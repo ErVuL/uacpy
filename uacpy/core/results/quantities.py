@@ -72,6 +72,11 @@ QUANTITIES: Mapping[str, Quantity] = {
         Quantity('reverberation',
                  {'dB': 'Reverberation loss (dB re unit source)'}),
         Quantity('signal_excess', {'dB': 'Signal excess (dB)'}),
+        # An absolute received level, SL - TL: what a hydrophone at that cell
+        # would measure. Its own quantity and NOT a loss, so it reads upward
+        # on a 1-D cut and is never captioned "TL (dB)" — the reference is
+        # the source's, not the unit source at 1 m a TL is quoted against.
+        Quantity('level', {'dB': 'Level (dB re 1 uPa)'}),
         # A signed RESIDUAL between two dB fields, not a level and not a loss:
         # zero means the two agree, and the sign says which way they differ.
         # It exists so a difference stops inheriting 'pressure', which would
@@ -90,6 +95,20 @@ QUANTITIES: Mapping[str, Quantity] = {
         Quantity('ambiguity', {'dB': 'Normalised power (dB re max)'}),
     )
 }
+
+
+#: dB quantities whose numbers run BACKWARDS — less of them is louder. A loss
+#: is what a source level can be subtracted from and what an intensity sum has
+#: to invert before adding; a level, a residual, a normalised ambiguity power
+#: and a signal excess are none of those. ``uacpy.visualization`` keeps its own
+#: copy for the axis direction; this one is the data layer's, so a new kind is
+#: declared in one place and both read it.
+LOSS_KINDS = ('pressure', 'reverberation')
+
+
+def is_loss(kind: str) -> bool:
+    """Whether ``kind``'s dB view is a loss rather than a level."""
+    return str(kind) in LOSS_KINDS
 
 
 def quantity(kind: str) -> Quantity:

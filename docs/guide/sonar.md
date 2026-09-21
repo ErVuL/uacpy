@@ -155,6 +155,48 @@ evaluate the sonar equation at every `(depth, range)` sample of it:
 | `probability_of_detection_field(se_field, *, sigma_dB)` | an `SE` `Field` | `P_D` `Field` |
 | `detection_range_by_depth(se_field)` | an `SE` `Field` | `(depths, ranges)` |
 
+### `array_gain` may be a grid
+
+On the field forms, `array_gain` takes either one number or an array
+broadcasting to the TL grid. The scalar is the textbook case and assumes what
+the textbook assumes: that the signal reaches the array as a single plane wave,
+so every element sees it in phase and the beamformer collects all of it. A
+waveguide does not deliver that. Each trapped mode arrives at its own grazing
+angle, one beam holds only the modes inside its main lobe, and the gain the
+beamformer *realises* therefore changes from one point of the map to the next.
+
+Ainslie (*Sonar Performance Modelling*, eq. 6.70) prescribes the measurement:
+compute the signal-to-noise ratio "not just once, but twice, with and without
+the effects of the beamformer", which on a modelled field is the best beam's
+output against the per-element mean. Passing that grid as `array_gain` puts the
+result into the sonar equation sample by sample:
+
+```python
+best = (np.abs(weights.conj() @ p) ** 2).max(axis=0)   # p: (n_elements, ...)
+ag = 10.0 * np.log10(best / np.mean(np.abs(p) ** 2, axis=0))
+se = sonar.passive_signal_excess_field(tl, source_level=120.0,
+                                       noise_level=75.0, array_gain=ag,
+                                       detection_threshold=dt)
+```
+
+A grid is summarised as `{'min', 'median', 'max'}` in
+`se.metadata['sonar_budget']['array_gain']`, where a single number would
+misdescribe it; a scalar is still stored as a scalar. `example_42` measures
+both on one channel: 11.9 dB assumed against 8.7 dB realised on the target's
+own row (9.0 dB over the whole water column), which is a 43 % overestimate of
+detection range and twice the area called detectable.
+
+The shortfall is a property of the *replica*, not of the channel. A
+conventional beamformer is the matched filter for a plane wave, which is the
+right solution of the wave equation only in the array's far field (Abraham,
+§8.4.2); in a waveguide the right replica is the Green's function, which is
+matched-field processing (Etter §11.5.7.1, after Baggeroer et al. 1993). With
+uncorrelated noise across the elements the ceiling is `10*log10(N)` whatever
+shape the field has (Butler & Sherman §8.4.1) — and feeding a modelled field
+back as its own replica reaches it exactly, 13.80 dB for 24 elements in
+`example_42`. Since a propagation model is what produces that replica, this
+term is one worth computing rather than tabulating.
+
 ```python
 import numpy as np
 import uacpy
@@ -468,6 +510,28 @@ that turns that promise into decibels.
 | `roc_curve(deflection, n_points=200)` | `(P_F, P_D)` arrays, `P_F` log-spaced over `[1e-6, ~1]` |
 | `albersheim_snr(pd, pf, n_pulses=1)` | required per-sample SNR (dB), envelope detector |
 | `detection_threshold_energy(pd, pf, bandwidth_hz, integration_time_s)` | `DT` (dB), energy detector |
+| `per_look_false_alarm(pf_scan, n_looks)` | per-look `P_F` holding a scan at `pf_scan` |
+| `scan_false_alarm(pf_look, n_looks)` | rate a max-over-looks detector achieves |
+
+### A scan is not one beam
+
+A detector that forms many looks and reports the largest false-alarms if
+*any* look does, so the `P_F` it achieves is the scan's, not one beam's.
+Setting the threshold from a required scan-level rate means tightening each
+look first:
+
+```python
+n_looks = span_in_sin_theta / (wavelength / aperture)      # resolution cells
+dt = sonar.detection_threshold_energy(
+    pd=0.5, pf=sonar.per_look_false_alarm(1e-4, n_looks),
+    bandwidth_hz=10.0, integration_time_s=10.0)
+```
+
+`n_looks` counts **independent** looks. One beam is `λ/L` wide in `sin θ`, so
+a sector holds that many resolution cells however finely the steering grid is
+sampled — a 361-point scan of ±45° on a 24-element λ/2 array is about 16
+independent beams, worth +0.70 dB of `DT`. Shaded beams overlap and are
+correlated, so the orthogonal-beam count is the conservative choice.
 
 ```python
 plot_roc([1.0, 2.0, 3.0, 4.0, 5.0], title='ROC — Gaussian detector')

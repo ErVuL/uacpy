@@ -310,15 +310,21 @@ class TestSingleConfigRule:
     no ``**kwargs``. A ``run(**kwargs)`` is what lets a misspelled knob be
     silently dropped instead of rejected."""
 
+    # ``run`` is the base class's template method, one object shared by
+    # every model; the body each wrapper actually declares — and the one
+    # ``__init_subclass__`` checks — is ``_run_single``. Reading ``.run``
+    # here would assert a property of ``PropagationModel`` twice.
     @pytest.mark.parametrize('cls_name', ['OASS', 'OASSP'])
-    def test_run_takes_no_var_keywords(self, cls_name):
-        params = inspect.signature(getattr(uacpy, cls_name).run).parameters
+    def test_run_single_takes_no_var_keywords(self, cls_name):
+        params = inspect.signature(
+            getattr(uacpy, cls_name)._run_single).parameters
         assert not any(p.kind is inspect.Parameter.VAR_KEYWORD
                        for p in params.values())
 
     @pytest.mark.parametrize('cls_name', ['OASS', 'OASSP'])
-    def test_run_takes_no_var_positionals(self, cls_name):
-        params = inspect.signature(getattr(uacpy, cls_name).run).parameters
+    def test_run_single_takes_no_var_positionals(self, cls_name):
+        params = inspect.signature(
+            getattr(uacpy, cls_name)._run_single).parameters
         assert not any(p.kind is inspect.Parameter.VAR_POSITIONAL
                        for p in params.values())
 

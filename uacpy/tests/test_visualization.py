@@ -109,6 +109,93 @@ def time_field():
     )
 
 
+class TestCompareModelsDrawsGeometry:
+    """Every other field plotter takes source= / receiver= and draws them.
+
+    Without it a side-by-side model comparison loses the one thing that
+    says what is listening to what, and a reader cannot tell a coverage map
+    from a propagation map.
+    """
+
+    @staticmethod
+    def _fields():
+        from uacpy.core.results import Field
+        z = np.linspace(5.0, 195.0, 12)
+        r = np.linspace(200.0, 20000.0, 20)
+        base = 60.0 + 10.0 * np.log10(r)[None, :] + 0.0 * z[:, None]
+        return [Field(data=base, coords={'depth': z, 'range': r}, model='A'),
+                Field(data=base + 1.0, coords={'depth': z, 'range': r},
+                      model='B')]
+
+    def test_receiver_markers_reach_every_panel(self):
+        import uacpy
+        from uacpy.visualization import compare_models
+        rx = uacpy.Receiver(depths=[80.0, 120.0], ranges=[0.0])
+        fig, axes = compare_models(self._fields(), labels=['A', 'B'],
+                                   receiver=rx)
+        panels = np.atleast_1d(axes).ravel()[:2]
+        for ax in panels:
+            assert len(ax.get_lines()) > 0, 'no receiver markers drawn'
+        plt.close(fig)
+
+    def test_the_source_marker_reaches_every_panel(self):
+        import uacpy
+        from uacpy.visualization import compare_models
+        from uacpy.visualization.plots._common import SOURCE_MARKER_STYLE
+        src = uacpy.Source(depths=60.0, frequencies=200.0)
+        fig, axes = compare_models(self._fields(), labels=['A', 'B'],
+                                   source=src)
+        marker = SOURCE_MARKER_STYLE.get('marker')
+        for ax in np.atleast_1d(axes).ravel()[:2]:
+            assert any(ln.get_marker() == marker for ln in ax.get_lines())
+        plt.close(fig)
+
+    def test_no_geometry_draws_no_markers(self):
+        from uacpy.visualization import compare_models
+        fig, axes = compare_models(self._fields(), labels=['A', 'B'])
+        for ax in np.atleast_1d(axes).ravel()[:2]:
+            assert not ax.get_lines()
+        plt.close(fig)
+
+
+class TestEnvironmentPlotCanMoveTheSource:
+    """The source is not always at r = 0.
+
+    When the ARRAY is the anchored end — the construction a range-dependent
+    detection map needs — the source is the thing at range, and a scene
+    drawing it at 0 shows the mirror-image geometry.
+    """
+
+    @staticmethod
+    def _env():
+        import uacpy
+        return uacpy.Environment(
+            name='slope', bathymetry=[(0.0, 200.0), (20000.0, 120.0)],
+            ssp=[(0.0, 1520.0), (200.0, 1498.0)],
+            bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                density=1.9, attenuation=0.5)))
+
+    def _source_x(self, **kw):
+        import uacpy
+        from uacpy.visualization.plots._common import SOURCE_MARKER_STYLE
+        fig, ax = self._env().plot(source=uacpy.Source(depths=60.0,
+                                                       frequencies=200.0),
+                                   **kw)
+        marker = SOURCE_MARKER_STYLE.get('marker')
+        xs = [ln.get_xdata()[0] for a in fig.axes for ln in a.get_lines()
+              if ln.get_marker() == marker and len(ln.get_xdata()) == 1]
+        plt.close(fig)
+        return xs
+
+    def test_the_source_defaults_to_the_origin(self):
+        assert self._source_x() == pytest.approx([0.0])
+
+    def test_source_marker_range_m_moves_the_star(self):
+        assert self._source_x(
+            source_marker_range_m=5000.0) == pytest.approx([5.0])
+
+
 class TestPlotField:
     """``plot_field`` auto-shapes based on what survives in
     :attr:`Field.coords` after slicing."""
@@ -2054,7 +2141,7 @@ class TestTheSourceMarkerClearsTheAxisEdge:
     out-of-view receivers), so half the star was cut away."""
 
     @staticmethod
-    def _panel(fig_width, source_range_m):
+    def _panel(fig_width, source_marker_range_m):
         import uacpy
         d = np.linspace(1.0, 60.0, 40)
         r = np.linspace(50.0, 5000.0, 120)
@@ -2068,7 +2155,7 @@ class TestTheSourceMarkerClearsTheAxisEdge:
         tl.plot(env=env, receiver=rcv, ax=ax, show_colorbar=False)
         from uacpy.visualization.plots._common import _draw_geometry
         _draw_geometry(ax, uacpy.Source(depths=[30.0], frequencies=200.0),
-                       source_range_m=source_range_m)
+                       source_range_m=source_marker_range_m)
         return fig, ax
 
     @staticmethod

@@ -980,7 +980,7 @@ class OAST(OASES):
                           'returns a (depth, range, frequency) Field)'],
         )
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,
@@ -1512,7 +1512,7 @@ class OASN(OASES):
 
         return kw
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,
@@ -1995,7 +1995,7 @@ class OASR(OASES):
         seen = [by_letter[ch] for ch in opts if ch in by_letter]
         return seen[-1] if seen else 'P-P'
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,
@@ -2376,7 +2376,7 @@ class OASP(OASES):
             executable, lambda: _oases_find_executable(self, 'oasp'),
         )
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,
@@ -3215,8 +3215,8 @@ class OASSP(OASES):
         )
         stem = 'oasp_run'
         self._log(f"Running {mean.model_name} for the mean field (option 's')")
-        mean_result = mean.run(env, source, receiver, RunMode.BROADBAND,
-                               frequencies=frequencies)
+        mean_result = mean.run(env, source.at_depth(0), receiver,
+                               RunMode.BROADBAND, frequencies=frequencies)
         self._require_output(
             [fm.get_path(f'{stem}.045')],
             what="a mean-field .rhs (option 's')",
@@ -3329,7 +3329,7 @@ class OASSP(OASES):
             )
         return from_file
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,
@@ -4042,7 +4042,11 @@ class OASS(OASES):
                          verbose=self.verbose, timeout=self.timeout)
         stem = f'{mean.model_name.lower()}_run'
         self._log(f"Running {mean.model_name} for the mean field (option 's')")
-        mean_result = mean.run(env, source, receiver)
+        # ``at_depth(0)``: the weight belongs to the run the user called,
+        # not to the mean-field spawn, whose own default mode would other-
+        # wise apply — or refuse — it and report under a model name the
+        # caller never built.
+        mean_result = mean.run(env, source.at_depth(0), receiver)
         rhs = self._require_output(
             [fm.get_path(f'{stem}.045')],
             what="a mean-field .rhs (option 's')",
@@ -4079,7 +4083,7 @@ class OASS(OASES):
             )
         return mean_result, stem
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,

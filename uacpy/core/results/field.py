@@ -16,6 +16,7 @@ from uacpy.core.environment import Bathymetry, Environment
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 from uacpy.core.results import quantities as _quantities
+from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.results._base import PhaseReference, Result, _complex_to_dB
 
 # Auto-sized IFFT length is ~sample_rate/df rounded up to a power of two, so a
@@ -962,6 +963,70 @@ class Field(Result):
             **id_kwargs,
         )
 
+    def at_source_level(self, source_level_dB: Optional[float] = None) -> "Field":
+        """This field as an absolute received level: ``SL - TL``.
+
+        The propagation term of the sonar equation. Transmission loss is
+        referenced to a unit source at 1 m, so a TL field says how much
+        quieter a cell is than the source, not how loud it is; naming the
+        level the source was driven at turns it into what a hydrophone
+        there would measure.
+
+        Reads the loss the field already carries: ``-20·log10|p|`` for
+        complex pressure, and the stored numbers themselves for a real dB
+        result (Kraken's ``INCOHERENT_TL``, OAST's TL, or an incoherent
+        :meth:`ResultStack.superpose`). The result is ``kind='level'``, which
+        is what keeps a plotter from captioning it "TL (dB)" and from
+        running a 1-D cut through it backwards — a level is not a loss.
+
+        A superposed multi-source field carries its array's gain inside the
+        loss (the reference is still one unit source at 1 m), so the level
+        this returns is the array's, driven at ``source_level_dB`` per unit
+        source. Scale the ``Source`` weights to normalise the array instead.
+
+        Raises :class:`ConfigurationError` for a time-domain trace, which is
+        linear pressure rather than a loss — there is nothing to subtract.
+        """
+        if not _quantities.is_loss(self.kind):
+            already = " it is already a level" if self.kind == 'level' else ""
+            raise ConfigurationError(
+                f"Field.at_source_level: this field's kind is "
+                f"{self.kind!r}, which is not a transmission loss, so a "
+                f"source level has nothing to subtract from —{already or ' a '
+                'residual, a normalised power and a signal excess are all dB '
+                'and none of them is a propagation loss'}. Apply the level to "
+                f"the loss the run returned, once."
+            )
+        if 'time' in self.coords:
+            raise ConfigurationError(
+                "Field.at_source_level: a time-domain trace is linear "
+                "pressure, not a transmission loss, so a source level has "
+                "nothing to subtract from. Take .extract_tone(f) for a "
+                "narrowband field first, or scale .data by the source "
+                "amplitude directly."
+            )
+        if source_level_dB is None:
+            source_level_dB = (self.metadata or {}).get('source_level_dB')
+        if source_level_dB is None:
+            raise ConfigurationError(
+                "Field.at_source_level: no source level to apply. Give one "
+                "here, or set Source(source_level_dB=...) on the run so "
+                "every result it produces carries it."
+            )
+        sl = float(source_level_dB)
+        if not np.isfinite(sl):
+            raise ConfigurationError(
+                f"Field.at_source_level: source_level_dB must be finite; "
+                f"got {source_level_dB!r}.")
+        loss = np.asarray(self.dB, dtype=float)
+        id_kwargs = self.id_kwargs()
+        meta = id_kwargs['metadata']
+        meta['kind'] = 'level'
+        meta['unit'] = 'dB'
+        meta['source_level_dB'] = sl
+        return Field(data=sl - loss, coords=self.coords,
+                     pinned=dict(self.pinned), **id_kwargs)
+
     def to_dB(self) -> "Field":
         """Return a real-dB Field via ``-20·log10(|data|)``.
 
@@ -1540,6 +1605,110 @@ _RESULTSTACK_VARYING_ATTR = {
 }
 
 
+def _check_superpose_grids(slabs) -> None:
+    """Refuse slabs that are not sampled at the same points.
+
+    Either kind of sum adds cell to cell, so this belongs to both: a
+    coherent one would add pressures from different places, an incoherent
+    one their intensities, and the answer would carry the first slab's axes
+    whichever it was.
+    """
+    first = slabs[0]
+    for i, slab in enumerate(slabs[1:], start=1):
+        same_axes = list(slab.coords) == list(first.coords) and all(
+            np.array_equal(slab.coords[k], first.coords[k])
+            for k in first.coords)
+        if not same_axes or slab.data.shape != first.data.shape:
+            sizes = {k: (first.coords[k].size, slab.coords[k].size)
+                     for k in first.coords
+                     if k in slab.coords
+                     and first.coords[k].size != slab.coords[k].size}
+            detail = (
+                f"axes {list(first.coords)} vs {list(slab.coords)}"
+                if list(slab.coords) != list(first.coords) else
+                f"shape {first.data.shape} vs {slab.data.shape}"
+                + (f", axis lengths {sizes}" if sizes else
+                   "; same lengths, different coordinate values")
+            )
+            raise ConfigurationError(
+                f"ResultStack.superpose: slabs[{i}] is on a different "
+                f"grid from slabs[0] ({detail}); a sum needs every slab "
+                f"sampled at the same points. A TIME_SERIES pair gets one "
+                f"time axis from run(output_duration=…)."
+            )
+
+
+def _check_stack_weightable(field: 'Field', weights, *, where: str) -> None:
+    """The weaker check a *stack* has to pass: refuse only what no sum of
+    it could ever use.
+
+    A stack is not weighted when it is built — :meth:`ResultStack.superpose`
+    applies the weights, and the caller has not yet said which sum they
+    mean. A dB-only stack cannot add coherently but adds perfectly well in
+    intensity, so refusing it here would close the only route to "N mutually
+    incoherent sources at these levels". What is unusable either way is a
+    complex weight on data with no phase to rotate; that is refused now,
+    while the rest waits for :meth:`ResultStack.superpose` to judge against
+    the sum actually asked for.
+    """
+    w = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
+    if not np.any(w.imag != 0.0):
+        return
+    if 'time' in field.coords or not field.is_complex:
+        _check_field_weightable(field, w, where=where)
+    elif field.phase_reference is None:
+        _check_field_weightable(field, w, where=where)
+
+
+def _check_field_weightable(field: 'Field', weights, *, where: str) -> None:
+    """Raise :class:`ConfigurationError` unless ``weights`` can scale
+    ``field``. The one rule behind the n = 1 weight
+    :meth:`PropagationModel.run` applies and the n-slab sum
+    :meth:`ResultStack.superpose` forms:
+
+    * a real frequency-domain field (dB) has lost its phase and takes no
+      weight at all — multiplying decibels is not a scaling;
+    * a real time-domain trace takes a real weight (a sign flip is -1),
+      never a complex one;
+    * complex data takes a complex weight only when it carries a
+      ``phase_reference``. Bellhop's incoherent and semicoherent beam sums
+      are stored complex with none (``bellhop.py`` stamps
+      ``phase_reference=None`` outside the coherent run type), so their
+      phase is an artefact of AT's storage rather than a propagation
+      phase; rotating it would record a source phase the field cannot
+      carry. A real weight still scales such a field's level.
+    """
+    w = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
+    time_domain = 'time' in field.coords
+    if not time_domain and not field.is_complex:
+        raise ConfigurationError(
+            f"{where}: the field is real {field.unit!r} values, not "
+            f"complex pressure, so its phase is gone and a weight cannot "
+            f"scale it (multiplying dB is not a coherent sum). Weight the "
+            f"complex field the run returned (before to_dB(), or a mode "
+            f"that keeps phase — phase_reference is not None); for the "
+            f"level of one source at magnitude |w|, subtract "
+            f"20*log10(|w|) from the dB view yourself."
+        )
+    if not field.is_complex and np.any(w.imag != 0.0):
+        raise ConfigurationError(
+            f"{where}: the data are real time-domain traces, which a "
+            f"complex weight cannot scale; give a real weight (a sign flip "
+            f"is -1), or run BROADBAND and weight the transfer function "
+            f"before synthesising."
+        )
+    if (field.is_complex and field.phase_reference is None
+            and np.any(w.imag != 0.0)):
+        raise ConfigurationError(
+            f"{where}: the data are complex but carry no phase reference — "
+            f"an incoherent or semicoherent beam sum, whose phase is an "
+            f"artefact of the engine's storage and not a propagation "
+            f"phase. Rotating it by a complex weight would record a source "
+            f"phase the field cannot carry; give a real weight to scale its "
+            f"level, or run a coherent mode, which stamps phase_reference."
+        )
+
+
 class ResultStack(_DeepCopyMixin):
     """Stack of typed :class:`Result` slabs along one coordinate.
 
@@ -1731,6 +1900,7 @@ class ResultStack(_DeepCopyMixin):
                 f"Field — no dB view. Pick a slab with stack[i] or "
                 f"stack.at({self.coordinate_name}=...)."
             )
+        self._warn_if_weights_unapplied('dB')
         if 'time' in first.coords:
             raise ConfigurationError(
                 "ResultStack.dB: time-domain slabs are linear pressure, not "
@@ -1768,7 +1938,7 @@ class ResultStack(_DeepCopyMixin):
             )
         return self.dB
 
-    def superpose(self, weights=None) -> 'Field':
+    def superpose(self, weights=None, *, coherent: bool = True) -> 'Field':
         """Coherent sum of the slabs: one :class:`Field` holding
         ``Σ wᵢ·pᵢ`` over the stack on the shared receiver grid.
 
@@ -1787,22 +1957,44 @@ class ResultStack(_DeepCopyMixin):
             (``metadata['source_weights']``, stamped by
             :meth:`PropagationModel.run`), else unit weights. Complex on a
             complex-pressure stack; real on a time-domain stack, whose
-            traces are real samples.
+            traces are real samples. ``coherent=False`` uses only ``|w|``.
+        coherent : bool, keyword-only
+            How the sources combine, which is a statement about the sources
+            and not about the arithmetic:
+
+            ``True`` (default) adds complex pressure, ``Σ wᵢ·pᵢ`` — the
+            sources are driven together with a fixed relative phase, as the
+            elements of one array are.
+
+            ``False`` adds intensity, ``√Σ|wᵢ·pᵢ|²`` — the sources are
+            mutually incoherent (separate platforms, unrelated tones,
+            random relative phase), so their phases carry no information and
+            only ``|w|`` is read. N identical sources then give
+            ``10·log10(N)`` where a coherent sum gives ``20·log10(N)``.
+            The result has no phase, so it comes back the way every engine
+            returns its own incoherent mode: real dB, ``phase_reference``
+            cleared. A dB-only stack, which cannot add coherently, adds this
+            way.
 
         Returns
         -------
         Field
-            Same grid, ``phase_reference`` and identity as the slabs, with
-            ``source_depths`` widened to the stacking coordinate and
-            ``metadata['superposed_sources']`` recording the ``depths`` and
-            ``weights`` that were summed.
+            Same grid and identity as the slabs, with ``source_depths``
+            widened to the stacking coordinate and
+            ``metadata['superposed_sources']`` recording the ``depths``, the
+            ``weights`` and whether the sum was ``coherent``. A coherent sum
+            keeps the slabs' ``phase_reference``; an incoherent one clears
+            it and returns real dB.
 
         Raises
         ------
         ConfigurationError
-            Non-Field slabs; a real frequency-domain (dB) stack; slabs on
-            different grids; a weight vector of the wrong length or with a
-            non-finite entry; a complex weight on a time-domain stack.
+            Non-Field slabs; slabs on different grids; a weight vector of
+            the wrong length or with a non-finite entry. A coherent sum also
+            refuses a real frequency-domain (dB) stack, a complex weight on
+            a time-domain stack, and a complex weight on data carrying no
+            phase reference; an incoherent sum refuses time-domain traces,
+            which do not add in intensity sample by sample.
         """
         first = self.slabs[0]
         if not isinstance(first, Field):
@@ -1810,15 +2002,6 @@ class ResultStack(_DeepCopyMixin):
                 f"ResultStack.superpose: slabs are "
                 f"{self.slab_type.__name__}, not Field — only gridded "
                 f"pressure adds. Pick a slab with stack[i]."
-            )
-        time_domain = 'time' in first.coords
-        if not time_domain and not first.is_complex:
-            raise ConfigurationError(
-                f"ResultStack.superpose: slabs are real {first.unit!r} "
-                f"values, not complex pressure, so their phase is gone and "
-                f"a coherent sum is undefined. Superpose the complex field "
-                f"the run returned (before to_dB()), or run a model that "
-                f"keeps phase (phase_reference is not None)."
             )
         if weights is None:
             weights = first.metadata.get('source_weights')
@@ -1837,39 +2020,13 @@ class ResultStack(_DeepCopyMixin):
                 f"ResultStack.superpose: weights must be finite; "
                 f"weights[{bad}] = {w[bad]}"
             )
+        _check_superpose_grids(self.slabs)
+        if not coherent:
+            return self._superpose_incoherent(w)
+        _check_field_weightable(first, w, where="ResultStack.superpose")
         real_data = not first.is_complex
-        if real_data and np.any(w.imag != 0.0):
-            raise ConfigurationError(
-                "ResultStack.superpose: the slabs are real time-domain "
-                "traces, which a complex weight cannot scale; give real "
-                "weights (a sign flip is -1), or superpose the BROADBAND "
-                "transfer function instead and synthesise afterwards."
-            )
         if real_data:
             w = w.real
-
-        for i, slab in enumerate(self.slabs[1:], start=1):
-            same_axes = list(slab.coords) == list(first.coords) and all(
-                np.array_equal(slab.coords[k], first.coords[k])
-                for k in first.coords)
-            if not same_axes or slab.data.shape != first.data.shape:
-                sizes = {k: (first.coords[k].size, slab.coords[k].size)
-                         for k in first.coords
-                         if k in slab.coords
-                         and first.coords[k].size != slab.coords[k].size}
-                detail = (
-                    f"axes {list(first.coords)} vs {list(slab.coords)}"
-                    if list(slab.coords) != list(first.coords) else
-                    f"shape {first.data.shape} vs {slab.data.shape}"
-                    + (f", axis lengths {sizes}" if sizes else
-                       "; same lengths, different coordinate values")
-                )
-                raise ConfigurationError(
-                    f"ResultStack.superpose: slabs[{i}] is on a different "
-                    f"grid from slabs[0] ({detail}); a coherent sum needs "
-                    f"every slab sampled at the same points. A TIME_SERIES "
-                    f"pair gets one time axis from run(output_duration=…)."
-                )
 
         total = np.zeros(first.data.shape,
                          dtype=np.result_type(first.data.dtype, w.dtype))
@@ -1883,15 +2040,98 @@ class ResultStack(_DeepCopyMixin):
         meta['superposed_sources'] = {
             'depths': self.coordinate.tolist(),
             'weights': w.tolist(),
+            'coherent': True,
         }
         pinned = {k: v for k, v in first.pinned.items()
                   if k != 'source_depth'}
         return Field(data=total, coords=first.coords, pinned=pinned,
                      **id_kwargs)
 
+    def _superpose_incoherent(self, w) -> 'Field':
+        """``√Σ|wᵢ·pᵢ|²`` over the slabs, as a real dB ``Field``.
+
+        Reads magnitudes only, so it serves a dB-only stack as well as a
+        complex one: ``|p| = 10**(-dB/20)`` recovers the magnitude a level
+        already is. Time-domain traces are refused — intensity does not add
+        sample by sample."""
+        first = self.slabs[0]
+        if 'time' in first.coords:
+            raise ConfigurationError(
+                "ResultStack.superpose(coherent=False): the slabs are "
+                "time-domain traces, and intensity does not add sample by "
+                "sample. Sum the traces coherently, or superpose the "
+                "BROADBAND transfer function and synthesise afterwards."
+            )
+        if np.any(w.imag != 0.0):
+            warnings.warn(
+                "ResultStack.superpose(coherent=False): an intensity sum "
+                "carries no phase, so only the weight magnitudes are used "
+                f"({np.abs(w).tolist()}); the phases of {w.tolist()} are "
+                "dropped. Pass coherent=True to drive the sources with a "
+                "fixed relative phase.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        amp = np.abs(w)
+
+        # A loss counts DOWN from the source and a level counts UP, so the
+        # stored numbers turn into an amplitude with opposite signs. Reading
+        # every real dB field as a loss inverted a stack of levels: two
+        # incoherent 120 dB sources came back 116.99 dB instead of 123.01.
+        loss = _quantities.is_loss(first.kind)
+        sign = -1.0 if loss else 1.0
+
+        def magnitude(slab):
+            data = np.asarray(slab.data)
+            if slab.is_complex:
+                return np.abs(data)
+            return np.power(10.0, sign * np.asarray(data, dtype=float) / 20.0)
+
+        total = np.zeros(np.asarray(first.data).shape, dtype=float)
+        for a, slab in zip(amp, self.slabs):
+            total += (a * magnitude(slab)) ** 2
+        # Clamped like every other dB view (``_complex_to_dB``), so a cell no
+        # energy reached reads the package's floor instead of ``inf``.
+        # A loss counts down (-20log10|p|), a level counts up (+20log10|p|),
+        # which is the same ``sign`` the magnitudes were recovered with.
+        level = sign * 20.0 * np.log10(
+            np.maximum(np.sqrt(total), PRESSURE_FLOOR))
+
+        id_kwargs = first.id_kwargs()
+        id_kwargs['source_depths'] = self.coordinate.copy()
+        id_kwargs['phase_reference'] = None
+        meta = id_kwargs['metadata']
+        meta.pop('source_weights', None)
+        meta['unit'] = 'dB'
+        meta['kind'] = first.kind
+        meta['superposed_sources'] = {
+            'depths': self.coordinate.tolist(),
+            'weights': amp.tolist(),
+            'coherent': False,
+        }
+        pinned = {k: v for k, v in first.pinned.items()
+                  if k != 'source_depth'}
+        return Field(data=level, coords=first.coords, pinned=pinned,
+                     **id_kwargs)
+
+    def _warn_if_weights_unapplied(self, view: str) -> None:
+        """Every slab is the unit-amplitude field of one source; when the
+        ``Source`` carried other weights, the level view or panel plot of
+        the slabs shows a field those weights never touched. Say so once,
+        naming :meth:`superpose`, which is where they apply."""
+        weights = self.slabs[0].metadata.get('source_weights')
+        if weights is None or np.all(np.asarray(weights) == 1.0):
+            return
+        warnings.warn(
+            f"ResultStack.{view}: the slabs are unit-amplitude fields; the "
+            f"Source weights {np.asarray(weights).tolist()} this stack "
+            f"carries are not applied to them. Call stack.superpose() for "
+            f"the weighted field.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
     def plot(self, **kwargs):
         """Plot every slab as a labelled panel grid (Field stacks), delegating
         to :func:`uacpy.visualization.plot_result`."""
+        if isinstance(self.slabs[0], Field):
+            self._warn_if_weights_unapplied('plot')
         # Deferred into the body: ``uacpy.visualization`` imports
         # ``uacpy.core`` at module scope, so this line at file scope makes
         # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records

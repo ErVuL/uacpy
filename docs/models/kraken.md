@@ -124,7 +124,7 @@ nonsense.
 | Source beam pattern | ✅ | staged as an `.sbp` |
 | Range-dependent bottom | ❌ | collapsed to the median column; layers kept |
 | Sea-surface altimetry | ❌ | dropped; flat surface |
-| Multiple source depths | ❌ | one depth per deck; `run()` loops and returns a `ResultStack` in the TL / BROADBAND / TIME_SERIES modes, `MODES` raises |
+| Multiple source depths | ✅ (TL modes) | `field.exe` sums every depth of the `.flp` from the one `.mod` — the mode solve reads no source depth — so `COHERENT_TL` / `INCOHERENT_TL` launch once and the `.shd` reader splits the `NSz` axis into a `ResultStack` (measured 4.4× at eight depths). `BROADBAND` / `TIME_SERIES` loop through `run()`, one deck per depth; `MODES` raises. Each slab equals that depth's stand-alone run exactly: the receiver depths sit on the mode-tabulation grid and are written to the `.flp` in full, so no source depth can reach another depth's answer |
 
 The first two ❌ rows are *collapsed* with a `UserWarning` naming what was
 dropped; the mechanism, and the `collapse=` dict that overrides it, is in the
@@ -252,7 +252,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `mode_points_per_meter` | `None` (derived: 10 pts/wavelength, floor 1.5) | Density of the depth grid `ψ_m(z)` is returned on, spanning water plus sediment. |
+| `mode_points_per_meter` | `None` (derived: 10 pts/wavelength, floor 1.5) | Density of the depth grid `ψ_m(z)` is returned on, spanning water plus sediment. The caller's receiver depths join that grid, so a range-independent or adiabatic **field** no longer interpolates between tabulated points and this knob does not move it (measured 2.9e-7 relative between 2 and 20 pts/m). It still sets the accuracy of `compute_modes`' own output, and of a **coupled** run, whose coupling integrals `EvaluateCMMod` forms from the tabulated shapes (2.6e-2 dB across the same pair). |
 | `mode_depth_grid` | `None` | Pin that grid explicitly instead. |
 
 **Range dependence**
@@ -611,11 +611,17 @@ sum at N modes. Dropping the high-order ones removes the steep energy, which
 matters most near the source; it is a speed knob for long-range work, not an
 accuracy knob.
 
-**Two combinations are rejected outright.** Coupled modes have no incoherent
+**One combination is rejected outright.** Coupled modes have no incoherent
 path in `field.exe`, so `mode_coupling='coupled'` with `INCOHERENT_TL` raises.
-And the multi-profile deck has no broadband form, so a range-dependent
-`BROADBAND` run raises — pass a single frequency, or make the environment
-range-independent.
+
+**A range-dependent `BROADBAND` run loops.** The multi-profile deck carries
+one frequency, but that is the deck's limit and not the physics': KRAKEN
+solves the modes of whatever environment it is given at one frequency, so a
+band is those runs stacked on a trailing frequency axis. uacpy does that for
+you and logs that it is doing it. The cost is linear in the band — one full
+mode solve over every profile per bin, of order 0.3 s each on a 41-node
+section — so a 200-bin band is a minute of work, not a free axis. Each bin
+is bit-identical to running that frequency on its own.
 
 **Receivers below the local seafloor are computed, not refused.** On a sloping
 track a fixed depth grid will dip into the seabed inshore. Kraken warns for each

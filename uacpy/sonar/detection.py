@@ -173,6 +173,57 @@ def _exact_detection_threshold_dB(pd: float, pf: float, m: float) -> float:
         return float(10.0 * np.log10(snr))
 
 
+def _check_n_looks(n_looks, caller: str) -> float:
+    """Validate a look count: at least one, finite."""
+    n = float(np.asarray(n_looks, dtype=float))
+    if not np.isfinite(n) or n < 1.0:
+        raise ConfigurationError(
+            f"{caller}: n_looks must be a finite count of at least 1; got "
+            f"{n_looks!r}. It is the number of INDEPENDENT looks the "
+            f"detector maximises over — for a beam scan that is the "
+            f"resolution cells in the sector (one beam is lambda/L wide in "
+            f"sin(theta)), not the number of steering angles computed."
+        )
+    return n
+
+
+def per_look_false_alarm(pf_scan: float, n_looks: float) -> float:
+    """Per-look ``P_F`` that holds a whole scan's false-alarm rate at ``pf_scan``.
+
+    A detector that forms many looks and reports the largest false-alarms if
+    *any* look does, so its rate is the scan's, not one look's. Inverting
+    :func:`scan_false_alarm`::
+
+        pf_look = 1 - (1 - pf_scan) ** (1 / n_looks)
+
+    ``n_looks`` counts **independent** looks. For a line array scanning a
+    sector, one beam is ``lambda/L`` wide in ``sin(theta)``, so the sector
+    holds ``sin-span / (lambda/L)`` resolution cells however finely the
+    steering grid is sampled. Overlapping (shaded) beams are correlated, so
+    using the orthogonal-beam count is the conservative choice: it sets a
+    stricter threshold than the true dependence requires.
+    """
+    pf = _check_prob(pf_scan, "per_look_false_alarm: pf_scan")
+    n = _check_n_looks(n_looks, "per_look_false_alarm")
+    # log1p/expm1 rather than the literal formula: at pf=1e-12 over 1e5
+    # looks, ``1 - (1 - pf) ** (1/n)`` rounds to exactly 0.0, and
+    # scan_false_alarm then raises on this function's own output.
+    return float(-np.expm1(np.log1p(-pf) / n))
+
+
+def scan_false_alarm(pf_look: float, n_looks: float) -> float:
+    """False-alarm rate of a max-over-looks detector, ``1 - (1 - pf)**n``.
+
+    The rate a scan actually achieves when each of ``n_looks`` independent
+    looks is thresholded at ``pf_look``. Inverse of
+    :func:`per_look_false_alarm`, which is the one to use when setting a
+    threshold from a required scan-level rate.
+    """
+    pf = _check_prob(pf_look, "scan_false_alarm: pf_look")
+    n = _check_n_looks(n_looks, "scan_false_alarm")
+    return float(-np.expm1(n * np.log1p(-pf)))      # see per_look_false_alarm
+
+
 def detection_threshold_energy(
     pd: float, pf: float, bandwidth_hz: float, integration_time_s: float
 ) -> float:

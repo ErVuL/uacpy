@@ -44,8 +44,9 @@ What each model consumes **natively**. An *environment* feature marked ✗ is
 was dropped — see [collapse policy](../guide/environment.md). The source row
 is the exception: a ✗ model reads one depth per deck, and instead of
 collapsing, `run()` loops over the depths in the field modes (TL,
-`BROADBAND`, `TIME_SERIES`) and returns a `ResultStack`; in any other mode a
-multi-depth `Source` raises `ConfigurationError`.
+`BROADBAND`, `TIME_SERIES`) — each depth in its own `source_depth_<z>m`
+subdirectory of a pinned `work_dir` — and returns a `ResultStack`; in any
+other mode a multi-depth `Source` raises `ConfigurationError`.
 
 | | Bellhop | Kraken | Scooter | SPARC | RAM | Bounce | OASES |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -56,7 +57,7 @@ multi-depth `Source` raises `ConfigurationError`.
 | Layered bottom | ✅¹ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Rough surface/bottom (`sigma`) | ✗ | ✅ | ✅⁴ | ✗ | ✗ | ✗ | ✅ |
 | Elastic media (shear) | ✅¹ | ✅² | ✅ | ✗ | ✅³ | ✅ | ✅ |
-| Multiple source depths | ✅ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Multiple source depths | ✅ | ✅⁷ | ✅⁷ | ✗ | ✗ | ✗ | ✗ |
 | Water-column absorption (`env.absorption`) | ✅ | ✅ | ✅ | ✅ | ✅⁵ | ✗ | ✗⁶ |
 
 ¹ an elastic *half-space* is native (bellhop.f90 applies its exact
@@ -72,6 +73,10 @@ warning. Kraken and OASES carry both interfaces unconditionally.
 per bin on a broadband sweep (uacpy-patched binaries). Bounce tabulates a
 reflection coefficient at an interface, so volume loss has no path to act on.
 ⁶ OASES substitutes its own Skretting-Leroy law for the water and says so.
+⁷ TL modes only. One Scooter wavenumber sweep writes every depth into the
+`.grn`, and one Kraken mode solve serves every depth of the `.flp`, so each
+launches its binary once (measured 4.4× for Kraken at eight depths);
+`BROADBAND` / `TIME_SERIES` loop per depth on both.
 
 `OASES` is an abstract base: instantiate **OAST** (TL), **OASN** (covariance,
 replicas), **OASR** (reflection), **OASP** (pulse/broadband), **OASS**

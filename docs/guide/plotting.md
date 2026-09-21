@@ -1,6 +1,6 @@
 # Plotting — one convention, one workhorse
 
-> `uacpy.plot` · 60 public plotters · every result and every drawable carrier
+> `uacpy.plot` · 61 public plotters · every result and every drawable carrier
 > renders itself with `.plot()`
 
 There are two halves to the plotting surface. Anything that is a uacpy object
@@ -286,11 +286,32 @@ All three apply to a `(depth, range)` cross-section only (§2.2). `env=` is
 accepted by every view that has one — `plot_field`, `plot_signal_excess`,
 `plot_detection_probability`, `compare_models`, `animate_field`,
 `plot_time_snapshots` and the ray plotter behind `rays.plot()`. `source=` /
-`receiver=` are `plot_field`'s, `env.plot()`'s and `plot_overview`'s; the ray
-plotter draws both by default instead, and turns them off with
-`show_source=False` / `show_receivers=False`. Ask for an overlay anywhere else —
+`receiver=` are `plot_field`'s, `env.plot()`'s, `compare_models`'s and
+`plot_overview`'s — `compare_models` draws the same markers on **every**
+panel, so two models of one scene carry one geometry. The ray plotter draws
+both by default instead, and turns them off with `show_source=False` /
+`show_receivers=False`. Ask for an overlay anywhere else —
 `arrivals.plot(env=env)`, a `(range, time)` heatmap — and you get a
 `ConfigurationError` saying so rather than a silently ignored keyword.
+
+### Drawing the source somewhere other than the origin
+
+The source marker sits at `r = 0`, because range in uacpy is measured *from*
+the source. For a scene built around a fixed receive array that is the wrong
+end to anchor: the array is the object that stays put, and the source is the
+thing out at range. `env.plot()` therefore accepts
+`source_marker_range_m=5000.0`, which moves the **star** and nothing else.
+
+It is a drawing coordinate, not a property of the `Source` and not an input
+to any model — no TL changes, no deck is rewritten. (It is named for the
+marker for that reason: a parameter called "source range" would read as a
+contradiction on a range axis that starts at the source.) The default `0.0`
+is bit-identical to omitting it.
+
+It matters most on a range-dependent bottom, where drawing the source at the
+origin does not merely mislabel the picture but shows the mirror-image
+geometry, with the array standing on the wrong part of the section — see
+`example_42_detection_chain`, which measures what that costs.
 
 ---
 
@@ -491,7 +512,7 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 60 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
+All 61 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
 draw land with — the 8 remaining names in `__all__` are the submodules
 themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
@@ -541,6 +562,9 @@ drawn where the backend filled it — `krakenc` does, `kraken` prints zeros
 
 | Plotter | ax | Draws |
 |---|---|---|
+| `plot_detection_probability(field, env=None, source=None, receiver=None, contour_levels=(0.1,0.5,0.9))` / `plot_signal_excess(...)` | ✓ | the two sonar-equation panels. Both take `source=`/`receiver=` like `plot_field`: a detection map answers "would this array hear that target", so the two things it is about belong on it |
+| `plot_result_stack(stack, env=None, ncols=None)` | ✓ | one TL panel per slab. A grid stacked over `source_depth` marks **each panel's own source**, since that is what one panel shows; pass `source=` to override |
+| `plot_mode_excitation(modes, source, ax=None, sound_speed=1500.0, show_array_factor=True, floor_dB=-40.0)` | ✓ | what a source array drives, both ways on one angle axis: a stem per mode at its grazing angle, height `|Σₙ wₙ·φₘ(zₙ)|` (the waveguide's answer — Medwin & Clay §11.3.1, *mode filters*), over the free-field pattern of the same array — its **array beam pattern** `P(θ)=f(θ)·A(θ)` when the elements are directional, the bare array factor `A(θ)` when not (Butler & Sherman §7.1.1). They agree while the pattern is symmetric in ±θ and part company once steering breaks it, which is why both are drawn |
 | `plot_beam_pattern(pattern=None, ax=None, polar=True, mirror=False, fill=True, rmin=None)` | ✓ | the `.sbp` directivity table, on polar axes oriented like the field: 0° along increasing range, positive angles downward. `source.plot_beam_pattern()` is the object form; `None` draws the flat 0 dB circle Bellhop substitutes for an omni source |
 
 The polar orientation is not cosmetic. The `.sbp` angle axis *is* Bellhop's

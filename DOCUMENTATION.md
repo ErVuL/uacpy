@@ -681,7 +681,16 @@ depth). Frequencies may be a scalar or array. `weights=` gives each source a
 complex amplitude (one per depth, a scalar broadcasts, default all ones): the
 engines never read it — every slab of a multi-depth run is the field of one
 unit-amplitude source — and `ResultStack.superpose()` adds the slabs with
-those weights (§8, ResultStack).
+those weights (§8, ResultStack). A **single-depth** source with a non-unit
+weight is the n = 1 case of the same sum: `run()` returns its `Field` already
+scaled by the weight and records it in `metadata['superposed_sources']`. The
+same rule bounds both: a field that has lost its phase (a dB-only result such
+as Kraken's `INCOHERENT_TL` or OAST's TL) refuses a weight, and a real
+time-domain trace refuses a complex one; outside the field modes (rays,
+arrivals, modes, reflection tables) the weights are not applied and `run()`
+warns. A multi-depth stack read through `.dB` / `.tl` / `.plot()` without
+`superpose()` shows its unit-amplitude slabs and warns that the weights were
+not applied.
 
 ```python
 from uacpy import Source
@@ -690,7 +699,52 @@ Source(depths=50, frequencies=100)              # single source, single tone
 Source(depths=[10, 20, 30], frequencies=200)    # vertical source array
 Source(depths=50, frequencies=[100, 200, 400])  # multi-frequency
 Source(depths=[40, 60], frequencies=200, weights=[1, -1])   # antiphase pair
+Source(depths=50, frequencies=100, source_level_dB=180)     # driven at 180 dB
 ```
+
+`source_level_dB=` is how hard a unit-weight element is driven (dB re 1 µPa
+at 1 m). The engines never read it — like `weights` it is applied to the
+field afterwards — but every result carries it, so
+`field.at_source_level()` turns the loss into the absolute level a
+hydrophone at that cell would read, with nothing repeated at the call site:
+
+```python
+field = model.run(env, Source(depths=50, frequencies=100,
+                              source_level_dB=180), receiver)
+field.dB                       # transmission loss, re a unit source at 1 m
+field.at_source_level().dB     # received level, dB re 1 µPa
+```
+
+A multi-depth `Source` is an **array**, and three angular quantities describe
+it — the product theorem `P(θ) = f(θ)·A(θ)` as Butler & Sherman state it for
+underwater arrays (*Transducers and Arrays for Underwater Sound*, §7.1.1):
+
+```python
+src.element_directivity(angles)   # f(θ) — the .sbp as linear amplitude,
+                                  #        interpolated the way engines read it
+src.array_factor(angles)          # A(θ) — the geometry alone: the pattern of
+                                  #        the array with POINT elements
+src.array_beam_pattern(angles)    # P(θ) = f·A — what the array radiates
+```
+
+`array_factor` is the one the theorem isolates, so it is unchanged when the
+elements are swapped and is **not** what a shaded array radiates; compare
+`array_beam_pattern` against a measurement. The theorem needs identical,
+co-aligned elements — which a `Source` satisfies, since one `beam_pattern`
+and one `source_type` describe every depth.
+
+All three are **free-field**. In a waveguide the array is a *mode filter*
+(Medwin & Clay §11.3.1): it sets each mode's amplitude, which is what
+`Modes.excitation` computes and what actually reaches the receiver. The two
+descriptions agree only while the pattern is symmetric in ±θ — steering is
+precisely what breaks that, because a trapped mode is a standing wave with
+equal up- and down-going halves. `plot_mode_excitation` draws both on one
+angle axis for that reason. Example 40 works through all of it.
+
+The level is its own `kind`, so it is captioned "Level (dB re 1 µPa)" rather
+than "TL (dB)" and a 1-D cut through it reads upward — more of a level is
+louder, where more of a loss is quieter. A multi-source total works the same
+way: `stack.superpose(coherent=False).at_source_level()`.
 
 `Receiver(depths, ranges)` places the field-evaluation points. Depths are
 positive down, ranges are outward from the source (metres); like `Source`'s
@@ -810,7 +864,8 @@ honours `env.absorption` (the OASES family and Bounce do not), drives no
 collapse, and `env.absorption` passes through untouched either way.
 
 `multi_source_depth` says whether the engine writes every source depth into
-one deck (Bellhop). It does not gate what a caller may pass: in the field
+one deck (Bellhop in every mode it stacks, Kraken in its two TL modes,
+Scooter in `COHERENT_TL` — see each model's `_NATIVE_MULTI_DEPTH_MODES`). It does not gate what a caller may pass: in the field
 modes (`COHERENT_TL` / `INCOHERENT_TL` / `SEMICOHERENT_TL` / `BROADBAND` /
 `TIME_SERIES`) **every model accepts a multi-depth `Source` and returns a
 `ResultStack` over `source_depth`** — `PropagationModel.run` runs the engine
@@ -1427,6 +1482,14 @@ modes.with_attenuation(alpha_dB_per_m=0.01,  # perturbational modal attenuation
                                             # the result is an upper bound
 modes.modal_propagation_loss(source_depth=50, receiver_depths=rcv.depths,
                              ranges_m=rcv.ranges)      # → a TL Field
+modes.excitation(source, sound_speed=1500.0) # what a source ARRAY drives:
+                                            # Σₙ wₙ·φₘ(zₙ), one amplitude per
+                                            # mode — the mode filter. Exact in
+                                            # the waveguide, unlike a free-field
+                                            # pattern. sound_speed= is required
+                                            # when the Source is directional:
+                                            # the engine shades the excitation
+                                            # by f(θₘ) and θₘ needs a reference
 rc.at(angle=30)                              # ReflectionCoefficient: nearest sample
 rc.is_broadband                              # is there a frequency axis to select on?
 ```
@@ -1456,14 +1519,50 @@ stack.n_slabs, stack.slab_type        # how many slabs, and of what result type
 stack.plot()                          # panel grid (Field slabs)
 stack.superpose()                     # Σ wᵢ·pᵢ with the Source's weights → one Field
 stack.superpose([1, 1j])              # the same with weights given here
+stack.superpose(coherent=False)       # √Σ|wᵢ·pᵢ|² → one real-dB Field
 ```
 
 Index a single slab with `stack[i]` or `stack.at(source_depth=…)` (each is a
-`Field`). `superpose` adds the slabs' complex pressure on the shared grid
-(a time-domain stack sums its real traces with real weights); the sum keeps
-the slabs' `phase_reference` and records what it added in
-`metadata['superposed_sources']`. A stack whose slabs are real dB values has
-lost its phase and refuses — superpose the complex field the run returned.
+`Field`). `superpose` records what it added in
+`metadata['superposed_sources']`, and `coherent=` says **how the sources
+combine** — a statement about the sources, not about the arithmetic:
+
+* `coherent=True` (default) adds complex pressure, `Σ wᵢ·pᵢ`: the sources are
+  driven together with a fixed relative phase, as the elements of one array
+  are. The sum keeps the slabs' `phase_reference` (a time-domain stack adds
+  its real traces with real weights). A stack whose slabs are real dB values
+  has lost its phase and refuses here — superpose the complex field the run
+  returned, or add the intensities instead.
+* `coherent=False` adds intensity, `√Σ|wᵢ·pᵢ|²`: the sources are mutually
+  incoherent (separate platforms, unrelated tones, random relative phase), so
+  their phases carry no information and only `|w|` is read. N identical
+  sources give `10·log10(N)` where a coherent sum gives `20·log10(N)`. The
+  result has no phase, so it comes back the way every engine returns its own
+  incoherent mode — real dB, `phase_reference` cleared — and a **dB-only
+  stack combines this way**, since magnitudes are all it needs. Time-domain
+  traces refuse: intensity does not add sample by sample. A stack of
+  *levels* adds as levels, not as losses, so two incoherent 120 dB sources
+  give 123.01 dB.
+
+A weight therefore refuses at one place and waits at another, and the
+difference is *when* it is applied rather than whether it could be. A
+**single-depth** `Source(weights=…)` is applied by `run()` itself, which
+refuses a field whose phase is gone at that moment. A **multi-depth** one is
+applied by `superpose`, which has not been called yet and may be called
+either way — so a dB-only stack is built, and only a complex weight (nothing
+could rotate a phase that is not there) is refused up front.
+
+Note what the level means. TL is referenced to a unit source at 1 m, and a
+superposed field keeps that reference, so the array's gain is *inside* the
+number: three in-phase sources read several dB "less TL" than one. That is
+the total level re one unit source at 1 m, which is normally what an array
+calls for — it is not the TL of a single source. Scale the weights (e.g.
+`Σ|wᵢ|² = 1`) to normalise the array as a source, or give the `Source` a
+`source_level_dB` and read `superpose(...).at_source_level()`, which is an
+absolute level and so carries no such ambiguity. This is also why
+`stack.superpose(coherent=False)` and an engine's own `INCOHERENT_TL` are
+different quantities: the engine sums *mode* magnitudes within one source,
+this sums *sources*.
 
 ### File I/O (`uacpy.io`)
 
@@ -1541,6 +1640,7 @@ in a `from … import` statement use the real modules
 | `bathymetry.plot()` / `altimetry.plot()` | seafloor depth / sea-surface height vs range — the shape carriers |
 | `absorption.plot(frequencies)` / `plot_absorption(frequencies, …)` | volume absorption `α(f)` (dB/km, log-log); the free function also takes a precomputed `absorption=` array and a `model=` name for the credit line |
 | `plot_bottom_properties(env)` | seabed `c` / `ρ` / `α` vs depth, per layer stack |
+| `plot_mode_excitation(modes, source)` | what a source array drives, both descriptions on one angle axis: a stem per mode at its grazing angle, height `|Σₙ wₙ·φₘ(zₙ)|` — the modal excitation, which is what sets the field in a waveguide — over the same array's free-field pattern: `Source.array_beam_pattern` gives `P(θ)=f(θ)·A(θ)`, the product theorem's element pattern times `Source.array_factor`'s point-source factor (Butler & Sherman §7.1.1). The two agree while the pattern is symmetric in ±θ and diverge once steering breaks that, so both are drawn |
 | `source.plot_beam_pattern()` / `plot_beam_pattern(pattern)` | source directivity from a `.sbp` table or an `(N, 2)` array; polar by default, oriented like the field (0° = increasing range, +angle downward) and spanning the propagating half-plane. `polar=False` gives level-vs-angle, `mirror=True` reflects a half-defined table |
 | `plot_mode_wavenumbers(modes)` / `plot_modes_heatmap(modes)` | Re and Im of the modal wavenumbers against mode index (twin axes) · mode shapes as a heatmap |
 | `plot_mode_speeds(modes, c_bottom=…)` / `plot_dispersion(modes_by_frequency)` | phase speed per mode index, with the group speed where the backend filled it and the seabed speed marking the trapped count · the same two speeds against frequency, over a **sequence** of `Modes` (one per frequency), which it sorts by each result's own `f0` |
@@ -1652,6 +1752,7 @@ fitted state). All plotting lives in `uacpy.visualization` (`plot_psd`,
 | Spectral / levels | One estimator per statistic: `welch` and `constant_q` (both `scaling='density'` or `'spectrum'`), `sound_exposure` (the ISO 18405 band energy), and a histogram twin of each — `probabilistic_welch`, `probabilistic_constant_q`, `probabilistic_sound_exposure` (→ `SpectralEstimate` / `ProbabilisticSpectralEstimate`). Each takes only the parameters its own statistic can honour: `sound_exposure` has no window, overlap, detrending or averaging, because a band sum is the band's energy only when every bin is counted once and whole, and asking a bin estimator for `scaling='exposure'` raises and names it. `fmin`, `fmax` and `integration_time` mean the same thing in all six. `BAND_TYPES` names the ladders (`'decidecade'` by default, also `'third_octave'`, `'octave'`, `'linear'`). Two result types cover the family: a name that fixes one scaling would say "density" over band power |
 | Decidecade (ISO 18405) | `decidecade_bands`, `decidecade_band_levels` |
 | Arrays | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` (→ `BeamformResult`) |
+| Arrays over a field | `beamform_field` (→ `BeamformedField`: beam power over a whole `(n_elements, *grid)` field, with `.best`, `.best_angle`, `.array_gain()`), `plane_wave_array_gain` (`|Σw|²/‖w‖²`), `matched_replica_gain` (the `10log10(N)` ceiling), `independent_beams` (orthogonal looks in a scanned sector — pair with `per_look_false_alarm`) |
 | Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function` (→ `AmbiguityResult`) |
 | Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt`, `inverse_cwt`, `cepstrum`, `complex_cepstrum`, `inverse_complex_cepstrum` (→ `SpectrogramResult`/`WignerVilleResult`/`CWTResult`/`ComplexCepstrum`) |
 | Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_spectrogram`, and `constant_q` / `probabilistic_constant_q` (→ `CQTResult`/`SpectralEstimate`/`CQSpectrogramResult`/`ProbabilisticSpectralEstimate`) |
@@ -1703,7 +1804,7 @@ TS, RL. The `*_field` helpers map the equation over a model TL
 |------|--------------|
 | Sonar equation | `passive_signal_excess`, `active_signal_excess`, `echo_level`, `figure_of_merit`, `noise_background`, `detection_range`, `detection_range_by_depth` |
 | Field maps | `passive_signal_excess_field`, `active_signal_excess_field`, `probability_of_detection_field` |
-| Detection theory | `albersheim_snr`, `probability_of_detection`, `roc_curve`, `detection_index`, `deflection_coefficient`, `detection_threshold_energy` |
+| Detection theory | `albersheim_snr`, `probability_of_detection`, `roc_curve`, `detection_index`, `deflection_coefficient`, `detection_threshold_energy`, `per_look_false_alarm`, `scan_false_alarm` (a scan of N independent beams false-alarms at the scan's rate, not one beam's) |
 | Target strength | `ts_sphere`, `ts_cylinder`, `ts_plate`, `ts_ellipsoid`, `ts_convex` |
 | Scattering / reverb | `lambert_bottom`, `LAMBERT_MU_DB`, `chapman_harris_surface`, `column_scattering_strength`, `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
 | High-frequency boundary scattering (APL-UW TR 9407, 10–100 kHz) | `apl_uw_bottom_backscatter`, `apl_uw_bottom_loss`, `apl_uw_surface_backscatter`, `BottomParameters` (`.from_sediment` / `.from_grain_size` / `.from_geoacoustics` / `.from_bottom` / `.from_environment`), `APL_UW_SEDIMENTS` |
@@ -2066,7 +2167,7 @@ have their own measurements —
 
 ## 17. Examples Index
 
-All 39 runnable scripts live in `uacpy/examples/`. Run them **by script
+All 42 runnable scripts live in `uacpy/examples/`. Run them **by script
 path** from the repo root — `python uacpy/examples/example_01_basic_shallow_water.py`
 — the form `run_all_examples.py` and the test suite use. The module form
 (`python -m uacpy.examples.example_01_…`) also works, from a source checkout;
@@ -2116,6 +2217,9 @@ uacpy calls it demonstrates are named in its own docstring.
 | 37 | Real-world environment — map · transmission loss · section |
 | 38 | Matched-field source localization — KRAKEN replicas, Bartlett vs MVDR |
 | 39 | OASS reverberation from a rough seabed — the mean-field → scattered-field chain |
+| 40 | A vertical source array — slabs · coherent vs incoherent total · received level · array beam pattern vs mode filter |
+| 41 | Beamforming a modelled field on a vertical receive array — the trapped-mode fan · shading · the λ/2 spacing limit |
+| 42 | Propagation → array processing → detection, end to end — the sonar equation with a measured array gain, and the geometry on every panel |
 
 ## 18. Parameter Reference
 

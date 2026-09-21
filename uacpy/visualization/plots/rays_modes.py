@@ -1268,6 +1268,143 @@ def _densify_in_angle(angles, levels, step_deg: float = 1.0):
 
 
 @typed_plot_error
+def plot_mode_excitation(
+    modes,
+    source,
+    ax=None,
+    *,
+    sound_speed: Optional[float] = None,
+    env=None,
+    show_array_factor: bool = True,
+    floor_dB: float = -40.0,
+    figsize: Tuple[float, float] = (8.0, 4.5),
+    title: Optional[str] = None,
+    **kwargs,
+):
+    """What a source array drives, both ways, on one angle axis.
+
+    A stem per trapped mode at that mode's grazing angle
+    ``θₘ = arccos(c / vₚ,ₘ)``, whose height is the modal excitation
+    ``|Σₙ wₙ·φₘ(zₙ)|`` (:meth:`~uacpy.core.results.Modes.excitation`) — what
+    the array actually does in the waveguide, the *mode filter* of Medwin &
+    Clay §11.3.1. Over it, optionally, the free-field pattern of the same
+    array: its **array beam pattern** ``P(θ) = f(θ)·A(θ)`` when the elements
+    are directional, or the bare array factor ``A(θ)`` when they are not
+    (Butler & Sherman §7.1.1; :meth:`~uacpy.Source.array_beam_pattern`).
+    Both the stems and the curve carry the element pattern the engine
+    applies, so the comparison is one array described two ways.
+
+    Both are normalised to their own maximum, so the figure compares
+    *shapes*, which is the comparison that means something: the two agree
+    while the pattern is symmetric in ±θ and part company once steering
+    breaks that symmetry, because a trapped mode is a standing wave with
+    equal up- and down-going halves and no single angle to be steered onto.
+    A reader who takes the free-field curve for the channel's response is
+    the reason this plot draws them together rather than apart.
+
+    Parameters
+    ----------
+    modes : Modes
+        From ``Kraken(...).compute_modes(env, source)``, tabulated over a
+        depth range spanning the array.
+    source : Source
+        The array: its ``depths`` and complex ``weights``.
+    sound_speed : float, optional
+        Reference speed (m/s) the grazing angles are measured against.
+        ``None`` (default) reads it from ``env`` at the source depth — the
+        depth at which the array factor's ``θ`` is a launch angle — and
+        falls back to 1500 m/s when no ``env`` is given. A mode whose phase
+        speed is below it has no real grazing angle at that depth and is
+        dropped, with a warning naming how many: clipping them onto 0°
+        would pile evanescent modes on the axis origin as if they travelled
+        horizontally.
+    env : Environment, optional
+        Supplies ``sound_speed`` at the source depth when it is not given.
+    show_array_factor : bool
+        Draw the free-field curve. ``False`` leaves the mode filter alone.
+    floor_dB : float
+        Lower limit of the dB axis, both curves being dB re their own max.
+    """
+    import numpy as _np
+
+    if sound_speed is None:
+        sound_speed = 1500.0
+        if env is not None:
+            try:
+                z_s = float(_np.atleast_1d(source.depths)[0])
+                sound_speed = float(_np.atleast_1d(
+                    env.ssp.speed_at(z_s))[0])
+            except Exception:                     # noqa: BLE001
+                sound_speed = 1500.0
+    amp = _np.abs(modes.excitation(source, sound_speed=sound_speed))
+    speeds = _np.asarray(modes.compute_phase_speeds(), dtype=float)
+    with _np.errstate(invalid='ignore'):
+        angles = _np.degrees(_np.arccos(
+            _np.clip(float(sound_speed) / speeds, -1.0, 1.0)))
+    # arccos is only defined where v_p >= c; a slower mode is evanescent at
+    # this depth and has no grazing angle. Drop those rather than let the
+    # clip stack them on 0 deg.
+    propagating = speeds >= float(sound_speed)
+    dropped = int(_np.sum(~propagating))
+    if dropped:
+        _plot_warn(
+            f"plot_mode_excitation: {dropped} of {speeds.size} modes have a "
+            f"phase speed below the {float(sound_speed):g} m/s reference, so "
+            f"they have no real grazing angle there and are not drawn. Pass "
+            f"sound_speed= (or env=) for the speed at the source depth.")
+    good = (propagating & _np.isfinite(angles) & _np.isfinite(amp)
+            & (amp > 0.0))
+    if not _np.any(good):
+        raise ConfigurationError(
+            "plot_mode_excitation: no mode has both a finite grazing angle "
+            "and a non-zero excitation — check that the source depths sit "
+            "inside the tabulated mode depths.")
+    angles, amp = angles[good], amp[good]
+    level = 20.0 * _np.log10(amp / amp.max())
+
+    fig, ax = fig_ax(ax, figsize)
+    ax.stem(angles, _np.maximum(level, floor_dB), bottom=floor_dB,
+            basefmt=' ', linefmt='C0-', markerfmt='C0o',
+            label='mode excitation (waveguide)')
+    if show_array_factor:
+        # Folded over +/-theta, and normalised over the whole fan rather than
+        # the drawn half. A trapped mode is a standing wave — it responds to
+        # e^{+ik_z z} AND e^{-ik_z z} — so the free-field quantity comparable
+        # to a mode stem is max(|AF(+θ)|, |AF(−θ)|). Drawing |AF(+θ)| over
+        # [0, 90] alone put an upward-steered array's main lobe off the plot
+        # and normalised a 12 dB sidelobe to 0 dB.
+        span = _np.linspace(0.0, max(90.0, float(angles.max())), 721)
+        # P = f*A when the elements are directional, A alone when they are
+        # not (Butler & Sherman §7.1.1). Drawing the bare factor for a shaded
+        # array would show the geometry only and make a directional source
+        # look omnidirectional, while the stems beside it carry f.
+        shaped = getattr(source, 'beam_pattern', None) is not None
+        pattern = (source.array_beam_pattern if shaped
+                   else source.array_factor)
+        af = _np.maximum(
+            _np.abs(pattern(span, sound_speed=sound_speed)),
+            _np.abs(pattern(-span, sound_speed=sound_speed)))
+        if af.max() > 0.0:
+            ax.plot(span, _np.maximum(20.0 * _np.log10(af / af.max()),
+                                      floor_dB),
+                    'C3-', lw=1.2, alpha=0.85,
+                    label=('array beam pattern P=f·A (free field, ±θ)'
+                           if shaped else
+                           'array factor (free field, folded ±θ)'))
+    ax.set_xlabel('Mode grazing angle (deg)')
+    ax.set_ylabel('Normalised amplitude (dB re max)')
+    ax.set_ylim(floor_dB, 3.0)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='lower left', fontsize=9)
+    n_src = len(_np.atleast_1d(source.depths))
+    aperture = float(_np.ptp(_np.atleast_1d(source.depths)))
+    ax.set_title(_title_or(
+        title, f"Array response — {n_src} source(s) over {aperture:g} m"))
+    _draw_result_credit(fig, modes)
+    return fig, ax
+
+
+@typed_plot_error
 def plot_beam_pattern(
     pattern=None,
     ax=None,

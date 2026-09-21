@@ -64,6 +64,18 @@ class Source(_DeepCopyMixin):
         pressure as ``Σ wᵢ·pᵢ``; a single-depth run scales its field by
         the one weight. ``[1, -1]`` drives two sources in antiphase;
         ``[1, 1j]`` puts them in quadrature. Every weight must be finite.
+    source_level_dB : float, optional
+        How hard a unit-weight element is driven, in dB re 1 uPa at 1 m.
+        ``None`` (default) leaves it unstated, which is what transmission
+        loss assumes -- TL is referenced to a *unit* source, so a run
+        without this says how much quieter each cell is than the source
+        rather than how loud it is. Giving it stamps
+        ``metadata['source_level_dB']`` on every result, and
+        :meth:`~uacpy.core.results.Field.at_source_level` then turns a loss
+        into the absolute level a hydrophone there would read, with no
+        argument to repeat at the call site. The engines never consume it:
+        like ``weights`` it is applied to the field afterwards, so a run's
+        TL is unchanged by setting it.
 
     Attributes
     ----------
@@ -114,6 +126,7 @@ class Source(_DeepCopyMixin):
     source_type: str = 'point'
     beam_pattern: Optional[Union[np.ndarray, str, Path]] = None
     weights: Optional[Union[complex, List[complex], np.ndarray]] = None
+    source_level_dB: Optional[float] = None
 
     if TYPE_CHECKING:
         # The two roles of a dataclass field annotation, separated: the
@@ -133,6 +146,7 @@ class Source(_DeepCopyMixin):
             beam_pattern: Optional[Union[np.ndarray, str, Path]] = None,
             weights: Optional[Union[complex, List[complex],
                                     np.ndarray]] = None,
+            source_level_dB: Optional[float] = None,
         ) -> None: ...
 
     def __post_init__(self):
@@ -204,6 +218,15 @@ class Source(_DeepCopyMixin):
 
         self.weights = self._normalise_weights(self.weights)
 
+        if self.source_level_dB is not None:
+            level = float(self.source_level_dB)
+            if not np.isfinite(level):
+                raise ConfigurationError(
+                    f"Source source_level_dB must be finite (dB re 1 uPa at "
+                    f"1 m); got {self.source_level_dB!r}"
+                )
+            self.source_level_dB = level
+
     def _normalise_weights(self, weights) -> np.ndarray:
         """One finite complex weight per depth: ``None`` is all ones, a
         scalar broadcasts, and a vector must match ``depths`` in length."""
@@ -251,7 +274,131 @@ class Source(_DeepCopyMixin):
             frequencies=self.frequencies,
             source_type=self.source_type,
             beam_pattern=self.beam_pattern,
+            source_level_dB=self.source_level_dB,
         )
+
+    def array_factor(self, angles_deg, *, frequency=None,
+                     sound_speed: float = 1500.0) -> np.ndarray:
+        """Complex free-field array factor ``AF(θ)`` of this source array.
+
+        ``AF(θ) = Σₙ wₙ·exp(i·k·(zₙ - z̄)·sin θ)``, with ``θ`` in degrees
+        from the horizontal (positive downward) and ``z̄`` the **mean** of
+        the element depths — the array's phase centre, which for an
+        unevenly spaced array is not its mid-depth. A caller composing
+        this complex factor with a single element's field has to place
+        that element at the same mean depth.
+        By the product theorem the array's far field is the field of one
+        element at that centre times this factor (Balanis, *Antenna Theory*,
+        eq. 6-5). The theorem is stated for arrays of **identical**
+        elements — which a uacpy ``Source`` satisfies, since one
+        ``beam_pattern`` and one ``source_type`` describe every depth —
+        and within that it holds for any magnitudes, phases and spacings.
+
+        **This is a free-field quantity, and a waveguide is not free field.**
+        A trapped mode is a standing wave — equal up- and down-going halves —
+        so what the array actually does in a channel is set each mode's
+        amplitude, ``Σₙ wₙ·φₘ(zₙ)``: the *mode filter* of Medwin & Clay
+        §11.3.1, which :meth:`~uacpy.core.results.Modes.excitation` computes
+        and which is exact there. Use this one for design intuition — where
+        the lobes point, how steering moves them — and that one for what
+        reaches the receiver. The two agree only while the pattern stays
+        symmetric in ±θ, which steering is precisely what breaks.
+
+        Parameters
+        ----------
+        angles_deg : array-like
+            Angles from the horizontal, in degrees.
+        frequency : float, optional
+            Hz. Defaults to this source's single frequency, and is required
+            when it carries a band.
+        sound_speed : float
+            Reference speed (m/s) setting the wavenumber. Default 1500.
+
+        Returns
+        -------
+        ndarray
+            Complex ``AF(θ)``, one entry per angle. A single-depth source
+            returns its own weight at every angle.
+        """
+        angles = np.atleast_1d(np.asarray(angles_deg, dtype=float))
+        if frequency is None:
+            if self.frequencies.size != 1:
+                raise ConfigurationError(
+                    f"Source.array_factor: this source carries "
+                    f"{self.frequencies.size} frequencies, so the one the "
+                    f"factor is formed at has to be named: "
+                    f"array_factor(angles, frequency=...)."
+                )
+            frequency = float(self.frequencies[0])
+        frequency = float(frequency)
+        if not (np.isfinite(frequency) and frequency > 0.0):
+            raise ConfigurationError(
+                f"Source.array_factor: frequency must be positive and "
+                f"finite; got {frequency!r}.")
+        if not (np.isfinite(sound_speed) and sound_speed > 0.0):
+            raise ConfigurationError(
+                f"Source.array_factor: sound_speed must be positive and "
+                f"finite; got {sound_speed!r}.")
+        k = 2.0 * np.pi * frequency / float(sound_speed)
+        offsets = self.depths - self.depths.mean()
+        phase = k * np.outer(np.sin(np.deg2rad(angles)), offsets)
+        return np.exp(1j * phase) @ self.weights
+
+    def element_directivity(self, angles_deg) -> np.ndarray:
+        """This source's ``beam_pattern`` as a linear amplitude at
+        ``angles_deg`` — ``f(θ)`` in the product theorem.
+
+        Interpolated the way the engines read the ``.sbp``: levels are
+        converted to amplitude (``10**(dB/20)``, ``beampattern.f90:59``)
+        *before* interpolating between samples, so a coarsely sampled table
+        gives the same numbers here as in the run. Ones everywhere when the
+        source is omnidirectional; a table given as a path is not read, and
+        raises.
+        """
+        angles = np.atleast_1d(np.asarray(angles_deg, dtype=float))
+        if self.beam_pattern is None:
+            return np.ones(angles.shape, dtype=float)
+        if isinstance(self.beam_pattern, Path):
+            raise ConfigurationError(
+                f"Source.element_directivity: beam_pattern is a file path "
+                f"({self.beam_pattern}); the table is read by the engine, "
+                f"not here. Pass the (N, 2) [angle_deg, level_dB] array to "
+                f"evaluate it in-process."
+            )
+        table = np.asarray(self.beam_pattern, dtype=float)
+        return np.interp(angles, table[:, 0],
+                         np.power(10.0, table[:, 1] / 20.0))
+
+    def array_beam_pattern(self, angles_deg, *, frequency=None,
+                           sound_speed: float = 1500.0) -> np.ndarray:
+        """Complex **array beam pattern** ``P(θ) = f(θ)·A(θ)`` — what this
+        source array actually radiates in the far field.
+
+        The product theorem in the form Butler & Sherman state it for
+        underwater arrays (*Transducers and Arrays for Underwater Sound*,
+        §7.1.1): ``P(θ,φ) = f(θ,φ)·A(θ,φ)``, where ``f`` is the beam pattern
+        of the identical elements — this source's :attr:`beam_pattern`, via
+        :meth:`element_directivity` — and ``A`` is the beam pattern of the
+        array of point sources at their centres, :meth:`array_factor`.
+
+        The theorem needs the elements to be identical and *co-aligned*; it
+        "does not apply to arrays on curved surfaces where the transducer
+        axes do not all point in the same direction" (ibid.). A uacpy
+        ``Source`` satisfies both by construction — one ``beam_pattern`` and
+        one ``source_type`` describe every depth.
+
+        This is the quantity to compare against a measurement or a
+        specification. :meth:`array_factor` is the geometry alone, which is
+        what the theorem isolates and what stays the same when the elements
+        are swapped; it is **not** what a shaded array radiates. As with
+        ``array_factor``, this is a free-field pattern: in a waveguide the
+        array's effect is its modal excitation
+        (:meth:`~uacpy.core.results.Modes.excitation`).
+        """
+        angles = np.atleast_1d(np.asarray(angles_deg, dtype=float))
+        return (self.element_directivity(angles)
+                * self.array_factor(angles, frequency=frequency,
+                                    sound_speed=sound_speed))
 
     def plot_beam_pattern(self, ax=None, **kwargs):
         """Plot this source's directivity — the ``.sbp`` beam pattern.
@@ -311,4 +458,5 @@ Source.__init__.__annotations__.update(
     depths=Union[float, List[float], np.ndarray],
     frequencies=Union[float, List[float], np.ndarray],
     weights=Optional[Union[complex, List[complex], np.ndarray]],
+    source_level_dB=Optional[float],
 )

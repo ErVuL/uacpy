@@ -1139,7 +1139,9 @@ def test_the_result_stack_producers_are_where_the_annotations_say():
     ``Bellhop._run_eigenrays_multi_depth`` does the same for eigenrays, and
     the OALIB readers build one whenever a ``.shd`` / ``.arr`` / ``.ray``
     carries more than one source depth — which is why Bellhop's TL, RAYS and
-    ARRIVALS stack without the wrapper looking as though it does."""
+    ARRIVALS stack without the wrapper looking as though it does (Scooter's
+    ``_assemble_field_from_grn`` stacks its own per-depth Hankel
+    transforms)."""
     producers = _result_stack_producers()
     assert 'uacpy/models/base.py' in producers, producers
     assert 'uacpy/models/bellhop.py' in producers, producers

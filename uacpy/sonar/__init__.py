@@ -57,6 +57,8 @@ from .detection import (
     deflection_coefficient,
     detection_index,
     detection_threshold_energy,
+    per_look_false_alarm,
+    scan_false_alarm,
     probability_of_detection,
     roc_curve,
 )
@@ -113,6 +115,8 @@ __all__ = [
     "roc_curve",
     "albersheim_snr",
     "detection_threshold_energy",
+    "per_look_false_alarm",
+    "scan_false_alarm",
     "ts_sphere",
     "ts_convex",
     "ts_ellipsoid",

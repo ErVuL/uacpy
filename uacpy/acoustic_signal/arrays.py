@@ -246,7 +246,9 @@ def beamform(
     angles: Optional[np.ndarray] = None,
     SL: float = 150.0,
     NL: float = 0.0,
-    c: float = DEFAULT_SOUND_SPEED
+    c: float = DEFAULT_SOUND_SPEED,
+    *,
+    weights: Optional[np.ndarray] = None,
 ) -> BeamformResult:
     """
     Plane-wave beamformer — returns signal-to-noise ratio per look angle.
@@ -279,6 +281,13 @@ def beamform(
         Hz before passing. Default 0.0.
     c : float, optional
         Reference sound speed for steering vectors in m/s.
+    weights : ndarray, optional
+        Per-element shading, one value per hydrophone — e.g. from
+        :func:`shading_taper`, but any real or complex vector will do.
+        Applied to the steering bank and
+        re-normalised to unit row norm, so the noise gain stays 1 and the
+        peak of a matched plane wave is the array gain the taper leaves,
+        ``10*log10(|sum w|**2 / ||w||**2)``. Default: unshaded.
 
     Returns
     -------
@@ -309,7 +318,8 @@ def beamform(
     frequency = require_positive_finite_scalar(
         frequency, "beamform", "frequency", " Hz")
     c = require_positive_finite_scalar(c, "beamform", "c", " m/s")
-    e = steering_vectors(phone_coords, angles, frequency, c)
+    e = _shaded_steering(phone_coords, angles, frequency, c, weights,
+                         'beamform')
     # Matched filter, the same Hermitian form bartlett/mvdr/music_spectrum use.
     beamformed = e.conj() @ pressure
     mag = np.abs(beamformed)
@@ -325,6 +335,402 @@ def beamform(
     peak_snr = np.max(snr)
 
     return BeamformResult(snr, angles, peak_snr)
+
+
+def _shaded_steering(positions_m, angles_deg, frequency, c, weights, caller):
+    """Unit-norm steering bank, optionally shaded and re-normalised.
+
+    The unit row norm is the convention that keeps the NOISE gain at 1, so a
+    beam output stays readable as an SNR: without it a taper would rescale
+    the noise along with the signal, and the peak of a matched plane wave
+    would no longer be the array gain the taper leaves.
+    """
+    e = steering_vectors(positions_m, angles_deg, frequency, c)
+    if weights is None:
+        return e
+    # Complex is kept, not cast away: a shading may carry phase — a fixed
+    # taper steered off the scan grid, a null placed by design, an adaptive
+    # weight vector. ``dtype=float`` on those discards the imaginary part
+    # with only a numpy warning and returns a plausible wrong number.
+    w = np.asarray(weights)
+    if not np.issubdtype(w.dtype, np.number):
+        raise ConfigurationError(
+            f"{caller}: weights must be numeric, one per element; got dtype "
+            f"{w.dtype}."
+        )
+    w = w.astype(complex if np.iscomplexobj(w) else float)
+    if w.shape != (e.shape[1],):
+        raise ConfigurationError(
+            f"{caller}: weights must be one per element, shape "
+            f"({e.shape[1]},); got {w.shape}. These are element shadings "
+            f"(see shading_taper), not per-angle weights."
+        )
+    e = e * w[None, :]
+    norm = np.linalg.norm(e, axis=1, keepdims=True)
+    if not np.all(norm > 0.0):
+        # 0/0 would hand back a bank of NaNs and every beam power downstream
+        # would be NaN with nothing to say why.
+        # The shaded row norm is sqrt(sum|w|^2 / N), which does not depend
+        # on the look angle, so this is all-or-nothing: it fires only when
+        # every weight is zero.
+        raise ConfigurationError(
+            f"{caller}: weights carry no power, so the shaded steering "
+            f"vector has no norm to divide by; got weights summing to "
+            f"{float(np.sum(np.abs(w))):.3g} in modulus."
+        )
+    return e / norm
+
+
+_BeamformedFields = namedtuple("BeamformedField",
+                               "response angles element_power frequencies")
+
+
+class BeamformedField(_BeamformedFields):
+    """Beam output over a whole field grid, with the reference to read it against.
+
+    ``response`` is the COMPLEX beam output, shape ``(n_angles, *grid)`` —
+    every axis of the input after the element axis is carried through
+    untouched, so a ``(n_elements, n_depths, n_ranges)`` plane gives a beam
+    output per look angle at every point of that plane. ``power`` is its
+    modulus squared, which is what an energy detector sees; the phase is
+    kept because a time-domain reception cannot be rebuilt without it.
+
+    ``element_power`` is the mean intensity across the elements at each
+    point — the single-sensor reference an array gain is measured against.
+
+    ``frequencies`` is ``None`` for a single-frequency beamformer. When it
+    is an array, the LAST axis of ``response`` is frequency, every bin was
+    steered at its own frequency, and :meth:`to_time_trace` can synthesise
+    what the beam actually receives.
+    """
+
+    @property
+    def power(self):
+        """Beam power, ``|response|**2`` — what an energy detector sees."""
+        return np.abs(self.response) ** 2
+
+    @property
+    def best(self):
+        """Power of the winning beam at each point — a scanning detector's output."""
+        return self.power.max(axis=0)
+
+    @property
+    def best_angle(self):
+        """Look angle (deg) that won at each point.
+
+        On a multi-mode arrival this hops between +/- theta rather than
+        migrating smoothly, because the modes arrive in up- and down-going
+        pairs and the interference decides which one wins.
+        """
+        return np.asarray(self.angles, dtype=float)[
+            np.argmax(self.power, axis=0)]
+
+    def array_gain(self):
+        """Realised array gain (dB) at each point: best beam over mean element.
+
+        This is Ainslie's Equation (6.70) prescription — the signal-to-noise
+        ratio "calculated not just once, but twice, with and without the
+        effects of the beamformer" — evaluated on a modelled field, and it
+        is what a scalar AG misses when the signal is not one plane wave.
+
+        The reference is the MEAN element power, not any single element's: a
+        lone hydrophone can sit in an interference null, which reads as
+        enormous "gain" from an array whose ceiling is ``10log10(N)``.
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return 10.0 * np.log10(self.best / self.element_power)
+
+    def to_time_trace(self, angle_deg, *, range_m, source_spectrum=None,
+                      **kwargs):
+        """What one beam actually receives, as a time series.
+
+        Only defined for a broadband beamformer — a single frequency has no
+        band to transform. Selects the look angle nearest ``angle_deg`` and
+        hands its complex response to
+        :meth:`uacpy.core.results.Field.to_time_trace`, so the window, the
+        time base and the ``source_spectrum`` convolution are the package's
+        own and not a second implementation of them.
+
+        ``range_m`` is the source-to-array separation, and it is required
+        rather than defaulted: it sets where the time window starts, and
+        there is no range at which a default would be right. Left at zero
+        the window would open at t = 0 — before anything can have arrived —
+        and the wrap warning below is itself suppressed at t_start = 0, so
+        the one certainly-wrong time base would be the one that said
+        nothing.
+
+        ``source_spectrum`` is the transmitted signal's spectrum on this
+        object's ``frequencies``; without it the result is the channel's
+        band-limited impulse response through the beam.
+
+        Remaining keyword arguments (``t_start``, ``window``, ``nfft``) pass
+        straight through. ``t_start`` is worth setting: the default window
+        is anchored on a nominal sound speed, and a faster path arrives
+        before the window and wraps to the end of the record.
+        """
+        # Local because this is the only method that needs it, and
+        # arrays.py is imported on nearly every uacpy path.
+        from uacpy.core.results import Field
+        if self.frequencies is None:
+            raise ConfigurationError(
+                "BeamformedField.to_time_trace: this beamformer ran at a "
+                "single frequency, so there is no band to transform. Pass a "
+                "frequency array to beamform_field (the shape a BROADBAND "
+                "run returns) to synthesise a reception."
+            )
+        if self.response.ndim != 2:
+            raise ConfigurationError(
+                f"BeamformedField.to_time_trace: needs the beam at one "
+                f"point in space, i.e. response of shape (n_angles, "
+                f"n_frequencies); got {self.response.shape}. Select the "
+                f"grid point first — a whole plane of receptions is a set "
+                f"of traces, not one."
+            )
+        idx = int(np.argmin(np.abs(np.asarray(self.angles, dtype=float)
+                                   - float(angle_deg))))
+        beam = np.asarray(self.response)[idx][None, None, :]
+        holder = Field(data=beam,
+                       coords={'depth': np.array([0.0]),
+                               'range': np.array([float(range_m)]),
+                               'frequency': np.asarray(self.frequencies,
+                                                       dtype=float)},
+                       model='beamform_field')
+        return holder.to_time_trace(depth=0.0, range=float(range_m),
+                                    source_spectrum=source_spectrum, **kwargs)
+
+
+def beamform_field(pressure, positions_m, angles_deg, frequency, *,
+                   c: float = DEFAULT_SOUND_SPEED,
+                   weights=None) -> BeamformedField:
+    """Conventional beamformer over every point of a field.
+
+    :func:`beamform` answers "what does this array hear along one range
+    line", in dB SNR. This answers "what does it hear at every point of a
+    modelled field", in power, and keeps the look angle that won — which is
+    what a coverage map, a realised array gain or a re-steering study needs.
+
+    Parameters
+    ----------
+    pressure : ndarray
+        Complex pressure, element axis FIRST: ``(n_elements, *grid)``. The
+        grid may be anything — ``(n_ranges,)``, ``(n_depths, n_ranges)`` —
+        and comes back unchanged behind the angle axis.
+    positions_m : array_like
+        Element positions (m), one per element of ``pressure``'s first axis.
+    angles_deg : array_like
+        Look angles to scan, in degrees from broadside.
+    frequency : float or array_like
+        One frequency, or a whole band. Given a band, the LAST axis of
+        ``pressure`` is taken as the frequency axis — the shape a
+        ``RunMode.BROADBAND`` run returns — and **each bin is steered at its
+        own frequency**. That is not a refinement: a beam delay is a
+        frequency-dependent phase, so one steering vector at the band centre
+        mis-steers both edges. A band also makes
+        :meth:`BeamformedField.to_time_trace` available.
+    c : float, optional
+        Reference sound speed (m/s) for the steering vectors.
+    weights : array_like, optional
+        Per-element shading, one value per element — any real or **complex**
+        vector, not only a :func:`shading_taper` output. Applied to the
+        steering bank and re-normalised to unit row norm, so the noise gain
+        stays 1 whatever scale the weights arrive at. Complex entries carry
+        phase, which is how a fixed taper steers off the scan grid or places
+        a null by design. What this is *not* is a per-angle weight **bank**:
+        an adaptive design with a different vector per look angle is a
+        different object, and a ``(n_angles, n_elements)`` array is refused
+        rather than broadcast.
+
+    Returns
+    -------
+    BeamformedField
+        ``response`` (complex) ``(n_angles, *grid)``, ``angles``,
+        ``element_power`` ``(*grid,)`` and ``frequencies``; with ``.power``,
+        ``.best``, ``.best_angle``, ``.array_gain()`` and — for a band —
+        ``.to_time_trace()``.
+    """
+    p = np.asarray(pressure)
+    pos = np.asarray(positions_m, dtype=float).ravel()
+    if p.ndim < 1 or p.shape[0] != pos.size:
+        raise ConfigurationError(
+            f"beamform_field: the FIRST axis of pressure is the element "
+            f"axis, so it must be {pos.size} long to match positions_m; got "
+            f"shape {p.shape}. Grid axes follow it — e.g. "
+            f"(n_elements, n_depths, n_ranges)."
+        )
+    angles = np.asarray(angles_deg, dtype=float).ravel()
+    # A frequency AXIS (more than one value) makes the last axis of
+    # ``pressure`` the frequency axis and turns this into a broadband
+    # beamformer; a scalar keeps the narrowband shape exactly as it was.
+    # An ARRAY means broadband, however short. Switching on size instead
+    # would make a one-bin band silently narrowband, and to_time_trace
+    # would then tell the caller to pass a frequency array — which they did.
+    freq_in = np.asarray(frequency, dtype=float)
+    freqs = np.atleast_1d(freq_in) if freq_in.ndim > 0 else None
+    freq_arr = np.atleast_1d(freq_in)
+    if freqs is not None:
+        if p.ndim < 2 or p.shape[-1] != freqs.size:
+            raise ConfigurationError(
+                f"beamform_field: {freqs.size} frequencies were given, so "
+                f"the LAST axis of pressure is the frequency axis and must "
+                f"be {freqs.size} long; got shape {p.shape}. A broadband "
+                f"field is (n_elements, *grid, n_frequencies) — the shape "
+                f"a BROADBAND run returns."
+            )
+        e = None
+    else:
+        e = _shaded_steering(pos, angles, float(freq_arr[0]), c, weights,
+                             "beamform_field")
+    # One matrix product over the element axis, with every grid axis folded
+    # into a single column axis and restored afterwards, so the same code
+    # serves a range line and a depth-range plane.
+    if freqs is None:
+        # One matrix product over the element axis, with every grid axis
+        # folded into a single column axis and restored afterwards, so the
+        # same code serves a range line and a depth-range plane.
+        flat = np.reshape(p, (p.shape[0], -1))
+        resp = np.reshape(e.conj() @ flat, (angles.size,) + p.shape[1:])
+    else:
+        # A beam delay is a frequency-dependent phase, so each bin gets its
+        # own steering bank. Steering the band once at its centre mis-steers
+        # both edges, by the fractional bandwidth times the steer angle.
+        flat = np.reshape(p, (p.shape[0], -1, freqs.size))
+        resp = np.empty((angles.size, flat.shape[1], freqs.size),
+                        dtype=complex)
+        for i, f_i in enumerate(freqs):
+            e_i = _shaded_steering(pos, angles, f_i, c, weights,
+                                   "beamform_field")
+            resp[:, :, i] = e_i.conj() @ flat[:, :, i]
+        resp = np.reshape(resp, (angles.size,) + p.shape[1:])
+    return BeamformedField(resp, angles, np.mean(np.abs(p) ** 2, axis=0),
+                           freqs)
+
+
+def plane_wave_array_gain(weights) -> float:
+    """Array gain (dB) a weight vector realises on a BROADSIDE plane wave.
+
+    ``AG = |sum w|^2 / ||w||^2`` — the coherent sum of the weights against
+    the noise power a unit-norm version of them passes. For an unshaded
+    array this is ``10log10(N)``; a Hann taper spends about 1.95 dB of it on
+    sidelobes.
+
+    **Broadside, not "matched".** For a real taper the two are the same
+    thing: the weights are in phase, so the wave they are matched to is the
+    one arriving broadside. A *complex* taper steers, and then they part
+    company — its matched wave arrives at the steered angle, and this
+    function still reports the gain at broadside. With a phase ramp of 8
+    radians across 16 elements that is -0.33 dB here against 10.0 dB for
+    the wave the taper is actually matched to, found by
+    :meth:`BeamformedField.array_gain`. Both are right; they answer
+    different questions, and which one a budget wants depends on where the
+    signal is coming from.
+
+    The broadside value is the one that keeps a superdirective design
+    honest: Butler & Sherman's alternating shading gives a genuinely
+    NEGATIVE broadside gain, which a magnitudes-only form would erase.
+
+    It is **not** ``-10log10(sum |w|^4)``, which is the inverse of a
+    normalised effective element count: the two agree for a boxcar and
+    differ by about 1.1 dB for a Hann taper, which is small enough to read
+    as plausible and wrong enough to matter.
+
+    Scale-invariant, so an unnormalised taper may be passed directly, and
+    defined for complex weights too — ``|sum w|`` is then a coherent sum, so
+    a phase ramp across the elements legitimately lowers the gain. Weights
+    that sum to zero null the steered direction, which Butler & Sherman's
+    alternating superdirective shading does on purpose; the answer is
+    ``-inf`` dB rather than an error.
+    """
+    w = np.asarray(weights)
+    if not np.issubdtype(w.dtype, np.number):
+        raise ConfigurationError(
+            f"plane_wave_array_gain: weights must be numeric; got dtype "
+            f"{w.dtype}."
+        )
+    w = w.astype(complex if np.iscomplexobj(w) else float).ravel()
+    if w.size == 0:
+        raise ConfigurationError(
+            "plane_wave_array_gain: weights is empty; expected one shading "
+            "per element."
+        )
+    denom = float(np.sum(np.abs(w) ** 2))
+    if denom <= 0.0:
+        raise ConfigurationError(
+            "plane_wave_array_gain: weights carry no power, so the gain is "
+            "undefined; got all zeros."
+        )
+    # A weight vector summing to zero nulls the steered direction outright
+    # — Butler & Sherman's alternating superdirective shading does exactly
+    # that — so -inf is the answer, not an error and not a numpy warning.
+    with np.errstate(divide='ignore'):
+        return float(10.0 * np.log10(np.abs(np.sum(w)) ** 2 / denom))
+
+
+def matched_replica_gain(pressure):
+    """Array gain (dB) of the replica matched to the field itself.
+
+    The ceiling a conventional scan is measured against. Correlating the
+    field with ``p / ||p||`` gives ``||p||^2`` against a mean element power
+    of ``||p||^2 / N``, so the gain is ``10log10(N)`` exactly — whatever
+    shape the field has, with no plane wave anywhere in it. That is the
+    point: the shortfall a plane-wave scan shows in a waveguide belongs to
+    the *replica*, not to the channel, and the right replica is the
+    channel's own Green's function (matched-field processing — see
+    :mod:`uacpy.sonar.matched_field`).
+
+    Computed from ``pressure`` rather than returned as a constant, so a
+    point with no signal comes back NaN instead of a confident number.
+    """
+    p = np.asarray(pressure)
+    if p.ndim < 1 or p.shape[0] < 1:
+        raise ConfigurationError(
+            "matched_replica_gain: the first axis of pressure is the element "
+            f"axis and must be non-empty; got shape {p.shape}."
+        )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return 10.0 * np.log10(np.linalg.norm(p, axis=0) ** 2
+                               / np.mean(np.abs(p) ** 2, axis=0))
+
+
+def independent_beams(positions_m, angles_deg, frequency,
+                      c: float = DEFAULT_SOUND_SPEED) -> float:
+    """How many INDEPENDENT looks a scan over ``angles_deg`` really holds.
+
+    Beams spaced ``lambda / (N*d)`` apart in ``sin(theta)`` are mutually
+    orthogonal for a uniform line array — the DFT spacing — so a sector
+    spanning ``span`` in ``sin(theta)`` holds ``span * N*d / lambda``
+    resolution cells however finely it is sampled. Scanning 361 angles does
+    not buy 361 looks.
+
+    Feed the result to :func:`uacpy.sonar.per_look_false_alarm`: a detector
+    that keeps the largest of these looks false-alarms at the scan's rate,
+    not at one beam's.
+
+    ``N*d`` is the element span plus one mean spacing, which is exactly
+    ``N*d`` for a uniform array and degrades sensibly for a ragged one. Note
+    this is NOT the aperture ``(N-1)*d``: beams at the aperture spacing are
+    still correlated: |corr| = 1/N at that spacing, 0.062 for 16
+    elements and 0.042 for 24, against 1e-16 here. Being the wider spacing
+    it also yields FEWER cells — for a +/-45 deg scan, 10.61 against 11.31
+    at N=16 and 16.26 against 16.97 at N=24 — so a threshold set from it is
+    set for fewer looks than the detector really takes, and is optimistic.
+    """
+    pos = np.asarray(positions_m, dtype=float).ravel()
+    if pos.size < 2:
+        raise ConfigurationError(
+            f"independent_beams: needs at least 2 elements to have a beam "
+            f"width at all; got {pos.size}."
+        )
+    span_m = float(np.ptp(pos))
+    if span_m <= 0.0:
+        raise ConfigurationError(
+            "independent_beams: every element is at the same position, so "
+            "the array has no aperture and forms one beam."
+        )
+    effective_m = span_m * pos.size / (pos.size - 1)      # == N*d if uniform
+    span_sin = float(np.ptp(np.sin(np.deg2rad(
+        np.asarray(angles_deg, dtype=float)))))
+    wavelength = float(c) / float(frequency)
+    return span_sin * effective_m / wavelength
 
 
 # ──────────────────────────────────────────────────────────────────────

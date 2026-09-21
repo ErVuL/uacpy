@@ -390,8 +390,21 @@ apply a `√r` gain before plotting.
 
 A `Source` with several depths runs on every field model in a single call
 and returns a `ResultStack` — a list of slabs plus the coordinate they vary
-along, one slab per source. Bellhop writes every depth into one deck; the
-other engines run once per depth inside `run()`.
+along, one slab per source. Bellhop writes every depth into one deck, and
+so do Kraken in its TL modes and Scooter in `COHERENT_TL`; the other engines
+run once per depth inside `run()`.
+
+`stack.superpose()` adds the slabs' complex pressure — the elements of one
+array, driven with a fixed relative phase — and `superpose(coherent=False)`
+adds their intensity instead, for sources that are mutually incoherent. N
+identical sources give `20·log10(N)` one way and `10·log10(N)` the other, so
+the choice is a statement about the sources rather than about the arithmetic.
+
+Either total keeps transmission loss's reference — one unit source at 1 m —
+so the array's gain sits inside the number and the map is captioned *Total
+level*, not TL. Give the `Source` a `source_level_dB=` and
+`total.at_source_level()` returns an absolute received level instead, in dB
+re 1 µPa, which carries no such ambiguity. See example 40.
 
 ![A ResultStack of Field slabs](figures/results_stack.png)
 

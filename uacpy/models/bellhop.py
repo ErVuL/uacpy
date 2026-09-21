@@ -722,6 +722,10 @@ class Bellhop(PropagationModel):
         RunMode.RAYS, RunMode.ARRIVALS,
     })
 
+    #: Stacked, but by ``_run_eigenrays_multi_depth`` rather than by one
+    #: deck: the ``.ray`` file carries no per-source boundary to split on.
+    _PYTHON_STACKED_MODES = frozenset({RunMode.EIGENRAYS})
+
     #: Catalogue entry per resolved engine. ``bellhopcxx`` and ``bellhopcuda``
     #: are one codebase under one copyright holder, so both credit one entry.
     _SOURCE_BY_VERSION = {
@@ -1600,16 +1604,20 @@ class Bellhop(PropagationModel):
         (``Bellhop/influence.f90:633-635``), so a source depth contributes a
         data-dependent number of records and those counts cannot split the file.
         Loop one run per source depth in Python and stack."""
-        slabs = [
-            self.run(
-                env, source.at_depth(i), receiver, run_mode=run_mode,
-                frequencies=frequencies,
-                source_waveform=source_waveform,
-                sample_rate=sample_rate,
-                output_duration=output_duration,
-            )
-            for i in range(source.depths.size)
-        ]
+        slabs = []
+        for i in range(source.depths.size):
+            single = source.at_depth(i)
+            # The same per-depth scratch the base's loop uses: one .ray per
+            # depth, so a pinned work_dir does not leave every slab naming
+            # the last depth's file.
+            with self._scratch_subdir(f"source_depth_{single.depths[0]:g}m"):
+                slabs.append(self._run_single(
+                    env, single, receiver, run_mode=run_mode,
+                    frequencies=frequencies,
+                    source_waveform=source_waveform,
+                    sample_rate=sample_rate,
+                    output_duration=output_duration,
+                ))
         return ResultStack(
             slabs=slabs, coordinate=source.depths,
             coordinate_name='source_depth',
@@ -1666,7 +1674,7 @@ class Bellhop(PropagationModel):
         )
         return None
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,
@@ -2374,7 +2382,11 @@ class Bellhop(PropagationModel):
             bounce_fm.cleanup_work_dir()
             raise
         try:
-            bounce_result = bounce.run(env, source, receiver)
+            # BOUNCE reads no source geometry at all, so it takes a unit
+            # single-depth copy: the user's weights are this Bellhop run's
+            # to apply, and handing them over made the spawn warn that a
+            # REFLECTION run ignores them.
+            bounce_result = bounce.run(env, source.at_depth(0), receiver)
 
             brc_file = bounce_result.metadata.get('brc_file')
             if not brc_file:
@@ -2390,7 +2402,11 @@ class Bellhop(PropagationModel):
             ))
 
             self._log("Running Bellhop with BOUNCE reflection coefficients...")
-            result = self.run(
+            # ``_run_single``, not ``run``: this is the continuation of a
+            # run the template already validated, split and weighted, so
+            # re-entering it would repeat its warnings (and, for a weighted
+            # single-depth source, hand the body a second unit copy).
+            result = self._run_single(
                 env_bounce, source, receiver,
                 run_mode=run_mode,
                 frequencies=frequencies,

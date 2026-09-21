@@ -104,6 +104,8 @@ _LAZY_ATTRS = {
     'compare_models': ('uacpy.visualization.plots', 'compare_models'),
     'plot_mode_speeds': ('uacpy.visualization.plots', 'plot_mode_speeds'),
     'plot_dispersion': ('uacpy.visualization.plots', 'plot_dispersion'),
+    'plot_mode_excitation': ('uacpy.visualization.plots',
+                             'plot_mode_excitation'),
     'plot_greens_function': ('uacpy.visualization.plots', 'plot_greens_function'),
     'plot_wavenumber_sampling': ('uacpy.visualization.plots', 'plot_wavenumber_sampling'),
 }
@@ -134,7 +136,7 @@ if _TYPE_CHECKING:
     from uacpy.visualization.plots import (  # noqa: F401
         compare_models, plot_field, plot_overview, plot_result,
         plot_mode_speeds, plot_dispersion, plot_greens_function,
-        plot_wavenumber_sampling,
+        plot_wavenumber_sampling, plot_mode_excitation,
     )
 
 
@@ -193,7 +195,7 @@ __all__ = [
     'plot',
     'plot_result', 'plot_field', 'plot_overview', 'compare_models',
     'plot_mode_speeds', 'plot_dispersion', 'plot_greens_function',
-    'plot_wavenumber_sampling',
+    'plot_wavenumber_sampling', 'plot_mode_excitation',
     'io',
     'parallel',
     'visualization',

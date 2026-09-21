@@ -1,5 +1,10 @@
-"""Tests for ``uacpy.acoustic_signal.arrays`` — steering vectors and the
-Bartlett / MVDR / MUSIC beamformers on a synthetic line array.
+"""Tests for ``uacpy.acoustic_signal.arrays`` on a synthetic line array.
+
+Steering vectors and the Bartlett / MVDR / MUSIC beamformers; ``beamform``
+and its shading; ``beamform_field`` over a whole field grid, narrowband and
+broadband, and the reception it synthesises; and the three scalars that
+bound a scan — ``plane_wave_array_gain``, ``matched_replica_gain`` and
+``independent_beams``.
 """
 
 import numpy as np
@@ -14,7 +19,11 @@ from uacpy.acoustic_signal import (
     shading_taper,
 )
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.acoustic_signal.arrays import beamform
+from uacpy.acoustic_signal.arrays import (_shaded_steering, beamform,
+                                          beamform_field,
+                                          independent_beams,
+                                          matched_replica_gain,
+                                          plane_wave_array_gain)
 
 #: The scalars every sample-rate / dimension guard must refuse.
 BAD_SCALARS = [0.0, -100.0, np.nan, np.inf]
@@ -540,6 +549,438 @@ class TestBeamformOutputContract:
         # SL defaults to 150 dB and enters additively.
         res_default = beamform_fn(p[:, None], pos, FREQ, NL=0.0)
         assert res_default.peak_snr - res.peak_snr == pytest.approx(150.0)
+
+
+class TestBeamformFieldGoesBroadband:
+    """Steering a band means steering every bin, not the centre once.
+
+    A beam delay is a frequency-dependent phase, so one steering vector at
+    the band centre mis-steers both edges. And a time-domain reception needs
+    the COMPLEX beam output, which a power-only result throws away.
+    """
+
+    @staticmethod
+    def _band(n_el=16, n_f=33):
+        rng = np.random.default_rng(7)
+        H = (rng.standard_normal((n_el, n_f))
+             + 1j * rng.standard_normal((n_el, n_f)))
+        return H, np.linspace(150.0, 250.0, n_f)
+
+    def test_each_bin_is_steered_at_its_own_frequency(self):
+        pos, ang = _array(), np.linspace(-30.0, 30.0, 25)
+        H, freqs = self._band()
+        out = beamform_field(H, pos, ang, freqs, c=C)
+        expected = np.empty((ang.size, freqs.size), dtype=complex)
+        for i, f in enumerate(freqs):
+            e = steering_vectors(pos, ang, f, C)
+            expected[:, i] = e.conj() @ H[:, i]
+        np.testing.assert_allclose(out.response, expected, atol=1e-12)
+
+    def test_it_differs_from_steering_once_at_the_band_centre(self):
+        pos, ang = _array(), np.linspace(-30.0, 30.0, 25)
+        H, freqs = self._band()
+        broadband = beamform_field(H, pos, ang, freqs, c=C)
+        centre = steering_vectors(pos, ang, float(np.mean(freqs)), C).conj() @ H
+        assert not np.allclose(broadband.response, centre, atol=1e-6)
+
+    def test_the_response_is_complex_and_power_is_its_modulus_squared(self):
+        pos, ang = _array(), np.linspace(-30.0, 30.0, 9)
+        H, freqs = self._band()
+        out = beamform_field(H, pos, ang, freqs, c=C)
+        assert np.iscomplexobj(out.response)
+        np.testing.assert_allclose(out.power, np.abs(out.response) ** 2)
+
+    def test_a_frequency_axis_that_does_not_match_is_refused(self):
+        pos, ang = _array(), np.linspace(-30.0, 30.0, 9)
+        H, freqs = self._band()
+        with pytest.raises(ConfigurationError, match='frequency'):
+            beamform_field(H[:, :-1], pos, ang, freqs, c=C)
+
+    def test_a_single_frequency_keeps_the_narrowband_shape(self):
+        """One frequency must not grow a length-1 frequency axis."""
+        pos, ang = _array(), np.linspace(-30.0, 30.0, 9)
+        H, _ = self._band()
+        out = beamform_field(H[:, 0], pos, ang, FREQ, c=C)
+        assert out.response.shape == (ang.size,)
+        assert out.frequencies is None
+
+
+class TestBeamformedFieldSynthesisesAReception:
+    """The point of keeping the complex response: a beam's time series."""
+
+    @staticmethod
+    def _beam():
+        pos = _array()
+        freqs = np.linspace(150.0, 250.0, 65)
+        rng = np.random.default_rng(3)
+        H = (rng.standard_normal((16, freqs.size))
+             + 1j * rng.standard_normal((16, freqs.size))) * 1e-3
+        return beamform_field(H, pos, np.array([-10.0, 0.0, 10.0]), freqs,
+                              c=C, weights=shading_taper(16, 'hann'))
+
+    def test_it_returns_a_time_field(self):
+        tr = self._beam().to_time_trace(0.0, range_m=5000.0)
+        assert list(tr.coords) == ['time']
+        assert np.asarray(tr.data).size > 1
+
+    def test_it_matches_the_hand_built_field_route(self):
+        from uacpy.core.results import Field
+        beams = self._beam()
+        i = int(np.argmin(np.abs(beams.angles - 10.0)))
+        mine = np.asarray(beams.to_time_trace(10.0, range_m=5000.0).data)
+        hand = Field(data=beams.response[i][None, None, :],
+                     coords={'depth': np.array([0.0]),
+                             'range': np.array([5000.0]),
+                             'frequency': beams.frequencies},
+                     model='x').to_time_trace(depth=0.0, range=5000.0)
+        np.testing.assert_allclose(mine, np.asarray(hand.data), atol=1e-18)
+
+    def test_a_source_spectrum_shapes_the_reception(self):
+        beams = self._beam()
+        plain = np.asarray(beams.to_time_trace(0.0, range_m=5000.0).data)
+        S = np.exp(-((beams.frequencies - 200.0) / 20.0) ** 2)
+        shaped = np.asarray(beams.to_time_trace(
+            0.0, range_m=5000.0, source_spectrum=S).data)
+        assert not np.allclose(plain, shaped)
+
+    def test_the_range_must_be_given(self):
+        """There is no separation at which a default would be right."""
+        beams = self._beam()
+        with pytest.raises(TypeError, match='range_m'):
+            beams.to_time_trace(0.0)
+
+    def test_a_narrowband_beam_cannot_make_a_trace(self):
+        pos = _array()
+        p = np.ones((16, 4), dtype=complex)
+        narrow = beamform_field(p, pos, np.array([0.0]), FREQ, c=C)
+        with pytest.raises(ConfigurationError, match='frequency'):
+            narrow.to_time_trace(0.0, range_m=5000.0)
+
+    def test_extra_grid_axes_are_refused_with_advice(self):
+        pos = _array()
+        freqs = np.linspace(150.0, 250.0, 17)
+        H = np.ones((16, 5, freqs.size), dtype=complex)    # 5 ranges
+        beams = beamform_field(H, pos, np.array([0.0]), freqs, c=C)
+        with pytest.raises(ConfigurationError, match='one point'):
+            beams.to_time_trace(0.0, range_m=5000.0)
+
+
+class TestWeightsMayBeComplex:
+    """A shading is not always real.
+
+    A fixed phase taper, a null steered off the scan grid, an adaptive
+    weight vector — all are complex, and casting them to float silently
+    discards the imaginary part and returns a plausible wrong number.
+    """
+
+    @staticmethod
+    def _complex_taper(n=16):
+        return shading_taper(n, 'hann') * np.exp(1j * np.linspace(0.0, 2.0, n))
+
+    def test_a_complex_taper_is_not_truncated_to_its_real_part(self):
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 361)
+        k = 2.0 * np.pi * FREQ / C
+        p = np.exp(-1j * k * pos * np.sin(np.deg2rad(10.0)))[:, None]
+        w = self._complex_taper()
+        full = beamform_field(p, pos, ang, FREQ, c=C, weights=w)
+        real_only = beamform_field(p, pos, ang, FREQ, c=C, weights=w.real)
+        assert not np.allclose(full.power, real_only.power), \
+            'the imaginary part was discarded'
+
+    def test_a_complex_taper_keeps_the_noise_gain_at_one(self):
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 31)
+        e = _shaded_steering(pos, ang, FREQ, C, self._complex_taper(), 'test')
+        np.testing.assert_allclose(np.linalg.norm(e, axis=1), 1.0, atol=1e-12)
+
+    def test_plane_wave_array_gain_takes_a_complex_taper(self):
+        w = self._complex_taper()
+        got = plane_wave_array_gain(w)
+        expected = 10.0 * np.log10(np.abs(np.sum(w)) ** 2
+                                   / np.sum(np.abs(w) ** 2))
+        assert got == pytest.approx(expected)
+        assert got != pytest.approx(plane_wave_array_gain(w.real))
+
+    def test_a_phase_ramp_lowers_the_BROADSIDE_gain(self):
+        """|sum w| shrinks as a ramp spreads the phases: a real effect."""
+        pos = _array()
+        n = pos.size
+        w = np.ones(n) * np.exp(1j * np.linspace(0.0, 3.0, n))
+        assert plane_wave_array_gain(w) < plane_wave_array_gain(np.ones(n))
+
+    def test_the_two_gains_answer_different_questions(self):
+        """Broadside gain is not the gain on the wave the taper is matched to.
+
+        A complex taper steers, so its matched wave is not at broadside.
+        ``plane_wave_array_gain`` reports broadside; the scan finds the
+        steered direction. On an 8-radian ramp they differ by ~10 dB, and
+        making them agree would erase the superdirective case.
+        """
+        pos = _array()
+        ang = np.linspace(-90.0, 90.0, 2881)      # fine enough to find it
+        k = 2.0 * np.pi * FREQ / C
+        p = np.exp(-1j * k * pos * np.sin(0.0))[:, None]     # broadside wave
+        w = shading_taper(16, 'hann') * np.exp(-1j * np.linspace(0.0, 8.0, 16))
+        broadside = plane_wave_array_gain(w)
+        scan = beamform_field(p, pos, ang, FREQ, c=C, weights=w)
+        assert broadside < 1.0                    # the ramp nulls broadside
+        assert scan.array_gain()[0] > 9.0         # the scan finds the lobe
+        assert scan.array_gain()[0] - broadside > 9.0
+        assert abs(scan.best_angle[0]) > 5.0      # and it is not at 0 deg
+
+    def test_weights_that_sum_to_zero_null_the_steered_direction(self):
+        """Alternating +/-1 is Butler & Sherman's superdirective example."""
+        w = np.array([1.0, -1.0] * 8)
+        assert plane_wave_array_gain(w) == -np.inf
+
+    def test_all_zero_weights_are_refused_not_silently_nan(self):
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 9)
+        p = np.ones((16, 3), dtype=complex)
+        with pytest.raises(ConfigurationError, match='no power'):
+            beamform_field(p, pos, ang, FREQ, c=C, weights=np.zeros(16))
+
+    def test_non_numeric_weights_are_refused(self):
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 9)
+        p = np.ones((16, 3), dtype=complex)
+        with pytest.raises(ConfigurationError, match='weights'):
+            beamform_field(p, pos, ang, FREQ, c=C,
+                           weights=np.array(['a'] * 16))
+
+
+class TestShadedSteeringIsRenormalised:
+    """The unit row norm must bite for a taper that is not already normalised.
+
+    ``shading_taper`` returns ``w / sqrt(mean(w**2))``, so ``||w||**2 == N``
+    for every window it makes, and multiplying a ``1/sqrt(N)`` steering row
+    by it lands on unit norm by accident. A test fed only those tapers
+    cannot see the re-normalisation at all — deleting the line leaves the
+    whole file green. ``np.hanning`` has ``||w||**2 = 5.625`` at N=16, which
+    is what makes these tests able to fail.
+    """
+
+    @staticmethod
+    def _raw_taper(n=16):
+        w = np.hanning(n)
+        assert not np.isclose(np.sum(w ** 2), n), 'fixture must not be pre-normalised'
+        return w
+
+    def test_a_raw_taper_leaves_the_noise_gain_at_one(self):
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 31)
+        w = self._raw_taper()
+        e = _shaded_steering(pos, ang, FREQ, C, w, 'test')
+        np.testing.assert_allclose(np.linalg.norm(e, axis=1), 1.0, atol=1e-12)
+
+    def test_a_raw_taper_gives_the_same_gain_as_the_normalised_one(self):
+        """AG is scale-invariant, so the two spellings must agree exactly."""
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 361)
+        k = 2.0 * np.pi * FREQ / C
+        p = np.exp(-1j * k * pos * np.sin(np.deg2rad(0.0)))[:, None]
+        raw = beamform_field(p, pos, ang, FREQ, c=C, weights=self._raw_taper())
+        tapered = beamform_field(p, pos, ang, FREQ, c=C,
+                                 weights=shading_taper(16, 'hann'))
+        np.testing.assert_allclose(raw.array_gain(), tapered.array_gain(),
+                                   atol=1e-9)
+
+    def test_beamform_peak_is_the_taper_gain_for_a_raw_taper(self):
+        """Without the re-normalisation this peak is wrong by 10log10(N/||w||^2)."""
+        pos = _array()
+        k = 2.0 * np.pi * FREQ / C
+        p = np.exp(-1j * k * pos * np.sin(np.deg2rad(0.0)))[:, None]
+        w = self._raw_taper()
+        res = beamform_fn(p, pos, FREQ, SL=0.0, NL=0.0, weights=w)
+        assert res.peak_snr == pytest.approx(plane_wave_array_gain(w), abs=1e-9)
+
+
+class TestBeamformFieldCoversAWholeGrid:
+    """A coverage map needs the beamformer run over every point of a field.
+
+    ``beamform`` takes one ``(n_phones, n_ranges)`` slice and returns SNR in
+    dB, so a depth-range plane, the beam power itself, and the look angle
+    that won had to be assembled by hand at every call site.
+    """
+
+    @staticmethod
+    def _plane(n_el=16, n_z=7, n_r=11, seed=3):
+        rng = np.random.default_rng(seed)
+        return (rng.standard_normal((n_el, n_z, n_r))
+                + 1j * rng.standard_normal((n_el, n_z, n_r)))
+
+    def test_it_matches_the_hand_rolled_contraction(self):
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 61)
+        p = self._plane()
+        taper = shading_taper(16, 'hann')
+        out = beamform_field(p, pos, ang, FREQ, c=C, weights=taper)
+        W = steering_vectors(pos, ang, FREQ, C) * taper[None, :]
+        W /= np.linalg.norm(W, axis=1, keepdims=True)
+        expected = np.abs(np.einsum('ae,ezr->azr', W.conj(), p)) ** 2
+        np.testing.assert_allclose(out.power, expected, rtol=1e-12, atol=1e-12)
+        assert out.power.shape == (ang.size, 7, 11)
+
+    def test_a_one_dimensional_grid_keeps_its_shape(self):
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 61)
+        p = self._plane()[:, 0, :]
+        out = beamform_field(p, pos, ang, FREQ, c=C)
+        assert out.power.shape == (ang.size, p.shape[1])
+        assert out.element_power.shape == (p.shape[1],)
+
+    def test_best_angle_recovers_a_planted_plane_wave(self):
+        pos = _array()
+        ang = np.linspace(-45.0, 45.0, 181)     # 0.5 deg grid
+        k = 2.0 * np.pi * FREQ / C
+        for truth in (-20.0, 0.0, 12.5):
+            p = np.exp(-1j * k * pos * np.sin(np.deg2rad(truth)))[:, None]
+            out = beamform_field(p, pos, ang, FREQ, c=C)
+            assert out.best_angle[0] == pytest.approx(truth, abs=0.5)
+
+    def test_array_gain_of_a_matched_plane_wave_is_the_weight_vector_gain(self):
+        pos = _array()
+        ang = np.linspace(-45.0, 45.0, 361)
+        k = 2.0 * np.pi * FREQ / C
+        p = np.exp(-1j * k * pos * np.sin(np.deg2rad(0.0)))[:, None]
+        for window in ('boxcar', 'hann'):
+            w = shading_taper(16, window)
+            out = beamform_field(p, pos, ang, FREQ, c=C, weights=w)
+            assert out.array_gain()[0] == pytest.approx(
+                plane_wave_array_gain(w), abs=1e-9)
+
+    def test_the_element_count_is_checked(self):
+        with pytest.raises(ConfigurationError, match='element'):
+            beamform_field(self._plane(n_el=15), _array(),
+                           np.linspace(-45.0, 45.0, 9), FREQ, c=C)
+
+
+class TestPlaneWaveArrayGainIsTheWeightVectorRatio:
+    """``AG = |sum w|^2 / ||w||^2`` — not ``-10log10(sum |w|^4)``.
+
+    The two agree for an unshaded array and differ by about 1.1 dB for a
+    Hann one, which is the shape of error that reads as plausible.
+    """
+
+    def test_an_unshaded_array_gives_10log10_n(self):
+        for n in (4, 16, 24):
+            assert plane_wave_array_gain(np.ones(n)) == pytest.approx(
+                10.0 * np.log10(n))
+
+    def test_a_hann_taper_costs_about_two_dB(self):
+        n = 24
+        loss = (10.0 * np.log10(n)
+                - plane_wave_array_gain(shading_taper(n, 'hann')))
+        assert loss == pytest.approx(1.95, abs=0.05)
+
+    def test_it_is_scale_invariant(self):
+        w = shading_taper(24, 'hann')
+        assert plane_wave_array_gain(7.3 * w) == pytest.approx(
+            plane_wave_array_gain(w))
+
+    def test_it_differs_from_the_sum_of_fourth_powers(self):
+        w = shading_taper(24, 'hann')
+        wn = w / np.linalg.norm(w)
+        wrong = -10.0 * np.log10(np.sum(np.abs(wn) ** 4))
+        assert abs(plane_wave_array_gain(w) - wrong) > 1.0
+
+
+class TestMatchedReplicaGainIsTheWhiteNoiseCeiling:
+    """A replica matched to the field realises ``10log10(N)`` exactly.
+
+    Whatever shape the field has: that is what makes it the bound a
+    conventional beamformer is measured against.
+    """
+
+    def test_it_equals_10log10_n_for_any_field(self):
+        rng = np.random.default_rng(11)
+        for shape in ((24, 200), (16, 7, 11), (8,)):
+            p = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+            got = matched_replica_gain(p)
+            np.testing.assert_allclose(got, 10.0 * np.log10(shape[0]),
+                                       rtol=0, atol=1e-9)
+
+    def test_it_bounds_what_a_plane_wave_scan_realises(self):
+        pos, ang = _array(), np.linspace(-45.0, 45.0, 361)
+        rng = np.random.default_rng(5)
+        p = (rng.standard_normal((16, 40))
+             + 1j * rng.standard_normal((16, 40)))      # a multi-mode arrival
+        scan = beamform_field(p, pos, ang, FREQ, c=C).array_gain()
+        assert np.all(scan <= matched_replica_gain(p) + 1e-9)
+
+
+class TestIndependentBeamsCountsOrthogonalLooks:
+    """Beams spaced ``lambda / (N*d)`` in ``sin(theta)`` are orthogonal.
+
+    The aperture form ``lambda / ((N-1)*d)`` is the tempting one and leaves
+    the neighbours correlated — |corr| = 1/N, so 0.0625 on this file's
+    16-element fixture, against 1e-16 at the orthogonal spacing. Being the
+    WIDER spacing it also yields fewer cells: 10.61 against 11.31 over
+    +/-45 deg here (16.26 against 16.97 for the 24-element array in
+    example 42). A threshold set from it is set for fewer looks than the
+    detector takes, and is optimistic.
+    """
+
+    def test_the_spacing_it_implies_is_orthogonal(self):
+        pos = _array()
+        ang = np.linspace(-90.0, 90.0, 361)
+        n = independent_beams(pos, ang, FREQ, c=C)
+        span = np.ptp(np.sin(np.deg2rad(ang)))
+        k = 2.0 * np.pi * FREQ / C
+        a0 = np.exp(-1j * k * pos * 0.0)
+        a1 = np.exp(-1j * k * pos * (span / n))
+        assert abs(np.vdot(a0, a1)) / pos.size < 1e-12
+
+    def test_a_full_visible_sector_holds_about_n_beams(self):
+        pos = _array()                       # 16 elements at lambda/2
+        ang = np.linspace(-90.0, 90.0, 721)
+        assert independent_beams(pos, ang, FREQ, c=C) == pytest.approx(
+            16.0, rel=1e-9)
+
+    def test_a_narrower_scan_holds_proportionally_fewer(self):
+        pos = _array()
+        wide = independent_beams(pos, np.linspace(-90.0, 90.0, 721), FREQ, c=C)
+        half = independent_beams(pos, np.linspace(-30.0, 30.0, 721), FREQ, c=C)
+        assert half == pytest.approx(wide * np.sin(np.deg2rad(30.0)), rel=1e-9)
+
+
+class TestBeamformTakesAShadingTaper:
+    """A shaded beamformer trades main-lobe width and gain for sidelobes.
+
+    Without a ``weights`` argument the only way to shade is to rebuild the
+    weight matrix by hand, which puts the unit-norm convention — the one
+    that keeps the noise gain at 1 — on every caller.
+    """
+
+    def test_a_uniform_taper_changes_nothing(self):
+        pos = _array()
+        rng = np.random.default_rng(5)
+        p = (rng.standard_normal(16) + 1j * rng.standard_normal(16))[:, None]
+        plain = beamform_fn(p, pos, FREQ, SL=0.0)
+        boxcar = beamform_fn(p, pos, FREQ, SL=0.0, weights=np.ones(16))
+        np.testing.assert_allclose(boxcar.snr, plain.snr, atol=1e-12)
+
+    def test_a_hann_taper_lowers_the_peak_by_its_own_loss(self):
+        pos = _array()
+        k = 2.0 * np.pi * FREQ / C
+        p = np.exp(-1j * k * pos * np.sin(np.deg2rad(0.0)))[:, None]
+        w = shading_taper(16, 'hann')
+        shaded = beamform_fn(p, pos, FREQ, SL=0.0, NL=0.0, weights=w)
+        # A matched plane wave gives |sum w|^2 / ||w||^2 for unit-norm w,
+        # which is the array gain the taper leaves.
+        wn = w / np.linalg.norm(w)
+        expected = 10.0 * np.log10(np.abs(np.sum(wn)) ** 2
+                                   / np.sum(np.abs(wn) ** 2))
+        assert shaded.peak_snr == pytest.approx(expected, abs=1e-9)
+
+    def test_the_taper_buys_lower_sidelobes(self):
+        pos = _array()
+        k = 2.0 * np.pi * FREQ / C
+        p = np.exp(-1j * k * pos * np.sin(0.0))[:, None]
+        ang = np.linspace(-90.0, 90.0, 721)
+        plain = beamform_fn(p, pos, FREQ, angles=ang, SL=0.0, NL=0.0)
+        shaded = beamform_fn(p, pos, FREQ, angles=ang, SL=0.0, NL=0.0,
+                             weights=shading_taper(16, 'hann'))
+        far = np.abs(ang) > 30.0          # well outside either main lobe
+        assert shaded.snr[far, 0].max() < plain.snr[far, 0].max() - 5.0
+
+    def test_a_taper_that_does_not_fit_the_array_is_refused(self):
+        p = np.ones((16, 1), dtype=complex)
+        with pytest.raises(ConfigurationError, match='weights'):
+            beamform_fn(p, _array(), FREQ, weights=np.ones(15))
 
 
 class TestPowerAverageEqualsCovarianceBeamforming:

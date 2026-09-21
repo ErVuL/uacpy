@@ -604,6 +604,141 @@ class TestBudgetKnobs:
         assert se.metadata['sonar_budget']['processing_loss_dB'] == 3.0
 
 
+class TestScanFalseAlarmAccountsForManyLooks:
+    """Keeping the largest of many looks is many chances to false-alarm.
+
+    A scanning sonar forms every beam and reports the biggest. Judged with a
+    single-beam P_F its false-alarm rate is that of the whole scan, which is
+    larger; these convert between the two so a threshold can be set for the
+    detector actually used.
+    """
+
+    def test_one_look_is_the_identity(self):
+        assert sonar.per_look_false_alarm(1e-4, 1) == pytest.approx(1e-4)
+        assert sonar.scan_false_alarm(1e-4, 1) == pytest.approx(1e-4)
+
+    def test_the_two_are_inverses(self):
+        for pf, n in ((1e-4, 16), (1e-2, 3), (1e-6, 100)):
+            per = sonar.per_look_false_alarm(pf, n)
+            assert sonar.scan_false_alarm(per, n) == pytest.approx(pf)
+
+    def test_many_looks_need_a_tighter_per_look_rate(self):
+        per = sonar.per_look_false_alarm(1e-4, 16)
+        assert per < 1e-4
+        # Small rates are very nearly pf/n, but not exactly - the exact form
+        # is what keeps the round trip above exact.
+        assert per == pytest.approx(1e-4 / 16, rel=1e-3)
+        assert per != 1e-4 / 16
+
+    def test_a_scan_raises_the_rate_it_is_given(self):
+        assert sonar.scan_false_alarm(1e-4, 16) > 1e-4
+        assert sonar.scan_false_alarm(1e-4, 16) == pytest.approx(
+            1.0 - (1.0 - 1e-4) ** 16)
+
+    def test_it_raises_the_detection_threshold(self):
+        kw = dict(pd=0.5, bandwidth_hz=10.0, integration_time_s=10.0)
+        one = sonar.detection_threshold_energy(pf=1e-4, **kw)
+        scan = sonar.detection_threshold_energy(
+            pf=sonar.per_look_false_alarm(1e-4, 16), **kw)
+        assert scan > one
+
+    def test_a_fractional_look_count_is_ACCEPTED(self):
+        """Resolution cells do not come out whole, and the caller needs that.
+
+        ``independent_beams`` returns 16.97 for the array in example 42, and
+        rounding it would be a silent change of threshold.
+        """
+        assert sonar.per_look_false_alarm(1e-4, 16.97) == pytest.approx(
+            1.0 - (1.0 - 1e-4) ** (1.0 / 16.97))
+
+    def test_the_guard_sits_at_one_look_not_at_zero(self):
+        """Both sides of the boundary: fewer than one look is meaningless."""
+        assert sonar.per_look_false_alarm(1e-4, 1.0) == pytest.approx(1e-4)
+        for bad in (0.999, 0.0, -3.0):
+            with pytest.raises(ConfigurationError, match='n_looks'):
+                sonar.per_look_false_alarm(1e-4, bad)
+            with pytest.raises(ConfigurationError, match='n_looks'):
+                sonar.scan_false_alarm(1e-4, bad)
+
+    def test_it_survives_a_tiny_rate_over_many_looks(self):
+        """``1 - (1-pf)**(1/n)`` underflows to exactly 0 and loses the inverse.
+
+        At pf=1e-12 over 1e5 looks the naive form returns 0.0, which then
+        makes scan_false_alarm raise on its own output.
+        """
+        per = sonar.per_look_false_alarm(1e-12, 1e5)
+        assert per > 0.0
+        assert sonar.scan_false_alarm(per, 1e5) == pytest.approx(1e-12,
+                                                                rel=1e-6)
+
+    def test_a_non_finite_look_count_is_refused(self):
+        for bad in (np.nan, np.inf):
+            with pytest.raises(ConfigurationError, match='n_looks'):
+                sonar.per_look_false_alarm(1e-4, bad)
+
+
+class TestFieldArrayGainMayVaryPerSample:
+    """AG is a per-sample quantity whenever the signal is not a plane wave.
+
+    A beam's realised gain changes with target depth and range, because a
+    multi-mode arrival puts a different share of its energy inside the main
+    lobe at every point. The scalar form stays the common case; these pin
+    that a grid of AG is accepted and applied sample by sample.
+    """
+
+    def test_grid_of_gains_applies_sample_by_sample(self):
+        field, tl = TestSignalExcessField._tl_field()
+        ag = np.linspace(6.0, 14.0, tl.size).reshape(tl.shape)
+        se = sonar.passive_signal_excess_field(
+            field, source_level=140.0, noise_level=60.0, array_gain=ag,
+        )
+        np.testing.assert_allclose(se.data, 140.0 - tl - (60.0 - ag))
+
+    def test_grid_of_gains_is_summarised_in_the_budget(self):
+        field, tl = TestSignalExcessField._tl_field()
+        # Deliberately SKEWED: a linspace has mean == median exactly, so a
+        # summary that quietly reported the mean would pass unnoticed.
+        ag = np.full(tl.size, 6.0)
+        ag[-1] = 14.0
+        ag = ag.reshape(tl.shape)
+        assert not np.isclose(np.mean(ag), np.median(ag))
+        se = sonar.passive_signal_excess_field(
+            field, source_level=140.0, noise_level=60.0, array_gain=ag,
+        )
+        summary = se.metadata['sonar_budget']['array_gain']
+        assert summary['min'] == pytest.approx(6.0)
+        assert summary['max'] == pytest.approx(14.0)
+        assert summary['median'] == pytest.approx(float(np.median(ag)))
+
+    def test_a_scalar_gain_stays_a_scalar_in_the_budget(self):
+        field, _ = TestSignalExcessField._tl_field()
+        se = sonar.passive_signal_excess_field(
+            field, source_level=140.0, noise_level=60.0, array_gain=12.0,
+        )
+        assert se.metadata['sonar_budget']['array_gain'] == 12.0
+
+    def test_a_gain_that_does_not_fit_the_grid_is_refused(self):
+        field, tl = TestSignalExcessField._tl_field()
+        bad = np.linspace(6.0, 14.0, tl.shape[0] + 1)
+        with pytest.raises(ConfigurationError, match='array_gain'):
+            sonar.passive_signal_excess_field(
+                field, source_level=140.0, noise_level=60.0, array_gain=bad,
+            )
+
+    def test_the_active_twin_takes_a_grid_too(self):
+        field, tl = TestSignalExcessField._tl_field()
+        ag = np.full(tl.shape, 9.0)
+        se_grid = sonar.active_signal_excess_field(
+            field, source_level=220.0, target_strength=10.0,
+            noise_level=70.0, array_gain=ag,
+        )
+        se_scalar = sonar.active_signal_excess_field(
+            field, source_level=220.0, target_strength=10.0,
+            noise_level=70.0, array_gain=9.0,
+        )
+        np.testing.assert_allclose(se_grid.data, se_scalar.data)
+
+
 class TestDetectionProbabilityField:
     @staticmethod
     def _se_field(values):

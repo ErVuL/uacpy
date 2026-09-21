@@ -673,7 +673,7 @@ def stage_source_beam_pattern(
         # is also false), so ``misc/beampattern.f90:56`` passes it too. The
         # engines then index the table as a pair: ``bellhop.f90:270`` clamps
         # ``IBP`` to ``NSBPPts - 1`` and reads below the bound allocated at
-        # ``beampattern.f90:36``, while ``field.f90:190-198`` brackets with
+        # ``beampattern.f90:36``, while ``field.f90:203-209`` brackets with
         # ``x(iseg + 1)``. Bellhop yields an all-NaN field and field.exe a
         # finite, plausible, wrong one — both at exit code 0 with nothing in the
         # print file.

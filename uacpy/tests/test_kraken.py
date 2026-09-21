@@ -47,6 +47,102 @@ def _k_for(phase_speeds, freq):
                       dtype=complex)
 
 
+class TestRangeDependentBroadbandRunsPerFrequency:
+    """A multi-profile deck carries one frequency; a band is a loop of them.
+
+    KRAKEN solves modes at one frequency whatever the environment, so a
+    range-dependent band is not a physical limitation — only the deck
+    writer's. Refusing it pushed the loop onto every caller.
+    """
+
+    @staticmethod
+    def _env():
+        import uacpy
+        rr = np.linspace(0.0, 6000.0, 7)
+        dd = np.interp(rr, [0.0, 3000.0, 6000.0], [200.0, 150.0, 175.0])
+        return uacpy.Environment(
+            name='rd', bathymetry=list(zip(rr, dd)),
+            ssp=[(0.0, 1520.0), (200.0, 1498.0)],
+            bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                density=1.9, attenuation=0.5)))
+
+    def test_it_returns_a_frequency_axis(self):
+        import uacpy
+        from uacpy.models import RunMode
+        band = np.linspace(190.0, 210.0, 5)
+        out = uacpy.Kraken(verbose=False).run(
+            self._env(), uacpy.Source(depths=60.0, frequencies=band),
+            uacpy.Receiver(depths=[100.0, 120.0], ranges=[3000.0, 5000.0]),
+            run_mode=RunMode.BROADBAND)
+        assert list(out.coords) == ['depth', 'range', 'frequency']
+        assert np.asarray(out.data).shape == (2, 2, band.size)
+        np.testing.assert_allclose(out.coords['frequency'], band)
+
+    def test_each_bin_equals_its_own_single_frequency_run(self):
+        """The loop must be the single-frequency path, not a near-miss."""
+        import uacpy
+        from uacpy.models import RunMode
+        env = self._env()
+        band = np.linspace(195.0, 205.0, 3)
+        rcv = uacpy.Receiver(depths=[100.0, 120.0], ranges=[4000.0])
+        wide = uacpy.Kraken(verbose=False).run(
+            env, uacpy.Source(depths=60.0, frequencies=band), rcv,
+            run_mode=RunMode.BROADBAND)
+        for i, f in enumerate(band):
+            one = uacpy.Kraken(verbose=False).run(
+                env, uacpy.Source(depths=60.0, frequencies=float(f)), rcv)
+            np.testing.assert_allclose(
+                np.asarray(wide.data)[:, :, i], np.asarray(one.data),
+                rtol=1e-12, atol=1e-30)
+
+    def test_it_carries_what_a_native_broadband_field_carries(self):
+        """Three stamps travel only on the broadband path.
+
+        Built from one narrowband slab's metadata the stacked field loses
+        them, and the losses are not cosmetic: without ``frequencies`` it
+        denies being broadband, without ``phase_reference`` a complex
+        weighted sum is refused as having none, and without ``c_max`` every
+        time-series window falls back to a nominal sound speed and warns.
+        """
+        import uacpy
+        from uacpy.models import RunMode
+        band = np.linspace(190.0, 210.0, 4)
+        src = uacpy.Source(depths=60.0, frequencies=band)
+        rcv = uacpy.Receiver(depths=[100.0], ranges=[3000.0])
+        flat = uacpy.Environment(
+            name='flat', bathymetry=200.0,
+            ssp=[(0.0, 1520.0), (200.0, 1498.0)],
+            bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                density=1.9, attenuation=0.5)))
+        native = uacpy.Kraken(verbose=False).run(flat, src, rcv,
+                                                 run_mode=RunMode.BROADBAND)
+        looped = uacpy.Kraken(verbose=False).run(self._env(), src, rcv,
+                                                 run_mode=RunMode.BROADBAND)
+        np.testing.assert_allclose(looped.frequencies, band)
+        assert looped.phase_reference == native.phase_reference
+        assert looped.metadata['c_max'] == native.metadata['c_max']
+        # and it says which path built it
+        assert looped.metadata['native_broadband'] is False
+
+    def test_a_range_independent_band_is_untouched(self):
+        """The native broadband deck must still be the one that runs."""
+        import uacpy
+        from uacpy.models import RunMode
+        flat = uacpy.Environment(
+            name='flat', bathymetry=200.0, ssp=[(0.0, 1520.0), (200.0, 1498.0)],
+            bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                density=1.9, attenuation=0.5)))
+        band = np.linspace(190.0, 210.0, 5)
+        out = uacpy.Kraken(verbose=False).run(
+            flat, uacpy.Source(depths=60.0, frequencies=band),
+            uacpy.Receiver(depths=[100.0], ranges=[3000.0]),
+            run_mode=RunMode.BROADBAND)
+        assert np.asarray(out.data).shape == (1, 1, band.size)
+
+
 class TestKrakenBackendSelection:
     """The ``Kraken(backend=...)`` override (kraken / krakenc)."""
 
@@ -2098,50 +2194,59 @@ class TestModesErrorMessageReadsTheRealPrtStrings:
 
 
 class TestBeamPatternOnMultipleFrequencies:
-    """``KrakenField/field.f90:191`` allocates ``kz2``/``thetaT``/``S`` inside
+    """``KrakenField/field.f90`` allocated ``kz2``/``thetaT``/``S`` inside
     ``FreqLoop`` guarded only by ``SBPFlag == '*' .AND. iS == 1``, while the
-    matching ``DEALLOCATE`` sits after the loop closes (:226). The second
-    frequency therefore re-allocates an already-allocated array, which gfortran
-    terminates on. The allocation block is outside uacpy's ``rProf`` patch, so it
-    is upstream behaviour."""
+    matching ``DEALLOCATE`` sat after the loop closed, so the second frequency
+    re-allocated an already-allocated array and gfortran terminated — and the
+    same guard applied the shading to the first source depth only. uacpy
+    patches that block (third_party/MODIFICATIONS.md): allocate per frequency,
+    apply per source. These pin the capability the patch buys; they fail
+    against an unpatched Acoustics-Toolbox."""
 
     PATTERN = np.array([[-90.0, 0.0], [90.0, 0.0]])
+    #: A pattern with a real roll-off, so "was the shading applied?" is a
+    #: question the field can answer. The flat ``PATTERN`` above cannot.
+    SHAPED = np.array([[-90.0, -40.0], [-20.0, -40.0], [0.0, 0.0],
+                       [20.0, -40.0], [90.0, -40.0]])
 
-    def test_multi_frequency_with_a_beam_pattern_is_refused_before_the_binary_runs(
-            self, tmp_path, monkeypatch):
-        from uacpy.core.exceptions import UnsupportedFeatureError
+    @pytest.mark.requires_binary
+    def test_a_multi_frequency_run_accepts_the_pattern(self, tmp_path):
+        """The re-allocation is per frequency now, so the second bin no
+        longer aborts the run."""
         model = Kraken(work_dir=tmp_path, cleanup=False)
+        field = model.run(
+            _pekeris(depth=100.0),
+            Source(depths=[25.0], frequencies=[180.0, 200.0, 220.0],
+                   beam_pattern=self.PATTERN),
+            Receiver(depths=[50.0], ranges=[1000.0, 2000.0]),
+            run_mode=RunMode.BROADBAND)
+        assert np.asarray(field.data).shape[-1] == 3
+        assert np.all(np.isfinite(np.asarray(field.data)))
 
-        def _no_launch(*args, **kwargs):
-            raise AssertionError("a binary was launched past the guard")
-
-        monkeypatch.setattr(model, '_run_subprocess', _no_launch)
-        monkeypatch.setattr(model, '_run_and_attach_prt', _no_launch)
-        with pytest.raises(UnsupportedFeatureError, match=r'field\.f90:191'):
-            model.run(_pekeris(depth=100.0),
-                      Source(depths=[25.0], frequencies=[180.0, 200.0, 220.0],
-                             beam_pattern=self.PATTERN),
-                      Receiver(depths=[50.0], ranges=[1000.0, 2000.0]),
-                      run_mode=RunMode.BROADBAND)
-
-    def test_the_gate_is_the_frequency_count_not_the_run_mode(
-            self, tmp_path, monkeypatch):
-        """The multi-frequency path reaches the funnel with the default
-        ``COHERENT_TL``, so a guard keyed on ``run_mode`` would not fire."""
-        from uacpy.core.exceptions import UnsupportedFeatureError
-        model = Kraken(work_dir=tmp_path, cleanup=False)
-        monkeypatch.setattr(
-            model, '_run_subprocess',
-            lambda *a, **k: (_ for _ in ()).throw(
-                AssertionError("a binary was launched past the guard")))
-        with pytest.raises(UnsupportedFeatureError):
-            model._compute_field_via_exe(
-                _pekeris(depth=100.0),
-                Source(depths=[25.0], frequencies=[200.0],
-                       beam_pattern=self.PATTERN),
-                Receiver(depths=[50.0], ranges=[1000.0]),
-                frequencies=np.array([180.0, 200.0, 220.0]),
-            )
+    @pytest.mark.requires_binary
+    def test_every_source_depth_of_a_stack_is_shaded_not_only_the_first(
+            self, tmp_path):
+        """The shading is loop-invariant over source depth, so it is computed
+        once — but it must be *applied* to every depth. Each slab must equal
+        that depth's own single-source run, and a shaped pattern must move it
+        away from the unshaded one."""
+        env = _pekeris(depth=100.0)
+        receiver = Receiver(depths=[30.0, 50.0, 70.0],
+                            ranges=[1000.0, 2000.0, 3000.0])
+        depths = [25.0, 60.0]
+        stack = Kraken(work_dir=tmp_path, cleanup=False).run(
+            env, Source(depths=depths, frequencies=200.0,
+                        beam_pattern=self.SHAPED), receiver)
+        for i, z in enumerate(depths):
+            shaded = Kraken().run(
+                env, Source(depths=z, frequencies=200.0,
+                            beam_pattern=self.SHAPED), receiver)
+            plain = Kraken().run(
+                env, Source(depths=z, frequencies=200.0), receiver)
+            np.testing.assert_allclose(stack[i].data, shaded.data, rtol=1e-9,
+                                       err_msg=f"slab {i} (z={z} m) unshaded")
+            assert not np.allclose(np.abs(stack[i].data), np.abs(plain.data)), (
+                f"the pattern did not reach slab {i} (z={z} m)")
 
     @pytest.mark.requires_binary
     def test_a_single_frequency_accepts_the_pattern(self, tmp_path):
@@ -2154,7 +2259,7 @@ class TestBeamPatternOnMultipleFrequencies:
 
     def test_field_completion_marker_separates_teardown_from_a_real_abort(
             self, tmp_path):
-        """``field.f90:228`` writes the marker after ``FreqLoop`` and before the
+        """``field.f90:240`` writes the marker after ``FreqLoop`` and before the
         clean-up block, so its absence means the run died while computing."""
         model = Kraken(work_dir=tmp_path, cleanup=False)
         prt = tmp_path / 'field.prt'
@@ -2166,11 +2271,13 @@ class TestBeamPatternOnMultipleFrequencies:
 
 class TestKrakenSourceBeamPatternRestrictions:
     """``field.exe`` shades MODE amplitudes, not launch angles
-    (``KrakenField/field.f90:190-200``), and the three limits that follow
-    from that are invisible in the ``.sbp`` file itself. The class docstring
+    (``KrakenField/field.f90:189-212``), and the limits that follow from
+    that are invisible in the ``.sbp`` file itself. The class docstring
     documents them; these read them back out of the vendored source, so a
     vendored update that lifts one of them shows up as a red test rather
-    than as documentation nobody rechecked."""
+    than as documentation nobody rechecked — which is what happened to the
+    first-source-depth restriction, lifted by uacpy's own patch to that
+    block (third_party/MODIFICATIONS.md). Two limits remain."""
 
     PATTERN = np.array([[-90.0, 0.0], [90.0, 0.0]])
 
@@ -2180,26 +2287,45 @@ class TestKrakenSourceBeamPatternRestrictions:
                 / 'Acoustics-Toolbox' / 'KrakenField'
                 / 'field.f90').read_text(errors='replace').splitlines()
 
-    def test_the_shading_is_gated_on_the_first_source_depth(self):
+    def test_the_shading_reaches_every_source_depth_not_only_the_first(self):
+        """The restriction this class used to record. Upstream gated the
+        whole block on ``iS == 1``, so only the first source of a
+        multi-source run was shaded; uacpy's patch keeps the computation
+        under that guard — the shading is loop-invariant over source depth —
+        and lifts the *application* out of it. Read back from the source so
+        a vendored update that reverts it shows up here."""
         lines = self._field_f90()
-        assert "SBPFlag == '*'" in lines[189] and 'iS == 1' in lines[189], (
-            lines[189])
-        # ... and that gate sits INSIDE the source-depth loop, which is what
-        # makes it a first-depth-only shading rather than a run-once setup.
         assert 'SourceDepths: DO iS = 1, Pos%Nsz' in lines[183], lines[183]
+        # The block is entered for every source depth ...
+        assert lines[189].strip() == "IF ( SBPFlag == '*' ) THEN", lines[189]
+        assert 'iS == 1' not in lines[189], lines[189]
+        # ... the invariant setup still runs once ...
+        assert lines[199].strip() == 'IF ( iS == 1 ) THEN', lines[199]
+        assert 'interp1' in lines[208], lines[208]
+        assert lines[209].strip() == 'END IF', lines[209]
+        # ... and the shading is applied outside that inner guard.
+        assert 'C( 1 : Msrc ) * REAL( S )' in lines[210], lines[210]
+
+    def test_the_work_arrays_are_reallocated_once_per_frequency(self):
+        """The other half of the same patch: upstream allocated under
+        ``iS == 1`` with the matching DEALLOCATE after ``FreqLoop``, so a
+        second frequency re-allocated an allocated array and aborted."""
+        lines = self._field_f90()
+        assert 'IF ( ALLOCATED( kz2 ) ) DEALLOCATE' in lines[200], lines[200]
+        assert 'ALLOCATE( kz2( MSrc )' in lines[201], lines[201]
 
     def test_the_reference_speed_is_hard_coded_not_the_source_speed(self):
         lines = self._field_f90()
-        assert 'c0' in lines[191] and '1500' in lines[191], lines[191]
+        assert 'c0' in lines[202] and '1500' in lines[202], lines[202]
         # Porter's own note that this is the wrong speed.
-        assert 'should be speed at the source depth' in lines[191], lines[191]
+        assert 'should be speed at the source depth' in lines[202], lines[202]
 
     def test_slow_modes_are_clamped_into_the_zero_degree_bin(self):
         lines = self._field_f90()
-        assert 'WHERE ( kz2 < 0 ) kz2 = 0' in lines[194], lines[194]
+        assert 'WHERE ( kz2 < 0 ) kz2 = 0' in lines[205], lines[205]
         # ATAN of a non-negative root over a positive k: [0, 90) only, so the
         # negative half of the pattern table is unreachable.
-        assert 'ATAN( SQRT( kz2 )' in lines[196], lines[196]
+        assert 'ATAN( SQRT( kz2 )' in lines[207], lines[207]
 
     def test_bellhop_shades_the_signed_launch_angle_instead(self):
         """Why the same .sbp is not portable: Bellhop interpolates the table
@@ -2669,33 +2795,46 @@ class TestFrequencyVectorDefaultsToBroadband:
                     frequencies=np.array([100.0]))
 
 
-def test_range_dependent_broadband_raises_before_any_launch(tmp_path,
-                                                            monkeypatch):
-    """kraken.md §7 "the multi-profile deck has no broadband form"
-    / kraken.py ``_write_field_env``:
-    ``write_multi_profile_env`` has no broadband form, so a range-dependent
-    BROADBAND run raises ``UnsupportedFeatureError`` at deck-writing time
-    rather than dropping the frequency vector. The launcher traps prove no
-    binary is spent on the refused run."""
-    from uacpy.core.exceptions import UnsupportedFeatureError
-    model = Kraken(work_dir=tmp_path, cleanup=False)
+def test_range_dependent_broadband_never_writes_a_broadband_deck(tmp_path,
+                                                                 monkeypatch):
+    """kraken.md §7 "range-dependent `BROADBAND` run loops":
+    ``write_multi_profile_env`` carries ONE frequency, so a range-dependent
+    band must be decomposed before any deck is written — never handed to the
+    multi-profile writer with a frequency vector, and never silently
+    stripped down to one frequency. This traps the writer to prove the
+    decomposition happens upstream of it.
 
-    def _no_launch(*args, **kwargs):
-        raise AssertionError("a binary was launched past the guard")
+    (It replaces a test that pinned the old refusal. The refusal was a deck
+    limitation standing in for a physical one: KRAKEN solves modes at one
+    frequency whatever the environment, so the band is a loop.)"""
+    import uacpy.models.kraken as kraken_mod
+    seen = []
+    real_writer = kraken_mod.write_multi_profile_env
 
-    monkeypatch.setattr(model, '_run_subprocess', _no_launch)
-    monkeypatch.setattr(model, '_run_and_attach_prt', _no_launch)
+    def _spy(*args, **kwargs):
+        src = kwargs.get('source')
+        seen.append(len(np.atleast_1d(src.frequencies)) if src is not None
+                    else 0)
+        return real_writer(*args, **kwargs)
+
+    monkeypatch.setattr(kraken_mod, 'write_multi_profile_env', _spy)
     env = Environment(
         name='rd_bb', bathymetry=[(0.0, 100.0), (5000.0, 150.0)],
         ssp=[(0.0, 1500.0), (150.0, 1500.0)],
         bottom=BoundaryProperties(acoustic_type='half-space',
                                   sound_speed=1800.0, density=1.8,
                                   attenuation=0.3))
-    with pytest.raises(UnsupportedFeatureError, match='range-dependent'):
-        model.run(env, Source(depths=50.0, frequencies=100.0),
-                  Receiver(depths=[50.0], ranges=[1000.0, 3000.0]),
-                  run_mode=RunMode.BROADBAND,
-                  frequencies=np.array([95.0, 100.0, 105.0]))
+    band = np.array([95.0, 100.0, 105.0])
+    out = Kraken(verbose=False, work_dir=tmp_path).run(
+        env, Source(depths=50.0, frequencies=band),
+        Receiver(depths=[50.0], ranges=[1000.0, 3000.0]),
+        run_mode=RunMode.BROADBAND)
+    assert list(out.coords) == ['depth', 'range', 'frequency']
+    assert np.asarray(out.data).shape[-1] == band.size
+    assert seen, 'the multi-profile writer was never reached'
+    assert set(seen) == {1}, (
+        f"the multi-profile deck was handed {sorted(set(seen))} frequencies; "
+        f"it carries exactly one")
 
 
 class TestRMaxAutoDefaults:
@@ -2904,7 +3043,7 @@ class TestElasticGuardTestsTheColumnTheDeckCarries:
 
 
 def test_incoherent_tl_on_krakenc_is_quiet_for_a_multi_profile_run():
-    """``field.f90:202-203`` picks the evaluator by profile count. The
+    """``field.f90:214-215`` picks the evaluator by profile count. The
     multi-profile adiabatic one, ``EvaluateADMod.f90:110``, computes
     ``SQRT(SUM(ABS(...)**2))`` — a strict energy sum on either backend — so
     the single-profile ``EvaluateMod.f90:66`` caveat does not apply and the
@@ -3328,7 +3467,16 @@ def test_the_shear_term_changes_the_field_it_is_kept_for():
     """The term stays because it is not value-neutral, so this measures the
     thing that justifies keeping it rather than the code path that reaches
     it. A 20 m elastic layer at 200 Hz: 5.0 pts/m with the shear speed in
-    the minimum against the 1.5 pts/m floor without it."""
+    the minimum against the 1.5 pts/m floor without it.
+
+    Measured on a **coupled-mode** run, which is where the tabulation
+    density still reaches the field. Since the caller's receiver depths
+    joined the tabulation grid (``_write_field_env``), a range-independent
+    or adiabatic field reads its mode shapes straight off a tabulated point
+    instead of interpolating between two, so the density no longer moves it
+    (measured 2.1e-7 dB / 0.0 dB across the same pair). ``EvaluateCM``
+    still forms its coupling integrals from the tabulated shapes at the
+    profile interfaces, so the density bites there — 2.6e-2 dB."""
     bottom = Bottom([SeabedColumn(
         layers=[SedimentLayer(thickness=20.0, sound_speed=1800.0,
                               shear_speed=400.0, density=1.8,
@@ -3338,6 +3486,11 @@ def test_the_shear_term_changes_the_field_it_is_kept_for():
                                      density=2.0, attenuation=0.5))])
     env = Environment(name='elastic-grid', bathymetry=100.0, ssp=1500.0,
                       bottom=bottom)
+    # Range-dependent, so the field goes through EvaluateCM's coupling
+    # integrals — see the docstring.
+    rd_env = Environment(name='elastic-grid-rd',
+                         bathymetry=[(0.0, 100.0), (3000.0, 130.0)],
+                         ssp=1500.0, bottom=bottom)
     src = Source(depths=50.0, frequencies=200.0)
     rcv = Receiver(depths=np.array([30.0, 60.0]),
                    ranges=np.linspace(500.0, 3000.0, 6))
@@ -3348,9 +3501,9 @@ def test_the_shear_term_changes_the_field_it_is_kept_for():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         fields = [
-            np.asarray(Kraken(verbose=False,
-                              mode_points_per_meter=ppm).run(env, src, rcv).dB,
-                       dtype=float)
+            np.asarray(Kraken(verbose=False, mode_coupling='coupled',
+                              mode_points_per_meter=ppm)
+                       .run(rd_env, src, rcv).dB, dtype=float)
             for ppm in (with_shear, MODE_POINTS_PER_METER_FLOOR)
         ]
     diff = np.abs(fields[0] - fields[1])

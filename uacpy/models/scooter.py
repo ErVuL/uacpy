@@ -18,6 +18,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, ModelExecutionError,
 )
 from uacpy.models.base import (
+    _slabs_of,
     _line_source_unit_at_1m, _source_sound_speed,
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
     _max_roughness, _smooth_surface,
@@ -210,11 +211,19 @@ class Scooter(PropagationModel):
     # nowhere, and a sediment-layer roughness lands in the rejected range.
     spec = ModelSpec(
         modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
-        supports={'layered_bottom', 'elastic_media', 'rough_surface'},
+        supports={'layered_bottom', 'elastic_media', 'rough_surface',
+                  'multi_source_depth'},
         source_types=frozenset({'point', 'line', 'scaled'}),
         collapse={'ssp': 'mean', 'bottom_range': 'median'},
     )
     source = 'acoustics_toolbox'
+
+    # scooter.exe solves the depth-separated equation for every source depth
+    # of the deck in one wavenumber sweep (the .grn carries an NSz axis) and
+    # grn_to_field transforms one depth at a time — so COHERENT_TL takes a
+    # multi-depth Source in one launch. BROADBAND / TIME_SERIES go through
+    # the base's per-depth loop.
+    _NATIVE_MULTI_DEPTH_MODES = frozenset({RunMode.COHERENT_TL})
 
     def __init__(
         self,
@@ -339,7 +348,7 @@ class Scooter(PropagationModel):
             ),
         )
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,
@@ -458,38 +467,57 @@ class Scooter(PropagationModel):
             grn_data = self._run_and_read_grn(fm, base_name)
             result = self._assemble_field_from_grn(
                 grn_data, source, receiver, broadband_mode)
-            if source.source_type == 'line':
-                # The 'X' Hankel path returns 1/√(k0·R) in free space
-                # (grn_reader: no √k weighting, 1/√(2π)); ×√k0 is unit
-                # amplitude at 1 m, the package's line-source level.
-                freqs_out = (np.asarray(result.coords['frequency'], dtype=float)
-                             if 'frequency' in result.coords
-                             else np.atleast_1d(source.frequencies)[0])
-                level = _line_source_unit_at_1m(_source_sound_speed(env, source),
-                                                freqs_out)
-                result.data = result.data * (level if level.size == 1 else level[None, None, :])
+            slabs = _slabs_of(result)
+            sources = ([source.at_depth(i) for i in range(len(slabs))]
+                       if len(slabs) > 1 else [source])
+            for slab, slab_source in zip(slabs, sources):
+                if source.source_type == 'line':
+                    # The 'X' Hankel path returns 1/√(k0·R) in free space
+                    # (grn_reader: no √k weighting, 1/√(2π)); ×√k0 is unit
+                    # amplitude at 1 m, the package's line-source level.
+                    freqs_out = (np.asarray(slab.coords['frequency'],
+                                            dtype=float)
+                                 if 'frequency' in slab.coords
+                                 else np.atleast_1d(source.frequencies)[0])
+                    # ``slab_source``, not ``source``: the level is
+                    # sqrt(k0) at the SOURCE depth, and on a multi-depth
+                    # stack ``source`` still carries every depth, whose
+                    # first one is not this slab's.
+                    level = _line_source_unit_at_1m(
+                        _source_sound_speed(env, slab_source), freqs_out)
+                    slab.data = slab.data * (level if level.size == 1
+                                             else level[None, None, :])
 
-            freqs = broadband_freqs if broadband_mode else float(source.frequencies[0])
-            self._stamp_result(result, source, backend='scooter',
-                               frequencies=freqs, phase_reference='travelling_wave')
-            # Physical fastest compressional speed in the waveguide (water
-            # column + sediment + half-space): the time-series synthesis
-            # helpers anchor their output window at r / c_max, ahead of the
-            # earliest bottom-refracted arrival.
-            c_max = self._resolve_c_max(env)
-            if c_max is not None:
-                result.metadata['c_max'] = c_max
-            # The taper changes the field by a decibel or two and leaves no
-            # other trace, so two otherwise identical results are only
-            # distinguishable by it.
-            result.metadata['taper'] = self.taper
+                freqs = (broadband_freqs if broadband_mode
+                         else float(source.frequencies[0]))
+                self._stamp_result(slab, slab_source, backend='scooter',
+                                   frequencies=freqs,
+                                   phase_reference='travelling_wave')
+                # Physical fastest compressional speed in the waveguide
+                # (water column + sediment + half-space): the time-series
+                # synthesis helpers anchor their output window at r / c_max,
+                # ahead of the earliest bottom-refracted arrival.
+                c_max = self._resolve_c_max(env)
+                if c_max is not None:
+                    slab.metadata['c_max'] = c_max
+                # The taper changes the field by a decibel or two and leaves
+                # no other trace, so two otherwise identical results are only
+                # distinguishable by it.
+                slab.metadata['taper'] = self.taper
 
-            self._attach_output_paths(
-                result, fm.work_dir, base_name,
-                primary_files=(('grn_file', '.grn'),),
-            )
+                self._attach_output_paths(
+                    slab, fm.work_dir, base_name,
+                    primary_files=(('grn_file', '.grn'),),
+                )
 
             self._log("Simulation complete")
+            if isinstance(result, ResultStack):
+                # Narrowband only (the broadband modes loop per depth), so
+                # there is no synthesis to finish.
+                result.slabs = [
+                    self._mask_unresolvable_depths(slab, receiver, media_depth)
+                    for slab in result.slabs]
+                return result
             result = self._finish_broadband(
                 result, run_mode, source_waveform, sample_rate)
             return self._mask_unresolvable_depths(
@@ -654,8 +682,24 @@ class Scooter(PropagationModel):
             return grn_to_transfer_function(
                 grn_data, receiver.ranges, **transform_kwargs)
         self._log("Transforming to range domain (direct-DFT Hankel transform)...")
-        return grn_to_field(
-            grn_data, receiver.ranges, method='direct_dft', **transform_kwargs)
+        nsd = int(grn_data['nsd'])
+        if nsd == 1:
+            return grn_to_field(
+                grn_data, receiver.ranges, method='direct_dft',
+                **transform_kwargs)
+        # One slab per source depth of the deck, on the Source's own depth
+        # axis (the .grn stores the depths in float32).
+        depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+        if depths.size != nsd:
+            raise ModelExecutionError(
+                self.model_name, return_code=0, stdout=None,
+                stderr=(f"the Green's function holds {nsd} source depths for "
+                        f"a Source of {depths.size}"))
+        return ResultStack(
+            [grn_to_field(grn_data, receiver.ranges, method='direct_dft',
+                          source_depth_idx=i, **transform_kwargs)
+             for i in range(nsd)],
+            coordinate=depths, coordinate_name='source_depth')
 
     def _resolve_rmax_multiplier(self, run_mode: RunMode) -> float:
         """Pick the effective ``rmax_multiplier`` for this run.

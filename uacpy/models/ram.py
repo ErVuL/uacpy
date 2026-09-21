@@ -1791,7 +1791,7 @@ class RAM(PropagationModel):
                             cs_profiles, rho_profiles, attn_profiles)
         return sed_filename
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,

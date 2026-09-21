@@ -277,6 +277,33 @@ def _spawn_se_field(tl_field, se: np.ndarray, budget: dict) -> Field:
     )
 
 
+def _budget_array_gain(value, tl, caller: str):
+    """Accept an AG that is one number or one per TL sample, and describe it.
+
+    A beamformer's realised gain is a grid whenever the signal is not a
+    single plane wave: in a waveguide each trapped mode arrives at its own
+    grazing angle, so the share of the signal a beam collects changes with
+    target depth and range. Returns the value to use in the arithmetic and
+    the entry to record in the budget — a float for a scalar, min/median/max
+    for a grid, where one number would misdescribe it.
+    """
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim == 0:
+        return float(arr), float(arr)
+    try:
+        arr = np.broadcast_to(arr, np.shape(tl))
+    except ValueError:
+        raise ConfigurationError(
+            f"{caller}: array_gain must be a scalar dB gain, or an array "
+            f"broadcasting to the TL grid {np.shape(tl)}; got shape "
+            f"{arr.shape}. A per-sample AG is what a beamformer realises on "
+            f"a modelled field — see Field.data for the grid it must match."
+        ) from None
+    return arr, {'min': float(np.nanmin(arr)),
+                 'median': float(np.nanmedian(arr)),
+                 'max': float(np.nanmax(arr))}
+
+
 def passive_signal_excess_field(
     tl_field,
     *,
@@ -309,9 +336,13 @@ def passive_signal_excess_field(
     detection_threshold : float, optional
         Detection threshold DT (dB) — see
         :func:`uacpy.sonar.detection.detection_threshold_energy`. Default 0.
-    array_gain : float, optional
+    array_gain : float or array_like, optional
         Replaces ``directivity_index`` for non-isotropic noise (see
-        :func:`noise_background`).
+        :func:`noise_background`). May be one number, or a grid
+        broadcasting to the TL field: the gain a beamformer *realises*
+        varies over the grid, because a waveguide delivers a sum of modes
+        rather than the single plane wave a scalar AG assumes. A grid is
+        summarised as ``{'min', 'median', 'max'}`` in the budget metadata.
     processing_loss_dB : float, optional
         Implementation/system loss ``L_sp >= 0`` (dB). Default 0.
 
@@ -327,6 +358,10 @@ def passive_signal_excess_field(
     noise_level = _require_scalar_dB(noise_level,
                                      'passive_signal_excess_field',
                                      'noise_level')
+    gain_entry = None
+    if array_gain is not None:
+        array_gain, gain_entry = _budget_array_gain(
+            array_gain, tl, 'passive_signal_excess_field')
     se = passive_signal_excess(
         source_level, tl, noise_level,
         directivity_index=directivity_index,
@@ -342,8 +377,8 @@ def passive_signal_excess_field(
         'detection_threshold': float(detection_threshold),
         'processing_loss_dB': float(processing_loss_dB),
     }
-    if array_gain is not None:
-        budget['array_gain'] = float(array_gain)
+    if gain_entry is not None:
+        budget['array_gain'] = gain_entry
     return _spawn_se_field(tl_field, se, budget)
 
 
@@ -391,9 +426,11 @@ def active_signal_excess_field(
         Receiving directivity index DI (dB). Default 0.
     detection_threshold : float, optional
         Detection threshold DT (dB). Default 0.
-    array_gain : float, optional
+    array_gain : float or array_like, optional
         Replaces ``directivity_index`` against the noise background
-        (never against ``RL`` — see :func:`active_signal_excess`).
+        (never against ``RL`` — see :func:`active_signal_excess`). One
+        number, or a grid broadcasting to the TL field — see
+        :func:`passive_signal_excess_field`.
     processing_loss_dB : float, optional
         Implementation/system loss ``L_sp >= 0`` (dB). Default 0.
 
@@ -413,6 +450,10 @@ def active_signal_excess_field(
                              'reverberation_level')
         if reverberation_level is not None else None
     )
+    gain_entry = None
+    if array_gain is not None:
+        array_gain, gain_entry = _budget_array_gain(
+            array_gain, tl, 'active_signal_excess_field')
     se = active_signal_excess(
         source_level, tl, target_strength,
         noise_level=noise_level,
@@ -430,8 +471,8 @@ def active_signal_excess_field(
         'detection_threshold': float(detection_threshold),
         'processing_loss_dB': float(processing_loss_dB),
     }
-    if array_gain is not None:
-        budget['array_gain'] = float(array_gain)
+    if gain_entry is not None:
+        budget['array_gain'] = gain_entry
     if noise_level is not None:
         budget['noise_level'] = float(noise_level)
     if reverberation_level is not None:

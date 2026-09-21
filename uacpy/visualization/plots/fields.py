@@ -635,12 +635,17 @@ def _begin_sonar_heatmap(field, ax, *, env, figsize, vmin, vmax, cmap,
 
 
 def _finish_sonar_heatmap(fig, ax, im, field, *, env, x_label, colorbar_label,
-                          show_colorbar, title, auto_title, owns_fig):
+                          show_colorbar, title, auto_title, owns_fig,
+                          source=None, receiver=None):
     """Close a ``(depth, range)`` sonar panel: colorbar, axis labels, depth
-    downward, title, seafloor overlay and the data credit.
+    downward, title, seafloor and geometry overlays, and the data credit.
 
     The colorbar label and the automatic title are the caller's, because each
-    plotter is the dedicated view of one quantity and names it itself."""
+    plotter is the dedicated view of one quantity and names it itself.
+
+    ``source`` / ``receiver`` draw the same markers :func:`plot_field` does.
+    A sonar panel answers "would this array hear that target", so the two
+    things it is about belong on it on the same footing as the seafloor."""
     if show_colorbar:
         fig.colorbar(im, ax=ax, label=colorbar_label,
                      fraction=0.046, pad=0.02)
@@ -651,6 +656,8 @@ def _finish_sonar_heatmap(fig, ax, im, field, *, env, x_label, colorbar_label,
     ax.set_title(_title_or(title, auto_title))
     if env is not None:
         _overlay_seafloor(ax, env, field.coords['range'], painted=im)
+    if source is not None or receiver is not None:
+        _draw_geometry(ax, source=source, receiver=receiver)
     if owns_fig:                         # credit only a figure we own
         _draw_result_credit(fig, field, env=env)
     return fig, ax
@@ -662,6 +669,8 @@ def plot_signal_excess(
     ax=None,
     *,
     env: Optional[Environment] = None,
+    source=None,
+    receiver=None,
     vmax: Optional[float] = None,
     cmap: str = 'RdBu_r',
     show_boundary: bool = True,
@@ -747,7 +756,7 @@ def plot_signal_excess(
         fig, ax, im, field, env=env, x_label=x_label,
         colorbar_label='Signal excess (dB)', show_colorbar=show_colorbar,
         title=title, auto_title=_signal_excess_title(field),
-        owns_fig=_owns_fig)
+        owns_fig=_owns_fig, source=source, receiver=receiver)
 
 
 @typed_plot_error
@@ -756,6 +765,8 @@ def plot_detection_probability(
     ax=None,
     *,
     env: Optional[Environment] = None,
+    source=None,
+    receiver=None,
     cmap: str = PROBABILITY_COLORMAP,
     contour_levels: Sequence[float] = (0.1, 0.5, 0.9),
     show_colorbar: bool = True,
@@ -832,7 +843,8 @@ def plot_detection_probability(
         fig, ax, im, field, env=env, x_label=x_label,
         colorbar_label='Probability of detection',
         show_colorbar=show_colorbar, title=title,
-        auto_title=f"{auto} — {pin}" if pin else auto, owns_fig=_owns_fig)
+        auto_title=f"{auto} — {pin}" if pin else auto, owns_fig=_owns_fig,
+        source=source, receiver=receiver)
 
 
 @typed_plot_error
@@ -961,6 +973,8 @@ def compare_models(
     labels: Optional[Sequence[str]] = None,
     *,
     env: Optional[Environment] = None,
+    source=None,
+    receiver=None,
     value: Optional[str] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
@@ -983,7 +997,11 @@ def compare_models(
     row). ``contours`` adds dB-level contour lines to every panel.
     ``value=None`` picks the view :func:`plot_field` would pick for the first
     panel on its own (:func:`_default_value`): the dB view wherever one
-    exists, the raw samples of a time-domain wavefield.
+    exists, the raw samples of a time-domain wavefield. ``source`` and
+    ``receiver`` draw the run geometry on **every** panel, exactly as
+    :func:`plot_field` draws it — two models of the same scene should carry
+    the same markers, and a comparison that hides what is listening to what
+    cannot be read as a coverage map.
 
     Returns
     -------
@@ -1106,7 +1124,7 @@ def compare_models(
     im_last = None
     for f, label, ax in zip(fields, labels, axes_flat):
         plot_field(
-            f, ax=ax, env=env, value=value,
+            f, ax=ax, env=env, source=source, receiver=receiver, value=value,
             vmin=vmin, vmax=vmax, cmap=cmap, title=label,
             contours=contours, show_colorbar=False,
         )
@@ -1524,8 +1542,21 @@ def _plot_field_stack(stack, env: Optional[Environment] = None, *,
     figsize = figsize or (5.5 * ncols, 4.0 * nrows)
     fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
     flat = axes.ravel()
+    # A source-depth grid is "one source at a time", so each panel marks the
+    # source it belongs to. The whole array on every panel would say the
+    # opposite, and nothing at all leaves the reader drawing the marker by
+    # hand. ``source=`` from the caller wins, and any other stacking
+    # coordinate is left alone.
+    per_panel_source = (
+        stack.coordinate_name == 'source_depth'
+        and 'source' not in kwargs
+        and all(getattr(s, 'source_depths', None) is not None
+                for s in stack.slabs)
+    )
     for i, (coord, slab) in enumerate(stack):
-        plot_field(slab, ax=flat[i], env=env, **kwargs)
+        extra = ({'source': np.atleast_1d(slab.source_depths)}
+                 if per_panel_source else {})
+        plot_field(slab, ax=flat[i], env=env, **extra, **kwargs)
         flat[i].set_title(f"{stack.coordinate_name}={coord:g}")
     for j in range(n, len(flat)):
         flat[j].axis('off')

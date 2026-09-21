@@ -1484,12 +1484,24 @@ def _validate_flp_option(option: str, n_profiles: int = 1) -> None:
         )
 
 
-def _write_flp_axis(f: TextIO, values, count_label: str, label: str) -> None:
+def _write_flp_axis(f: TextIO, values, count_label: str, label: str,
+                    *, subtabulate: bool = True) -> None:
     """One ``.flp`` axis: the count, then either the ``first last /``
     shortcut FIELD subtabulates (``misc/subtabulate.f90:24,40``, taken only
-    for more than two equally spaced values) or every value in full."""
+    for more than two equally spaced values) or every value in full.
+
+    ``subtabulate=False`` always writes in full. The shortcut makes FIELD
+    *recompute* the intermediate values in single precision, so they land a
+    few ULPs from the ``%.6f`` the same numbers are written as elsewhere —
+    harmless for an axis FIELD only evaluates on, and not for the receiver
+    depths, which ``Kraken._write_field_env`` now places on the mode
+    tabulation grid so they are read off a tabulated point instead of
+    interpolated between two. A few ULPs is enough to put the interpolation
+    weight at ~1e-7 instead of 0, which let a source depth elsewhere in the
+    grid move a receiver's answer by 6e-6.
+    """
     f.write(f"{len(values):5d} \t \t \t \t ! {count_label} \n")
-    if len(values) > 2 and equally_spaced(values):
+    if subtabulate and len(values) > 2 and equally_spaced(values):
         f.write(f"    {values[0]:.6f}  {values[-1]:.6f} ")
     else:
         for v in values:
@@ -1637,7 +1649,10 @@ def write_fieldflp(
         # two depth blocks; shorter vectors are written out in full.
         _write_flp_axis(f, r_ranges, 'NRr', 'Rr(1)  ... (km)')
         _write_flp_axis(f, s_depths, 'NSz', 'Sz(1)  ... (m)')
-        _write_flp_axis(f, r_depths, 'NRz', 'Rz(1)  ... (m)')
+        # In full: these depths are tabulation nodes, not just query
+        # points — see ``_write_flp_axis``.
+        _write_flp_axis(f, r_depths, 'NRz', 'Rz(1)  ... (m)',
+                        subtabulate=False)
 
         # Receiver range offsets (array tilt) - default to zeros for every
         # receiver. field.exe ERROUTs unless ``NRro == NRz``

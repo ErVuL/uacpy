@@ -774,7 +774,7 @@ class TestScooterKernelTaper:
         """A 2 dB change that leaves no other trace: two otherwise identical
         results are distinguishable only by this key."""
         import inspect
-        assert "metadata['taper']" in inspect.getsource(Scooter.run)
+        assert "metadata['taper']" in inspect.getsource(Scooter._run_single)
 
 
 class TestScooterRefusesAGreenCubeOverTheReaderBudget:

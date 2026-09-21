@@ -250,6 +250,7 @@ class Bounce(PropagationModel):
         collapse={'bottom_range': 'median'},
     )
     source = 'acoustics_toolbox'
+    _run_accepts_none_receiver = True
 
     def __init__(
         self,
@@ -484,7 +485,7 @@ class Bounce(PropagationModel):
         k_max = omega / c_low
         return int(1000.0 * rmax_km * (k_max - k_min) / (2.0 * np.pi))
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,

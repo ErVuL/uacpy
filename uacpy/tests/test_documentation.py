@@ -529,7 +529,10 @@ def _section_18_targets(heading: str, classes: dict):
     if "common plumbing" in low:
         return [(n, inspect.signature(c.__init__)) for n, c in classes.items()]
     if "run()" in low:
-        return [(f"{n}.run", inspect.signature(c.run))
+        # ``_run_single``, not ``run``: ``run`` is the base class's
+        # template method, so reading it would check the §18 table against
+        # one shared signature instead of each wrapper's own.
+        return [(f"{n}.run", inspect.signature(c._run_single))
                 for n, c in classes.items()]
     if "source" in low and "receiver" in low:
         return "dotted"

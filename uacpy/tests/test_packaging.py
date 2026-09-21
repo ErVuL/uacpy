@@ -2283,6 +2283,16 @@ _CROSS_PACKAGE_PRIVATES = {
     ('core/ssp.py', 'uacpy.visualization.plots.environment', '_plot_ssp'),
     ('core/results/field.py', 'uacpy.visualization.plots._common',
      '_draw_result_credit'),
+    # One rule decides whether a weight can scale a field, and both callers
+    # of it are in models/: the n = 1 weight ``PropagationModel.run``
+    # applies and the n-slab sum ``ResultStack.superpose`` forms. It lives
+    # beside the Field it interrogates and stays private because the
+    # question it answers is not one a user asks.
+    ('models/base.py', 'uacpy.core.results.field', '_check_field_weightable'),
+    # The weaker of the same pair: a stack is not weighted when it is built,
+    # so it refuses only what no sum of it could use and the rest waits for
+    # superpose. Both callers are in models/.
+    ('models/base.py', 'uacpy.core.results.field', '_check_stack_weightable'),
     # The set of acoustic_type values that carry no geoacoustic parameters.
     # Defined beside the carrier that validates them; every writer and every
     # wrapper that skips a geoacoustic block reads the same set.

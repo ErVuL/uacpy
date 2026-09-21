@@ -138,7 +138,7 @@ def _bare_model_factory(supports_layered: bool):
             super().__init__(**kw)
             self._supports_layered_bottom = supports_layered
 
-        def run(self, env, source, receiver, run_mode=None):
+        def _run_single(self, env, source, receiver, run_mode=None):
             return self._project_environment(env)
 
     return _Bare
@@ -159,7 +159,7 @@ def test_bottom_range_picks_right_profile(range_method, expected_c):
     })
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        proj = bare.run(_rdlb_env(), None, None)
+        proj = bare._run_single(_rdlb_env(), None, None)
     assert not proj.bottom.is_range_dependent
     assert proj.bottom.columns[0].halfspace.sound_speed == pytest.approx(expected_c)
 
@@ -171,7 +171,7 @@ def test_layered_kept_when_model_supports_layers():
     bare = Bare(collapse={'bottom_range': 'median'})
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        proj = bare.run(_rdlb_env(), None, None)
+        proj = bare._run_single(_rdlb_env(), None, None)
     assert not proj.bottom.is_range_dependent and proj.bottom.is_layered
     assert len(proj.bottom.columns[0].layers) == 1
 

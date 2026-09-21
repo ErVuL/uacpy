@@ -330,6 +330,7 @@ def _plot_environment(
     title: Optional[str] = None,
     figsize: Tuple[float, float] = (10, 5),
     x_max_m=None,
+    source_marker_range_m: float = 0.0,
 ):
     """Single-panel water column + bottom structure with two colorbars.
 
@@ -579,10 +580,16 @@ def _plot_environment(
 
     # Source / receiver markers on the bottom panel, drawn after the x limit
     # is set so the source star at the left limit can widen it. The source
-    # sits at r = 0, where every cross-section on this surface draws it.
+    # sits at r = 0 by the package convention that range is measured from
+    # it — but not every scene anchors that end: with a fixed receive array
+    # the ARRAY is at the origin and the source is the thing at range.
+    # ``source_marker_range_m`` moves the STAR, and nothing else: it is a
+    # drawing coordinate, not a property of the Source and not an input to
+    # any model. Named for the marker because "source range" would read as
+    # a contradiction in a package where range is measured from the source.
     ax_bathy.set_xlim(*x_range)
     _draw_geometry(ax_bathy, source, receiver, max_markersize=5,
-                   source_range_m=0.0)
+                   source_range_m=source_marker_range_m)
     # Tight ylim — surface to a small margin past the deepest seafloor, but
     # never above what the bottom branch actually painted. Every branch
     # returns ``z_max_layer``, the floor of its own rendering (layer stack +

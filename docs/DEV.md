@@ -115,7 +115,26 @@ Each model declares which **env shapes** it consumes natively, along with its
 run modes, source geometries and collapse defaults, in one `ModelSpec` class
 attribute. The base validates it at *class-definition* time
 (`PropagationModel.__init_subclass__` in `base.py`) and applies it in
-`__init__`, so a malformed spec fails on import rather than on the first run:
+`__init__`, so a malformed spec fails on import rather than on the first run.
+The same hook checks the signature of the wrapper's `_run_single`: `run()`
+itself is the base class's template method — it validates the carrier
+triple, splits a multi-depth `Source` into one `_run_single` per depth in a
+field mode the engine does not stack natively (`_NATIVE_MULTI_DEPTH_MODES`),
+applies a single source's weight to the returned field, and stamps
+`source_weights` on a stack — and each wrapper implements only the
+one-source, one-mode body as `_run_single(env, source, receiver, run_mode,
+*, frequencies, source_waveform, sample_rate, output_duration)`. A wrapper
+that redefined `run` would sit outside that flow, so none does.
+
+**Breaking change (0.5.x).** `_run_single` is the abstract method, so a
+third-party subclass that implements only `run` now defines a class that
+still *imports* but raises `TypeError: Can't instantiate abstract class …
+without an implementation for abstract method '_run_single'` on
+construction. Rename the body to `_run_single` and drop any per-depth
+looping it did itself — the base does it. Overriding `run` remains legal
+for wrapping (logging, caching); it must keep the fixed signature and
+delegate to `super().run(...)`, which applies the source weights exactly
+once:
 
 ```python
 class Scooter(PropagationModel):

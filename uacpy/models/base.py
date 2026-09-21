@@ -17,7 +17,13 @@
   result stamping, depth policy, ``__repr__``;
 * module-private introspection helpers behind ``copy`` / ``__repr__``.
 
-Every concrete ``run()`` follows the same recipe, in this order::
+``run()`` itself belongs to :class:`PropagationModel`: it is the template
+method that validates the carrier triple, splits a multi-depth ``Source``
+into one run per depth (or lets an engine that stacks them natively through),
+applies a single source's ``weights`` to the field that comes back, and
+stamps the weights on a stack. Every concrete model implements the
+one-source, one-mode body as ``_run_single``, which follows the same recipe,
+in this order::
 
     run_mode = self._resolve_run_mode(run_mode)   # + optional-kwarg guards
     env      = self._project_environment(env)     # collapse what we lack
@@ -30,9 +36,9 @@ Every concrete ``run()`` follows the same recipe, in this order::
         fm.finish()          # wipes iff cleanup=True; always releases the claim
 """
 
+import contextlib
 import copy as _copy
 import errno
-import functools
 import gc
 import os
 import re
@@ -66,6 +72,8 @@ from uacpy.core.exceptions import (
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import Field, PhaseReference, Result, ResultStack
+from uacpy.core.results.field import (_check_field_weightable,
+                                      _check_stack_weightable)
 from uacpy.core.source import Source
 from uacpy.core.surface import Surface
 from uacpy.models.sources import MODEL_SOURCES, model_source
@@ -601,6 +609,38 @@ def _warn_if_volume_absorption_is_missing(env, source, receiver) -> None:
         UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
+#: Per-depth scratch redirects in flight, keyed by ``id(model)``. Thread-local
+#: because two threads may drive one model instance, and module-level (not an
+#: instance attribute) because a model is pickled to ``run_parallel`` workers
+#: and :class:`threading.local` is not picklable.
+_SCRATCH_REDIRECT = threading.local()
+
+
+def _effective_work_dir(model) -> Optional[Path]:
+    """The pinned directory a run writes into: ``model.work_dir``, or its
+    per-depth subdirectory while :meth:`PropagationModel.run` is inside one
+    depth of a per-depth loop (see
+    :meth:`PropagationModel._scratch_subdir`). Read by
+    :meth:`PropagationModel._setup_file_manager` in place of the attribute,
+    so the redirect never touches what the user configured.
+
+    Module-level rather than a method because ``_setup_file_manager`` is
+    borrowed as a plain function by stand-ins that are not
+    ``PropagationModel`` subclasses (``test_concurrency``'s ``_StubModel``),
+    which is what keeps that test driving the real recipe."""
+    if model.work_dir is None:
+        return None
+    sub = getattr(_SCRATCH_REDIRECT, 'by_model', {}).get(id(model))
+    return Path(model.work_dir) / sub if sub else Path(model.work_dir)
+
+
+def _slabs_of(result):
+    """The slabs of a ``ResultStack``, or ``[result]`` for a single result —
+    so a wrapper's post-assembly steps (masking, stamping, output paths)
+    run per slab whether the engine returned one field or a stack."""
+    return result.slabs if isinstance(result, ResultStack) else [result]
+
+
 def _stamp_source_weights(slabs, source: 'Source') -> None:
     """Record ``source.weights`` on every slab of a source-depth stack so
     ``ResultStack.superpose()`` finds them without the ``Source``."""
@@ -655,33 +695,6 @@ def _pad_time_slabs_to_common_axis(slabs):
                             coords=coords, pinned=slab.pinned,
                             **id_kwargs))
     return padded
-
-
-def _loop_run_over_source_depths(run):
-    """Wrap a wrapper's ``run`` so a multi-depth ``Source`` in a field mode
-    runs once per depth and returns a ``ResultStack``; everything else
-    reaches ``run`` untouched. Applied to every concrete ``run`` by
-    ``PropagationModel.__init_subclass__``."""
-    @functools.wraps(run)
-    def run_over_source_depths(self, env, source, receiver, run_mode=None,
-                               **kwargs):
-        multi = isinstance(source, Source) and source.depths.size > 1
-        if multi and self._loops_source_depths(run_mode):
-            return self._run_per_source_depth(
-                run, env, source, receiver, run_mode, kwargs)
-        result = run(self, env, source, receiver, run_mode, **kwargs)
-        if (isinstance(source, Source) and source.depths.size == 1
-                and not source.has_unit_weights
-                and self._loops_source_depths(run_mode)):
-            return self._apply_single_source_weight(result, source)
-        # A stack the engine built itself (Bellhop's .shd / .ray / .arr
-        # readers) carries the same weight stamp as a looped one.
-        if (multi and isinstance(result, ResultStack)
-                and result.coordinate_name == 'source_depth'
-                and result.n_slabs == source.depths.size):
-            _stamp_source_weights(result.slabs, source)
-        return result
-    return run_over_source_depths
 
 
 class PropagationModel(ABC):
@@ -746,6 +759,11 @@ class PropagationModel(ABC):
     # has to fail with TypeError at the call site, not be silently swallowed.
     _RUN_POSITIONAL = ('self', 'env', 'source', 'receiver', 'run_mode')
 
+    # Whether ``run(env, source, None)`` is legal: only for a wrapper whose
+    # receivers are inert (Bounce, where ``rmax=`` can stand in), which
+    # applies that contract itself in ``_run_single``.
+    _run_accepts_none_receiver: bool = False
+
     # Declarative metadata. When a subclass declares a :class:`ModelSpec`, the
     # base validates it at class-definition time and applies it in
     # ``__init__``. A subclass without one keeps the base defaults and sets
@@ -776,17 +794,22 @@ class PropagationModel(ABC):
                     f"{cls.__name__}.source = {cls.source!r} is not a known "
                     f"model source. Valid: {sorted(MODEL_SOURCES)}."
                 )
-        run = cls.__dict__.get('run')
-        if run is None:
-            # Abstract: an intermediate base (OASES) that leaves ``run`` to
-            # its own subclasses. Nothing below applies, and the two
-            # declarations required of a concrete wrapper are its subclasses'
-            # to make.
+        # (attribute name, function) — the attribute name is what the
+        # messages below quote, because a body declared as a lambda has
+        # ``__name__ == '<lambda>'``.
+        bodies = [(name, cls.__dict__[name])
+                  for name in ('_run_single', 'run') if name in cls.__dict__]
+        if not bodies:
+            # Abstract: an intermediate base (OASES) that leaves
+            # ``_run_single`` to its own subclasses. Nothing below applies,
+            # and the two declarations required of a concrete wrapper are
+            # its subclasses' to make.
             return
 
-        # A subclass that defines ``run`` is instantiable, so it is a model a
-        # user can hold — and both declarations below are load-bearing at that
-        # point. Without ``spec`` the class silently takes the base defaults
+        # A subclass that defines ``_run_single`` (or its own ``run``) is
+        # instantiable, so it is a model a user can hold — and both
+        # declarations below are load-bearing at that point. Without
+        # ``spec`` the class silently takes the base defaults
         # (COHERENT_TL only, no env-shape support, point sources), which are
         # nobody's real answer; without ``source`` the licence and citation
         # machinery is skipped entirely, so an engine that must warn on use
@@ -796,8 +819,9 @@ class PropagationModel(ABC):
         missing = [name for name in ('spec', 'source')
                    if getattr(cls, name, None) is None]
         if missing:
+            seen = ' or '.join(f"{name}()" for name, _ in bodies)
             raise TypeError(
-                f"{cls.__name__} defines run() but declares no "
+                f"{cls.__name__} defines {seen} but declares no "
                 f"{' or '.join(missing)}. A concrete model must set both: "
                 f"``spec = ModelSpec(...)`` for its run modes, env-shape "
                 f"support and source geometries, and ``source = '<id>'`` "
@@ -805,45 +829,68 @@ class PropagationModel(ABC):
                 f"metadata reach the user."
             )
 
+        for name, body in bodies:
+            cls._check_run_signature(name, body)
+
+    @classmethod
+    def _check_run_signature(cls, name: str, body) -> None:
+        """Refuse a ``_run_single`` (or a subclass's own ``run``) whose
+        signature the template method :meth:`run` could not call the way
+        it does: the four carriers by position, every extra as a keyword,
+        no ``**kwargs`` sink, and no default of its own for ``run_mode``."""
         import inspect
 
-        params = list(inspect.signature(run).parameters.values())
+        label = f"{cls.__name__}.{name}()"
+        params = list(inspect.signature(body).parameters.values())
         for p in params:
             if p.kind is inspect.Parameter.VAR_KEYWORD:
                 raise TypeError(
-                    f"{cls.__name__}.run() must not use **kwargs: an unknown "
+                    f"{label} must not use **kwargs: an unknown "
                     "keyword has to raise TypeError, not be swallowed. Declare "
                     "the accepted extras as keyword-only after a bare '*'."
+                )
+            # The mirror of the rule below: a *args sink accepts exactly the
+            # unknown positional arguments that rule exists to refuse.
+            if p.kind is inspect.Parameter.VAR_POSITIONAL:
+                raise TypeError(
+                    f"{label} must not use *args: an unknown positional "
+                    "argument has to raise TypeError, not be swallowed. The "
+                    "four carriers are the whole positional contract."
                 )
 
         leading = params[:len(cls._RUN_POSITIONAL)]
         names = tuple(p.name for p in leading)
         if names != cls._RUN_POSITIONAL:
             raise TypeError(
-                f"{cls.__name__}.run() must begin with "
+                f"{label} must begin with "
                 f"{cls._RUN_POSITIONAL!r}; got {names!r}."
             )
         for p in leading:
             if p.kind is inspect.Parameter.KEYWORD_ONLY:
                 raise TypeError(
-                    f"{cls.__name__}.run() parameter {p.name!r} must be "
+                    f"{label} parameter {p.name!r} must be "
                     "positional-or-keyword, not keyword-only."
                 )
+        # ``run`` passes ``run_mode`` through as it received it, ``None``
+        # included, so a default declared here would never be seen.
+        # ``inspect.Parameter.empty`` (no default at all) is fine: ``run``
+        # always passes ``run_mode`` positionally. Only a non-None default is
+        # a lie, because it can never be the value the body sees.
+        run_mode = leading[-1]
+        if run_mode.default not in (None, inspect.Parameter.empty):
+            raise TypeError(
+                f"{label} declares run_mode={run_mode.default!r}; the "
+                f"default must be None — run() resolves it through "
+                f"_default_run_mode(), which is the place to change it."
+            )
 
         for p in params[len(cls._RUN_POSITIONAL):]:
             if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
                 raise TypeError(
-                    f"{cls.__name__}.run() parameter {p.name!r} must be "
+                    f"{label} parameter {p.name!r} must be "
                     "keyword-only (place it after a bare '*') so unknown "
                     "positional args cannot reach it."
                 )
-
-        # The signature above is what the wrapper below relies on: it takes
-        # the four leading carriers by position and forwards every extra as
-        # a keyword, so an unknown keyword still reaches the wrapper's own
-        # TypeError. ``functools.wraps`` keeps ``inspect.signature`` and the
-        # docstring pointing at the wrapper's declaration.
-        cls.run = _loop_run_over_source_depths(run)
 
     def __init__(
         self,
@@ -926,10 +973,11 @@ class PropagationModel(ABC):
         self._supports_range_dependent_bottom: bool = False
         self._supports_layered_bottom: bool = False
         self._supports_elastic_media: bool = False
-        # Bellhop is the only model that runs one source-depth grid in a
-        # single binary call (``_NATIVE_MULTI_DEPTH_MODES``). Every other
-        # engine reads one source depth per deck: in a field mode ``run()``
-        # loops over the depths in Python and stacks the slabs
+        # Bellhop runs one source-depth grid in a single binary call in every
+        # mode it stacks, Scooter in ``COHERENT_TL``
+        # (``_NATIVE_MULTI_DEPTH_MODES``). Every other engine and mode reads
+        # one source depth per deck: in a field mode ``run()`` loops over the
+        # depths in Python and stacks the slabs
         # (``_run_per_source_depth``); in any other mode the ten models that
         # read source geometry raise from ``_validate_geometry``. Bounce
         # accepts a multi-depth ``Source`` without raising because it reads
@@ -1214,7 +1262,6 @@ class PropagationModel(ABC):
 
         return type(self)(**kwargs)
 
-    @abstractmethod
     def run(
         self,
         env: Environment,
@@ -1306,12 +1353,80 @@ class PropagationModel(ABC):
             ``ResultStack`` is not a ``Result`` subclass, so a caller that
             annotates the result has to name both.
         """
-        # Validates the (env, source, receiver) triple. No wrapper reaches it
-        # today — every override opens with its own _require_run_triple call
-        # and none delegates to super().run() — but this is the correct
-        # prelude for one that ever does, and dropping it would make such a
-        # super().run() a silent no-op.
-        self._require_run_triple(env, source, receiver)
+        self._require_run_triple(
+            env, source, receiver,
+            allow_none_receiver=self._run_accepts_none_receiver)
+        kwargs = dict(frequencies=frequencies, source_waveform=source_waveform,
+                      sample_rate=sample_rate, output_duration=output_duration)
+        n_depths = int(source.depths.size)
+        if n_depths > 1 and self._splits_source_depths(run_mode):
+            return self._run_per_source_depth(
+                env, source, receiver, run_mode, kwargs)
+        weighted = not source.has_unit_weights
+        weights_apply = self._weights_source(run_mode)
+        if weighted and not weights_apply:
+            # Rays, arrivals, mode shapes, a reflection table: there is no
+            # pressure field for a complex amplitude to scale, and silently
+            # dropping the weights would let the same Source mean two things
+            # on two modes. An unsupported ``run_mode`` lands here too
+            # (``_weights_source`` swallows its error); leave that refusal
+            # to ``_run_single``, which is where it reads as a mode error.
+            try:
+                mode = self._resolve_run_mode(
+                    run_mode, default=self._default_run_mode())
+            except UnsupportedFeatureError:
+                mode = None
+            if mode is not None:
+                warnings.warn(
+                    f"{self.model_name}: Source(weights="
+                    f"{source.weights.tolist()}) is not applied in the "
+                    f"{mode.name} mode — a weight scales a pressure field, "
+                    f"and this mode returns none. Run a TL, BROADBAND or "
+                    f"TIME_SERIES mode for a weighted field.",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        if n_depths == 1 and weighted and weights_apply:
+            # The engine sees a unit source — as it does for every slab of
+            # a multi-depth run — and the weight is applied here, once,
+            # whatever the body does with the run it was handed (Bellhop's
+            # BOUNCE route calls ``run`` again; a subclass may too).
+            result = self._run_single(env, source.at_depth(0), receiver,
+                                      run_mode, **kwargs)
+            return self._apply_single_source_weight(result, source)
+        result = self._run_single(env, source, receiver, run_mode, **kwargs)
+        # A stack the engine built itself (Bellhop's .shd / .ray / .arr
+        # readers, Kraken's and Scooter's TL) carries the same weight stamp —
+        # and the same refusal — as a looped one.
+        if (n_depths > 1 and isinstance(result, ResultStack)
+                and result.coordinate_name == 'source_depth'
+                and result.n_slabs == n_depths):
+            if weighted and isinstance(result.slabs[0], Field):
+                _check_stack_weightable(
+                    result.slabs[0], source.weights,
+                    where=f"{self.model_name}: Source(weights="
+                          f"{source.weights.tolist()})")
+            _stamp_source_weights(result.slabs, source)
+        return result
+
+    @abstractmethod
+    def _run_single(
+        self,
+        env: Environment,
+        source: Source,
+        receiver: Receiver,
+        run_mode: Optional[RunMode] = None,
+        *,
+        frequencies: Optional[np.ndarray] = None,
+        source_waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
+        output_duration: Optional[float] = None,
+    ) -> Union[Result, ResultStack]:
+        """The engine-specific body :meth:`run` calls once per depth (or
+        once with every depth, where the engine stacks them itself): same
+        signature as ``run``, which ``__init_subclass__`` enforces. It
+        never sees a non-unit ``Source.weights`` — ``run`` hands it a unit
+        copy and applies the weight to what comes back. Abstract, so a
+        class without one is a base (``PropagationModel``, ``OASES``), not
+        a wrapper — the distinction ``inspect.isabstract`` reports."""
 
     # Modes that consume exactly one source frequency. Multi-frequency
     # Source passed to one of these is a configuration error — the user
@@ -1346,7 +1461,8 @@ class PropagationModel(ABC):
 
     # Modes in which this engine writes every source depth into one deck
     # and its reader splits the output into a ``ResultStack`` — the loop
-    # above is skipped for these. Empty on every model but Bellhop.
+    # above is skipped for these. Bellhop's TL / RAYS / ARRIVALS and
+    # Scooter's COHERENT_TL; empty elsewhere.
     _NATIVE_MULTI_DEPTH_MODES: 'frozenset[RunMode]' = frozenset()
 
     def _default_run_mode(self) -> RunMode:
@@ -1355,11 +1471,35 @@ class PropagationModel(ABC):
         while its ``run`` defaults to a TL mode."""
         return self._supported_modes[0]
 
-    def _loops_source_depths(self, run_mode) -> bool:
+    #: Modes outside :data:`_FIELD_MODES` in which this model returns a
+    #: ``ResultStack`` over the source depths anyway, by looping in Python
+    #: rather than in one deck — Bellhop's eigenrays, whose ``.ray`` file
+    #: carries no per-source boundary. Legal input, just not one launch.
+    _PYTHON_STACKED_MODES: 'frozenset[RunMode]' = frozenset()
+
+    def _stacks_source_depths(self, mode) -> bool:
+        """Whether a multi-depth ``Source`` is legal in ``mode``: a field
+        mode (the base loops, or the engine batches them), a mode the engine
+        batches into one deck, or one this model stacks by its own loop."""
+        return (mode in self._FIELD_MODES
+                or mode in self._NATIVE_MULTI_DEPTH_MODES
+                or mode in self._PYTHON_STACKED_MODES)
+
+    def _weights_source(self, run_mode) -> bool:
+        """Whether ``Source.weights`` applies in ``run_mode``: a field mode,
+        whose result is a pressure field a complex amplitude can scale. An
+        unsupported ``run_mode`` is left to ``_run_single`` to refuse."""
+        try:
+            mode = self._resolve_run_mode(
+                run_mode, default=self._default_run_mode())
+        except UnsupportedFeatureError:
+            return False
+        return mode in self._FIELD_MODES
+
+    def _splits_source_depths(self, run_mode) -> bool:
         """Whether ``run()`` splits a multi-depth ``Source`` into one
         single-depth run per depth: a field mode the engine does not stack
-        natively. An unsupported ``run_mode`` is left to ``run()`` itself
-        to refuse."""
+        natively."""
         try:
             mode = self._resolve_run_mode(
                 run_mode, default=self._default_run_mode())
@@ -1368,22 +1508,69 @@ class PropagationModel(ABC):
         return (mode in self._FIELD_MODES
                 and mode not in self._NATIVE_MULTI_DEPTH_MODES)
 
-    def _run_per_source_depth(self, run, env, source, receiver, run_mode,
+    @contextlib.contextmanager
+    def _scratch_subdir(self, name: str):
+        """Run the block with a pinned ``work_dir`` redirected into its
+        subdirectory ``name``; an unpinned one (a fresh temp dir per run)
+        needs no such split.
+
+        The redirect is recorded in a thread-local map keyed by this
+        instance rather than written to ``self.work_dir``: the attribute is
+        shared state that :meth:`_setup_file_manager` reads on every run, so
+        mutating it made a concurrent single-depth run on the same model
+        claim — and be refused for — a ``source_depth_*`` directory it never
+        asked for, and left the instance pointing inside a subdirectory if a
+        run raised between the two writes. Keying by ``id(self)`` keeps a
+        model that spawns another (Bellhop's BOUNCE route) from inheriting
+        its parent's redirect."""
+        if self.work_dir is None:
+            yield
+            return
+        by_model = getattr(_SCRATCH_REDIRECT, 'by_model', None)
+        if by_model is None:
+            by_model = _SCRATCH_REDIRECT.by_model = {}
+        saved = by_model.get(id(self))
+        by_model[id(self)] = name
+        try:
+            yield
+        finally:
+            if saved is None:
+                by_model.pop(id(self), None)
+            else:
+                by_model[id(self)] = saved
+
+    def _run_per_source_depth(self, env, source, receiver, run_mode,
                               kwargs) -> ResultStack:
-        """One single-depth run per ``source.depths`` entry, stacked over
-        ``source_depth``. ``run`` is the wrapper's own ``run`` function; the
-        same env, receiver, mode and keywords go to every depth, and each
-        slab's ``metadata['source_weights']`` records ``source.weights`` for
-        :meth:`ResultStack.superpose` to read as its default. Time-domain
-        slabs whose window the engine sized from each depth's own arrivals
-        are zero-padded at the end to one common axis, so the stack always
-        superposes."""
+        """One single-depth ``_run_single`` per ``source.depths`` entry,
+        stacked over ``source_depth``. The same env, receiver, mode and
+        keywords go to every depth, and each slab's
+        ``metadata['source_weights']`` records ``source.weights`` for
+        :meth:`ResultStack.superpose` to read as its default. A pinned
+        ``work_dir`` gets one ``source_depth_<z>m`` subdirectory per depth,
+        so the ``*_file`` paths each slab carries stay that slab's. Time-
+        domain slabs whose window the engine sized from each depth's own
+        arrivals are zero-padded at the end to one common axis, so the stack
+        always superposes."""
         n = int(source.depths.size)
         self._log(f"multi-depth Source: {n} single-depth runs, one per "
                   f"depth {source.depths.tolist()}")
-        slabs = [run(self, env, source.at_depth(i), receiver, run_mode,
-                     **kwargs)
-                 for i in range(n)]
+        slabs = []
+        for i in range(n):
+            single = source.at_depth(i)
+            with self._scratch_subdir(f"source_depth_{single.depths[0]:g}m"):
+                slabs.append(self._run_single(env, single, receiver, run_mode,
+                                              **kwargs))
+            # The weights are applied by ``superpose``, not here — but a
+            # field they could never scale (a dB-only mode, or a real trace
+            # under a complex weight) is refused now rather than after the
+            # remaining n-1 runs, so the one-source and many-source paths
+            # refuse the same input at the same point.
+            if i == 0 and not source.has_unit_weights and isinstance(
+                    slabs[0], Field):
+                _check_stack_weightable(
+                    slabs[0], source.weights,
+                    where=f"{self.model_name}: Source(weights="
+                          f"{source.weights.tolist()})")
         if kwargs.get('output_duration') is None:
             slabs = _pad_time_slabs_to_common_axis(slabs)
         _stamp_source_weights(slabs, source)
@@ -1400,14 +1587,10 @@ class PropagationModel(ABC):
         if not isinstance(result, Field):
             return result
         w = complex(source.weights[0])
+        _check_field_weightable(
+            result, np.array([w]),
+            where=f"{self.model_name}: Source(weights={w})")
         if not result.is_complex:
-            if w.imag != 0.0:
-                raise ConfigurationError(
-                    f"{self.model_name}: Source(weights={w}) on a real "
-                    f"time-domain trace, which a complex weight cannot "
-                    f"scale; give a real weight (a sign flip is -1), or run "
-                    f"BROADBAND and weight the transfer function."
-                )
             result.data = result.data * w.real
         else:
             result.data = result.data * w
@@ -1497,7 +1680,9 @@ class PropagationModel(ABC):
         positional carriers are an :class:`Environment`, a :class:`Source`
         and a :class:`Receiver` (subclasses accepted), in that order.
 
-        The first statement of every wrapper's ``run()``: without it a
+        The first statement of :meth:`run` (and of every wrapper's
+        ``_run_single``, which the Bounce route and a subclass may call
+        directly): without it a
         swapped pair — ``run(source, env, receiver)`` — surfaces as a raw
         ``AttributeError`` deep inside deck assembly, far from the call
         that caused it. ``allow_none_receiver=True`` lets a wrapper whose
@@ -1796,19 +1981,20 @@ class PropagationModel(ABC):
         directory raises instead of silently trading results with this one.
         The claim comes back through the manager's release hook.
         """
-        if self.work_dir is not None:
-            claim = _claim_work_dir(self.work_dir, self.model_name)
+        work_dir = _effective_work_dir(self)
+        if work_dir is not None:
+            claim = _claim_work_dir(work_dir, self.model_name)
             try:
                 # base_dir is the *parent*: FileManager validates that it
                 # exists, while ``adopt_work_dir`` keys ownership on whether
                 # work_dir itself already existed, so it has to do that mkdir
                 # itself.
-                parent = Path(self.work_dir).parent
+                parent = Path(work_dir).parent
                 parent.mkdir(parents=True, exist_ok=True)
                 if self.use_tmpfs:
                     warnings.warn(
                         f"{self.model_name}(use_tmpfs=True) is ignored for the "
-                        f"pinned work_dir {self.work_dir} — a named directory "
+                        f"pinned work_dir {work_dir} — a named directory "
                         f"cannot be relocated to /dev/shm. Drop work_dir= for "
                         f"RAM-backed I/O, or point work_dir at a tmpfs mount.",
                         UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
@@ -1820,7 +2006,7 @@ class PropagationModel(ABC):
                     cleanup=self.cleanup,
                 )
                 # Adopted, not owned: cleanup may remove only what this run adds.
-                fm.adopt_work_dir(self.work_dir)
+                fm.adopt_work_dir(work_dir)
                 # FileManager's own writability check validated ``base_dir``,
                 # i.e. the PARENT; the directory the decks actually go in is
                 # this one, and a read-only one otherwise surfaced as a raw
@@ -1945,14 +2131,16 @@ class PropagationModel(ABC):
                 f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
             )
 
-        # A field mode never reaches here with several depths: ``run()``
-        # splits them first (``_run_per_source_depth``). What is left is a
-        # non-field mode on an engine that reads one source depth per deck.
+        # Whether a multi-depth Source is legal is a question about the
+        # MODE, not about the model: ``_supports_multi_source_depth`` says
+        # the engine batches depths into one deck *somewhere*, which is the
+        # declarative capability the matrix prints, and would wave through a
+        # mode of that same engine which stacks nothing (Kraken MODES).
         n_depths = len(np.atleast_1d(source.depths))
-        if n_depths > 1 and not self._supports_multi_source_depth:
+        if n_depths > 1:
             mode = (run_mode if run_mode is not None
                     else self._default_run_mode())
-            if mode not in self._FIELD_MODES:
+            if not self._stacks_source_depths(mode):
                 raise ConfigurationError(
                     f"{self.model_name} takes a single source depth per "
                     f"{mode.name} run; got {n_depths}: "
@@ -3276,6 +3464,11 @@ class PropagationModel(ABC):
             model_source=self.provenance,
             metadata=dict(extra),
         )
+        # The drive level rides with the result so ``Field.at_source_level()``
+        # needs no argument: it is the Source's, not the plot call's.
+        level = getattr(source, 'source_level_dB', None)
+        if level is not None:
+            kw['metadata'].setdefault('source_level_dB', float(level))
         if phase_reference is not None:
             # Coerced to the PhaseReference enum member, so wrapper-built
             # results carry the same type as the synthesis helpers stamp.
@@ -3296,6 +3489,9 @@ class PropagationModel(ABC):
         for attr in ('model', 'backend', 'source_depths', 'frequencies',
                      'model_source'):
             setattr(result, attr, kw[attr])
+        if 'source_level_dB' in kw['metadata'] and result.metadata is not None:
+            result.metadata.setdefault('source_level_dB',
+                                       kw['metadata']['source_level_dB'])
         if phase_reference is not None:
             result.phase_reference = PhaseReference(phase_reference)
         return result
@@ -3395,7 +3591,8 @@ class PropagationModel(ABC):
         d['coords'] = {**d['coords'], 'depth': depths}
         return Field.from_dict(d)
 
-    def _mask_zero_range_columns(self, data, ranges, singular_term: str):
+    def _mask_zero_range_columns(self, data, ranges, singular_term: str,
+                                 *, warn: bool = True):
         """Return ``data`` with the range-axis (axis 1) columns at ``r = 0``
         set to NaN, warning once with the model prefix.
 
@@ -3413,20 +3610,27 @@ class PropagationModel(ABC):
         zero = np.abs(ranges) < np.finfo(float).tiny
         if not zero.any():
             return data
-        warnings.warn(
-            f"{self.model_name}: {int(zero.sum())} receiver range(s) at "
-            f"r = 0, where {singular_term} is singular; those cells are "
-            f"returned as NaN (no data). Move the receiver off the source "
-            f"axis (e.g. r = 1 m) to get a field value.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
+        if warn:
+            self._warn_zero_range(int(zero.sum()), singular_term)
         masked = np.array(data, copy=True)
         if not np.issubdtype(masked.dtype, np.inexact):
             masked = masked.astype(float)
         masked[:, zero, ...] = np.nan
         return masked
 
-    def _mask_source_axis(self, field, source):
+    def _warn_zero_range(self, n_zero: int, singular_term: str) -> None:
+        """The ``r = 0`` notice, once per run. A model that masks each slab
+        of a native multi-depth stack separately would otherwise repeat one
+        binary launch's warning per source depth."""
+        warnings.warn(
+            f"{self.model_name}: {n_zero} receiver range(s) at "
+            f"r = 0, where {singular_term} is singular; those cells are "
+            f"returned as NaN (no data). Move the receiver off the source "
+            f"axis (e.g. r = 1 m) to get a field value.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+
+    def _mask_source_axis(self, field, source, *, warn: bool = True):
         """NaN the ``r = 0`` column of a point-source ``field`` and warn once.
 
         Every engine that evaluates ``1/sqrt(r)`` cylindrical spreading
@@ -3445,7 +3649,8 @@ class PropagationModel(ABC):
             return field
         masked = self._mask_zero_range_columns(
             field.data, field.coords['range'],
-            'the point-source cylindrical-spreading factor 1/sqrt(r)')
+            'the point-source cylindrical-spreading factor 1/sqrt(r)',
+            warn=warn)
         if masked is not field.data:
             field.data = masked
         return field

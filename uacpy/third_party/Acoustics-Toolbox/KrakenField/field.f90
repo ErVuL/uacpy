@@ -187,15 +187,27 @@ PROGRAM FIELD
         C( 1 : MSrc ) = phiS( 1 : MSrc, is )
 
         ! apply the source beam pattern
-        IF ( SBPFlag == '*' .AND. iS == 1 ) THEN
-           ALLOCATE( kz2( MSrc ), thetaT( MSrc ), S( MSrc ) )
-           c0    = 1500   !!! reference sound speed, should be speed at the source depth
-           omega = 2 * pi * freqVec( ifreq )
-           kz2   = REAL( omega ** 2 / c0 ** 2 - k( 1 : MSrc ) ** 2 )      ! vertical wavenumber squared
-           WHERE ( kz2 < 0 ) kz2 = 0                                      ! remove negative values
+        IF ( SBPFlag == '*' ) THEN
+           ! uacpy: the shading factor S depends only on the mode angles, so
+           ! it is loop-invariant over source depth and is computed once per
+           ! frequency -- but APPLYING it is not, and the application used to
+           ! sit inside the iS == 1 guard with the computation, so only the
+           ! first source of a multi-source run was shaded.  The allocation
+           ! also ran once per frequency while the matching DEALLOCATE sits
+           ! after FreqLoop, so a second frequency re-allocated an allocated
+           ! array and the program aborted.  Both are fixed here: allocate
+           ! per frequency (MSrc may change with it), apply per source.
+           IF ( iS == 1 ) THEN
+              IF ( ALLOCATED( kz2 ) ) DEALLOCATE( kz2, thetaT, S )
+              ALLOCATE( kz2( MSrc ), thetaT( MSrc ), S( MSrc ) )
+              c0    = 1500   !!! reference sound speed, should be speed at the source depth
+              omega = 2 * pi * freqVec( ifreq )
+              kz2   = REAL( omega ** 2 / c0 ** 2 - k( 1 : MSrc ) ** 2 )   ! vertical wavenumber squared
+              WHERE ( kz2 < 0 ) kz2 = 0                                   ! remove negative values
 
-           thetaT = RadDeg * ATAN( SQRT( kz2 ) / REAL( k( 1 : MSrc ) ) )  ! calculate the angle in degrees
-           CALL interp1( SrcBmPat( :, 1 ), SrcBmPat( :, 2 ), thetaT, S )
+              thetaT = RadDeg * ATAN( SQRT( kz2 ) / REAL( k( 1 : MSrc ) ) )  ! calculate the angle in degrees
+              CALL interp1( SrcBmPat( :, 1 ), SrcBmPat( :, 2 ), thetaT, S )
+           END IF
            C( 1 : Msrc ) = C( 1 : Msrc ) * REAL( S )         ! apply the shading
         END IF
 

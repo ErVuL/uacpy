@@ -299,6 +299,19 @@ def _default_value(field: Field) -> str:
     return 'dB'
 
 
+def _is_multi_source_total(field) -> bool:
+    """Whether ``field`` is the sum of more than one source.
+
+    ``ResultStack.superpose`` stamps ``metadata['superposed_sources']`` with
+    the depths it added; a one-source stamp (the ``n = 1`` weight
+    ``PropagationModel.run`` applies) is still one source and is left alone.
+    """
+    stamp = (getattr(field, 'metadata', None) or {}).get('superposed_sources')
+    if not isinstance(stamp, dict):
+        return False
+    return len(stamp.get('depths', ())) > 1
+
+
 def _value_label(field: Field, value: str) -> str:
     """Axis / colorbar label for the ``value`` view of ``field``.
 
@@ -310,6 +323,16 @@ def _value_label(field: Field, value: str) -> str:
         # data IS. They are independent — one complex field renders every
         # view — but the label has to come from the field, or the dB view of
         # a signal-excess grid announces itself as transmission loss.
+        #
+        # A superposed multi-source field is the one pressure field whose dB
+        # view is NOT a transmission loss. TL is defined against a single
+        # unit source at 1 m (JKPS §1.3.4), and superposing keeps that
+        # reference, so the array's gain lands inside the number and enough
+        # in-phase sources drive it negative — which no loss does. Same
+        # quantity, honest caption.
+        if (_is_multi_source_total(field)
+                and quantity_label(field.kind, 'dB') == 'TL (dB)'):
+            return 'Total level (dB re 1 source @ 1 m)'
         return quantity_label(field.kind, 'dB' if field.is_complex else field.unit)
     if value == 'real':
         # A time trace is p(t); a real field that is not pressure (a

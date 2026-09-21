@@ -53,8 +53,8 @@ slightly.
 ## Acoustics Toolbox (Bellhop, Kraken, Scooter, Bounce, SPARC)
 
 Vendored from https://github.com/oalib-acoustics/Acoustics-Toolbox at commit
-`8b4682b` ("sync with 2024_12_25 sources" plus repo housekeeping). Two source
-patches are applied:
+`8b4682b` ("sync with 2024_12_25 sources" plus repo housekeeping). Three
+source patches are applied:
 
 ### `KrakenField/field.f90` -- out-of-bounds sentinel fix
 
@@ -98,6 +98,75 @@ elements and set `rProf(NProf + 1) = HUGE(rProf(1))`.
    ELSE
 ```
 
+### `KrakenField/field.f90` -- source beam pattern on a multi-source, multi-frequency run
+
+`FIELD` applies a `.sbp` source beam pattern by shading the modal excitation
+vector `C`.  The shading factor `S` is a function of the mode angles
+`RadDeg*ATAN(SQRT(kz2)/k)`, which depend on the eigenvalues `k`, the
+frequency and the hard-coded reference speed `c0` -- **not** on the source
+depth.  It is therefore loop-invariant over `SourceDepths`, and upstream
+hoists its computation under `iS == 1`:
+
+```fortran
+        IF ( SBPFlag == '*' .AND. iS == 1 ) THEN
+           ALLOCATE( kz2( MSrc ), thetaT( MSrc ), S( MSrc ) )
+           ...
+           CALL interp1( SrcBmPat( :, 1 ), SrcBmPat( :, 2 ), thetaT, S )
+           C( 1 : Msrc ) = C( 1 : Msrc ) * REAL( S )         ! apply the shading
+        END IF
+```
+
+The hoist is correct for the computation and wrong for the last line.  `C` is
+reloaded from `phiS( :, iS )` at the top of every iteration, so **only the
+first source depth is shaded**; every later one propagates omnidirectionally
+while the run still reports that a pattern was used.  Measured on a 200 m
+isovelocity guide at 200 Hz with a +-20 deg / -40 dB pattern, driving
+`field.exe` directly against one `.mod` so nothing else differs: the field at
+`z = 70 m` as the *second* source depth is **bit-identical to the same run
+with the pattern switched off** (max relative difference `0.0`), and differs
+from the same depth run as the first source by a factor of 19.5.
+
+The same `IF` carries a second defect.  `ALLOCATE` runs once per *frequency*
+(the guard is `iS == 1`, not "first time through"), while the matching
+`DEALLOCATE` sits after `FreqLoop` closes, so the second frequency of a
+broadband run re-allocates an already-allocated array and gfortran
+terminates.  uacpy previously refused that combination with a typed
+`UnsupportedFeatureError`; the patch removes the need for it.
+
+**Fix:** enter the block for every source depth, keep the invariant setup
+under `iS == 1`, and release the arrays there before reallocating them, since
+`MSrc` may change between frequencies:
+
+```diff
+-        IF ( SBPFlag == '*' .AND. iS == 1 ) THEN
+-           ALLOCATE( kz2( MSrc ), thetaT( MSrc ), S( MSrc ) )
++        IF ( SBPFlag == '*' ) THEN
++           IF ( iS == 1 ) THEN
++              IF ( ALLOCATED( kz2 ) ) DEALLOCATE( kz2, thetaT, S )
++              ALLOCATE( kz2( MSrc ), thetaT( MSrc ), S( MSrc ) )
+            ...
+-           CALL interp1( SrcBmPat( :, 1 ), SrcBmPat( :, 2 ), thetaT, S )
+-           C( 1 : Msrc ) = C( 1 : Msrc ) * REAL( S )
++              CALL interp1( SrcBmPat( :, 1 ), SrcBmPat( :, 2 ), thetaT, S )
++           END IF
++           C( 1 : Msrc ) = C( 1 : Msrc ) * REAL( S )
+         END IF
+```
+
+Neither half is reachable from `Bellhop`, which brackets the pattern itself
+at `bellhop.f90:265-274` and never calls this code.  Both are invisible with
+one source depth and one frequency -- `iS == 1` always holds and `ALLOCATE`
+runs once -- which is every deck in AT's own `at/tests` tree and the example
+in `doc/field.htm`.
+
+The two restrictions that remain are not defects and are pinned as
+behaviour in `tests/test_kraken.py`
+(`TestKrakenSourceBeamPatternRestrictions`): `c0` is hard-coded to 1500 m/s
+rather than the speed at the source depth (Porter's own `!!!` note says so),
+and `WHERE ( kz2 < 0 ) kz2 = 0` followed by `ATAN` of a non-negative root
+confines the queried angles to `[0, 90)`, so the negative half of a `.sbp`
+table is unreachable from `FIELD`.
+
 ### `misc/interpolation.f90` -- non-terminating segment search
 
 `interp1` walks a segment index `iseg` over the tabulated abscissa `x(1:N)`.
@@ -117,7 +186,7 @@ keeps testing the same condition, so **any query point in the final segment
 at `iseg == 1` for any query below `x(1)`.  Neither hangs on typical input:
 a finely sampled table makes the final segment a narrow sliver, and the
 callers query well inside the range.  It is reachable from
-`KrakenField/field.f90:198`, which shades modes by a `.sbp` source beam
+`KrakenField/field.f90:209`, which shades modes by a `.sbp` source beam
 pattern at angles `RadDeg*ATAN(SQRT(kz2)/k)` — bounded by the critical
 angle, so a *coarse* pattern (e.g. the three points `-90, 0, 90`) puts
 `x(N-1)` at `0` deg and every mode angle then spins.  Reproduced standalone:

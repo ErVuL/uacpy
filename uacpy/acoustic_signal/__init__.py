@@ -104,6 +104,9 @@ _EXPORTS = {
     'BeamformResult': 'arrays', 'music_spectrum': 'arrays',
     'mvdr_spectrum': 'arrays', 'sample_covariance': 'arrays',
     'steering_vectors': 'arrays', 'shading_taper': 'arrays',
+    'beamform_field': 'arrays', 'BeamformedField': 'arrays',
+    'plane_wave_array_gain': 'arrays', 'matched_replica_gain': 'arrays',
+    'independent_beams': 'arrays',
     # active
     'AmbiguityResult': 'detect', 'ambiguity_function': 'detect',
     'matched_filter': 'detect', 'processing_gain': 'detect',
@@ -156,6 +159,8 @@ __all__ = [
     # arrays
     "steering_vectors", "beamform", "BeamformResult", "sample_covariance", "bartlett_spectrum",
     "mvdr_spectrum", "music_spectrum", "shading_taper",
+    "beamform_field", "BeamformedField", "plane_wave_array_gain",
+    "matched_replica_gain", "independent_beams",
     # active
     "matched_filter", "pulse_compression", "processing_gain",
     "ambiguity_function", "AmbiguityResult",

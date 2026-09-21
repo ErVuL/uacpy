@@ -49,15 +49,20 @@ tl = kraken.compute_tl(env_rd, source, receiver)
 import os
 import re
 import warnings
+import dataclasses
+import time
+
 import numpy as np
 from pathlib import Path
 from typing import Optional, Dict, Union
 
 from uacpy.models.base import (
+    _slabs_of,
     _line_source_unit_at_1m, _source_sound_speed,
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
     _max_roughness, _smooth_surface,
 )
+from uacpy._log import log_message
 from uacpy.core.bottom import _NON_GEOACOUSTIC_TYPES, BoundaryProperties
 from uacpy.core.environment import Environment
 from uacpy.core.source import Source
@@ -170,6 +175,68 @@ MODE_POINTS_PER_WAVELENGTH = 10.0
 MODE_POINTS_PER_METER_FLOOR = 1.5
 
 
+#: ``MergeVectors`` (``kraken.f90:573``) treats two tabulation depths as one
+#: when they differ by less than ``100 * EPSILON`` of a single-precision REAL,
+#: i.e. ~1.19e-5 m absolute — far looser than the ``%.6f`` the ``.env`` spells
+#: depths at. Any grid this module builds has to separate its points by at
+#: least this much, or KRAKEN silently merges a pair and the surviving one is
+#: whichever came first.
+_MERGE_VECTORS_TOL_M = 100.0 * float(np.finfo(np.float32).eps)
+
+
+def _merge_depths(grid, extra, max_depth):
+    """``grid`` with every ``extra`` depth inside the domain merged in.
+
+    ``extra`` wins every collision: a uniform grid point within
+    :data:`_MERGE_VECTORS_TOL_M` of one is dropped rather than the other way
+    round, because the whole point of merging them in is that *these* depths
+    end up tabulated. Letting ``MergeVectors`` arbitrate instead leaves the
+    survivor up to ordering, which put one receiver back on the interpolated
+    path and left its value dependent on the source depths — 6.2e-6 relative,
+    on exactly the one row whose interval a source depth split.
+    """
+    extra = np.atleast_1d(np.asarray(extra, dtype=float))
+    extra = np.unique(extra[(extra >= 0.0) & (extra <= max_depth)])
+    grid = np.asarray(grid, dtype=float)
+    if not extra.size:
+        return grid
+    # The grid's own endpoints are load-bearing and are never displaced:
+    # ``EvaluateCMMod.f90:312`` stops a coupled run outright unless
+    # ``z(1) == depthT`` and ``z(NR) == depthB`` exactly (the invariant
+    # ``io/oalib_writer`` documents), so a receiver a micron off the surface
+    # or the bottom must snap onto the endpoint rather than replace it.
+    ends = grid[[0, -1]] if grid.size else np.empty(0)
+    for end in ends:
+        extra = extra[np.abs(extra - end) > _MERGE_VECTORS_TOL_M]
+    # Then drop the interior grid points a kept extra would collide with.
+    if extra.size:
+        idx = np.clip(np.searchsorted(extra, grid), 0, extra.size - 1)
+        right = np.abs(grid - extra[idx])
+        left = np.abs(grid - extra[np.clip(idx - 1, 0, extra.size - 1)])
+        keep = np.minimum(right, left) > _MERGE_VECTORS_TOL_M
+        if grid.size:
+            keep[0] = keep[-1] = True
+        grid = grid[keep]
+    merged = np.concatenate([grid, extra])
+    merged.sort()
+    # Two *extras* can also sit inside MergeVectors' tolerance — receiver
+    # depths are only required to differ by DECK_DEPTH_RESOLUTION_M, which is
+    # ten times finer. Thin them here so the deck asks for a grid KRAKEN will
+    # return unchanged; the endpoints are kept whatever else goes.
+    keep = np.ones(merged.size, dtype=bool)
+    last = -np.inf
+    for i, value in enumerate(merged):
+        if value - last > _MERGE_VECTORS_TOL_M:
+            keep[i] = True
+            last = value
+        else:
+            keep[i] = False
+    keep[0] = True
+    if merged.size > 1 and not keep[-1]:
+        keep[-1], keep[-2] = True, False
+    return merged[keep]
+
+
 class Kraken(PropagationModel):
     """
     Kraken - Normal modes + field computation (multi-backend).
@@ -220,7 +287,7 @@ class Kraken(PropagationModel):
     ``Source(beam_pattern=...)`` means something DIFFERENT here than it does
     on Bellhop, and the ``.sbp`` file is not portable between the two.
     ``field.exe`` shades the mode amplitudes rather than launch angles
-    (``KrakenField/field.f90:190-200``), which brings three restrictions the
+    (``KrakenField/field.f90:189-212``), which brings the restrictions the
     file format itself does not show:
 
     1. **One source depth per run.** The shading sits inside
@@ -947,7 +1014,10 @@ class Kraken(PropagationModel):
         # ``n_modes`` is constructor state; a per-call cap is applied by
         # running a copy so ``run()`` keeps the fixed model-wide signature.
         model = self if n_modes is None else self.copy(n_modes=int(n_modes))
-        return model.run(env, source, dense_receiver, run_mode=RunMode.MODES)
+        # A unit copy: MODES applies no weight, and passing the caller's
+        # would warn a second time from this internal run.
+        return model.run(env, source.at_depth(0), dense_receiver,
+                         run_mode=RunMode.MODES)
 
     def _read_modes_file(self, filepath: Path) -> Dict:
         """Read the Kraken ``.mod`` at ``<filepath>.mod`` using the binary
@@ -1216,6 +1286,7 @@ class Kraken(PropagationModel):
             RunMode.BROADBAND, RunMode.TIME_SERIES,
         ),
         supports={
+            'multi_source_depth',
             'range_dependent_bathymetry',
             'range_dependent_ssp',
             'layered_bottom',
@@ -1605,6 +1676,23 @@ class Kraken(PropagationModel):
             )
         return self._exe  # kraken.exe
 
+    # field.exe evaluates every source depth of the .flp from the one .mod
+    # kraken.exe wrote — the mode solve reads no source depth at all — and
+    # the .shd reader splits its NSz axis into a ResultStack, so the two TL
+    # modes take a multi-depth Source in one launch instead of one mode solve
+    # per depth (measured 4.3x at eight depths). Two upstream obstacles had
+    # to go first: field.f90 shaded only the FIRST source depth of a .sbp run
+    # (patched — third_party/MODIFICATIONS.md), and kraken.f90:573 merges
+    # Pos%Sz into the mode-tabulation grid that ReadModes.f90:54 interpolates
+    # the receiver mode shapes from, so an extra source depth moved a
+    # receiver's answer — until the receiver depths joined that grid
+    # (``_write_field_env``) and stopped being interpolated at all.
+    # BROADBAND / TIME_SERIES keep the per-depth loop: their .mod carries one
+    # block per frequency and the synthesis is per-depth anyway.
+    _NATIVE_MULTI_DEPTH_MODES: 'frozenset[RunMode]' = frozenset({
+        RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
+    })
+
     def _default_run_mode(self) -> RunMode:
         """``run(run_mode=None)`` solves a TL field (``BROADBAND`` when a
         ``frequencies=`` vector is passed, else ``COHERENT_TL``), not the
@@ -1612,7 +1700,87 @@ class Kraken(PropagationModel):
         mode, which is all the base's per-depth loop asks."""
         return RunMode.COHERENT_TL
 
-    def run(
+    def _broadband_by_frequency_loop(self, env, source, receiver, freq_vec):
+        """Broadband over a range-dependent section, one frequency at a time.
+
+        ``write_multi_profile_env`` has no broadband form — a multi-profile
+        deck carries a single frequency — but that is the deck's limit, not
+        the physics': KRAKEN solves the modes of whatever environment it is
+        given at one frequency, and a band is those runs stacked. Each bin
+        is a full mode solve over every profile, so the cost is linear in
+        the number of frequencies and is announced rather than discovered.
+
+        The alternative, refusing the pair, only moved this loop into every
+        caller — and a caller assembling it by hand has to rediscover that
+        the slabs stack on a trailing frequency axis.
+        """
+        freq_vec = np.asarray(freq_vec, dtype=float).ravel()
+        slabs, first = [], None
+        for i, f_i in enumerate(freq_vec):
+            one = dataclasses.replace(source, frequencies=np.array([f_i]))
+            t_bin = time.perf_counter()
+            field = self._run_single(env, one, receiver, RunMode.COHERENT_TL)
+            if i == 0:
+                # Project the total from the FIRST bin actually solved,
+                # rather than from a constant. Per-bin cost runs from
+                # ~0.03 s on a 3-profile puddle to ~47 s on a 21-profile
+                # 100 km section — a factor of 1500 — so any hard-coded
+                # rate is wrong by orders of magnitude on one of them, and
+                # wrong in the direction that strands the caller.
+                # A LOWER bound by construction: freq_vec is ascending and
+                # per-bin cost climbs with frequency, so the cheapest bin
+                # sets the estimate. Better to say "at least" than to time
+                # the whole band before saying anything.
+                per_bin = time.perf_counter() - t_bin
+                total = per_bin * freq_vec.size
+                log_message(
+                    "Kraken",
+                    f"range-dependent broadband: the multi-profile deck "
+                    f"carries one frequency, so this runs {freq_vec.size} "
+                    f"separate mode solves and stacks them. The first took "
+                    f"{per_bin:.2f} s, so expect AT LEAST about {total:.0f} "
+                    f"s — the first bin is the cheapest, since mode count "
+                    f"and mesh density both climb with frequency (roughly "
+                    f"f^2, so a 2:1 band runs about 1.8x this). Cost "
+                    f"is linear in the band and grows with the number of "
+                    f"profiles; reduce the frequency count if that is too "
+                    f"slow, or use a range-independent environment for the "
+                    f"native broadband deck.",
+                    verbose=self.verbose,
+                    # Loud only when the projection is worth interrupting
+                    # for. Measured from the run, so the threshold means
+                    # the same thing on every section.
+                    level="warning" if total > 10.0 else "info",
+                )
+            first = first if first is not None else field
+            slabs.append(np.asarray(field.data))
+        # The stacked result must carry what a NATIVE broadband field
+        # carries, not what one narrowband slab happens to have. Three
+        # things travel only on the broadband path and are stamped here:
+        # the frequency vector (without it the field denies being
+        # broadband), the phase reference (without it a complex-weighted
+        # sum is refused as "no phase reference"), and ``c_max`` (without
+        # it every time-series window falls back to a nominal sound speed
+        # and warns about it).
+        metadata = dict(getattr(first, 'metadata', {}) or {})
+        c_max = self._resolve_c_max(env)
+        if c_max is not None:
+            metadata['c_max'] = c_max
+        metadata['native_broadband'] = False
+        metadata['broadband_assembly'] = ('per-frequency loop '
+                                          '(range-dependent deck)')
+        return Field(
+            data=np.stack(slabs, axis=-1),
+            coords={'depth': np.asarray(first.coords['depth'], dtype=float),
+                    'range': np.asarray(first.coords['range'], dtype=float),
+                    'frequency': freq_vec},
+            frequencies=freq_vec,
+            phase_reference=getattr(first, 'phase_reference', None),
+            model='Kraken',
+            metadata=metadata,
+        )
+
+    def _run_single(
         self,
         env: Environment,
         source: Source,
@@ -2213,6 +2381,16 @@ class Kraken(PropagationModel):
             env, freq_vec if freq_vec is not None else source.frequencies)
         n_mode_depths = max(100, int(max_total_depth * ppm))
         mode_depths = np.linspace(0, max_total_depth, n_mode_depths)
+        # The caller's receiver depths join the tabulation grid. kraken.exe
+        # tabulates the mode shapes at these depths (merged with the source
+        # depths, ``kraken.f90:573``) and field.exe interpolates the receiver
+        # values off that table (``ReadModes.f90:54``), so a receiver that is
+        # not on the grid is interpolated twice: FE mesh -> grid -> receiver.
+        # Putting it on the grid leaves one interpolation. It also makes the
+        # receiver values independent of the source depths, which is what lets
+        # a multi-depth deck return slabs equal to their stand-alone runs.
+        mode_depths = _merge_depths(mode_depths, receiver.depths,
+                                    max_total_depth)
         receiver_for_modes = Receiver(depths=mode_depths, ranges=receiver.ranges)
 
         if env.is_range_dependent and segments is not None:
@@ -2228,19 +2406,11 @@ class Kraken(PropagationModel):
             n_mesh_deck = self._multi_profile_n_mesh(
                 segments, float(source.frequencies[0]))
 
-            if broadband:
-                # ``write_multi_profile_env`` has no broadband form; refuse
-                # rather than drop the frequency vector. Both the env and the
-                # run mode are legal on their own — it is Kraken's deck that
-                # cannot carry the pair.
-                raise UnsupportedFeatureError(
-                    'Kraken',
-                    "range-dependent broadband runs — the multi-profile "
-                    "deck has no broadband form",
-                    alternatives=["a single source frequency",
-                                  "a range-independent environment"],
-                    alternatives_label='inputs',
-                )
+            # A broadband request never reaches here: ``_run_single``
+            # sends a range-dependent band to
+            # ``_broadband_by_frequency_loop`` before any deck is written,
+            # because ``write_multi_profile_env`` carries one frequency.
+            assert not broadband, 'range-dependent band should have looped'
 
             c_low = self._c_low_for(env)
             write_multi_profile_env(
@@ -2298,7 +2468,7 @@ class Kraken(PropagationModel):
             if exc.timed_out:
                 self._attach_prt_tail(exc, fm.work_dir, base_name)
                 raise
-            # field.f90:228 writes 'Field completed successfully' before the
+            # field.f90:240 writes 'Field completed successfully' before the
             # teardown block whose deallocation can fail, so that line is what
             # separates a benign non-zero exit from a run that died mid-field.
             # Without this check an abort is downgraded to a warning and the
@@ -2337,7 +2507,7 @@ class Kraken(PropagationModel):
     def _field_reached_completion(self, work_dir) -> bool:
         """Whether field.exe got past its last field write.
 
-        ``field.f90:228`` writes ``'Field completed successfully'`` after
+        ``field.f90:240`` writes ``'Field completed successfully'`` after
         ``FreqLoop`` closes and before the clean-up block whose deallocation is
         the known benign failure, so the line is present for a teardown-only
         error and absent for a run that died while computing. Like
@@ -2520,50 +2690,57 @@ class Kraken(PropagationModel):
             # branches, so the complex pressure carries one phase reference.
             field.phase_reference = PhaseReference.TRAVELLING_WAVE
         else:
-            field = read_shd_file(shd_file)
-            # The line-source level (×√k0, see ``line_level``) is applied
-            # ONCE here, before the INCOHERENT/COHERENT split, because both
-            # branches below need it: COHERENT_TL keeps this payload as the
-            # complex pressure and INCOHERENT_TL takes ``.dB`` of it. It is a
-            # real, positive scalar, so it commutes with both the magnitude
-            # sum and the ``phase_corr`` rotation, and it is exactly 1 for a
-            # point/scaled source. Without it the narrowband line-source
-            # result sat 10·log10(k0) dB away from this engine's own
-            # broadband branch, from Scooter and from Bellhop — an offset
-            # that changes with frequency (and changes sign at
-            # k0 = 1, f = c(z_s)/2π), so it could not be read as a constant
-            # convention difference.
-            field.data = (line_level(np.atleast_1d(source.frequencies)[0])[0]
-                          * np.asarray(field.data))
-            if run_mode == RunMode.INCOHERENT_TL:
-                # Opt(4:4)='I' returns SQRT(SUM(z**2)) over the per-mode
-                # contributions with the range phase dropped
-                # (EvaluateMod.f90:43,66); AT parks that in the complex .shd
-                # slot, where its phase is an artefact. Store real dB TL so
-                # the result claims only what it has.
-                field.data = np.asarray(field.dB, dtype=float)
-                phase_reference = None
-            else:
-                # field.exe emits the modal sum with a prefactor that differs
-                # from Scooter's Hankel path by an overall -1 — times
-                # e^{+iπ/4} for a line source (see the broadband branch
-                # above). Apply ``phase_corr`` here too, upcast to
-                # complex128, and tag travelling_wave so the COHERENT_TL
-                # complex pressure carries the SAME phase convention and
-                # dtype as the broadband / return_pressure branches and as
-                # Scooter (|TL| is unchanged; this only fixes the complex
-                # phase).
-                field.data = phase_corr * np.asarray(
-                    field.data, dtype=np.complex128)
-                phase_reference = 'travelling_wave'
-            self._stamp_result(
-                field, source, backend='field',
-                frequencies=float(np.atleast_1d(source.frequencies)[0]),
-                phase_reference=phase_reference,
-            )
-            field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
-            field.metadata['n_profiles'] = n_profiles
-            field.metadata.update(bounds)
+            read = read_shd_file(shd_file)
+            # One slab per source depth of the deck — read_shd_file stacks an
+            # NSz > 1 .shd — each stamped with its own depth.
+            slabs = _slabs_of(read)
+            sources = ([source.at_depth(i) for i in range(len(slabs))]
+                       if len(slabs) > 1 else [source])
+            for field, slab_source in zip(slabs, sources):
+                # The line-source level (×√k0, see ``line_level``) is applied
+                # ONCE here, before the INCOHERENT/COHERENT split, because both
+                # branches below need it: COHERENT_TL keeps this payload as the
+                # complex pressure and INCOHERENT_TL takes ``.dB`` of it. It is a
+                # real, positive scalar, so it commutes with both the magnitude
+                # sum and the ``phase_corr`` rotation, and it is exactly 1 for a
+                # point/scaled source. Without it the narrowband line-source
+                # result sat 10·log10(k0) dB away from this engine's own
+                # broadband branch, from Scooter and from Bellhop — an offset
+                # that changes with frequency (and changes sign at
+                # k0 = 1, f = c(z_s)/2π), so it could not be read as a constant
+                # convention difference.
+                field.data = (line_level(np.atleast_1d(source.frequencies)[0])[0]
+                              * np.asarray(field.data))
+                if run_mode == RunMode.INCOHERENT_TL:
+                    # Opt(4:4)='I' returns SQRT(SUM(z**2)) over the per-mode
+                    # contributions with the range phase dropped
+                    # (EvaluateMod.f90:43,66); AT parks that in the complex .shd
+                    # slot, where its phase is an artefact. Store real dB TL so
+                    # the result claims only what it has.
+                    field.data = np.asarray(field.dB, dtype=float)
+                    phase_reference = None
+                else:
+                    # field.exe emits the modal sum with a prefactor that differs
+                    # from Scooter's Hankel path by an overall -1 — times
+                    # e^{+iπ/4} for a line source (see the broadband branch
+                    # above). Apply ``phase_corr`` here too, upcast to
+                    # complex128, and tag travelling_wave so the COHERENT_TL
+                    # complex pressure carries the SAME phase convention and
+                    # dtype as the broadband / return_pressure branches and as
+                    # Scooter (|TL| is unchanged; this only fixes the complex
+                    # phase).
+                    field.data = phase_corr * np.asarray(
+                        field.data, dtype=np.complex128)
+                    phase_reference = 'travelling_wave'
+                self._stamp_result(
+                    field, slab_source, backend='field',
+                    frequencies=float(np.atleast_1d(source.frequencies)[0]),
+                    phase_reference=phase_reference,
+                )
+                field.metadata['mode_coupling'] = self.mode_coupling if is_rd else 'none'
+                field.metadata['n_profiles'] = n_profiles
+                field.metadata.update(bounds)
+            field = read
         return field
 
     def _warn_krakenc_incoherent_sum(self, run_mode, kraken_exe,
@@ -2571,7 +2748,7 @@ class Kraken(PropagationModel):
         """Warn when field.exe's incoherent branch will square complex mode
         contributions without taking their magnitude first.
 
-        ``field.f90:202-203`` picks the evaluator by profile count. The
+        ``field.f90:214-215`` picks the evaluator by profile count. The
         single-profile one, ``EvaluateMod.f90:66``, computes
         ``SQRT(SUM(z**2))`` — no ``ABS`` — which equals the energy sum
         ``SQRT(SUM(|z|**2))`` only for real mode functions, so krakenc's
@@ -2628,25 +2805,19 @@ class Kraken(PropagationModel):
             and len(np.atleast_1d(frequencies)) > 1
         )
         freq_vec = np.asarray(frequencies, dtype=float) if broadband else None
-        if broadband and source.beam_pattern is not None:
-            # field.f90:191 allocates the beam-pattern work arrays inside
-            # FreqLoop under `SBPFlag == '*' .AND. iS == 1` but deallocates them
-            # only after the loop closes (:226), so the second frequency
-            # re-allocates an already-allocated array and gfortran terminates.
-            # The gate is the frequency count reaching field.exe, not the
-            # caller's run_mode: the multi-frequency path reaches here with the
-            # default COHERENT_TL. Dropping the pattern would silently change
-            # the source's directivity, so this raises.
-            raise UnsupportedFeatureError(
-                self.model_name,
-                f"a source beam pattern on a multi-frequency run "
-                f"({freq_vec.size} frequencies) — field.exe re-allocates its "
-                f"beam-pattern arrays once per frequency "
-                f"(KrakenField/field.f90:191) and aborts on the second one",
-                ["one frequency per call, which accepts the pattern",
-                 "Source(beam_pattern=None) for a multi-frequency run"],
-                alternatives_label='options',
-            )
+        if broadband and env.is_range_dependent:
+            # The multi-profile deck carries one frequency, but KRAKEN
+            # solves modes at one frequency whatever the environment, so the
+            # band is a loop of single-frequency runs rather than a refusal.
+            return self._broadband_by_frequency_loop(
+                env, source, receiver, freq_vec)
+        # A source beam pattern on a multi-frequency run used to be refused
+        # here: field.f90 allocated its beam-pattern work arrays inside
+        # FreqLoop while the matching DEALLOCATE sat after the loop, so the
+        # second frequency re-allocated an allocated array and gfortran
+        # terminated. uacpy's patch to that block reallocates per frequency
+        # (MSrc may change with it) — see third_party/MODIFICATIONS.md — so
+        # the combination now runs, and the pattern reaches every frequency.
         if broadband and freq_vec.size > _FIELD_MAX_NFREQ:
             raise ConfigurationError(
                 f"{self.model_name}: {freq_vec.size} frequencies exceed "
@@ -2740,7 +2911,8 @@ class Kraken(PropagationModel):
             # binary the dispatch picked (kraken / krakenc) moves the
             # eigenvalues, so it is recorded beside it, as ``compute_modes``
             # stamps it on ``backend``.
-            field.metadata['modes_backend'] = Path(kraken_exe).stem
+            for slab in _slabs_of(field):
+                slab.metadata['modes_backend'] = Path(kraken_exe).stem
 
             # Physical fastest compressional speed in the waveguide (water
             # column + sediment + half-space) on the complex-spectrum
@@ -2776,16 +2948,23 @@ class Kraken(PropagationModel):
             # After the guard above: the guard reads the whole TL grid, and a
             # single-range r=0 request would otherwise look like an empty
             # modal sum.
-            field = self._mask_source_axis(field, source)
+            if isinstance(field, ResultStack):
+                # One launch, one r = 0 notice — not one per slab.
+                field.slabs = [self._mask_source_axis(slab, source,
+                                                      warn=(i == 0))
+                               for i, slab in enumerate(field.slabs)]
+            else:
+                field = self._mask_source_axis(field, source)
 
-            self._attach_output_paths(
-                field, fm.work_dir, base_name,
-                primary_files=(
-                    ('shd_file', '.shd'),
-                    ('mod_file', '.mod'),
-                ),
-            )
-            self._attach_field_prt_path(field, fm)
+            for slab in _slabs_of(field):
+                self._attach_output_paths(
+                    slab, fm.work_dir, base_name,
+                    primary_files=(
+                        ('shd_file', '.shd'),
+                        ('mod_file', '.mod'),
+                    ),
+                )
+                self._attach_field_prt_path(slab, fm)
 
             self._log("Kraken simulation complete")
             return field

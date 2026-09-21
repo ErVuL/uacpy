@@ -180,9 +180,11 @@ ResultStack[Field](n_slabs=3, source_depth=[15.0, 50.0, 85.0])
 ResultStack[Field](n_slabs=2, source_depth=[20.0, 60.0])
 ```
 
-Bellhop writes every depth into one deck and its reader splits the slabs;
-every other engine reads one depth per deck, so `run()` runs it once per
-depth with the same environment, receiver and keywords. Either way each slab
+Bellhop writes every depth into one deck and its reader splits the slabs,
+and Kraken (TL modes) and Scooter (`COHERENT_TL`) do the same; every other engine reads one
+depth per deck, so `run()` runs it once per depth with the same
+environment, receiver and keywords, each in its own `source_depth_<z>m`
+subdirectory of a pinned `work_dir`. Either way each slab
 is the field of **one unit-amplitude source**, so the stack is what you sum
 to drive the sources together. `weights=` on the `Source` gives each one a
 complex amplitude (a scalar broadcasts; default all ones); the engines never

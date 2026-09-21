@@ -395,7 +395,7 @@ def test_rough_surface_is_dropped_for_solvers_that_reject_it():
 
 
 _EXPECTED_MULTI_SOURCE_DEPTH = {
-    'Bellhop': True, 'Kraken': False, 'Scooter': False, 'SPARC': False,
+    'Bellhop': True, 'Kraken': True, 'Scooter': True, 'SPARC': False,
     'Bounce': False, 'OAST': False, 'OASN': False, 'OASR': False,
     'OASP': False, 'RAM': False,
 }
@@ -403,14 +403,18 @@ _EXPECTED_MULTI_SOURCE_DEPTH = {
 
 @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
 def test_multi_source_depth_capability_matrix(model_name):
-    """Bellhop is the only model that runs a source-depth *grid* in one
-    binary call (``ModelSpec.supports`` carries ``'multi_source_depth'``).
-    Every other model reads one depth per deck: in a field mode
-    ``PropagationModel.run`` loops over the depths and stacks the slabs, and
-    in any other mode ``_validate_geometry`` refuses a multi-depth Source
-    with 'single source depth' (pinned in test_input_validation.py). Bounce
-    also reads ``False``, but its geometry validation is a no-op so nothing
-    enforces it.
+    """``ModelSpec.supports`` carries ``'multi_source_depth'`` for the two
+    models that run a source-depth *grid* in one binary call: Bellhop (in
+    every mode it stacks), Kraken (in its two TL modes) and Scooter (in
+    ``COHERENT_TL``). Which modes
+    those are is ``_NATIVE_MULTI_DEPTH_MODES``; this flag is the whole-model
+    statement the capability matrix in docs/models/README.md prints. Every
+    other model reads ``False``: in a field mode ``PropagationModel.run``
+    loops over the depths and stacks the slabs, and in any other mode
+    ``_validate_geometry`` refuses a multi-depth Source with 'single source
+    depth' (pinned in test_input_validation.py). Bounce also reads
+    ``False``, but its geometry validation is a no-op so nothing enforces
+    it.
     """
     try:
         m = _EXPECTED[model_name][0]()

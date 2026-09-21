@@ -280,6 +280,96 @@ class Modes(Result):
             f"Receiver depths) before reading Im(k).",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
+    def excitation(self, source, *, sound_speed=None) -> np.ndarray:
+        """Complex modal excitation of a ``Source``: ``Σₙ wₙ·φₘ(zₙ)``.
+
+        What a source array actually does in a waveguide. Each element
+        drives every mode in proportion to the mode's shape at that
+        element's depth, and the array's weights set the sum — so choosing
+        the weights chooses the modal content. That is the *mode filter* of
+        Medwin & Clay §11.3.1 ("Arrays of sources and receivers in a
+        waveguide: mode filters"), and the reason JKPS poses the vertical
+        array as a "modal, rather than plane-wave beamformer": drive the
+        elements with a mode's own shape and that mode dominates.
+
+        This is exact in the channel, unlike the free-field
+        :meth:`~uacpy.Source.array_factor`, which describes the same array
+        as an angular pattern. The two agree only while that pattern is
+        symmetric in ±θ — a trapped mode is a standing wave, equal up- and
+        down-going halves, so a steered array is not a scaling of any single
+        source. Mode shapes are interpolated onto the source depths from
+        this result's tabulation.
+
+        Parameters
+        ----------
+        source : Source
+            Its ``depths`` and complex ``weights``. A single-depth source
+            gives that depth's mode shapes scaled by its one weight.
+
+        A directional element shades this too. ``field.f90`` multiplies the
+        modal excitation by ``S(θₘ)`` before summing (``C = C * REAL(S)``),
+        and every element of a uacpy ``Source`` shares one ``beam_pattern``
+        and one mode angle, so ``S`` factors straight out of the array sum —
+        the product theorem again, in the modal domain. Pass
+        ``sound_speed`` to evaluate the mode angles it is read at; a source
+        that carries a pattern and is given no speed raises rather than
+        silently returning the omnidirectional answer.
+
+        Parameters
+        ----------
+        sound_speed : float, optional
+            Reference speed (m/s) for the mode grazing angles
+            ``θₘ = arccos(c / vₚ,ₘ)`` the element pattern is sampled at.
+            Required when ``source.beam_pattern`` is set, unused otherwise.
+
+        Returns
+        -------
+        ndarray, shape ``(n_modes,)``, complex
+            One amplitude per mode, in the mode shapes' own normalisation.
+        """
+        depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+        weights = np.atleast_1d(np.asarray(source.weights,
+                                           dtype=np.complex128))
+        lo, hi = float(self.depths.min()), float(self.depths.max())
+        outside = depths[(depths < lo) | (depths > hi)]
+        if outside.size:
+            raise ConfigurationError(
+                f"Modes.excitation: source depth(s) "
+                f"{np.array2string(outside, precision=2)} m lie outside the "
+                f"tabulated mode depths ({lo:g}-{hi:g} m), so their mode "
+                f"shapes would be extrapolated.",
+                remediation="Compute the modes on a grid spanning the "
+                            "source depths (Kraken.compute_modes uses a "
+                            "dense grid over the whole waveguide).",
+            )
+        phi = np.asarray(self.phi)
+        # Interpolate each mode onto the source depths; complex shapes
+        # (krakenc) interpolate in real and imaginary parts.
+        at_source = np.empty((depths.size, phi.shape[1]),
+                             dtype=np.complex128)
+        for m in range(phi.shape[1]):
+            column = phi[:, m]
+            at_source[:, m] = np.interp(depths, self.depths, column.real)
+            if np.iscomplexobj(column):
+                at_source[:, m] += 1j * np.interp(depths, self.depths,
+                                                  column.imag)
+        excited = weights @ at_source
+        if getattr(source, 'beam_pattern', None) is None:
+            return excited
+        if sound_speed is None:
+            raise ConfigurationError(
+                "Modes.excitation: this Source carries a beam_pattern, "
+                "which the engine applies to the modal excitation at each "
+                "mode's grazing angle — so the answer depends on the speed "
+                "those angles are measured against. Pass sound_speed= (the "
+                "speed at the source depth), or drop the pattern."
+            )
+        speeds = np.asarray(self.compute_phase_speeds(), dtype=float)
+        with np.errstate(invalid='ignore'):
+            angles = np.degrees(np.arccos(
+                np.clip(float(sound_speed) / speeds, -1.0, 1.0)))
+        return excited * source.element_directivity(angles)
+
     def _on_depths(self, values, name: str) -> np.ndarray:
         """``values`` as one entry per tabulated depth: a scalar is spread
         over the tabulation, an array must already match it."""

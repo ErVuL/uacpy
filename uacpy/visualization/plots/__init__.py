@@ -30,6 +30,7 @@ from uacpy.visualization.plots.rays_modes import (
     plot_wavenumber_sampling,
     plot_modes_heatmap, _plot_reflection_coefficient, _plot_covariance,
     plot_beam_pattern,
+    plot_mode_excitation,
     _plot_replicas,
 )
 from uacpy.visualization.plots.environment import (
@@ -124,6 +125,7 @@ __all__ = [
     'plot_dispersion',
     'plot_modes_heatmap',
     'plot_beam_pattern',
+    'plot_mode_excitation',
     'plot_fk',
     'plot_radon',
     'plot_taup',

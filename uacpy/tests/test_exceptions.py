@@ -181,12 +181,13 @@ class TestValidationHelpers:
         from uacpy.models.base import ModelSpec, RunMode
 
         # ``spec`` and ``source`` are required of any subclass that defines
-        # run(); this double spawns no binary, and 'acoustics_toolbox' is
+        # _run_single(); this double spawns no binary, and 'acoustics_toolbox' is
         # unrestricted so it emits no licence warning.
         Model = type('M', (PropagationModel,), {
             'spec': ModelSpec(modes=(RunMode.COHERENT_TL,)),
             'source': 'acoustics_toolbox',
-            'run': lambda self, env, source, receiver, run_mode=None: None,
+            '_run_single': lambda self, env, source, receiver,
+            run_mode=None: None,
         })
         m = Model()
         source_deep = uacpy.Source(depths=150, frequencies=100)
@@ -204,12 +205,13 @@ class TestValidationHelpers:
         from uacpy.models.base import ModelSpec, RunMode
 
         # ``spec`` and ``source`` are required of any subclass that defines
-        # run(); this double spawns no binary, and 'acoustics_toolbox' is
+        # _run_single(); this double spawns no binary, and 'acoustics_toolbox' is
         # unrestricted so it emits no licence warning.
         Model = type('M', (PropagationModel,), {
             'spec': ModelSpec(modes=(RunMode.COHERENT_TL,)),
             'source': 'acoustics_toolbox',
-            'run': lambda self, env, source, receiver, run_mode=None: None,
+            '_run_single': lambda self, env, source, receiver,
+            run_mode=None: None,
         })
         m = Model()
         source = uacpy.Source(depths=50, frequencies=100)
@@ -629,13 +631,13 @@ def _bare_model():
 
     class _Bare(PropagationModel):
         # ``spec`` and ``source`` are required of any subclass that defines
-        # run(); this double spawns no binary, so the source id only has to
+        # _run_single(); this double spawns no binary, so the source id only has to
         # be a real one — 'acoustics_toolbox' is unrestricted, so nothing
         # here emits a licence warning.
         spec = ModelSpec(modes=(RunMode.COHERENT_TL,))
         source = 'acoustics_toolbox'
 
-        def run(self, env, source, receiver, run_mode=None):
+        def _run_single(self, env, source, receiver, run_mode=None):
             return self._project_environment(env)
 
     return _Bare()

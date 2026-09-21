@@ -500,7 +500,7 @@ class SPARC(PropagationModel):
             ),
         )
 
-    def run(
+    def _run_single(
         self,
         env: Environment,
         source: Source,

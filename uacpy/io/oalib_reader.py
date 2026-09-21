@@ -231,7 +231,7 @@ def _read_shd_pressure_rows(fid, filename, first_record, n_rows, recl,
     the record length (``misc/RWSHDFile.f90:100``).
 
     Both writers step ``IRec`` by one per record with no skip and no reorder
-    (``KrakenField/field.f90:215``, ``Bellhop/bellhop.f90:323-326``), so the
+    (``KrakenField/field.f90:227``, ``Bellhop/bellhop.f90:323-326``), so the
     run is gap-free and one strided read replaces one seek per row. That read
     also moves the padding a per-row seek skips, so it is taken only while the
     extra bytes stay under :data:`_SHD_STRIDE_PADDING_BUDGET_BYTES`.
