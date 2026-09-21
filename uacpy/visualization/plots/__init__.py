@@ -30,11 +30,12 @@ from uacpy.visualization.plots.rays_modes import (
     plot_wavenumber_sampling,
     plot_modes_heatmap, _plot_reflection_coefficient, _plot_covariance,
     plot_beam_pattern,
+    plot_beam_power,
     plot_mode_excitation,
     _plot_replicas,
 )
 from uacpy.visualization.plots.environment import (
-    plot_bottom_properties, plot_absorption,
+    plot_bottom_properties, plot_bottom_loss, plot_absorption,
 )
 from uacpy.visualization.plots.maps import (
     plot_bathymetry_map, plot_overview, plot_sea_ice_map,
@@ -114,6 +115,7 @@ __all__ = [
     'plot_field_statistics',
     'shared_colorbar',
     'plot_bottom_properties',
+    'plot_bottom_loss',
     'plot_absorption',
     'plot_bathymetry_map',
     'plot_overview',
@@ -125,6 +127,7 @@ __all__ = [
     'plot_dispersion',
     'plot_modes_heatmap',
     'plot_beam_pattern',
+    'plot_beam_power',
     'plot_mode_excitation',
     'plot_fk',
     'plot_radon',

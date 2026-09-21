@@ -7,6 +7,7 @@ bound a scan — ``plane_wave_array_gain``, ``matched_replica_gain`` and
 ``independent_beams``.
 """
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
@@ -603,6 +604,89 @@ class TestBeamformFieldGoesBroadband:
         out = beamform_field(H[:, 0], pos, ang, FREQ, c=C)
         assert out.response.shape == (ang.size,)
         assert out.frequencies is None
+
+
+class TestBeamformedFieldDrawsItsBeam:
+    """The receive dual of ``plot_beam_pattern``.
+
+    That plotter is a TRANSMIT one: it labels the axis 'Launch angle' and
+    warns that a table not spanning +/-90 deg leaves a launch fan
+    undefined. Feeding a receive beam to it mislabels the picture and
+    raises an irrelevant warning, so the beam power gets its own.
+    """
+
+    @staticmethod
+    def _beams(n_r=0):
+        """One planted arrival, or a grid whose columns differ.
+
+        A grid built by repeating one column cannot tell at=3 from at=0, so
+        each column here is a plane wave from its OWN direction and the
+        peak names the column.
+        """
+        pos = _array()
+        ang = np.linspace(-45.0, 45.0, 181)
+        k = 2.0 * np.pi * FREQ / C
+        if n_r == 0:
+            p = np.exp(-1j * k * pos * np.sin(np.deg2rad(12.0)))
+        else:
+            bearings = np.linspace(-30.0, 30.0, n_r)
+            p = np.exp(-1j * k * np.outer(pos, np.sin(np.deg2rad(bearings))))
+        return beamform_field(p, pos, ang, FREQ, c=C,
+                              weights=shading_taper(16, 'hann'))
+
+    def test_it_draws_one_curve_against_the_look_angle(self):
+        fig, ax = self._beams().plot()
+        assert len(ax.get_lines()) == 1
+        x, y = ax.get_lines()[0].get_data()
+        np.testing.assert_allclose(x, self._beams().angles)
+        assert y.max() == pytest.approx(0.0)          # dB re max
+        assert 'angle' in ax.get_xlabel().lower()
+        assert 'launch' not in ax.get_xlabel().lower()
+        plt.close(fig)
+
+    def test_the_peak_sits_at_the_planted_direction(self):
+        fig, ax = self._beams().plot()
+        x, y = ax.get_lines()[0].get_data()
+        assert x[np.argmax(y)] == pytest.approx(12.0, abs=0.6)
+        plt.close(fig)
+
+    def test_normalise_false_keeps_the_absolute_level(self):
+        beams = self._beams()
+        fig, ax = beams.plot(normalise=False)
+        _, y = ax.get_lines()[0].get_data()
+        np.testing.assert_allclose(y, 10.0 * np.log10(beams.power))
+        plt.close(fig)
+
+    def test_a_grid_needs_a_point_selected(self):
+        with pytest.raises(ConfigurationError, match='at='):
+            self._beams(n_r=7).plot()
+
+    def test_at_selects_one_point_of_the_grid(self):
+        """Each column is a plane wave from its own bearing, so the peak
+        of the drawn curve says which column was taken."""
+        bearings = np.linspace(-30.0, 30.0, 7)
+        beams = self._beams(n_r=7)
+        for idx in (0, 3, 6):
+            fig, ax = beams.plot(at=idx)
+            assert len(ax.get_lines()) == 1
+            x, y = ax.get_lines()[0].get_data()
+            assert x[np.argmax(y)] == pytest.approx(bearings[idx], abs=0.6)
+            plt.close(fig)
+
+    def test_it_overlays_on_a_shared_axes(self):
+        fig, ax = plt.subplots()
+        self._beams().plot(ax=ax, label='one')
+        self._beams().plot(ax=ax, label='two')
+        assert len(ax.get_lines()) == 2
+        plt.close(fig)
+
+    def test_a_broadband_beam_needs_its_bin_chosen(self):
+        pos = _array()
+        freqs = np.linspace(180.0, 220.0, 5)
+        H = np.ones((16, freqs.size), dtype=complex)
+        beams = beamform_field(H, pos, np.linspace(-45, 45, 91), freqs, c=C)
+        with pytest.raises(ConfigurationError, match='at='):
+            beams.plot()
 
 
 class TestBeamformedFieldSynthesisesAReception:

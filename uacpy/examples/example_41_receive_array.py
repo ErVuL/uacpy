@@ -68,10 +68,9 @@ fig, axes = plt.subplots(1, 3, figsize=(16, 4.4))
 
 # ── 1. what the array hears, against what the waveguide can send ────────
 ax = axes[0]
-# beamform_field does |w^H p|^2 over the scan; normalise to dB re max.
-pw = beamform_field(p[:, 0], elements, angles, FREQ, c=C_REF,
-                    weights=shading_taper(n_el, 'boxcar')).power
-beam = 10.0 * np.log10(pw / pw.max())
+scan = beamform_field(p[:, 0], elements, angles, FREQ, c=C_REF,
+                      weights=shading_taper(n_el, 'boxcar'))
+beam = 10.0 * np.log10(scan.power / scan.power.max())   # for the arithmetic
 theta_max = float(mode_angles.max())
 # The honest claim. This array's beamwidth (~2.5 deg over an 86 m aperture)
 # is wider than the 2 deg between neighbouring modes, so it CANNOT resolve
@@ -84,7 +83,7 @@ ax.axvspan(-theta_max, theta_max, color='C3', alpha=0.10,
            label=f'trapped-mode fan (±{theta_max:.1f}°)')
 for s_ in (+1, -1):
     ax.axvline(s_ * theta_max, color='C3', alpha=0.7, lw=1.1)
-ax.plot(angles, beam, 'C0-', lw=1.3, label='conventional (unshaded)')
+scan.plot(ax=ax, color='C0', lw=1.3, label='conventional (unshaded)')
 ax.set(xlabel='Angle from horizontal (deg)', ylabel='Beam power (dB re max)',
        ylim=(-35, 2), title='Arrivals live inside the trapped-mode fan')
 ax.legend(fontsize=8, loc='lower right')
@@ -93,15 +92,15 @@ ax.grid(alpha=0.3)
 # ── 2. shading: beamwidth against sidelobes ─────────────────────────────
 ax = axes[1]
 for name, style in (('boxcar', 'C0-'), ('hann', 'C1-'), ('hamming', 'C2--')):
-    bp = beamform_field(p[:, 0], elements, angles, FREQ, c=C_REF,
-                        weights=shading_taper(n_el, name)).power
-    b = 10.0 * np.log10(bp / bp.max())
+    shaded = beamform_field(p[:, 0], elements, angles, FREQ, c=C_REF,
+                            weights=shading_taper(n_el, name))
+    b = 10.0 * np.log10(shaded.power / shaded.power.max())
     # The highest sidelobe is the largest local maximum OUTSIDE the fan the
     # arrivals occupy - taking the maximum of the whole curve just returns
     # the main lobe at 0 dB.
     out = np.abs(angles) > theta_max + 2.0
-    ax.plot(angles, b, style, lw=1.2,
-            label=f"{name} (worst sidelobe {b[out].max():.0f} dB)")
+    shaded.plot(ax=ax, color=style[:2], ls=style[2:] or '-', lw=1.2,
+                label=f"{name} (worst sidelobe {b[out].max():.0f} dB)")
 ax.set(xlabel='Angle from horizontal (deg)', ylabel='Beam power (dB re max)',
        ylim=(-45, 2), title='Shading buys sidelobes with beamwidth')
 ax.legend(fontsize=8, loc='lower right')
@@ -114,11 +113,11 @@ ax.grid(alpha=0.3)
 ax = axes[2]
 coarse = elements[::2]
 p_coarse = p[::2]
-pc = beamform_field(p_coarse[:, 0], coarse, angles, FREQ, c=C_REF,
-                    weights=shading_taper(len(coarse), 'boxcar')).power
-ax.plot(angles, beam, 'C0-', lw=1.3, label=f'{HALF:.2f} m spacing (λ/2)')
-ax.plot(angles, 10.0 * np.log10(pc / pc.max()), 'C3-', lw=1.3,
-        alpha=0.85, label=f'{2 * HALF:.2f} m spacing (λ) — aliased')
+aliased = beamform_field(p_coarse[:, 0], coarse, angles, FREQ, c=C_REF,
+                         weights=shading_taper(len(coarse), 'boxcar'))
+scan.plot(ax=ax, color='C0', lw=1.3, label=f'{HALF:.2f} m spacing (λ/2)')
+aliased.plot(ax=ax, color='C3', lw=1.3, alpha=0.85,
+             label=f'{2 * HALF:.2f} m spacing (λ) — aliased')
 ax.set(xlabel='Angle from horizontal (deg)', ylabel='Beam power (dB re max)',
        ylim=(-35, 2), title='Above λ/2 a grating lobe folds in')
 ax.legend(fontsize=8, loc='lower right')

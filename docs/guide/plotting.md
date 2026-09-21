@@ -1,6 +1,6 @@
 # Plotting — one convention, one workhorse
 
-> `uacpy.plot` · 61 public plotters · every result and every drawable carrier
+> `uacpy.plot` · 63 public plotters · every result and every drawable carrier
 > renders itself with `.plot()`
 
 There are two halves to the plotting surface. Anything that is a uacpy object
@@ -512,7 +512,7 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 61 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
+All 63 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
 draw land with — the 8 remaining names in `__all__` are the submodules
 themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
@@ -566,6 +566,7 @@ drawn where the backend filled it — `krakenc` does, `kraken` prints zeros
 | `plot_result_stack(stack, env=None, ncols=None)` | ✓ | one TL panel per slab. A grid stacked over `source_depth` marks **each panel's own source**, since that is what one panel shows; pass `source=` to override |
 | `plot_mode_excitation(modes, source, ax=None, sound_speed=1500.0, show_array_factor=True, floor_dB=-40.0)` | ✓ | what a source array drives, both ways on one angle axis: a stem per mode at its grazing angle, height `|Σₙ wₙ·φₘ(zₙ)|` (the waveguide's answer — Medwin & Clay §11.3.1, *mode filters*), over the free-field pattern of the same array — its **array beam pattern** `P(θ)=f(θ)·A(θ)` when the elements are directional, the bare array factor `A(θ)` when not (Butler & Sherman §7.1.1). They agree while the pattern is symmetric in ±θ and part company once steering breaks it, which is why both are drawn |
 | `plot_beam_pattern(pattern=None, ax=None, polar=True, mirror=False, fill=True, rmin=None)` | ✓ | the `.sbp` directivity table, on polar axes oriented like the field: 0° along increasing range, positive angles downward. `source.plot_beam_pattern()` is the object form; `None` draws the flat 0 dB circle Bellhop substitutes for an omni source |
+| `plot_beam_power(beams, ax=None, at=None, normalise=True)` | ✓ | a scanned beam's power against **look** angle, from the `BeamformedField` that `beamform_field` returns; `beams.plot()` is the object form. The receive dual of `plot_beam_pattern` — that one is a *launch* fan and labels itself so. `at=` picks the point when the beamformer ran over a grid, or the bin when it ran over a band |
 
 The polar orientation is not cosmetic. The `.sbp` angle axis *is* Bellhop's
 launch declination `alpha` — `Bellhop._check_beam_pattern_spans_the_fan`
@@ -601,6 +602,7 @@ against an omni one.
 | Plotter | ax | Draws |
 |---|---|---|
 | `plot_bottom_properties(env, properties=None, n_range=240, n_depth=200)` | — | small-multiples seabed cross-sections, one panel per property → [environment](environment.md) |
+| `plot_bottom_loss(materials, ax=None, water_speed=1500.0, mark_critical=False)` | ✓ | plane-wave bottom loss vs grazing angle, one curve per seabed — a preset name, a property dict, a sequence, or a `{label: material}` mapping. Draws what `core.acoustics.bottom_loss_curve` computes; `mark_critical=True` rules each **faster-than-water** seabed's critical angle (a slower one has none) |
 | `plot_absorption(frequencies, absorption=None, ax=None, model=None, label=None)` | ✓ | α(f) in dB/km, log-log; `absorption.plot(frequencies)` is the object form |
 
 ### Maps

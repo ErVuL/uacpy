@@ -1640,8 +1640,10 @@ in a `from … import` statement use the real modules
 | `bathymetry.plot()` / `altimetry.plot()` | seafloor depth / sea-surface height vs range — the shape carriers |
 | `absorption.plot(frequencies)` / `plot_absorption(frequencies, …)` | volume absorption `α(f)` (dB/km, log-log); the free function also takes a precomputed `absorption=` array and a `model=` name for the credit line |
 | `plot_bottom_properties(env)` | seabed `c` / `ρ` / `α` vs depth, per layer stack |
+| `plot_bottom_loss(materials, water_speed=…)` | plane-wave bottom loss vs grazing angle, one curve per seabed. Takes a preset name, a property dict (`sound_speed` / `density` / `attenuation`), a sequence of either, or a `{label: material}` mapping, so a fetched seabed and the canonical presets share one axes and one `water_speed` — the critical angle is the ratio of the two speeds, so curves drawn against different water are not comparable. `mark_critical=True` rules each critical angle, skipping any seabed slower than the water, which has an angle of intromission instead |
 | `plot_mode_excitation(modes, source)` | what a source array drives, both descriptions on one angle axis: a stem per mode at its grazing angle, height `|Σₙ wₙ·φₘ(zₙ)|` — the modal excitation, which is what sets the field in a waveguide — over the same array's free-field pattern: `Source.array_beam_pattern` gives `P(θ)=f(θ)·A(θ)`, the product theorem's element pattern times `Source.array_factor`'s point-source factor (Butler & Sherman §7.1.1). The two agree while the pattern is symmetric in ±θ and diverge once steering breaks that, so both are drawn |
 | `source.plot_beam_pattern()` / `plot_beam_pattern(pattern)` | source directivity from a `.sbp` table or an `(N, 2)` array; polar by default, oriented like the field (0° = increasing range, +angle downward) and spanning the propagating half-plane. `polar=False` gives level-vs-angle, `mirror=True` reflects a half-defined table |
+| `beams.plot()` / `plot_beam_power(beams)` | a scanned beam's power against **look** angle, from the `BeamformedField` `beamform_field` returns. The receive dual of `plot_beam_pattern`, which is a *launch* fan and labels its axis so; `at=` selects the grid point or frequency bin, `normalise=False` keeps the absolute level |
 | `plot_mode_wavenumbers(modes)` / `plot_modes_heatmap(modes)` | Re and Im of the modal wavenumbers against mode index (twin axes) · mode shapes as a heatmap |
 | `plot_mode_speeds(modes, c_bottom=…)` / `plot_dispersion(modes_by_frequency)` | phase speed per mode index, with the group speed where the backend filled it and the seabed speed marking the trapped count · the same two speeds against frequency, over a **sequence** of `Modes` (one per frequency), which it sorts by each result's own `f0` |
 | `plot_greens_function(grn, modes=…)` / `plot_wavenumber_sampling(f, c_low, c_high, delta_k, r_max=…)` | `|G(k_r, z)|` from a Scooter `.grn`, with Kraken's eigenvalues marked on it · the wavenumber axis that transform is sampled on — the phase-speed window against the water and seabed `ω/c`, and whether the receivers fit inside the alias period `2π/Δk` |
@@ -2167,7 +2169,7 @@ have their own measurements —
 
 ## 17. Examples Index
 
-All 42 runnable scripts live in `uacpy/examples/`. Run them **by script
+All 44 runnable scripts live in `uacpy/examples/`. Run them **by script
 path** from the repo root — `python uacpy/examples/example_01_basic_shallow_water.py`
 — the form `run_all_examples.py` and the test suite use. The module form
 (`python -m uacpy.examples.example_01_…`) also works, from a source checkout;
@@ -2220,6 +2222,8 @@ uacpy calls it demonstrates are named in its own docstring.
 | 40 | A vertical source array — slabs · coherent vs incoherent total · received level · array beam pattern vs mode filter |
 | 41 | Beamforming a modelled field on a vertical receive array — the trapped-mode fan · shading · the λ/2 spacing limit |
 | 42 | Propagation → array processing → detection, end to end — the sonar equation with a measured array gain, and the geometry on every panel |
+| 43 | Which end of the path carries the sources — reciprocity on a range-dependent section, the cost of the mirror geometry against the solver's own residual, and `Source(beam_pattern=)` as per-element receive directivity |
+| 44 | Two propagation models through one detection chain — a symmetric comparison protocol with its own measured noise floor, maps that agree where headline ranges do not, and the beam's broadband reception |
 
 ## 18. Parameter Reference
 

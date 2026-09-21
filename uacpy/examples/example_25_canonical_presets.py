@@ -5,11 +5,13 @@ factory — isovelocity, Munk, and one derived from T(z), S(z) through Mackenzie
 — and the plane-wave bottom loss of the sediment and rock presets.
 
 Granite is left out of the loss panel: its 5750 m/s would sit on top of
-basalt's 5250 m/s. bottom_loss_curve ignores each preset's shear speed by
-construction.
+basalt's 5250 m/s. plot_bottom_loss ignores each preset's shear speed by
+construction, and rules each critical angle — clay gets none, being slower
+than the water it is bounced against, so it has an angle of intromission
+instead.
 
 Uses: SoundSpeedProfile.from_isovelocity / from_munk / from_mackenzie ·
-ssp.plot(ax=, label=, color=) · core.acoustics.bottom_loss_curve
+ssp.plot(ax=, label=, color=) · visualization.plot_bottom_loss
 """
 
 import os
@@ -20,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.core.acoustics import bottom_loss_curve
+from uacpy.visualization import plot_bottom_loss
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -42,15 +44,9 @@ uacpy.SoundSpeedProfile.from_mackenzie(depths, temperature, salinity).plot(
     ax=axes[0], label='Mackenzie T,S', color='C2')
 axes[0].set_title('Canonical SSP shapes')
 
-for preset in ('clay', 'silt', 'sand', 'gravel', 'moraine',
-               'chalk', 'limestone', 'basalt'):
-    angles, loss_dB = bottom_loss_curve(preset)
-    axes[1].plot(angles, loss_dB, label=preset, lw=1.5)
-axes[1].set_xlabel('Grazing angle (°)')
-axes[1].set_ylabel('Bottom loss (dB)')
-axes[1].set_title('Plane-wave bottom loss')
-axes[1].legend(loc='upper right', fontsize='small')
-axes[1].grid(True, alpha=0.3)
+plot_bottom_loss(['clay', 'silt', 'sand', 'gravel', 'moraine',
+                  'chalk', 'limestone', 'basalt'],
+                 ax=axes[1], mark_critical=True, lw=1.5)
 
 fig.tight_layout()
 fig.savefig(OUT / 'example_25_canonical_presets.png', dpi=120)

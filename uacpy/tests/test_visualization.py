@@ -972,6 +972,88 @@ class TestPlotReflectionCoefficient:
         plt.close(fig)
 
 
+class TestReflectionPanelDrawsDecibelLoss:
+    """``quantity='loss'`` draws ``-20 log10 |R|``, the form a reflection is
+    read in against grazing angle. The default stays the linear magnitude.
+    """
+
+    @staticmethod
+    def _narrowband(reflection_type=None):
+        metadata = ({} if reflection_type is None
+                    else {'reflection_type': reflection_type})
+        # |R| = 1 at grazing, 0.1 at normal: 0 dB of loss rising to 20 dB
+        return ReflectionCoefficient(
+            theta=np.linspace(0, 90, 91),
+            R=np.linspace(1.0, 0.1, 91),
+            phi=np.zeros(91), model='Bounce', metadata=metadata,
+        )
+
+    def test_the_curve_is_the_decibel_loss_of_the_magnitude(self):
+        rc = self._narrowband()
+        fig, ax = rc.plot(quantity='loss')
+        try:
+            y = ax.lines[0].get_ydata()
+            assert y[0] == pytest.approx(0.0, abs=1e-9)
+            assert y[-1] == pytest.approx(20.0, abs=1e-9)
+            assert 'dB' in ax.get_ylabel()
+            assert 'Reflection loss' in ax.get_title()
+        finally:
+            plt.close(fig)
+
+    def test_the_default_is_the_linear_magnitude(self):
+        rc = self._narrowband()
+        fig, ax = rc.plot()
+        try:
+            y = ax.lines[0].get_ydata()
+            assert y[0] == pytest.approx(1.0)
+            assert y[-1] == pytest.approx(0.1)
+            assert 'dB' not in ax.get_ylabel()
+        finally:
+            plt.close(fig)
+
+    def test_a_null_reflection_is_floored_not_infinite(self):
+        rc = ReflectionCoefficient(
+            theta=np.linspace(0, 90, 3), R=np.array([1.0, 0.0, 1.0]),
+            phi=np.zeros(3), model='Bounce',
+        )
+        fig, ax = rc.plot(quantity='loss')
+        try:
+            y = ax.lines[0].get_ydata()
+            assert np.all(np.isfinite(y))
+            assert y[1] == pytest.approx(120.0)
+        finally:
+            plt.close(fig)
+
+    def test_a_transmission_run_is_named_transmission_loss(self):
+        rc = self._narrowband('transmission')
+        fig, ax = rc.plot(quantity='loss')
+        try:
+            assert 'Transmission loss' in ax.get_title()
+            assert 'Reflection' not in ax.get_title()
+        finally:
+            plt.close(fig)
+
+    def test_the_broadband_map_and_its_bar_follow(self):
+        theta = np.linspace(0, 90, 31)
+        R = np.tile(np.linspace(1.0, 0.1, 31)[:, None], (1, 10))
+        rc = ReflectionCoefficient(
+            theta=theta, R=R, phi=np.zeros_like(R),
+            frequencies=np.linspace(50, 500, 10), model='Bounce',
+        )
+        fig, ax = rc.plot(quantity='loss')
+        try:
+            assert 'Reflection loss' in ax.get_title()
+            bars = ''.join(cb.ax.get_ylabel() for cb in _colorbars(fig))
+            assert 'dB' in bars
+        finally:
+            plt.close(fig)
+
+    def test_an_unknown_quantity_is_refused(self):
+        rc = self._narrowband()
+        with pytest.raises(ConfigurationError, match='quantity'):
+            rc.plot(quantity='decibels')
+
+
 class TestReflectionCoefficientPanelNamesItsQuantity:
     """OASR returns a TRANSMISSION coefficient under
     ``reflection_type='transmission'`` — a different quantity from a

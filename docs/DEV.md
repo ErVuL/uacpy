@@ -571,7 +571,8 @@ plotting lives in `uacpy.visualization`** (`plot_psd`, `plot_fk`, …) — the
   per-type renderers (`_plot_rays`, `_plot_arrivals`, `_plot_mode_functions`,
   `_plot_environment`, `_plot_ssp`, …). Public free functions remain for the
   grid/flexible renderers (`plot_field`, `plot_absorption`), alternate views
-  (`plot_bottom_properties`, `plot_mode_wavenumbers`, `plot_modes_heatmap`),
+  (`plot_bottom_properties`, `plot_bottom_loss`, `plot_mode_wavenumbers`,
+  `plot_modes_heatmap`, `plot_beam_power`),
   composition (`compare`, `compare_models`, `plot_overview`, maps), and the
   raw-array DSP/comms plotters.
 - `visualization/style.py` — colour palette: field colormaps, sediment

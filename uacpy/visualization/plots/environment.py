@@ -11,6 +11,7 @@ from matplotlib.ticker import MaxNLocator
 from typing import Optional, Tuple
 
 from uacpy.core.absorption import francois_garrison_dB_per_km, thorp_dB_per_km
+from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.environment import Environment
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.visualization.style import (
@@ -753,6 +754,101 @@ def _seabed_property_grid(bottom, prop, r_km, z, seafloor_r):
         grid[below, j] = _layered_property_at_depths(
             col, prop, seafloor_r[j], z[below])
     return grid
+
+
+@typed_plot_error
+def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
+                     water_speed: float = DEFAULT_SOUND_SPEED,
+                     water_density: Optional[float] = None,
+                     mark_critical: bool = False,
+                     title: Optional[str] = None,
+                     figsize: Tuple[float, float] = (8, 5), **mpl_kw):
+    """Plane-wave bottom loss against grazing angle, one curve per seabed.
+
+    Draws what :func:`uacpy.core.acoustics.bottom_loss_curve` computes.
+    ``materials`` is anything that function accepts — a preset name
+    (``'sand'``), a property dict (``sound_speed``, ``density``,
+    ``attenuation``) — or a sequence of them, or a ``{label: material}``
+    mapping when the labels should not be the preset names. A fetched
+    seabed and the canonical presets therefore go on one axes, computed by
+    one function against one ``water_speed``, which is the only way the
+    comparison means anything: the critical angle is the ratio of the two
+    speeds, so curves drawn against different water are not comparable.
+
+    ``mark_critical=True`` adds each **faster-than-water** seabed's critical
+    angle as a dotted rule in that curve's own colour. A seabed slower than
+    the water has no critical angle — it has an angle of intromission, where
+    the impedances match and the loss spikes — and is skipped rather than
+    marked with an angle it does not have.
+
+    Returns ``(fig, ax)``.
+    """
+    from uacpy.core.acoustics import bottom_loss_curve
+    from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+
+    if water_density is None:
+        water_density = DEFAULT_WATER_DENSITY_G_CM3
+
+    # A {label: material} mapping is also a dict, so type alone cannot tell
+    # it from a single property dict; the property keys can.
+    def _is_properties(m):
+        return isinstance(m, dict) and bool(
+            {'sound_speed', 'density', 'attenuation'} & set(m))
+
+    if isinstance(materials, str) or _is_properties(materials):
+        items = [(materials if isinstance(materials, str) else 'seabed',
+                  materials)]
+    elif hasattr(materials, 'items'):
+        items = list(materials.items())
+    else:
+        items = [(m if isinstance(m, str) else f'seabed {i + 1}', m)
+                 for i, m in enumerate(materials)]
+    if not items:
+        raise ConfigurationError(
+            "plot_bottom_loss: no materials to draw. Pass a preset name, a "
+            "property dict, a sequence of either, or a {label: material} "
+            "mapping.")
+    for label, material in items:
+        # _is_properties accepts a dict carrying ANY of the three keys, so a
+        # partial one reaches bottom_loss_curve and fails there on a bare
+        # KeyError. That function needs all three — none of them has a
+        # default, since sound speed sets the critical angle, density sets
+        # the impedance ratio and attenuation sets the loss past it.
+        if isinstance(material, dict):
+            missing = ({'sound_speed', 'density', 'attenuation'}
+                       - set(material))
+            if missing:
+                raise ConfigurationError(
+                    f"plot_bottom_loss: the property dict for {label!r} is "
+                    f"missing {sorted(missing)}; got keys {sorted(material)}. "
+                    f"Plane-wave bottom loss needs sound_speed, density and "
+                    f"attenuation together — none has a default. Name a "
+                    f"preset instead if you want its tabulated values.")
+
+    fig, ax = fig_ax(ax, figsize)
+    for label, material in items:
+        angles, loss = bottom_loss_curve(
+            material, grazing_angles_deg=grazing_angles_deg,
+            water_speed=water_speed, water_density=water_density)
+        line, = ax.plot(angles, loss, label=str(label), **mpl_kw)
+        if not mark_critical:
+            continue
+        c_b = (float(material['sound_speed']) if isinstance(material, dict)
+               else None)
+        if c_b is None:
+            from uacpy.core.materials import get_material
+            c_b = float(get_material(material)['sound_speed'])
+        if c_b > water_speed:
+            ax.axvline(np.degrees(np.arccos(water_speed / c_b)),
+                       color=line.get_color(), ls=':', lw=1.0)
+    ax.set_xlabel('Grazing angle (°)')
+    ax.set_ylabel('Bottom loss (dB)')
+    ax.set_xlim(0.0, 90.0)
+    ax.grid(True, alpha=0.3)
+    if len(items) > 1:
+        ax.legend(loc='upper left', fontsize='small')
+    ax.set_title(_title_or(title, 'Plane-wave bottom loss'))
+    return fig, ax
 
 
 @typed_plot_error

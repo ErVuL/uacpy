@@ -1,6 +1,6 @@
 """Tests for the plane-wave bottom-loss helper
 :func:`uacpy.core.acoustics.bottom_loss_curve` and the matching plot
-helper."""
+helper :func:`uacpy.visualization.plot_bottom_loss`."""
 
 import warnings
 from pathlib import Path
@@ -428,3 +428,88 @@ class TestReflectionCoeffRefusesAnAngleOutsideItsConvention:
         for angle in (0.0, np.pi / 4.0, np.pi / 2.0):
             R = reflection_coeff(angle, 1800.0, 1700.0, c=1500.0, rho=1000.0)
             assert np.isfinite(np.abs(R))
+
+
+class TestPlotBottomLoss:
+    """The plotter that draws what ``bottom_loss_curve`` computes. Before it
+    existed every caller -- example 25 included -- looped and called
+    ``ax.plot`` itself."""
+
+    @staticmethod
+    def _close(fig):
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    def test_one_curve_per_material_named_after_it(self):
+        from uacpy.visualization import plot_bottom_loss
+        fig, ax = plot_bottom_loss(['sand', 'silt', 'basalt'])
+        try:
+            assert len(ax.lines) == 3
+            assert [l.get_label() for l in ax.lines] == ['sand', 'silt', 'basalt']
+            assert 'Grazing angle' in ax.get_xlabel()
+            assert 'dB' in ax.get_ylabel()
+        finally:
+            self._close(fig)
+
+    def test_a_property_dict_is_drawn_beside_the_presets(self):
+        from uacpy.visualization import plot_bottom_loss
+        fetched = dict(sound_speed=1521.0, density=1.52, attenuation=0.11)
+        fig, ax = plot_bottom_loss({'sand': 'sand', 'fetched': fetched})
+        try:
+            assert [l.get_label() for l in ax.lines] == ['sand', 'fetched']
+            # the dict curve is a real curve, not an empty one
+            assert np.nanmax(ax.lines[1].get_ydata()) > 1.0
+        finally:
+            self._close(fig)
+
+    def test_a_label_mapping_is_not_read_as_one_property_dict(self):
+        """Both are dicts. Only the property keys tell them apart, and
+        getting it wrong sends the whole mapping to ``bottom_loss_curve``
+        as though it described one seabed."""
+        from uacpy.visualization import plot_bottom_loss
+        fig, ax = plot_bottom_loss({'a': 'sand', 'b': 'silt', 'c': 'basalt'})
+        try:
+            assert len(ax.lines) == 3
+            assert [l.get_label() for l in ax.lines] == ['a', 'b', 'c']
+        finally:
+            self._close(fig)
+
+    def test_the_curve_is_bottom_loss_curve_verbatim(self):
+        from uacpy.visualization import plot_bottom_loss
+        angles, loss = bottom_loss_curve('sand', water_speed=1490.0)
+        fig, ax = plot_bottom_loss('sand', water_speed=1490.0)
+        try:
+            np.testing.assert_allclose(ax.lines[0].get_xdata(), angles)
+            np.testing.assert_allclose(ax.lines[0].get_ydata(), loss)
+        finally:
+            self._close(fig)
+
+    def test_mark_critical_rules_the_fast_seabeds_only(self):
+        """A seabed slower than the water has no critical angle, so it gets
+        no rule rather than one at an angle it does not have."""
+        from uacpy.visualization import plot_bottom_loss
+        # clay is 1500 m/s: slower than 1510 water, faster than 1480
+        fig, ax = plot_bottom_loss(['clay', 'basalt'], water_speed=1510.0,
+                                   mark_critical=True)
+        try:
+            rules = [l for l in ax.lines if l.get_linestyle() == ':']
+            assert len(rules) == 1          # basalt only
+            x = rules[0].get_xdata()[0]
+            assert x == pytest.approx(
+                np.degrees(np.arccos(1510.0 / 5250.0)), abs=1e-6)
+        finally:
+            self._close(fig)
+
+    def test_without_mark_critical_there_are_no_rules(self):
+        from uacpy.visualization import plot_bottom_loss
+        fig, ax = plot_bottom_loss(['sand', 'basalt'], water_speed=1500.0)
+        try:
+            assert not [l for l in ax.lines if l.get_linestyle() == ':']
+        finally:
+            self._close(fig)
+
+    def test_an_empty_material_list_is_refused(self):
+        from uacpy.visualization import plot_bottom_loss
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='no materials'):
+            plot_bottom_loss([])

@@ -54,6 +54,42 @@ def test_plot_channel_draws_on_a_given_tuple_of_axes():
     plt.close(fig)
 
 
+def test_plot_channel_titles_each_panel_from_its_own_keyword():
+    """The frequency panel's title was hardcoded, so a caller who wanted a
+    different one got a second title drawn over the first."""
+    fig, ax = plot_channel(_TAPS, 1000.0, title='delay',
+                           freq_title='response')
+    assert ax[0].get_title(loc='left') == 'delay'
+    assert ax[1].get_title(loc='left') == 'response'
+    # nothing left behind in the other title slots to overlap with
+    for a in ax:
+        assert a.get_title(loc='center') == ''
+        assert a.get_title(loc='right') == ''
+    plt.close(fig)
+
+
+def test_plot_channel_refuses_a_pair_where_a_string_belongs():
+    """A pair was briefly accepted here; str()ing it into the panel would
+    draw "('a', 'b')" as the title, which is worse than refusing it."""
+    from uacpy.core.exceptions import ConfigurationError
+    with pytest.raises(ConfigurationError, match='freq_title'):
+        plot_channel(_TAPS, 1000.0, title=('delay', 'response'))
+
+
+def test_plot_channel_title_alone_leaves_the_frequency_panel_default():
+    fig, ax = plot_channel(_TAPS, 1000.0, title='just the left one')
+    assert ax[0].get_title(loc='left') == 'just the left one'
+    assert ax[1].get_title(loc='left') == 'Frequency response'
+    plt.close(fig)
+
+
+def test_plot_channel_freq_title_alone_leaves_the_delay_panel_default():
+    fig, ax = plot_channel(_TAPS, 1000.0, freq_title='just the right one')
+    assert ax[0].get_title(loc='left') == 'Channel impulse response'
+    assert ax[1].get_title(loc='left') == 'just the right one'
+    plt.close(fig)
+
+
 def test_plot_channel_delay_axis_is_milliseconds():
     fig, ax = plot_channel(np.array([1.0, 0.5, 0.25, 0.1]), 1000.0)
     stem_x = ax[0].containers[0].markerline.get_xdata()

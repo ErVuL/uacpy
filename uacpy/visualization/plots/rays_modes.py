@@ -981,6 +981,23 @@ def _coefficient_symbol(rc: ReflectionCoefficient) -> Tuple[str, str]:
     return 'R', 'Reflection coefficient'
 
 
+#: |R| below this floors the decibel loss, so a null reflection plots at
+#: 120 dB instead of -inf and taking the whole axis with it.
+_LOSS_FLOOR = 1e-6
+
+
+def _loss_name(rc: ReflectionCoefficient) -> str:
+    """What ``-20 log10 |R|`` is called for what this result holds.
+
+    'Reflection loss', not 'bottom loss': Bounce writes a top-reflection
+    table as readily as a bottom one, and the plotter cannot tell which
+    interface the caller bounced off.
+    """
+    if rc.metadata.get('reflection_type') == 'transmission':
+        return 'Transmission loss'
+    return 'Reflection loss'
+
+
 @typed_plot_error
 def _plot_reflection_coefficient(
     rc: ReflectionCoefficient,
@@ -988,6 +1005,7 @@ def _plot_reflection_coefficient(
     *,
     figsize: Tuple[float, float] = (8, 5),
     title: Optional[str] = None,
+    quantity: str = 'magnitude',
     show_phase: bool = False,
     angle_on_x: bool = False,
     frequency_unit: str = 'kHz',
@@ -997,6 +1015,11 @@ def _plot_reflection_coefficient(
     show_colorbar: bool = True,
 ):
     """Auto-detect narrowband (line) vs broadband (heatmap) reflection coefficient.
+
+    ``quantity='loss'`` draws ``-20 log10 |R|`` in decibels instead of the
+    linear magnitude — the form a reflection is read in against grazing
+    angle, where the critical angle is the knee and the plateau is the loss
+    per bounce. ``quantity='magnitude'`` (the default) keeps ``|R|``.
 
     ``show_phase=True`` overlays the phase ``φ(θ)`` on a twin y-axis
     when the input is narrowband (single frequency).
@@ -1011,6 +1034,10 @@ def _plot_reflection_coefficient(
             f"_plot_reflection_coefficient: expected ReflectionCoefficient, "
             f"got {type(rc).__name__}"
         )
+    if quantity not in ('magnitude', 'loss'):
+        raise ConfigurationError(
+            f"_plot_reflection_coefficient: quantity must be 'magnitude' or "
+            f"'loss', got {quantity!r}")
     if rc.is_broadband:
         _owns_fig = ax is None
         fig, ax = fig_ax(ax, figsize)
@@ -1024,30 +1051,43 @@ def _plot_reflection_coefficient(
         # rc.R is (angle, frequency); pcolormesh wants C indexed (y, x), so the
         # orientation is read off the result's documented layout rather than
         # inferred from which axis length happens to match.
+        values = (rc.R if quantity == 'magnitude'
+                  else -20.0 * np.log10(np.clip(np.abs(rc.R), _LOSS_FLOOR,
+                                                None)))
         if angle_on_x:
-            x, y, C = rc.theta, f_axis, rc.R.T
+            x, y, C = rc.theta, f_axis, values.T
             xlabel, ylabel = 'Grazing angle (°)', f_label
         else:
-            x, y, C = f_axis, rc.theta, rc.R
+            x, y, C = f_axis, rc.theta, values
             xlabel, ylabel = f_label, 'Grazing angle (°)'
         im = ax.pcolormesh(x, y, C, shading='nearest', cmap=cmap,
                            vmin=vmin, vmax=vmax)
-        letter, quantity = _coefficient_symbol(rc)
+        letter, quantity_name = _coefficient_symbol(rc)
+        bar_label = (f'|{letter}|' if quantity == 'magnitude'
+                     else f'{_loss_name(rc)} (dB)')
         if show_colorbar:
-            fig.colorbar(im, ax=ax, label=f'|{letter}|')
+            fig.colorbar(im, ax=ax, label=bar_label)
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        ax.set_title(_title_or(title, f'{quantity} |{letter}(θ, f)|'))
+        auto = (f'{quantity_name} |{letter}(θ, f)|' if quantity == 'magnitude'
+                else f'{_loss_name(rc)} (θ, f)')
+        ax.set_title(_title_or(title, auto))
         if _owns_fig:
             _draw_result_credit(fig, rc, env=None)
         return fig, ax
 
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
-    letter, quantity = _coefficient_symbol(rc)
-    ax.plot(rc.theta, rc.R, label=f'|{letter}|', color='C0')
+    letter, quantity_name = _coefficient_symbol(rc)
+    if quantity == 'magnitude':
+        values, ylabel, auto = rc.R, f'|{letter}|', quantity_name
+    else:
+        values = -20.0 * np.log10(np.clip(np.abs(rc.R), _LOSS_FLOOR, None))
+        ylabel = auto = f'{_loss_name(rc)}'
+        ylabel = f'{ylabel} (dB)'
+    ax.plot(rc.theta, values, label=ylabel, color='C0')
     ax.set_xlabel('Grazing angle (°)')
-    ax.set_ylabel(f'|{letter}|', color='C0')
+    ax.set_ylabel(ylabel, color='C0')
     ax.tick_params(axis='y', labelcolor='C0')
     ax.grid(True, alpha=0.3)
     if show_phase:
@@ -1056,7 +1096,7 @@ def _plot_reflection_coefficient(
                     label='φ')
         ax_phi.set_ylabel('Phase (°)', color='C1')
         ax_phi.tick_params(axis='y', labelcolor='C1')
-    ax.set_title(_title_or(title, quantity))
+    ax.set_title(_title_or(title, auto))
     if _owns_fig:
         _draw_result_credit(fig, rc, env=None)
     return fig, ax
@@ -1401,6 +1441,65 @@ def plot_mode_excitation(
     ax.set_title(_title_or(
         title, f"Array response — {n_src} source(s) over {aperture:g} m"))
     _draw_result_credit(fig, modes)
+    return fig, ax
+
+
+@typed_plot_error
+def plot_beam_power(beams, ax=None, *, at=None, normalise: bool = True,
+                    title: Optional[str] = None,
+                    figsize: Tuple[float, float] = (8, 5), **mpl_kw):
+    """Beam power against look angle, from a :class:`BeamformedField`.
+
+    The RECEIVE dual of :func:`plot_beam_pattern`, and deliberately not that
+    function: a source beam pattern is a launch fan, so it labels its axis
+    'Launch angle' and warns when a table does not span the +/-90 deg
+    Bellhop can steer into. A scanned beam is neither — it is what the array
+    heard, over whatever sector was scanned.
+
+    Parameters
+    ----------
+    beams : BeamformedField
+        What :func:`uacpy.acoustic_signal.beamform_field` returned.
+    at : int or tuple, optional
+        Which point of the grid to draw, when the beamformer ran over one.
+        A ``(n_elements, n_ranges)`` field gives ``power`` of shape
+        ``(n_angles, n_ranges)``, and a single curve needs one range; a
+        broadband run needs its frequency bin the same way. Not needed when
+        the beamformer ran on a single point.
+    normalise : bool, default True
+        Draw dB re the peak of the curve, which is how a beam is read. False
+        keeps the absolute ``10*log10(power)``.
+
+    Returns
+    -------
+    (fig, ax)
+    """
+    power = np.asarray(getattr(beams, 'power', None))
+    angles = np.asarray(getattr(beams, 'angles', None), dtype=float)
+    if power.ndim == 0 or angles.ndim != 1:
+        raise ConfigurationError(
+            "plot_beam_power: expected a BeamformedField from "
+            "beamform_field; got something without power/angles.")
+    if at is not None:
+        power = power[(slice(None),) + (at if isinstance(at, tuple) else (at,))]
+    if power.ndim != 1:
+        raise ConfigurationError(
+            f"plot_beam_power: the beamformer ran over a grid, so its power "
+            f"is {power.shape} and there is no single curve to draw. Pass "
+            f"at= to choose the point — an index into the axes after the "
+            f"angle one (a range index, or a frequency bin for a broadband "
+            f"run).")
+    with np.errstate(divide='ignore'):
+        level = 10.0 * np.log10(power)
+        if normalise:
+            level = level - np.max(level)
+    fig, ax = fig_ax(ax, figsize)
+    ax.plot(angles, level, **mpl_kw)
+    ax.set_xlabel('Look angle (°)')
+    ax.set_ylabel('Beam power (dB re max)' if normalise
+                  else 'Beam power (dB)')
+    ax.grid(True, alpha=0.3)
+    ax.set_title(_title_or(title, 'Beam power'))
     return fig, ax
 
 

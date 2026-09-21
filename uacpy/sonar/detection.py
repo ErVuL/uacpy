@@ -196,7 +196,7 @@ def per_look_false_alarm(pf_scan: float, n_looks: float) -> float:
     signal results in an N-fold increase in the single-resolution-cell
     probability of false alarm ... the single-resolution-cell probability of
     false alarm must be set N times smaller than that desired"
-    (*Underwater Acoustic Signal Processing*, 8.5). Inverting
+    (*Underwater Acoustic Signal Processing*, 8.2.11). Inverting
     :func:`scan_false_alarm`::
 
         pf_look = 1 - (1 - pf_scan) ** (1 / n_looks)
@@ -224,7 +224,8 @@ def scan_false_alarm(pf_look: float, n_looks: float) -> float:
     the probability of one or more false alarms in N statistically
     independent resolution cells,
     ``Pr{at least one FA} = 1 - [1 - P_f]^N ~ N*P_f`` (*Underwater Acoustic
-    Signal Processing*, 8.5). Inverse of :func:`per_look_false_alarm`,
+    Signal Processing*, 8.2.11, "False-Alarm Rate"). Inverse of
+    :func:`per_look_false_alarm`,
     which is the one to use when setting a threshold from a required
     scan-level rate.
 

@@ -8,6 +8,7 @@ do not import matplotlib. Each function consumes plain arrays, takes the target
 import numpy as np
 import matplotlib.pyplot as plt
 
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.visualization.plots._common import (fig_ax, typed_plot_error,
                                                _require_nonempty, _title_or)
 
@@ -15,10 +16,33 @@ from uacpy.visualization.plots._common import (fig_ax, typed_plot_error,
 
 
 @typed_plot_error
-def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
-                 **mpl_kw):
+def plot_channel(h, sample_rate, ax=None, *, title=None, freq_title=None,
+                 figsize=(12, 4), **mpl_kw):
     """Two-panel channel view: |h[n]| (delay) and |H(f)| (frequency response).
-    ``ax`` may be a 2-tuple ``(ax_delay, ax_freq)``."""
+
+    ``ax`` may be a 2-tuple ``(ax_delay, ax_freq)``. ``title`` names the
+    delay panel and ``freq_title`` the frequency one; each falls back to its
+    own default. The frequency panel's title used to be hardcoded, so a
+    caller who wanted a different one got a second title drawn over it.
+
+    One keyword per panel, as :func:`uacpy.visualization.plot_overview`
+    spells it (``map_title`` / ``tl_title`` / ``env_title``), rather than a
+    ``title`` that is sometimes a string and sometimes a pair: the
+    polymorphic form has no way to reject a 3-tuple except by letting the
+    unpacking raise, which names neither the argument nor the fix.
+    """
+    for name, value in (('title', title), ('freq_title', freq_title)):
+        if value is not None and not isinstance(value, str):
+            # A pair used to be accepted here. Without this it would be
+            # str()'d into the delay panel — "('a', 'b')" drawn as a title,
+            # which is worse than refusing it.
+            raise ConfigurationError(
+                f"plot_channel: {name} must be a string; got "
+                f"{type(value).__name__}. One keyword per panel — pass "
+                f"title= for the delay panel and freq_title= for the "
+                f"frequency one."
+            )
+    title_delay, title_freq = title, freq_title
     h = np.asarray(h, dtype=complex)
     fs = float(sample_rate)
     if ax is None:
@@ -29,7 +53,8 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
     ax[0].stem(t, np.abs(h))
     ax[0].set_xlabel("Delay (ms)")
     ax[0].set_ylabel("|h|")
-    ax[0].set_title(_title_or(title, "Channel impulse response"), loc="left")
+    ax[0].set_title(_title_or(title_delay, "Channel impulse response"),
+                    loc="left")
     ax[0].grid(alpha=0.3)
     # h is complex (baseband IR): use the full FFT, not rfft (which rejects
     # complex input), and fftshift so |H(f)| is centred on 0 Hz.
@@ -39,7 +64,7 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, figsize=(12, 4),
     ax[1].plot(f, H, **mpl_kw)
     ax[1].set_xlabel("Frequency (Hz)")
     ax[1].set_ylabel("|H(f)| (dB)")
-    ax[1].set_title("Frequency response", loc="left")
+    ax[1].set_title(_title_or(title_freq, "Frequency response"), loc="left")
     ax[1].grid(alpha=0.3)
     return fig, ax
 

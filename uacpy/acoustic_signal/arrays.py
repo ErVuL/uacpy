@@ -448,11 +448,13 @@ class BeamformedField(_BeamformedFields):
 
         The weights are unit-norm, so the noise term vanishes when the noise
         is spatially uncorrelated across the elements — which for isotropic
-        3-D noise, coherence ``sinc(k*d)``, holds at ``d = lambda/2`` and
-        nowhere else. At the design frequency of a half-wavelength array
-        this method IS the array gain. Away from it the noise term is real
-        and is NOT included here; for a 24-element lambda/2-at-200-Hz array
-        the correction runs
+        3-D noise, coherence ``sinc(k*d)``, holds at every integer multiple
+        of ``lambda/2`` and at no spacing between them. Only the first is
+        useful: the rest are grating-lobed. At the design frequency of a
+        half-wavelength array this method IS the array gain. Away from it
+        the noise term is real and is NOT included here. For a 24-element
+        lambda/2-at-200-Hz array with a Hann taper (the case example 42
+        runs), the correction is
 
             150 Hz  +1.25 dB      225 Hz  -0.51 dB
             175 Hz  +0.58 dB      250 Hz  -0.97 dB
@@ -462,19 +464,48 @@ class BeamformedField(_BeamformedFields):
         gains only in the bin where the spacing is half a wavelength. A
         positive correction means this method OVERSTATES the array gain.
 
-        That correction is not a private derivation: it reproduces, to
-        machine precision at every frequency tried, the ``f_c/f_d`` factor
-        in Abraham's shaded-line-array directivity index,
+        Those entries are the exact quadratic form ``w^H R_n w`` for
+        ``R_n = sinc(k*d_ij)``, and they land on the ``f_c/f_d`` factor in
+        Abraham's shaded-line-array directivity index,
         ``DI ~ 10log10[(f_c/f_d)(sum w)^2 / sum w^2]`` — his "10-dB-per-
         decade reduction when operating the array below the design
-        frequency". Above the design frequency the array is spatially
-        aliased, where that approximation is not intended and the entries
-        below should be read as the isotropic-noise arithmetic only.
+        frequency". Abraham writes that with ``~``, and the size of the
+        approximation is exactly statable. Writing the quadratic form as an
+        integral of the array factor over ``s = sin(theta)``,
+
+            w^H R_n w = (1/2u) * integral_{-u}^{u} |W(pi*s)|^2 ds,
+            u = f_c / f_d
+
+        and using ``integral_{-1}^{1} |W|^2 ds = 2||w||^2``, the departure
+        from Abraham's factor IS the array-factor energy lying outside
+        ``|sin(theta)| <= f_c/f_d`` — an identity, verified here to 1e-14.
+
+        So the condition is about where a window puts its energy, not about
+        which window it is: one tapering to zero at the edges leaves almost
+        nothing outside (~1e-6 dB), while an unshaded array leaves 1.3 % of
+        it out at half the design frequency, worth 0.058 dB. Predict your
+        own case from that rather than from this table, which is one
+        taper's arithmetic. Above the design frequency ``u > 1``, the
+        containment window exceeds a period, and the agreement genuinely
+        breaks — which is also where the array is spatially aliased and
+        Abraham's approximation is not intended at all.
         Real ocean noise is not isotropic either (Butler & Sherman 8.3.1:
         "sea noise is probably never isotropic"), which moves it again.
         """
         with np.errstate(divide="ignore", invalid="ignore"):
             return 10.0 * np.log10(self.best / self.element_power)
+
+    def plot(self, ax=None, **kwargs):
+        """Draw the beam power against look angle.
+
+        Dispatches to :func:`uacpy.visualization.plot_beam_power`. Spelled
+        ``plot()`` like the other carriers, because a beamformed field has
+        only the one rendering — unlike a :class:`~uacpy.Source`, whose
+        ``plot_beam_pattern`` is named for its attribute because its other
+        rendering is the marker an environment draws.
+        """
+        from uacpy.visualization import plot_beam_power
+        return plot_beam_power(self, ax=ax, **kwargs)
 
     def to_time_trace(self, angle_deg, *, range_m, source_spectrum=None,
                       **kwargs):

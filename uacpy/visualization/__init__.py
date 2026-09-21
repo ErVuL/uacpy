@@ -29,8 +29,16 @@ Canonical surface
 * :func:`plot_bottom_properties` — small-multiples seabed cross-sections,
   one panel per property (cp, cs, ρ, αp, αs); shows shear & friends that
   ``env.plot()`` (cp-only) does not.
+* :func:`plot_bottom_loss` — plane-wave bottom loss against grazing angle,
+  one curve per seabed: preset names, property dicts, or a
+  ``{label: material}`` mapping, all against one ``water_speed`` so the
+  critical angles are comparable.
 * :func:`plot_mode_wavenumbers`, :func:`plot_modes_heatmap` — the two
   alternate mode views (the default ``modes.plot()`` is the mode functions).
+* :func:`plot_beam_power` — a scanned beam's power against look angle, from
+  a :class:`~uacpy.acoustic_signal.BeamformedField`
+  (``beams.plot()`` is the object-oriented form). The receive dual of
+  :func:`plot_beam_pattern`, which is a launch fan and labels itself so.
 * :func:`plot_beam_pattern` — source directivity from a ``.sbp`` table or
   an ``(N, 2)`` array, on polar axes oriented like the field
   (``source.plot_beam_pattern()`` is the object-oriented form).
@@ -61,6 +69,7 @@ from uacpy.visualization.plots import (
     plot_field_statistics,
     shared_colorbar,
     plot_bottom_properties,
+    plot_bottom_loss,
     plot_absorption,
     plot_bathymetry_map,
     plot_overview,
@@ -72,6 +81,7 @@ from uacpy.visualization.plots import (
     plot_dispersion,
     plot_modes_heatmap,
     plot_beam_pattern,
+    plot_beam_power,
     plot_mode_excitation,
     plot_fk,
     plot_radon,
@@ -125,6 +135,7 @@ __all__ = [
     'plot_field_statistics',
     'shared_colorbar',
     'plot_bottom_properties',
+    'plot_bottom_loss',
     'plot_absorption',
     'plot_bathymetry_map',
     'plot_overview',
@@ -136,6 +147,7 @@ __all__ = [
     'plot_dispersion',
     'plot_modes_heatmap',
     'plot_beam_pattern',
+    'plot_beam_power',
     'plot_mode_excitation',
     'plot_fk',
     'plot_radon',
