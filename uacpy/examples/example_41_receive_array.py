@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal import beamform, shading_taper, steering_vectors
+from uacpy.acoustic_signal import beamform, beamform_field, shading_taper
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -64,19 +64,14 @@ print(f"{mode_angles.size} trapped modes span "
 angles = np.linspace(-60.0, 60.0, 1201)
 
 
-def conventional(pressure, positions, taper_name):
-    """|w^H p|^2 in dB re max, with w = taper * steering vector."""
-    e = steering_vectors(positions, angles, FREQ, c=C_REF)   # (n_ang, n_el)
-    w = e * shading_taper(len(positions), taper_name)[None, :]
-    power = np.abs(w.conj() @ pressure[:, 0]) ** 2
-    return 10.0 * np.log10(power / power.max())
-
-
 fig, axes = plt.subplots(1, 3, figsize=(16, 4.4))
 
 # ── 1. what the array hears, against what the waveguide can send ────────
 ax = axes[0]
-beam = conventional(p, elements, 'boxcar')
+# beamform_field does |w^H p|^2 over the scan; normalise to dB re max.
+pw = beamform_field(p[:, 0], elements, angles, FREQ, c=C_REF,
+                    weights=shading_taper(n_el, 'boxcar')).power
+beam = 10.0 * np.log10(pw / pw.max())
 theta_max = float(mode_angles.max())
 # The honest claim. This array's beamwidth (~2.5 deg over an 86 m aperture)
 # is wider than the 2 deg between neighbouring modes, so it CANNOT resolve
@@ -98,7 +93,9 @@ ax.grid(alpha=0.3)
 # ── 2. shading: beamwidth against sidelobes ─────────────────────────────
 ax = axes[1]
 for name, style in (('boxcar', 'C0-'), ('hann', 'C1-'), ('hamming', 'C2--')):
-    b = conventional(p, elements, name)
+    bp = beamform_field(p[:, 0], elements, angles, FREQ, c=C_REF,
+                        weights=shading_taper(n_el, name)).power
+    b = 10.0 * np.log10(bp / bp.max())
     # The highest sidelobe is the largest local maximum OUTSIDE the fan the
     # arrivals occupy - taking the maximum of the whole curve just returns
     # the main lobe at 0 dB.
@@ -117,9 +114,10 @@ ax.grid(alpha=0.3)
 ax = axes[2]
 coarse = elements[::2]
 p_coarse = p[::2]
-ax.plot(angles, conventional(p, elements, 'boxcar'), 'C0-', lw=1.3,
-        label=f'{HALF:.2f} m spacing (λ/2)')
-ax.plot(angles, conventional(p_coarse, coarse, 'boxcar'), 'C3-', lw=1.3,
+pc = beamform_field(p_coarse[:, 0], coarse, angles, FREQ, c=C_REF,
+                    weights=shading_taper(len(coarse), 'boxcar')).power
+ax.plot(angles, beam, 'C0-', lw=1.3, label=f'{HALF:.2f} m spacing (λ/2)')
+ax.plot(angles, 10.0 * np.log10(pc / pc.max()), 'C3-', lw=1.3,
         alpha=0.85, label=f'{2 * HALF:.2f} m spacing (λ) — aliased')
 ax.set(xlabel='Angle from horizontal (deg)', ylabel='Beam power (dB re max)',
        ylim=(-35, 2), title='Above λ/2 a grating lobe folds in')
@@ -160,7 +158,7 @@ print(f"  ({peaks.size - inside.size} further peaks lie outside the fan — "
       f"sidelobes, not arrivals)")
 # The claim panel 1 actually makes, in numbers: how much of the beam power
 # sits inside the fan the waveguide can fill.
-lin = 10.0 ** (conventional(p, elements, 'boxcar') / 10.0)
+lin = 10.0 ** (beam / 10.0)
 inside_fan = np.abs(angles) <= mode_angles.max()
 print(f"beam power inside the ±{mode_angles.max():.1f} deg fan: "
       f"{100.0 * lin[inside_fan].sum() / lin.sum():.1f} % "

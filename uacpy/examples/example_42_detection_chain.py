@@ -293,11 +293,6 @@ env = uacpy.Environment(
 )
 
 
-def seabed_at(ranges_m):
-    """Local water depth (m), for masking targets inside the sediment."""
-    return np.interp(np.asarray(ranges_m, dtype=float),
-                     BATHY_RANGES, BATHY_DEPTHS)
-
 SL, NL = 120.0, 75.0          # band-integrated, dB re 1 uPa^2
 target = uacpy.Source(depths=60.0, frequencies=FREQ, source_level_dB=SL)
 
@@ -356,7 +351,10 @@ p_map = np.stack([np.asarray(f.data) for _, f in stack])   # (n_el, n_z, n_r)
 # bite out of the plane. Everything below is masked, not merely ignored:
 # the model returns the sub-bottom evanescent tail there, about 30 dB
 # quieter, which would otherwise draw as ordinary shadow.
-in_water = plane_depths[:, None] <= seabed_at(array.ranges)[None, :]
+# env.bathymetry.eval, not a hand-rolled interp: the mask then cannot drift
+# from the seafloor the solver itself sees.
+seabed = np.asarray(env.bathymetry.eval(range=array.ranges), dtype=float)
+in_water = plane_depths[:, None] <= seabed[None, :]
 print(f"the shoaling bottom puts {100 * (~in_water).mean():.0f} % of the "
       f"({plane_depths.size} x {array.n_ranges}) plane inside the seabed")
 
@@ -389,16 +387,6 @@ print(f"adiabatic vs coupled on this bathymetry: median "
 # coherent and put through the same boxcar, and the protocol is given a
 # noise floor by running it on Bellhop against ITSELF.
 bellhop = uacpy.Bellhop(verbose=False, n_beams=0, beam_type='G')
-kern = np.ones(9) / 9
-
-
-def range_smoothed_tl(pressure):
-    """TL after a 9-point boxcar on intensity along range, water only."""
-    inten = np.apply_along_axis(lambda r: np.convolve(r, kern, mode='same'),
-                                1, np.abs(pressure) ** 2)
-    return np.where(in_water, -10.0 * np.log10(np.maximum(inten, 1e-300)),
-                    np.nan)
-
 
 print(f"TL on {n_el} elements x {array.n_ranges} ranges, target at "
       f"{plane_depths[i60]:.0f} m: median "
@@ -506,28 +494,20 @@ print(f"  the {angles.size}-point scan is {n_beams_independent:.0f} "
 # right place to say how far a single prediction can be trusted.
 
 
-def beamform_plane(pressure, label):
-    """Per-target TL and realised array gain, from one model's element fields.
-
-    ``pressure`` is (n_elements, n_depths, n_ranges). Seabed cells come back
-    NaN, which the sonar-equation grid carries through — the budget metadata
-    summarises an AG grid with nan-aware statistics for exactly this case.
-    """
-    scan = beamform_field(pressure, elements, angles, FREQ, c=C_REF,
-                          weights=taper)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        gain = np.where(in_water, scan.array_gain(), np.nan)
-        loss = np.where(in_water, -10.0 * np.log10(
-            np.maximum(scan.element_power, 1e-300)), np.nan)
-    field = Field(data=loss,
-                  coords={'depth': plane_depths,
-                          'range': np.asarray(array.ranges, dtype=float)},
-                  model=label)          # kind defaults to 'pressure', whose
-    # dB unit is spelled "TL (dB)" — which is exactly what this holds.
-    return field, gain
-
-
-tl_cov, ag_map = beamform_plane(p_map, 'Kraken')
+# The beamformer over the whole plane. Seabed cells go NaN, which the
+# sonar-equation grid carries through: _budget_array_gain summarises an AG
+# grid with nan-aware statistics for exactly this case.
+scan = beamform_field(p_map, elements, angles, FREQ, c=C_REF, weights=taper)
+with np.errstate(divide='ignore', invalid='ignore'):
+    ag_map = np.where(in_water, scan.array_gain(), np.nan)
+    tl_map = np.where(in_water, -10.0 * np.log10(
+        np.maximum(scan.element_power, 1e-300)), np.nan)
+# kind defaults to 'pressure', whose dB unit is spelled "TL (dB)" — which
+# is exactly what this holds.
+tl_cov = Field(data=tl_map,
+               coords={'depth': plane_depths,
+                       'range': np.asarray(array.ranges, dtype=float)},
+               model='Kraken')
 print(f"realised AG over the water column: median "
       f"{np.nanmedian(ag_map):.1f} dB, {np.nanpercentile(ag_map, 5):.1f}-"
       f"{np.nanpercentile(ag_map, 95):.1f} dB over 5-95 %")
@@ -578,11 +558,6 @@ print(f"  -> the constant AG adds {gap / 1e3:+.1f} km to the median "
 # section: in a section reversed about 20 km, the stretch from 0 to R is the
 # forward section's 20-R..20 km, which is different bottom. Reversing about
 # R is what makes (c) the same physics as (a).
-def element_mean_tl(pressure):
-    """TL averaged over the array elements, in intensity."""
-    return -10.0 * np.log10(np.mean(np.abs(pressure) ** 2, axis=0))
-
-
 probe_idx = np.linspace(40, array.n_ranges - 1, 6).astype(int)
 solver, physical, naive = [], [], []
 for j in probe_idx:
@@ -593,13 +568,14 @@ for j in probe_idx:
     walk = np.arange(0.0, R + 0.5 * step, step)
     reversed_env = uacpy.Environment(
         name='reversed-about-R',
-        bathymetry=list(zip(walk, seabed_at(R - walk))),
+        bathymetry=list(zip(walk, env.bathymetry.eval(range=R - walk))),
         ssp=env.ssp, bottom=env.bottom, absorption=uacpy.Thorp())
     rx = uacpy.Receiver(depths=elements, ranges=[R])
-    tl_a = element_mean_tl(p[:, j])                       # this example
-    tl_b = element_mean_tl(np.asarray(kraken.run(env, target, rx).data))
-    tl_c = element_mean_tl(np.asarray(
-        kraken.run(reversed_env, target, rx).data))       # reciprocal of (a)
+    # TL averaged over the elements, in intensity, for each of the three.
+    p_b = np.asarray(kraken.run(env, target, rx).data)           # the mirror
+    p_c = np.asarray(kraken.run(reversed_env, target, rx).data)  # reciprocal
+    tl_a, tl_b, tl_c = (-10.0 * np.log10(np.mean(np.abs(q) ** 2, axis=0))
+                        for q in (p[:, j], p_b, p_c))
     solver.append(abs(tl_a - tl_c))
     physical.append(abs(tl_b - tl_c))
     naive.append(abs(tl_a - tl_b))
@@ -660,7 +636,15 @@ for width in (5, 9, 21):
 print("  the answer barely moves across those kernels, which is what lets "
       "it be quoted:\n  that spread — 0.03 dB of bias, 0.17 dB of median "
       "— IS the protocol's noise floor")
-tl_bh, ag_bh = beamform_plane(bh_map, 'Bellhop')
+scan_bh = beamform_field(bh_map, elements, angles, FREQ, c=C_REF,
+                         weights=taper)
+with np.errstate(divide='ignore', invalid='ignore'):
+    ag_bh = np.where(in_water, scan_bh.array_gain(), np.nan)
+    tl_bh = Field(data=np.where(in_water, -10.0 * np.log10(
+        np.maximum(scan_bh.element_power, 1e-300)), np.nan),
+        coords={'depth': plane_depths,
+                'range': np.asarray(array.ranges, dtype=float)},
+        model='Bellhop')
 se_bh = passive_signal_excess_field(tl_bh, source_level=SL, noise_level=NL,
                                     array_gain=ag_bh, detection_threshold=dt)
 pd_bh = probability_of_detection_field(se_bh, sigma_dB=8.0)
@@ -749,11 +733,10 @@ for label, look in (('steered to the arrival', look_best),
     shots[label] = (np.asarray(tr.coords['time']),
                     np.asarray(tr.data).ravel(), look)
 # And one element, for the same pulse, as the thing the beam is beating.
-one = Field(data=np.asarray(H.data)[n_el // 2, 0, :][None, None, :],
-            coords={'depth': np.array([0.0]), 'range': np.array([R_SHOT]),
-                    'frequency': BAND}, model='Bellhop')
-trace_one = one.to_time_trace(depth=0.0, range=R_SHOT,
-                              source_spectrum=pulse, t_start=t_start)
+# H is already a (depth, range, frequency) Field, so it synthesises its own
+# trace — no need to repackage one element into a new Field.
+trace_one = H.to_time_trace(depth=float(elements[n_el // 2]), range=R_SHOT,
+                            source_spectrum=pulse, t_start=t_start)
 t_one = np.asarray(trace_one.coords['time'])
 y_one = np.asarray(trace_one.data).ravel()
 peak = lambda y: 20.0 * np.log10(np.max(np.abs(y)))
