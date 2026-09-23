@@ -32,6 +32,7 @@ from .modulate import (
     ofdm_modulate,
     ofdm_demodulate,
     ofdm_symbol,
+    subcarrier_response,
     schmidl_cox_preamble,
     schmidl_cox_sync,
     apply_cfo,
@@ -60,7 +61,7 @@ from .link import (
     # passband PHY
     rrc_filter,
     pulse_shape,
-    matched_filter as rrc_matched_filter,
+    rrc_matched_filter,
     upconvert,
     downconvert,
     symbol_sync,
@@ -146,7 +147,8 @@ __all__ = [
     # channel estimation
     "ls_estimate", "omp_estimate",
     # ofdm
-    "ofdm_modulate", "ofdm_demodulate", "schmidl_cox_preamble",
+    "ofdm_modulate", "ofdm_demodulate", "subcarrier_response",
+    "schmidl_cox_preamble",
     "schmidl_cox_sync", "apply_cfo", "estimate_channel", "ofdm_symbol",
     "equalize_subcarriers",
     # coding

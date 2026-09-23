@@ -33,9 +33,9 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 from scipy.optimize import brentq
 
-from uacpy.core.acoustics import (
-    soundspeed, soundspeed_unesco, soundspeed_delgrosso, soundspeed_teos10,
-)
+# Only teos10 is called directly here now; the other three are reached
+# through SOUND_SPEED_FORMULAS, which moved to core with the equations.
+from uacpy.core.acoustics import sound_speed_teos10
 from uacpy.core._carrier_validate import _dedupe_provenance
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.data import _cache
@@ -43,7 +43,6 @@ from uacpy.data._geo import (
     require_month,
     great_circle_km,
     Coordinate, as_coordinate, normalize_lon, depth_to_pressure_dbar,
-    pressure_dbar_to_depth,
     geodesic_waypoints, ring_offsets, run_representative_indices,
     capped_n_points, require_source,
     DEFAULT_MAX_TRANSECT_POINTS, checked_max_points, checked_n_points,
@@ -72,27 +71,16 @@ _GRIDS = {
     '0.25': (720, 1440, '04', -89.875, 0.25),
 }
 
-def _mackenzie_at_pressure(temperature, salinity, pressure_dbar):
-    """Mackenzie (1981) on the ``(T, S, p_dbar)`` signature the table's other
-    entries share. :func:`uacpy.core.acoustics.soundspeed` takes DEPTH in
-    metres as its third argument, so the pressure is inverted through the
-    same Leroy & Parthiot standard ocean the callers converted with, at the
-    45° reference latitude ``extend_ssp_below_data`` defaults to (exact
-    there; a column converted at another latitude comes back within the
-    ±0.26 % of ``k(Z, φ)``, under 15 m at 5500 m)."""
-    depth = pressure_dbar_to_depth(pressure_dbar, _REFERENCE_LATITUDE_DEG)
-    return soundspeed(temperature=temperature, salinity=salinity, depth=depth)
+# The formula registry lives with the four equations it indexes, in
+# uacpy.core.acoustics.seawater, and is imported rather than restated so
+# every fetcher resolves the same names.
+from uacpy.core.acoustics.seawater import (           # noqa: E402
+    DEFAULT_SOUND_SPEED_FORMULA, REFERENCE_LATITUDE_DEG,
+    SOUND_SPEED_FORMULAS as _FORMULAS,
+)
+_REFERENCE_LATITUDE_DEG = REFERENCE_LATITUDE_DEG
 
 
-#: ``formula`` name -> ``(T °C, S PSU, p dbar) -> c m/s``. Read by the fetchers
-#: and by ``extend_ssp_below_data``, which continues a column under the
-#: formula that built it (``SoundSpeedProfile.formula``).
-_FORMULAS = {
-    'unesco': soundspeed_unesco,
-    'delgrosso': soundspeed_delgrosso,
-    'teos10': soundspeed_teos10,
-    'mackenzie': _mackenzie_at_pressure,
-}
 
 
 def fetch_ssp(
@@ -100,7 +88,7 @@ def fetch_ssp(
     *,
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
-    formula: str = 'teos10',
+    formula: str = DEFAULT_SOUND_SPEED_FORMULA,
     resolution: str = '1.00',
     source: str = 'opendap',
     decade: str = DEFAULT_DECADE,
@@ -123,9 +111,9 @@ def fetch_ssp(
         the annual mean.
     formula : {'teos10', 'unesco', 'delgrosso', 'mackenzie'}, optional
         Sound-speed equation. Default ``'teos10'``; see
-        :func:`uacpy.core.acoustics.soundspeed_teos10` for why UNESCO
+        :func:`uacpy.core.acoustics.sound_speed_teos10` for why UNESCO
         (Chen-Millero 1977 as published) sits 0.6 m/s above it in deep water.
-        ``'mackenzie'`` is :func:`uacpy.core.acoustics.soundspeed`, which
+        ``'mackenzie'`` is :func:`uacpy.core.acoustics.sound_speed_mackenzie`, which
         takes depth in metres, so the table entry inverts the pressure to
         depth first (Leroy & Parthiot at the 45° reference latitude).
     resolution : {'1.00', '0.25'}, optional
@@ -234,7 +222,7 @@ def fetch_ssp_transect(
     max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
     date: Union[str, _dt.date, None] = None,
     month: Optional[int] = None,
-    formula: str = 'teos10',
+    formula: str = DEFAULT_SOUND_SPEED_FORMULA,
     resolution: str = '1.00',
     source: str = 'opendap',
     decade: str = DEFAULT_DECADE,
@@ -687,7 +675,7 @@ _EXTRAPOLATION_WARN_M = 50.0
 
 
 def _deep_increment(c_deepest: float, z_from: float, z_to: float,
-                    latitude: float, speed_fn=soundspeed_teos10) -> float:
+                    latitude: float, speed_fn=sound_speed_teos10) -> float:
     """Sound-speed increment from ``z_from`` down to ``z_to`` under the
     formula ``speed_fn(t, s, p)`` that built the column (TEOS-10 by default).
 
@@ -747,8 +735,8 @@ def extend_ssp_below_data(ssp, depth_max: float,
     # The extension continues the column under the formula that built it (a
     # Del Grosso column extended with UNESCO is 0.33 m/s off at 8.8 km); a
     # literal profile carries no formula and takes the package default.
-    speed_fn = _FORMULAS.get(ssp.formula or 'teos10',
-                             soundspeed_teos10)
+    speed_fn = _FORMULAS.get(ssp.formula or DEFAULT_SOUND_SPEED_FORMULA,
+                             sound_speed_teos10)
     new_row = np.empty(data.shape[1], dtype=float)
     for j in range(data.shape[1]):
         new_row[j] = data[-1, j] + _deep_increment(

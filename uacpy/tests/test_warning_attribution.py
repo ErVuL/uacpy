@@ -39,7 +39,7 @@ import uacpy
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.acoustic_signal.estimate import constant_q_transform
 from uacpy.core.absorption import Biological, BiologicalLayer
-from uacpy.core.acoustics import soundspeed_delgrosso
+from uacpy.core.acoustics import sound_speed_delgrosso
 from uacpy.core.receiver import Receiver
 from uacpy.io import grn_reader
 
@@ -192,7 +192,7 @@ def test_delgrosso_extrapolation_warnings_name_the_callers_file(kwargs):
     dispatch = _in_package_dispatcher()
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter('always')
-        dispatch(soundspeed_delgrosso, **kwargs)
+        dispatch(sound_speed_delgrosso, **kwargs)
     warning = _only_warning(record)
     assert 'Del Grosso' in str(warning.message)
     assert Path(warning.filename).resolve() == _THIS_FILE
@@ -206,9 +206,9 @@ def test_each_delgrosso_call_site_warns_under_the_once_per_location_filter():
     dispatch = _in_package_dispatcher()
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter('default')
-        dispatch(soundspeed_delgrosso, temperature=10.0, salinity=20.0,
+        dispatch(sound_speed_delgrosso, temperature=10.0, salinity=20.0,
                  pressure=0.0)                                  # call site A
-        dispatch(soundspeed_delgrosso, temperature=10.0, salinity=21.0,
+        dispatch(sound_speed_delgrosso, temperature=10.0, salinity=21.0,
                  pressure=0.0)                                  # call site B
     assert len(record) == 2, [(w.filename, w.lineno) for w in record]
     assert {Path(w.filename).resolve() for w in record} == {_THIS_FILE}
@@ -356,13 +356,14 @@ CONVERTED_SITES = [
     # reason), reached from the user's constructor and from the in-package
     # factories (``SeabedColumn.collapse``, the CRUST1/GRAW readers) alike.
     ('core/bottom.py', '_warn_implausible_geoacoustics', 2),
-    ('core/acoustics/seawater.py', 'soundspeed', 3),
-    ('core/acoustics/seawater.py', 'soundspeed_delgrosso', 3),
-    ('core/acoustics/seawater.py', 'soundspeed_teos10', 4),
-    ('core/acoustics/seawater.py', 'soundspeed_unesco', 4),
+    ('core/acoustics/seawater.py', 'sound_speed_mackenzie', 3),
+    ('core/acoustics/seawater.py', 'sound_speed_delgrosso', 3),
+    ('core/acoustics/seawater.py', 'sound_speed_teos10', 4),
+    ('core/acoustics/seawater.py', 'sound_speed_unesco', 4),
     ('core/bottom.py', 'SeabedColumn.collapse', 1),
     ('core/environment.py', 'Environment.get_sound_speed', 1),
     ('core/results/field.py', 'Field._warn_if_frequency_axis_undersamples', 1),
+    ('core/results/field.py', 'Field._warn_if_phase_view_aliases', 2),
     ('core/results/field.py', 'Field._warn_if_undersampled', 2),
     ('core/results/field.py', '_estimate_t_start', 2),
     ('core/results/field.py', '_warn_unsolved_bins', 1),

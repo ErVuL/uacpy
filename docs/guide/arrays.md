@@ -30,6 +30,7 @@ namespace.
 |---|---|---|
 | `steering_vectors(positions_m, angles_deg, frequency, c=1500.0)` | element coordinates (m), scan angles (deg) | `(n_angles, n_elements)` complex, unit-norm rows |
 | `beamform(pressure, phone_coords, frequency, angles=None, SL=150.0, NL=0.0, c=1500.0)` | `(n_phones, n_cols)` pressure | `BeamformResult(snr, angles, peak_snr)` |
+| `snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None, window=None)` | `(n_samples, n_elements)` record | `Snapshots(frequency, data)` — the bin used, and `(n_elements, n_snapshots)` |
 | `sample_covariance(snapshots, *, diagonal_loading=0.0)` | `(n_elements, n_snapshots)` | Hermitian `R`, `(N, N)` |
 | `bartlett_spectrum(R, steering)` | covariance + manifold | conventional power per angle |
 | `mvdr_spectrum(R, steering, *, diagonal_loading=1e-6)` | covariance + manifold | Capon power per angle |
@@ -494,6 +495,37 @@ across all N channels. `K` of them stack into an `(N, K)` array:
 R = sample_covariance(snapshots)                    # (N, N), R = <x xᴴ>
 R = sample_covariance(snapshots, diagonal_loading=0.05)
 ```
+
+Getting those `K` snapshots out of an array *record* is what `snapshots` is
+for. An array delivers a real time series per element, shaped
+`(n_samples, n_elements)` — the same orientation `fk_transform` takes — and
+the covariance wants `(n_elements, n_snapshots)`. Between the two sit five
+steps, and the last two fail quietly:
+
+```python
+f_bin, data = snapshots(record, fs, 200.0, nperseg=1024)
+R = sample_covariance(data, diagonal_loading=1e-3)
+replicas = steering_vectors(positions, angles, f_bin, c)   # f_bin, not 200.0
+```
+
+**Use the frequency it hands back, not the one you asked for.** A
+1024-point segment at 2 kHz resolves 1.95 Hz, so a request for 200 Hz is
+answered at 199.22 Hz. Build the replicas at 200 Hz and they no longer match
+the data the covariance was formed from — a mismatch nothing downstream can
+detect, which is why the bin comes back first and
+`Snapshots.covariance()` exists to keep the two together.
+
+`nperseg` is the one parameter that matters twice: it fixes the frequency
+resolution, hence which bin answers your request, and the snapshot count,
+hence whether an adaptive estimator has enough. Bartlett does not care much —
+its contrast is set by the array — but MVDR needs `K` comfortably above `N`.
+
+One bin, deliberately. Pooling a band of bins into a single covariance and
+beamforming it with one replica steers the off-centre bins at the wrong
+frequency: measured over 170–229 Hz on a 12-element array, that costs
+**2.4 dB** of MVDR contrast against steering each bin at its own frequency.
+Broadband processing is a sum of per-bin surfaces, each with its own
+replica — a different operation, not a wider window here.
 
 `sample_covariance` computes `R̂ = x·xᴴ / K` and, optionally, adds
 `diagonal_loading · trace(R̂)/N` to the diagonal. Note the default here is

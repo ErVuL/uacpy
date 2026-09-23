@@ -17,6 +17,7 @@ from uacpy.core._grid import (
     _as_finite_scalar_label, _nearest_index_on_axis,
 )
 from uacpy.core._carrier_validate import (
+    COLUMN_COLLAPSE_METHODS, RANGE_COLLAPSE_METHODS, _method_list,
     _DeepCopyMixin,
     _validate_acoustic_type, _require_strictly_increasing,
     _require_attenuation_in_range,
@@ -663,8 +664,6 @@ class BoundaryProperties(_DeepCopyMixin):
         return cls(**kwargs)
 
 
-_COLUMN_COLLAPSE_METHODS = ('halfspace', 'top_layer', 'volume_average')
-
 # Numeric acoustic fields a SedimentLayer shares with BoundaryProperties.
 # ``roughness`` is absent: it is an interface property, not a bulk one.
 _LAYER_ACOUSTIC_FIELDS = ('density', 'sound_speed', 'attenuation',
@@ -739,6 +738,17 @@ def _reduce_uniform_nodes(nodes: List[BoundaryProperties], method: str,
             f"{who}({method!r}) needs a single boundary type to average; "
             f"got {sorted(types)}. Boundary types cannot be blended — use "
             f"'r0' or 'rmax'.")
+    # Refused rather than assumed. ``np.mean if method == 'mean' else
+    # np.median`` makes every unrecognised method a median, which is a
+    # silently wrong boundary rather than an error. Both callers already
+    # reject anything outside ('mean','median') before reaching here, so
+    # this is defence in depth and not a path anyone can currently take —
+    # it exists so that a caller added later cannot reopen one.
+    if method not in ('mean', 'median'):
+        raise ConfigurationError(
+            f"{who}({method!r}) is not a numeric reduction of a range axis; "
+            f"this reducer implements 'mean' and 'median'. Pick one of "
+            f"those, or 'r0'/'rmax' to keep one node whole.")
     reduce = np.mean if method == 'mean' else np.median
     (the_type,) = types
     if the_type in ('file', 'precalc'):
@@ -967,10 +977,10 @@ class SeabedColumn(_DeepCopyMixin):
         The half-space is the template for the non-blendable fields, so a
         ``'vacuum'`` / ``'rigid'`` column collapses back to that parameter-free
         type carrying only its ``roughness``."""
-        if method not in _COLUMN_COLLAPSE_METHODS:
+        if method not in COLUMN_COLLAPSE_METHODS:
             raise ConfigurationError(
                 f"SeabedColumn.collapse: unknown method={method!r}; "
-                f"valid: {_COLUMN_COLLAPSE_METHODS}"
+                f"valid: {_method_list(COLUMN_COLLAPSE_METHODS)}"
             )
         if method == 'halfspace' or not self.layers:
             return _copy.deepcopy(self.halfspace)
@@ -1341,6 +1351,13 @@ class Bottom(_DeepCopyMixin):
         The picking methods return a **copy** of the chosen column, matching
         :meth:`at` / :meth:`isel` / :meth:`halfspace_at`; the averaging ones
         build a new half-space and never held the parent's to begin with."""
+        # Validated before the early return: a range-independent bottom has
+        # nothing to reduce, and returning first made a typo silent until the
+        # user switched to a range-dependent environment.
+        if method not in RANGE_COLLAPSE_METHODS:
+            raise ConfigurationError(
+                f"Bottom.select_range: unknown method={method!r}; "
+                f"valid: {_method_list(RANGE_COLLAPSE_METHODS)}")
         if not self.is_range_dependent:
             # Nothing to reduce: one column in, one column out. A single-node
             # ``ranges`` is a coordinate at that range (``from_halfspaces``
@@ -1354,10 +1371,6 @@ class Bottom(_DeepCopyMixin):
         if method == 'rmax':
             return Bottom(columns=[_copy.deepcopy(self.columns[-1])],
                           ranges=None)
-        if method not in ('mean', 'median'):
-            raise ConfigurationError(
-                f"Bottom.select_range: unknown method={method!r}; "
-                "valid: 'r0', 'rmax', 'mean', 'median'")
         if self.is_layered:
             if method == 'median':
                 return Bottom(

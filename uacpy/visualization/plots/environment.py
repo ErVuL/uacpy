@@ -10,15 +10,15 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.ticker import MaxNLocator
 from typing import Optional, Tuple
 
-from uacpy.core.absorption import francois_garrison_dB_per_km, thorp_dB_per_km
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
+from uacpy.core.acoustics.boundaries import critical_angle
 from uacpy.core.environment import Environment
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE, BOTTOM_CMAP, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
     hatched_fill,
 )
-from uacpy.visualization.plots._common import ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once, _title_or
+from uacpy.visualization.plots._common import _plot_warn, ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once, _title_or
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.units import km_to_m, m_to_km
 
@@ -838,9 +838,9 @@ def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
         if c_b is None:
             from uacpy.core.materials import get_material
             c_b = float(get_material(material)['sound_speed'])
-        if c_b > water_speed:
-            ax.axvline(np.degrees(np.arccos(water_speed / c_b)),
-                       color=line.get_color(), ls=':', lw=1.0)
+        theta_c = critical_angle(c_b, water_speed)
+        if np.isfinite(theta_c):        # nan for a seabed slower than water
+            ax.axvline(theta_c, color=line.get_color(), ls=':', lw=1.0)
     ax.set_xlabel('Grazing angle (°)')
     ax.set_ylabel('Bottom loss (dB)')
     ax.set_xlim(0.0, 90.0)
@@ -870,6 +870,19 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
     names or symbols) to restrict the panels, or ``title=`` to override the
     figure title. Returns ``(fig, axes)``.
     """
+    # A caller holding the Bottom itself reaches for this first, so the type
+    # is checked here and the refusal says why. The seabed has no ``.plot()``
+    # of its own because its depth axis is measured DOWN FROM THE SEAFLOOR:
+    # placing it needs the water depth, which lives on the Environment
+    # (``env.depth`` and ``env.has_range_dependent_bathymetry`` below).
+    if not hasattr(env, 'bottom'):
+        raise ConfigurationError(
+            f"plot_bottom_properties: expected an Environment, got "
+            f"{type(env).__name__}. The seabed is drawn from the environment "
+            f"rather than from the seabed object because its depth axis runs "
+            f"down from the seafloor, and only the environment knows where "
+            f"that is.",
+            remediation="plot_bottom_properties(env), with env.bottom set")
     bottom = env.bottom
     if bottom is None:
         raise ConfigurationError(
@@ -965,56 +978,60 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
 
 
 @typed_plot_error
-def plot_absorption(frequencies, absorption=None, ax=None, *, model=None,
-                    label=None, title=None, figsize=(7.5, 4.5), **mpl_kw):
-    """Volume absorption (dB/km) versus frequency, on log-log axes.
+def plot_absorption(coefficient, ax=None, *, label=None, title=None,
+                    figsize=(7.5, 4.5), **mpl_kw):
+    """Draw an :class:`~uacpy.core.absorption.AbsorptionCoefficient`.
 
-    Either pass pre-computed ``absorption`` (dB/km, same length as
-    ``frequencies`` in **Hz**), or a ``model`` to compute it from the
-    :mod:`uacpy.core.absorption` formulas: ``'thorp'`` or
-    ``'francois_garrison'`` (extra model parameters — ``temperature``,
-    ``salinity``, ``pH``, ``depth`` — go through ``model_kwargs``). Returns
-    ``(fig, ax)`` like the other plotters; call repeatedly with ``ax=`` to
-    overlay several models.
+    Log-log against frequency for a 1-D carrier: absorption spans four
+    decades across the band this package works in, so a linear axis shows one
+    end of it or the other and never both. A carrier that carries a depth
+    axis draws as a depth-frequency heatmap instead.
+
+    This function draws a carrier it is handed and computes nothing: build
+    one with :func:`~uacpy.core.absorption.absorption_thorp` or
+    :func:`~uacpy.core.absorption.absorption_francois_garrison`, or call
+    ``.plot()`` on it directly. Choosing a formula is the caller's job, which
+    keeps the ocean Francois-Garrison needs — temperature, salinity, pH,
+    depth — visible at the call rather than defaulted out of sight.
+
+    Call repeatedly with ``ax=`` to overlay several models.
     """
-    frequencies = np.asarray(frequencies, dtype=float)
-    mk = mpl_kw.pop('model_kwargs', None)
-    if absorption is not None and model is not None:
-        raise ConfigurationError(
-            "plot_absorption: model= selects the computed curve and has no "
-            "effect on a pre-computed absorption= array. Drop one of the "
-            "two.")
-    if absorption is not None and mk:
-        raise ConfigurationError(
-            "plot_absorption: model_kwargs= configures the model= computation "
-            "and has no effect on a pre-computed absorption= array. Drop one "
-            "of the two.")
-    mk = mk or {}
-    if absorption is None:
-        if model is None:
-            raise ConfigurationError(
-                "plot_absorption: pass absorption= (dB/km) or model= "
-                "('thorp' / 'francois_garrison').")
-        m = str(model).lower().replace('-', '_')
-        if m == 'thorp':
-            absorption = thorp_dB_per_km(frequencies)
-        elif m in ('francois_garrison', 'fg'):
-            absorption = francois_garrison_dB_per_km(frequencies, **mk)
+    freqs = np.asarray(coefficient.frequencies, dtype=float)
+    values = np.asarray(coefficient.values, dtype=float)
+    if not np.any(values > 0.0):
+        # The depth is named in both shapes. A curve carries the single depth
+        # it was evaluated at, so the advice below ("evaluate at a depth
+        # inside one") can be acted on — it used to say nothing at all for a
+        # curve, which is the case a Biological user hits first.
+        if coefficient.depths is not None:
+            where = (f" over depths {np.min(coefficient.depths):g}"
+                     f"..{np.max(coefficient.depths):g} m")
+        elif coefficient.depth_m is not None:
+            where = f" at {coefficient.depth_m:g} m"
         else:
-            raise ConfigurationError(
-                f"plot_absorption: unknown model={model!r}; use 'thorp' or "
-                "'francois_garrison'.")
-        if label is None:
-            label = m
-    absorption = np.asarray(absorption, dtype=float)
+            where = ''
+        _plot_warn(
+            f"plot_absorption: alpha is entirely non-positive{where}, so a "
+            f"logarithmic axis draws blank. A layered model such as "
+            f"Biological is zero outside its layers — evaluate at a depth "
+            f"inside one.")
+    value_label = f"Absorption ({coefficient.units})"
     fig, ax = fig_ax(ax, figsize)
-    ax.loglog(frequencies, absorption, label=label, **mpl_kw)
-    ax.set_xlabel("Frequency (Hz)")
-    ax.set_ylabel("Absorption (dB/km)")
-    ax.set_title(_title_or(title, "Volume absorption"), loc="left")
-    ax.grid(which="both", alpha=0.3)
-    if label is not None:
+    if coefficient.is_depth_dependent:
+        depths = np.asarray(coefficient.depths, dtype=float)
+        mesh = ax.pcolormesh(freqs, depths, values, shading='nearest',
+                             **mpl_kw)
+        ax.set_xscale('log')
+        invert_yaxis_once(ax)
+        ax.set_ylabel("Depth (m)")
+        fig.colorbar(mesh, ax=ax, label=value_label)
+    else:
+        ax.loglog(freqs, values, label=label or coefficient.model, **mpl_kw)
+        ax.set_ylabel(value_label)
+        ax.grid(which="both", alpha=0.3)
         ax.legend(fontsize='small')
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_title(_title_or(title, "Volume absorption"), loc="left")
     return fig, ax
 
 

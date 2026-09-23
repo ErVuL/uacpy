@@ -706,7 +706,10 @@ def evm(rx_symbols, ref_symbols):
 
 
 _BER_PSK_ORDERS = {"8psk": 8, "16psk": 16}
-_BER_QAM_ORDERS = {"16qam": 16, "64qam": 64, "256qam": 256}
+#: Constellation order per QAM scheme. Declared here, not in
+#: ``modulate``, because ``modulate`` already imports from this
+#: module and the reverse would be a cycle.
+_QAM_ORDERS = {"16qam": 16, "64qam": 64, "256qam": 256}
 
 
 def ber_theory(scheme, ebn0_dB):
@@ -733,11 +736,11 @@ def ber_theory(scheme, ebn0_dB):
         M = _BER_PSK_ORDERS[s]
         k = np.log2(M)
         return (2.0 / k) * _q(np.sqrt(2.0 * k * ebn0) * np.sin(np.pi / M))
-    if s in _BER_QAM_ORDERS:
-        M = _BER_QAM_ORDERS[s]
+    if s in _QAM_ORDERS:
+        M = _QAM_ORDERS[s]
         k = np.log2(M)
         c = 4.0 / k * (1.0 - 1.0 / np.sqrt(M))
         return c * _q(np.sqrt(3.0 * k / (M - 1.0) * ebn0))
-    valid = ("bpsk", "qpsk", *_BER_PSK_ORDERS, *_BER_QAM_ORDERS)
+    valid = ("bpsk", "qpsk", *_BER_PSK_ORDERS, *_QAM_ORDERS)
     raise ConfigurationError(
         f"ber_theory: unsupported scheme {scheme!r}; valid: {', '.join(valid)}")

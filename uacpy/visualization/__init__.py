@@ -42,8 +42,13 @@ Canonical surface
 * :func:`plot_beam_pattern` — source directivity from a ``.sbp`` table or
   an ``(N, 2)`` array, on polar axes oriented like the field
   (``source.plot_beam_pattern()`` is the object-oriented form).
-* :func:`plot_absorption` — volume absorption α(f) from a raw dB/km array or a
-  model string (``absorption.plot(frequencies)`` is the object-oriented form).
+* :func:`plot_absorption` — draws an
+  :class:`~uacpy.core.absorption.AbsorptionCoefficient`: α(f) on log-log axes,
+  or α(f, z) as a heatmap when the carrier has a depth axis. It computes
+  nothing; build the carrier with
+  :func:`~uacpy.core.absorption.absorption_thorp` or
+  :func:`~uacpy.core.absorption.absorption_francois_garrison`, or just call
+  ``.plot()`` on it.
 * :func:`land_polygons` — the Natural Earth land rings the map plotters draw
   behind a chart, for a map of your own; :func:`download_coastline` caches
   them for offline use, the way ``uacpy.data``'s ``download_*_db`` fetchers
@@ -105,7 +110,7 @@ from uacpy.visualization.plots import (
     plot_matched_field,
     plot_frf,
     plot_coherence,
-    plot_impulse_response_info,
+    plot_lsfir_diagnostics,
     plot_channel,
     plot_doppler_ambiguity,
     plot_convergence,
@@ -171,7 +176,7 @@ __all__ = [
     'plot_matched_field',
     'plot_frf',
     'plot_coherence',
-    'plot_impulse_response_info',
+    'plot_lsfir_diagnostics',
     'plot_channel',
     'plot_doppler_ambiguity',
     'plot_convergence',

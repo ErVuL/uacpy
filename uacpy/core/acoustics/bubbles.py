@@ -3,7 +3,7 @@
 A bubble is a mass-spring resonator, and a cloud of them is the strongest
 scatterer and the strongest attenuator in the upper ocean.
 :func:`bubble_resonance` gives the Minnaert frequency of one bubble,
-:func:`bubble_soundspeed` the speed through a void-fraction mixture (Wood's
+:func:`bubble_sound_speed` the speed through a void-fraction mixture (Wood's
 equation: air's compressibility with water's density, so at intermediate void
 fractions the mixture carries sound slower than either pure phase), and
 :func:`bubble_surface_loss` the per-bounce loss a wind-driven layer adds to a
@@ -29,12 +29,12 @@ import numpy as np
 from typing import Union, Optional
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.acoustics.seawater import soundspeed
+from uacpy.core.acoustics.seawater import sound_speed_mackenzie
 
 __all__ = [
     'bubble_resonance',
     'bubble_surface_loss',
-    'bubble_soundspeed',
+    'bubble_sound_speed',
 ]
 
 
@@ -199,7 +199,7 @@ def bubble_surface_loss(
     return 10 ** (-a / 20.0)
 
 
-def bubble_soundspeed(
+def bubble_sound_speed(
     void_fraction: Union[float, np.ndarray],
     c: Optional[float] = None,
     c_gas: float = 340,
@@ -228,7 +228,7 @@ def bubble_soundspeed(
 
     Examples
     --------
-    >>> c_bubbly = bubble_soundspeed(1e-5)
+    >>> c_bubbly = bubble_sound_speed(1e-5)
     >>> print(f"Sound speed in bubbly water: {c_bubbly:.2f} m/s")
     Sound speed in bubbly water: 1402.13 m/s
 
@@ -247,7 +247,7 @@ def bubble_soundspeed(
     and pulse propagation in unconsolidated granular materials". JASA, 102(5).
     """
     if c is None:
-        c = soundspeed()
+        c = sound_speed_mackenzie()
 
     # Splitting ``relative_density`` as m = sqrt(rho_w/rho_gas) puts the two
     # averages on a common footing: ``numerator`` is (rho_w c_w²)/(rho_A c_A²)/m

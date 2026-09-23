@@ -19,7 +19,7 @@ Examples
 """
 
 from uacpy.noise.ambient import (
-    compute_windnoise, WenzNoise, NoiseComponents,
+    compute_windnoise, WenzNoise, NoiseComponents, KNUDSEN_UNCERTAINTY_DB,
     WIND_MODELS, SHIPPING_MODELS, RAIN_MODELS, THERMAL_MODELS, TURBULENCE_MODELS,
 )
 from uacpy.noise.ship_radiated_noise import (
@@ -41,6 +41,7 @@ from uacpy.noise import marine_mammal, ship_radiated_noise
 __all__ = [
     'compute_windnoise',
     'WenzNoise',
+    'KNUDSEN_UNCERTAINTY_DB',
     'NoiseComponents',
     'WIND_MODELS', 'SHIPPING_MODELS', 'RAIN_MODELS',
     'THERMAL_MODELS', 'TURBULENCE_MODELS',

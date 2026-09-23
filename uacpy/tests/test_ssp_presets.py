@@ -36,19 +36,19 @@ class TestMackenzie:
         z = np.array([0.0])
         T = np.array([15.0])
         S = np.array([35.0])
-        ssp = SoundSpeedProfile.from_mackenzie(z, T, S)
+        ssp = SoundSpeedProfile.from_temperature_salinity(z, T, S)
         assert float(ssp.data[0, 0]) == pytest.approx(1506.69, abs=0.05)
 
     def test_increasing_with_depth(self):
         z = np.linspace(0.0, 4000.0, 81)
         T = np.full_like(z, 4.0)
         S = np.full_like(z, 35.0)
-        ssp = SoundSpeedProfile.from_mackenzie(z, T, S)
+        ssp = SoundSpeedProfile.from_temperature_salinity(z, T, S)
         assert np.all(np.diff(ssp.data[:, 0]) > 0)
 
     def test_shape_mismatch_raises(self):
         with pytest.raises(ConfigurationError, match="must share shape"):
-            SoundSpeedProfile.from_mackenzie(
+            SoundSpeedProfile.from_temperature_salinity(
                 depths=np.array([0.0, 100.0]),
                 temperature_c=np.array([15.0]),
                 salinity_psu=np.array([35.0, 35.0]),

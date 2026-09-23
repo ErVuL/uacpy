@@ -18,6 +18,7 @@ from uacpy.core._grid import (
     collapse_axis, INTERP_METHODS, _as_finite_scalar_label,
 )
 from uacpy.core._carrier_validate import (
+    RANGE_COLLAPSE_METHODS, _method_list,
     _DeepCopyMixin,
     _scalar_or_none,
     _reject_complex,
@@ -84,7 +85,7 @@ class SoundSpeedProfile(_DeepCopyMixin):
     shape: str = 'measured'
     data_sources: tuple = ()
     #: Sound-speed formula that built ``data`` from T/S ('teos10', 'unesco',
-    #: 'delgrosso', or 'mackenzie' from :meth:`from_mackenzie`); ``None`` for a
+    #: 'delgrosso', or 'mackenzie' from :meth:`from_temperature_salinity`); ``None`` for a
     #: literal or hand-built profile. Read by
     #: :func:`uacpy.data.extend_ssp_below_data`, which continues the column
     #: under the same equation (a ``None`` column takes the package default,
@@ -370,6 +371,16 @@ class SoundSpeedProfile(_DeepCopyMixin):
         ``'median'`` : depth-wise median across all ranges.
         ``'rmax'``   : keep the last (deepest range) column.
         """
+        # Validated before the early return: a range-independent
+        # carrier has nothing to reduce, and returning self first
+        # made a typo silent until the user switched to a
+        # range-dependent environment — the moment they are least
+        # looking for one.
+        if method not in RANGE_COLLAPSE_METHODS:
+            raise ConfigurationError(
+                f"SoundSpeedProfile.collapse: unknown method={method!r}; "
+                f"valid: {_method_list(RANGE_COLLAPSE_METHODS)}"
+            )
         if not self.is_range_dependent:
             return self
         if method == 'r0':
@@ -380,10 +391,10 @@ class SoundSpeedProfile(_DeepCopyMixin):
             col = self.data.mean(axis=1)
         elif method == 'median':
             col = np.median(self.data, axis=1)
-        else:
+        else:                       # pragma: no cover - guarded at entry
             raise ConfigurationError(
-                f"SoundSpeedProfile.collapse: unknown method={method!r}; "
-                "valid: 'r0', 'rmax', 'mean', 'median'"
+                f"SoundSpeedProfile.collapse: unreachable method "
+                f"{method!r} — the vocabulary is checked on entry."
             )
         return self._replace(data=col.reshape(-1, 1), ranges=None)
 
@@ -631,39 +642,65 @@ class SoundSpeedProfile(_DeepCopyMixin):
         )
 
     @classmethod
-    def from_mackenzie(
+    def from_temperature_salinity(
         cls,
         depths: np.ndarray,
         temperature_c: np.ndarray,
         salinity_psu: np.ndarray,
+        *,
+        formula: Optional[str] = None,
+        latitude_deg: Optional[float] = None,
     ) -> 'SoundSpeedProfile':
-        """Build a profile from in-situ ``T(z)`` and ``S(z)`` via Mackenzie's
-        nine-term seawater sound-speed equation.
+        """Build a profile from in-situ ``T(z)`` and ``S(z)``.
 
-        ``depths``, ``temperature_c``, ``salinity_psu`` must be 1-D arrays
-        of equal length sampled at the same depth grid. Use
-        ``np.full_like(depths, T_const)`` if the column is isothermal/
-        isohaline. Valid range: ``T ∈ [−2, 30] °C``,
-        ``S ∈ [25, 40] PSU``, ``z ∈ [0, 8000] m`` (Mackenzie 1981).
+        ``depths``, ``temperature_c``, ``salinity_psu`` must be 1-D arrays of
+        equal length sampled at the same depth grid. Use
+        ``np.full_like(depths, T_const)`` if the column is isothermal or
+        isohaline.
 
-        The profile carries ``formula='mackenzie'``, so
+        ``formula`` selects the equation and defaults to
+        ``DEFAULT_SOUND_SPEED_FORMULA`` (TEOS-10), the same default every
+        ``fetch_ssp*`` route carries, so an in-memory profile and a fetched
+        one agree unless you ask otherwise. Supersedes ``from_mackenzie``:
+        pass ``formula='mackenzie'`` for that equation, which sits about
+        0.2 m/s from the default at 4 km.
+
+        Three of the four equations are stated in **pressure**; Mackenzie is
+        stated in depth. The conversion is Leroy & Parthiot's standard ocean
+        and needs a latitude, which defaults to the equation's own reference
+        45 deg — see ``REFERENCE_LATITUDE_DEG`` for what that costs.
+
+        The profile records ``formula``, so
         :func:`uacpy.data.extend_ssp_below_data` continues it under the same
-        equation rather than under TEOS-10 (the two differ by ~0.35 m/s at
-        8.8 km from a 5.5 km column).
+        equation that built it.
         """
-        from uacpy.core.acoustics import soundspeed
+        from uacpy.core.acoustics.seawater import (
+            SOUND_SPEED_FORMULAS, DEFAULT_SOUND_SPEED_FORMULA,
+            REFERENCE_LATITUDE_DEG, depth_to_pressure_dbar,
+        )
+        formula = DEFAULT_SOUND_SPEED_FORMULA if formula is None else formula
+        if formula not in SOUND_SPEED_FORMULAS:
+            raise ConfigurationError(
+                f"SoundSpeedProfile.from_temperature_salinity: unknown "
+                f"formula={formula!r}.",
+                remediation=f"Use one of {sorted(SOUND_SPEED_FORMULAS)}.")
+        lat = (REFERENCE_LATITUDE_DEG if latitude_deg is None
+               else float(latitude_deg))
         z = np.asarray(depths, dtype=float).ravel()
         T = np.asarray(temperature_c, dtype=float).ravel()
         S = np.asarray(salinity_psu, dtype=float).ravel()
         if not (T.shape == S.shape == z.shape):
             raise ConfigurationError(
-                "from_mackenzie: depths, temperature_c, salinity_psu must "
-                f"share shape; got {z.shape}, {T.shape}, {S.shape}"
+                "SoundSpeedProfile.from_temperature_salinity: depths, "
+                f"temperature_c, salinity_psu must share shape; got "
+                f"{z.shape}, {T.shape}, {S.shape}"
             )
-        c = soundspeed(temperature=T, salinity=S, depth=z)
+        # Every arm of the table takes (T, S, p_dbar); the mackenzie arm
+        # inverts back to depth internally.
+        c = SOUND_SPEED_FORMULAS[formula](T, S, depth_to_pressure_dbar(z, lat))
         return cls(
             depths=z, data=np.asarray(c).reshape(-1, 1),
-            ranges=None, formula='mackenzie',
+            ranges=None, formula=formula,
         )
 
 

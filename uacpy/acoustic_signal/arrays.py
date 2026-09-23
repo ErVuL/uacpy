@@ -81,6 +81,126 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
     return e / np.sqrt(z.size)
 
 
+class Snapshots(namedtuple("Snapshots", "frequency data")):
+    """Complex single-frequency snapshots, and the bin they were read at.
+
+    The tuple is the measurement, so ``frequency, data = snapshots(...)``
+    keeps working. ``data`` is ``(n_elements, n_snapshots)``, the shape
+    :func:`sample_covariance` and :func:`uacpy.sonar.csdm` take.
+
+    ``frequency`` is the DFT bin actually used, which is not the frequency
+    asked for: a 1024-point segment at 2 kHz resolves 1.95 Hz, so a request
+    for 200 Hz is answered at 199.22 Hz. It comes back first because the
+    replicas must be built at the same frequency as the data — steering at
+    the requested value instead of the bin mismatches the replica against
+    the snapshots, and nothing downstream can detect that.
+    """
+
+    __slots__ = ()
+
+    def covariance(self, *, diagonal_loading: float = 0.0):
+        """``sample_covariance`` of these snapshots, for convenience."""
+        return sample_covariance(self.data,
+                                 diagonal_loading=diagonal_loading)
+
+
+def snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None,
+              window=None):
+    """Single-frequency snapshots from an array time record.
+
+    The bridge between what an array records and what the covariance
+    estimators take. :func:`sample_covariance` averages over snapshots, but
+    a hydrophone array delivers a real time series per element; getting from
+    one to the other means segmenting the record, windowing, transforming
+    each segment and reading one bin — with a transpose at the end, because
+    the record is ``(n_samples, n_elements)`` (what :func:`fk_transform`
+    takes) and the covariance wants ``(n_elements, n_snapshots)``.
+
+    Parameters
+    ----------
+    data : ndarray, shape ``(n_samples, n_elements)``
+        The array record, real or complex.
+    sample_rate : float
+        Sampling rate (Hz).
+    frequency : float
+        Frequency of interest (Hz). Answered at the nearest DFT bin, whose
+        value is returned — see :class:`Snapshots`.
+    nperseg : int
+        Samples per segment. Required, and the only parameter that matters
+        twice: it sets the frequency resolution (hence which bin answers
+        ``frequency``) and the snapshot count (hence whether an adaptive
+        estimator has enough). There is no defensible default for both.
+    noverlap : int, optional
+        Overlap between segments. Defaults to ``nperseg // 2``, matching
+        :func:`fk_transform`. Overlapped segments are correlated, so they
+        buy fewer independent snapshots than their count suggests.
+    window : array_like or str, optional
+        Time taper, as :func:`fk_transform` takes it. Default Hann.
+
+    Returns
+    -------
+    Snapshots
+        ``(frequency, data)`` — the bin frequency and the
+        ``(n_elements, n_snapshots)`` complex array.
+
+    Notes
+    -----
+    One bin, deliberately. Pooling a band of bins into one covariance and
+    beamforming it with a single replica steers the off-centre bins at the
+    wrong frequency: measured over 170-229 Hz on a 12-element array, that
+    costs 2.4 dB of MVDR contrast against steering each bin at its own
+    frequency. Broadband processing is a sum of per-bin surfaces, each with
+    its own replica — a different operation, not a wider window here.
+    """
+    d = np.asarray(data)
+    if d.ndim != 2:
+        raise ConfigurationError(
+            f"snapshots: data must be 2-D (n_samples, n_elements); got "
+            f"shape {d.shape}.")
+    nt, nx = d.shape
+    fs = float(sample_rate)
+    if not fs > 0 or not np.isfinite(fs):
+        raise ConfigurationError(
+            f"snapshots: sample_rate must be a positive finite number of Hz; "
+            f"got {sample_rate!r}.")
+    seg = int(nperseg)
+    if seg < 1 or seg > nt:
+        raise ConfigurationError(
+            f"snapshots: nperseg ({seg}) must be in [1, n_samples={nt}].")
+    ov = seg // 2 if noverlap is None else int(noverlap)
+    if not 0 <= ov < seg:
+        raise ConfigurationError(
+            f"snapshots: noverlap ({ov}) must be in [0, nperseg={seg}).")
+    f0 = float(frequency)
+    nyquist = fs / 2.0
+    if not 0.0 <= f0 <= nyquist:
+        raise ConfigurationError(
+            f"snapshots: frequency ({f0:g} Hz) must lie in [0, Nyquist="
+            f"{nyquist:g} Hz] for a {fs:g} Hz record.")
+    wt, _ = _fk_tapers(window, seg, nx)
+
+    # Clamped to the last non-negative bin. ``round`` is half-to-even, so a
+    # request at exactly Nyquist with an odd ``nperseg`` of the form 4m+3
+    # rounds *up* past seg//2 and lands on the first NEGATIVE-frequency bin —
+    # whose frequency is not ``bin_index * fs / seg`` at all. Unclamped,
+    # nperseg=255 at fs=2000 reported 1003.92 Hz for a 1000 Hz Nyquist,
+    # reading the -996.08 Hz bin: neither the frequency asked for nor the one
+    # supplied, which is the single thing this return value exists to be.
+    bin_index = min(int(round(f0 * seg / fs)), seg // 2)
+    bin_frequency = bin_index * fs / seg
+    # Whole segments only, as fk_transform does: a trailing partial block
+    # would be transformed at a different resolution and land in a different
+    # bin, which is not the same measurement.
+    starts = range(0, nt - seg + 1, seg - ov)
+    columns = [np.fft.fft(d[s0:s0 + seg] * wt[:, None], axis=0)[bin_index]
+               for s0 in starts]
+    if not columns:
+        raise ConfigurationError(
+            f"snapshots: no whole segment fits — nperseg={seg} with "
+            f"n_samples={nt}.")
+    return Snapshots(bin_frequency, np.asarray(columns).T)
+
+
 def sample_covariance(snapshots, *, diagonal_loading: float = 0.0):
     """Spatial covariance ``R = <x x^H>`` from snapshots.
 
@@ -887,8 +1007,51 @@ def independent_beams(positions_m, angles_deg, frequency,
 
 _RADON_KINDS = ("linear", "parabolic", "hyperbolic")
 
-RadonResult = namedtuple("RadonResult", "moveout taus panel")
-TauPResult = namedtuple("TauPResult", "slownesses taus panel")
+
+class RadonResult(namedtuple("RadonResult", "moveout taus panel")):
+    """Radon panel over ``moveout`` and intercept ``taus``.
+
+    The tuple is the measurement, so ``moveout, taus, panel = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_radon`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_radon(self.moveout, self.taus, self.panel, **kwargs)
+
+
+class TauPResult(namedtuple("TauPResult", "slownesses taus panel")):
+    """Tau-p panel over ``slownesses`` and intercept ``taus``.
+
+    The tuple is the measurement, so ``slownesses, taus, panel = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_taup`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_taup(self.slownesses, self.taus, self.panel, **kwargs)
+
+
 #: What :attr:`FKResult.scaling` may hold: ``'density'`` for the
 #: calibrated panel of ``fk_transform(..., normalize=True)`` (x² per
 #: Hz·rad/m, two-sided in f and k, ``ΣP·Δf·Δk = ⟨x²⟩``) and ``'power'`` for
@@ -930,6 +1093,20 @@ class FKResult(_FKFields):
 
     def __getnewargs_ex__(self):
         return tuple(self), {"scaling": self.scaling}
+
+    def plot(self, **kwargs):
+        """Draw this panel through :func:`uacpy.visualization.plot_fk`.
+
+        The plotter already accepts the whole result in place of its three
+        arrays, and reads ``scaling`` off it for the colourbar unit, so this
+        hands it ``self`` rather than unpacking. ``kwargs`` reach the
+        plotter. Returns ``(fig, ax)``, as every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would make
+        # ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_fk(self, **kwargs)
 
     def __repr__(self):
         return f"{super().__repr__()[:-1]}, scaling={self.scaling!r})"

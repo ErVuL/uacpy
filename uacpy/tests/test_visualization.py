@@ -4461,25 +4461,20 @@ def test_a_spectrogram_pinned_off_its_own_band_says_the_panel_is_empty():
     plt.close(fig)
 
 
-def test_a_precomputed_absorption_array_rejects_the_model_knobs():
+def test_plot_absorption_draws_a_carrier_and_computes_nothing():
+    """It used to take `frequencies` plus either a `model=` name it branched
+    on or a pre-computed array, with a ConfigurationError policing the two.
+    Both knobs are gone: evaluation belongs to the `absorption_*` functions,
+    so there is one argument and nothing to police."""
+    import inspect
     from uacpy.visualization.plots.environment import plot_absorption
-    frequencies = np.array([100.0, 1000.0, 10000.0])
-    absorption = np.array([0.001, 0.06, 1.0])
-    with pytest.raises(ConfigurationError,
-                       match='has no effect on a pre-computed'):
-        plot_absorption(frequencies, absorption, model='thorp')
-    with pytest.raises(ConfigurationError,
-                       match='has no effect on a pre-computed'):
-        plot_absorption(frequencies, absorption,
-                        model_kwargs={'temperature': 10.0})
-
-
-def test_a_precomputed_absorption_array_alone_plots():
-    from uacpy.visualization.plots.environment import plot_absorption
-    frequencies = np.array([100.0, 1000.0, 10000.0])
-    absorption = np.array([0.001, 0.06, 1.0])
-    _fig, ax = plot_absorption(frequencies, absorption)
+    from uacpy.core.absorption import absorption_thorp
+    params = inspect.signature(plot_absorption).parameters
+    assert 'model' not in params and 'absorption' not in params
+    assert 'model_kwargs' not in params
+    _fig, ax = plot_absorption(absorption_thorp(np.logspace(2, 4, 12)))
     assert ax.get_ylabel() == 'Absorption (dB/km)'
+    assert ax.get_xscale() == 'log' and ax.get_yscale() == 'log'
 
 
 def test_a_source_depth_heatmap_plots_positive_down_like_depth():
@@ -6209,7 +6204,8 @@ def _one_call_per_title_spelling(title):
                 np.array([1 + 1j, -1 + 1j, -1 - 1j, 1 - 1j]) / np.sqrt(2),
                 title=title),
         'environment.plot_absorption':
-            lambda: plots.plot_absorption(freqs, model='thorp', title=title),
+            lambda: plots.plot_absorption(
+                uacpy.absorption_thorp(freqs), title=title),
         'rays_modes.plot_wavenumber_sampling':
             lambda: plots.plot_wavenumber_sampling(200.0, 1400.0, 1800.0,
                                                    1e-3, title=title),
@@ -6504,3 +6500,110 @@ def test_the_frequency_axis_can_be_read_linearly():
     plt.close("all")
     with pytest.raises(ConfigurationError, match="unknown freq_scale"):
         plot_psd(r, freq_scale="semilog")
+
+
+def test_the_axis_direction_follows_the_data_layers_loss_vocabulary(monkeypatch):
+    """One declaration of which kinds are losses, and the plotter reads it.
+
+    `_common` used to keep a private `_LOSS_KINDS` tuple beside a data-layer
+    comment asserting that "a new kind is declared in one place and both read
+    it". It was declared in two. A third kind added to one of them would have
+    made `Field.max` report the loud end while a 1-D cut drew its value axis
+    the other way, with nothing to notice. Monkeypatching the one source must
+    therefore move the plotter.
+    """
+    import types
+    from uacpy.core.results import quantities
+    from uacpy.visualization.plots import _common
+
+    reverb = types.SimpleNamespace(kind='reverberation', is_complex=False,
+                                   unit='dB')
+    assert _common._is_loss_view(reverb, 'dB')
+    assert not hasattr(_common, '_LOSS_KINDS'), (
+        '_common has grown its own copy of the loss vocabulary again')
+
+    monkeypatch.setattr(quantities, 'LOSS_KINDS', ('pressure',))
+    assert not _common._is_loss_view(reverb, 'dB'), (
+        'the plotter did not follow the data layer')
+
+
+def test_one_ambiguity_surface_gets_one_colormap_from_the_registry():
+    """`plot_ambiguity` drew jet, `plot_matched_field` viridis, and
+    `cmap_for_field('ambiguity')` returned turbo — three colours for one
+    quantity, and jet is the perceptually unordered map `style.py` reasons
+    against for exactly this case ("read for where its peak is").
+
+    Both are ambiguity surfaces: unsigned, normalised dB re max, read for the
+    location of the peak. They now ask the registry, so a change there moves
+    both and neither can drift.
+    """
+    import numpy as _np
+    from uacpy.visualization.plots.signal import plot_ambiguity, plot_matched_field
+    from uacpy.visualization.style import cmap_for_field
+
+    rng = _np.random.default_rng(0)
+    taus, doppler = _np.linspace(0, 1e-3, 20), _np.linspace(-50, 50, 15)
+    chi = _np.abs(rng.normal(size=(doppler.size, taus.size))) + 1e-6
+    fig_a, ax_a = plot_ambiguity(taus, doppler, chi)
+    fig_m, ax_m = plot_matched_field(
+        _np.linspace(0, 5000, 20), _np.linspace(0, 100, 15),
+        _np.abs(rng.normal(size=(15, 20))) + 1e-6)
+    try:
+        want = cmap_for_field('ambiguity', dB=True)
+        assert ax_a.images[0].get_cmap().name == want
+        assert ax_m.collections[0].get_cmap().name == want
+    finally:
+        plt.close(fig_a)
+        plt.close(fig_m)
+
+
+def test_two_different_quantities_score_blank_not_green():
+    """`compare_models`' agreement matrix used to difference any two fields.
+    `uacpy.metrics.tl_rmse` refuses a kind mismatch — "their difference is
+    not an agreement metric" (`metrics._validate_tl_pair_and_window`) —
+    while the figure
+    printed a number, and a small number lands on the colormap's deep green.
+
+    The figure keeps its own interpolation onto a shared range grid, which
+    `tl_rmse` deliberately will not do; it does not get to keep the missing
+    refusal as well. NaN is the figure's existing "no answer" and is masked
+    grey.
+    """
+    import warnings as _warnings
+    import numpy as _np
+    from uacpy.core.results import Field
+    from uacpy.visualization.plots.fields import _rms_between
+
+    r = _np.linspace(100.0, 1000.0, 10)
+    z = _np.array([50.0])
+
+    def field(kind):
+        return Field(data=_np.full((1, r.size), 60.0),
+                     coords={'depth': z, 'range': r}, model='T',
+                     frequencies=100.0,
+                     metadata={'kind': kind, 'unit': 'dB'})
+
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter('always')
+        mismatched = _rms_between(field('pressure'), field('reverberation'),
+                                  50.0)
+    assert _np.isnan(mismatched)
+    assert any('agreement metric' in str(w.message) for w in caught)
+    # The like-for-like pair still scores.
+    assert _rms_between(field('pressure'), field('pressure'), 50.0) == 0.0
+
+
+def test_plotting_the_seabed_from_the_seabed_says_why_it_needs_the_environment():
+    """The seabed is the one environment component with no `.plot()`, and the
+    reason is real: its depth axis runs down from the seafloor, so placing it
+    needs the water depth, which lives on the Environment. A caller holding a
+    `Bottom` used to get `AttributeError: 'Bottom' object has no attribute
+    'bottom'`, which explains none of that.
+    """
+    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.visualization import plot_bottom_properties
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom='sand')
+    with pytest.raises(ConfigurationError, match='expected an Environment'):
+        plot_bottom_properties(env.bottom)
+    fig = plot_bottom_properties(env)          # the right call is unchanged
+    plt.close(fig[0] if isinstance(fig, tuple) else fig)

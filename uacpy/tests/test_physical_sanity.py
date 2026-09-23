@@ -353,34 +353,34 @@ class TestSoundSpeedEquations:
     """Standard sound-speed equations (UNESCO Chen-Millero, Del Grosso)."""
 
     def test_unesco_reference_check_value(self):
-        from uacpy.core.acoustics import soundspeed_unesco
+        from uacpy.core.acoustics import sound_speed_unesco
         # c(T=0 °C, S=35, P=0) = 1449.139 m/s. At P=0 the Chen-Millero
         # polynomial collapses to C0 + (A0 + B0*sqrt(S) + D0*S)*S, which the
-        # independent AT transcription (Acoustics-Toolbox/Matlab/soundspeed.m:
+        # independent AT transcription (Acoustics-Toolbox/Matlab/sound_speed_mackenzie.m:
         # 85-101) evaluates to that value from the same published
         # coefficients. abs=0.02 is the rounding of the quoted 2-dp figure;
         # T=0 needs no ITS-90/IPTS-68 care because the scales meet there.
-        assert soundspeed_unesco(0.0, 35.0, 0.0) == pytest.approx(1449.14, abs=0.02)
+        assert sound_speed_unesco(0.0, 35.0, 0.0) == pytest.approx(1449.14, abs=0.02)
 
     def test_unesco_agrees_with_mackenzie_at_surface(self):
-        from uacpy.core.acoustics import soundspeed_unesco, soundspeed
+        from uacpy.core.acoustics import sound_speed_unesco, sound_speed_mackenzie
         # the two independent surface formulas agree to < 0.2 m/s
         for t, s in [(5, 35), (15, 35), (25, 36)]:
-            assert soundspeed_unesco(t, s, 0.0) == pytest.approx(soundspeed(t, s, 0.0), abs=0.2)
+            assert sound_speed_unesco(t, s, 0.0) == pytest.approx(sound_speed_mackenzie(t, s, 0.0), abs=0.2)
 
     def test_delgrosso_matches_unesco_within_documented_difference(self):
-        from uacpy.core.acoustics import soundspeed_unesco, soundspeed_delgrosso
+        from uacpy.core.acoustics import sound_speed_unesco, sound_speed_delgrosso
         # Del Grosso and UNESCO agree to < 1 m/s over realistic profiles; the
         # small residual grows with depth (UNESCO overpredicts, Dushaw 1993).
         for t, s, p in [(25, 35, 0), (15, 35.5, 600), (4, 34.8, 3000), (1.5, 34.7, 8000)]:
-            assert soundspeed_delgrosso(t, s, p) == pytest.approx(
-                soundspeed_unesco(t, s, p), abs=1.0)
+            assert sound_speed_delgrosso(t, s, p) == pytest.approx(
+                sound_speed_unesco(t, s, p), abs=1.0)
         # near-identical at the surface
-        assert soundspeed_delgrosso(15, 35, 0) == pytest.approx(
-            soundspeed_unesco(15, 35, 0), abs=0.05)
+        assert sound_speed_delgrosso(15, 35, 0) == pytest.approx(
+            sound_speed_unesco(15, 35, 0), abs=0.05)
 
     def test_monotonic_increase_with_each_variable(self):
-        from uacpy.core.acoustics import soundspeed_unesco as c
+        from uacpy.core.acoustics import sound_speed_unesco as c
         assert c(20, 35, 0) > c(10, 35, 0)        # temperature
         assert c(15, 38, 0) > c(15, 32, 0)        # salinity
         assert c(15, 35, 5000) > c(15, 35, 0)     # pressure

@@ -452,6 +452,15 @@ def _public_named_surfaces():
                 for attr in vars(obj):
                     if not attr.startswith('_'):
                         sites.add(f"{module.__name__}.{name}.{attr}")
+                # A namedtuple subclassed to carry methods keeps its field
+                # descriptors on the base it was built from, so ``vars`` on
+                # the subclass alone stops seeing them — the fields are still
+                # readable attributes, and the sweep went quiet about them
+                # rather than reporting fewer. Read them off ``_fields``,
+                # which does not care which class in the chain holds them.
+                for attr in getattr(obj, '_fields', ()):
+                    if not attr.startswith('_'):
+                        sites.add(f"{module.__name__}.{name}.{attr}")
     return sites
 
 
@@ -1008,7 +1017,7 @@ class TestFieldMaxComplexData:
 class TestPublicReexports:
     """Public namespace contract."""
 
-    def test_soundspeedprofile_at_top_level(self):
+    def test_sound_speed_profile_at_top_level(self):
         from uacpy import SoundSpeedProfile
         assert SoundSpeedProfile is uacpy.core.environment.SoundSpeedProfile
 
@@ -2976,6 +2985,166 @@ class TestFieldEvalSamplingGuard:
             a = up.eval(range=1050.0)
             b = down.eval(range=1050.0)
         np.testing.assert_array_equal(a.data, b.data)
+
+
+class TestAPhaseViewIsGuardedAtNyquistNotAtTheInterpolationBound:
+    """A phase map drawn on a grid coarser than half a wavelength.
+
+    Nothing is interpolated here and no level is biased: the heatmap draws
+    flat cells and a line cut joins stored samples. What goes wrong is that
+    an aliased phase reads as smooth large-scale structure rather than as
+    noise, so the picture does not look wrong. Measured on the 100 m Pekeris
+    guide at 200 Hz over 1000-1300 m: at dr = 15 m the panel draws broad
+    diagonal bands that are purely an artefact of the grid, while dr = 0.94 m
+    over the same window draws the one-wrap-per-wavelength fringes the field
+    has. The two agree exactly at the ranges they share, so the field is
+    right and only the view is wrong.
+
+    The bound is the HALF wavelength, deliberately not the quarter wavelength
+    ``_warn_if_undersampled`` uses, and one test below pins the two apart:
+    that guard asks whether uacpy may interpolate between samples, this one
+    asks whether the samples resolve the carrier at all.
+    """
+
+    HALF = 3.75          # half wavelength at 200 Hz, c = 1500 m/s
+    QUARTER = 1.875      # what the INTERPOLATION guard uses, for contrast
+
+    @staticmethod
+    def _coherent_field(dr, dz=1.0, f0=200.0, c=1500.0):
+        """Complex pressure, carrier e^{ikr}, grid spaced ``dz`` x ``dr``."""
+        ranges = np.arange(1000.0, 1300.0 + dr, dr)
+        depths = np.arange(40.0, 60.0 + dz, dz)
+        k = 2.0 * np.pi * f0 / c
+        data = np.exp(1j * k * ranges)[None, :] / ranges[None, :]
+        return Field(
+            data=np.repeat(data, depths.size, axis=0),
+            coords={'depth': depths, 'range': ranges},
+            model='Test', frequencies=f0,
+        )
+
+    @pytest.mark.parametrize('dr,aliased', [
+        (3.70, False),   # just inside Nyquist — coarse but unambiguous
+        (3.75, True),    # Nyquist exactly: +pi and -pi are one wrapped value
+        (3.80, True),    # past it
+    ])
+    def test_nyquist_is_the_first_aliased_spacing_not_the_last_good_one(
+            self, dr, aliased):
+        """Both sides of the bound, and the bound itself.
+
+        At exactly half a wavelength the carrier advances exactly pi between
+        samples and the direction of rotation is already unrecoverable, so
+        the comparison is ``>=``. A guard written ``>`` passes every test
+        that brackets the bound loosely and stays silent on the one grid
+        where the ambiguity is exact."""
+        field = self._coherent_field(dr)
+        if aliased:
+            with pytest.warns(UserWarning, match='this view is aliased'):
+                field._warn_if_phase_view_aliases('test')
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error')
+                field._warn_if_phase_view_aliases('test')
+
+    def test_a_grid_between_the_two_bounds_warns_from_one_guard_only(self):
+        """The half wavelength and the quarter wavelength are different
+        numbers for different questions, and a later tidy-up that shares one
+        constant between the two guards would be caught here.
+
+        At 3.0 m the samples resolve the carrier (under half a wavelength,
+        so the phase map is honest) but interpolating between them cuts
+        across an opposite-phase lobe (over a quarter), so ``resample_to``
+        must still object while the phase view does not."""
+        assert self.QUARTER < 3.0 < self.HALF
+        field = self._coherent_field(3.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field._warn_if_phase_view_aliases('test')
+        with pytest.warns(UserWarning, match='quarter wavelength'):
+            field._warn_if_undersampled('test')
+
+    @pytest.mark.parametrize('dr,dz,named,silent_axis', [
+        (4.0, 3.5, 'range', 'depth'),
+        (3.5, 4.0, 'depth', 'range'),
+    ])
+    def test_each_spatial_axis_is_judged_on_its_own(self, dr, dz, named,
+                                                    silent_axis):
+        """The pair brackets 3.75 m per axis: the named one coarse at 4.0 m,
+        the other resolved at 3.5 m. A guard that read only the range axis
+        would draw an aliased depth structure in silence."""
+        field = self._coherent_field(dr, dz)
+        with pytest.warns(UserWarning, match=f'{named} samples are') as rec:
+            field._warn_if_phase_view_aliases('test')
+        assert f'{silent_axis} samples are' not in str(rec[0].message)
+
+    def test_a_field_with_no_frequency_says_so_rather_than_passing(self):
+        """A silence that reads as a pass is worse than an admission: without
+        a frequency there is no wavelength to judge the grid by, and the view
+        may still be aliased."""
+        field = Field(
+            data=np.exp(1j * np.linspace(0.0, 40.0, 30))[None, :],
+            coords={'depth': np.array([50.0]),
+                    'range': np.linspace(1000.0, 1300.0, 30)},
+            model='Test',
+        )
+        with pytest.warns(UserWarning, match='cannot be checked'):
+            field._warn_if_phase_view_aliases('test')
+
+    def test_a_frequency_axis_is_left_to_its_own_guard(self):
+        """``plot_transfer_function`` draws a phase panel along frequency on
+        purpose. That axis carries the same carrier but against range rather
+        than wavelength, so it has its own limit c/(4r); this guard firing on
+        it would report a metres-per-sample bound for an axis measured in
+        hertz."""
+        freqs = np.linspace(150.0, 450.0, 61)
+        field = Field(
+            data=np.exp(-2j * np.pi * freqs * 2.0),
+            coords={'frequency': freqs},
+            model='Test', frequencies=freqs,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field._warn_if_phase_view_aliases('test')
+
+    def test_a_real_field_carries_no_carrier_to_alias(self):
+        field = self._coherent_field(15.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            field.to_dB()._warn_if_phase_view_aliases('test')
+
+    @pytest.mark.parametrize('value,guarded', [
+        ('phase', True), ('real', True), ('imag', True),
+        ('dB', False), ('mag', False),
+    ])
+    def test_plot_field_guards_the_carrier_views_and_leaves_the_envelope(
+            self, value, guarded):
+        """``|p|`` varies on the interference scale, not on the carrier, so
+        the same coarse field plots a degraded but honest level panel. Only
+        the views that draw the carrier itself are guarded."""
+        import matplotlib.pyplot as plt
+        field = self._coherent_field(15.0)
+        fig, ax = plt.subplots()
+        try:
+            with warnings.catch_warnings(record=True) as rec:
+                warnings.simplefilter('always')
+                uacpy.plot_field(field, ax=ax, value=value)
+            fired = [w for w in rec
+                     if 'this view is aliased' in str(w.message)]
+            assert bool(fired) is guarded
+        finally:
+            plt.close(fig)
+
+    def test_compare_guards_a_one_dimensional_phase_cut_too(self):
+        """``compare`` draws its own lines instead of calling ``plot_field``,
+        so the guard has to be wired into both doors. A cut along a coarse
+        range axis aliases exactly as the map does."""
+        import matplotlib.pyplot as plt
+        field = self._coherent_field(15.0).at(depth=50.0)
+        fig, ax = plt.subplots()
+        try:
+            with pytest.warns(UserWarning, match='this view is aliased'):
+                uacpy.plot.compare([field], ax=ax, value='phase')
+        finally:
+            plt.close(fig)
 
 
 class TestFrequencyUndersamplingGuardCoversBothRangeSpellings:
@@ -5749,7 +5918,7 @@ def test_no_retired_spectral_name_survives_in_text():
 
 
 class TestAMackenzieProfileIsExtendedUnderMackenzie:
-    """``SoundSpeedProfile.from_mackenzie`` stamps ``formula='mackenzie'`` and
+    """``SoundSpeedProfile.from_temperature_salinity`` stamps ``formula='mackenzie'`` and
     ``uacpy.data.extend_ssp_below_data`` reads that stamp, so the deep
     extension continues the column under the equation that built it. Before
     the stamp the column was continued under TEOS-10 (the ``None`` default),
@@ -5760,13 +5929,17 @@ class TestAMackenzieProfileIsExtendedUnderMackenzie:
     _S = np.full(_Z.shape, 35.0)
 
     def _mackenzie_profile(self):
-        return SoundSpeedProfile.from_mackenzie(self._Z, self._T, self._S)
+        # formula= is explicit now: the constructor no longer pins one
+        # equation in its name, so the default is the package default
+        # (TEOS-10) and Mackenzie is asked for.
+        return SoundSpeedProfile.from_temperature_salinity(
+            self._Z, self._T, self._S, formula='mackenzie')
 
-    def test_from_mackenzie_stamps_its_formula(self):
+    def test_the_constructor_stamps_the_formula_it_was_given(self):
         assert self._mackenzie_profile().formula == 'mackenzie'
 
     def test_the_extension_matches_mackenzie_at_the_seafloor(self):
-        from uacpy.core.acoustics import soundspeed
+        from uacpy.core.acoustics import sound_speed_mackenzie
         from uacpy.data import extend_ssp_below_data
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
@@ -5774,12 +5947,12 @@ class TestAMackenzieProfileIsExtendedUnderMackenzie:
         # The extension inverts an effective temperature from the deepest
         # sample at S = 35, which is exactly this column's 2 °C, so the
         # continued value is Mackenzie at (2 °C, 35, 8800 m) itself.
-        reference = float(soundspeed(temperature=2.0, salinity=35.0,
+        reference = float(sound_speed_mackenzie(temperature=2.0, salinity=35.0,
                                      depth=8800.0))
         assert abs(float(extended.data[-1, 0]) - reference) < 0.05
 
     def test_the_same_numbers_without_the_stamp_continue_under_teos10(self):
-        from uacpy.core.acoustics import soundspeed
+        from uacpy.core.acoustics import sound_speed_mackenzie
         from uacpy.data import extend_ssp_below_data
         stamped = self._mackenzie_profile()
         literal = SoundSpeedProfile(depths=stamped.depths,
@@ -5788,7 +5961,7 @@ class TestAMackenzieProfileIsExtendedUnderMackenzie:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
             extended = extend_ssp_below_data(literal, 8800.0)
-        reference = float(soundspeed(temperature=2.0, salinity=35.0,
+        reference = float(sound_speed_mackenzie(temperature=2.0, salinity=35.0,
                                      depth=8800.0))
         assert abs(float(extended.data[-1, 0]) - reference) > 0.2
 

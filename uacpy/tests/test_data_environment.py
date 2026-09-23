@@ -536,14 +536,14 @@ class TestDeepSSPExtension:
         own (default) equation at the true T/S, so what is measured is the
         inversion, not the 0.16 m/s by which UNESCO's and TEOS-10's pressure
         terms differ over this span."""
-        from uacpy.core.acoustics import soundspeed_teos10
+        from uacpy.core.acoustics import sound_speed_teos10
         from uacpy.data._geo import depth_to_pressure_dbar
         from uacpy.data.sound_speed import _deep_increment
         for t_true, s_true in ((13.0, 38.5), (21.0, 40.5)):
             p0 = float(depth_to_pressure_dbar(1500.0, 45.0))
             p1 = float(depth_to_pressure_dbar(3000.0, 45.0))
-            c0 = soundspeed_teos10(t_true, s_true, p0)
-            truth = soundspeed_teos10(t_true, s_true, p1) - c0
+            c0 = sound_speed_teos10(t_true, s_true, p0)
+            truth = sound_speed_teos10(t_true, s_true, p1) - c0
             # The inversion holds S at the 35 reference; the residual is the
             # equation's salinity-pressure cross term over 1500 m: 0.04 m/s
             # for the Mediterranean, 0.16 for the Red Sea at 40.5 PSU (UNESCO

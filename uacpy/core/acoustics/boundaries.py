@@ -38,7 +38,7 @@ from typing import Union, Optional, Tuple
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.acoustics.seawater import density, soundspeed
+from uacpy.core.acoustics.seawater import density, sound_speed_mackenzie
 
 __all__ = [
     'reflection_coeff',
@@ -51,7 +51,7 @@ __all__ = [
 # announced in this process, so a caller sweeping angle by angle hears it once
 # rather than once per call. Same one-shot shape as the endian notice in
 # ``io/_fortran_helpers.py``; there is no key because there is nothing to key
-# on — ``soundspeed()`` and ``density()`` at their own defaults are one fixed
+# on — ``sound_speed_mackenzie()`` and ``density()`` at their own defaults are one fixed
 # water column.
 _DEFAULT_WATER_COLUMN_WARN_EMITTED = False
 
@@ -89,7 +89,7 @@ def reflection_coeff(
         Notes, which is not what :func:`bottom_loss_curve` uses.
     c : float, optional
         Sound speed in water in m/s. Omitted, it falls back to
-        :func:`soundspeed` at *its* argument defaults, i.e. Mackenzie at
+        :func:`sound_speed_mackenzie` at *its* argument defaults, i.e. Mackenzie at
         27 °C, S = 35, 10 m — a tropical-surface operating point — giving
         1539.087 m/s. See Notes: that is not what :func:`bottom_loss_curve`
         uses, and omitting ``c`` raises a one-shot :class:`UserWarning`
@@ -161,7 +161,7 @@ def reflection_coeff(
     if rho is None:
         rho = density()
     if c is None:
-        c = soundspeed()
+        c = sound_speed_mackenzie()
         if not _DEFAULT_WATER_COLUMN_WARN_EMITTED:
             # stacklevel=2 blames whoever called ``reflection_coeff``, which is
             # right because this can only fire on a direct call: the one
@@ -171,7 +171,7 @@ def reflection_coeff(
             # ``skip_file_prefixes=USER_FRAME_SKIP``, not a larger count.
             _warnings.warn(
                 f"reflection_coeff: no water sound speed given, so c falls "
-                f"back to soundspeed() = {c:.3f} m/s — Mackenzie at its own "
+                f"back to sound_speed_mackenzie() = {c:.3f} m/s — Mackenzie at its own "
                 f"argument defaults, 27 °C / S = 35 / 10 m, a "
                 f"tropical-surface operating point — with rho = "
                 f"{rho:.2f} kg/m³. bottom_loss_curve pins 1500.0 m/s and "
@@ -194,6 +194,40 @@ def reflection_coeff(
     V = (t1 - t2) / (t1 + t2)
 
     return V.real if np.all(V.imag == 0) else V
+
+
+def critical_angle(
+    bottom_sound_speed: float,
+    water_sound_speed: float = DEFAULT_SOUND_SPEED,
+) -> float:
+    """Grazing angle in degrees below which a faster seabed totally reflects.
+
+    ``theta_c = arccos(c_water / c_bottom)``. Below it the transmitted wave is
+    evanescent in the seabed and the plane-wave reflection loss is nominally
+    zero; above it energy radiates in and the loss climbs. It is the same
+    ratio-of-speeds angle as :meth:`uacpy.core.results.modes.Modes.grazing_angles`,
+    seen from the boundary instead of from a mode, which is why the modal
+    cutoff *is* the critical angle.
+
+    Returns ``nan`` when the seabed is not faster than the water, because
+    there is then no critical angle at all — a slow seabed (uacpy's ``clay``
+    preset is 1500 m/s, under sea water) reflects weakly at every angle and
+    shows an angle of *intromission* instead, where the loss peaks. Returning
+    zero there would read as "totally reflecting everywhere", the opposite of
+    the truth.
+
+    :func:`uacpy.visualization.plot_bottom_loss` rules this angle on its axes
+    by calling here, so the figure and the number are the same arithmetic.
+    """
+    c_b = float(bottom_sound_speed)
+    c_w = float(water_sound_speed)
+    if not (c_b > 0.0 and c_w > 0.0):
+        raise ConfigurationError(
+            f"critical_angle: both speeds must be > 0 m/s; got "
+            f"bottom={c_b}, water={c_w}")
+    if c_b <= c_w:
+        return float('nan')
+    return float(np.degrees(np.arccos(c_w / c_b)))
 
 
 def bottom_loss_curve(

@@ -6,8 +6,8 @@ historical date, not just recent ones. Served live from the NOAA CoastWatch
 **ERDDAP** griddap service (no auth), like the Argo / EMODnet fetchers.
 
 The 10 m wind speed feeds two consumers: the Wenz ambient-noise wind term
-(:class:`uacpy.noise.WenzNoise`, whose ``wind_speed_kn`` is in **knots** — multiply the
-m/s returned here by ``1.9438``) and the Pierson-Moskowitz sea surface
+(:class:`uacpy.noise.WenzNoise`, whose ``wind_speed_kn`` is in **knots** —
+:func:`uacpy.core.units.ms_to_knots` converts the m/s returned here) and the Pierson-Moskowitz sea surface
 (:func:`uacpy.data.fetch_sea_surface`, when no wave source is available).
 
 NBS is a U.S. Government work — **public domain**.

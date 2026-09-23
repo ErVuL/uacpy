@@ -403,7 +403,7 @@ These are the physics-agnostic primitives every model consumes:
   `pekeris_root`), `bubbles.py` (resonance, bubbly-water speed, surface
   loss) and `levels.py` (volts → Pa → dB). All fifteen public names are
   re-exported from the package, so callers write
-  `uacpy.acoustics.soundspeed` and never name a sub-module. **Not**
+  `uacpy.acoustics.sound_speed_mackenzie` and never name a sub-module. **Not**
   imported by the model wrappers; safe to use from notebooks. Some
   functions are arlpy-adapted; see `third_party/arlpy/NOTICE`.
 - `materials.py` — named-material presets for `BoundaryProperties`,

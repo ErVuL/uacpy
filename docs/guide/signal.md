@@ -711,6 +711,7 @@ wants. Decide up front whether you are estimating power or filtering.
 | `impulse_response(amplitudes, delays_s, sample_rate, *, n_samples=None, fractional=True)` | `(t, h)` | discrete arrivals → channel IR |
 | `simulate_reception(transmit, amplitudes, delays_s, sample_rate)` | `(t, received)` | transmit waveform convolved with that IR |
 | `impulse_response_from_transfer_function(H, frequencies, sample_rate, n_samples=None)` | `(t, h)` | one-sided `H(f)` → real IR |
+| `channel_response(h, sample_rate, *, nfft=None)` | `(f, H)` | complex IR → two-sided `H(f)`, complex |
 | `fractional_delay_taps(frac, half_len=8, beta=8.0)` | `2·half_len` taps | the sub-sample kernel `impulse_response` places arrivals with (`simulate_reception` through it) |
 
 `fractional=True` places each arrival with a windowed-sinc fractional-delay
@@ -750,6 +751,22 @@ rx = np.real(rx)
 `(amplitudes, phases, delays)` triple these functions want, which is why a
 Bellhop `ARRIVALS` run drops straight in. The same machinery underpins
 [`uacpy.comms`](comms.md)'s replay benchmarks.
+
+`channel_response` is the other direction: a complex baseband impulse
+response to `H(f)`, two-sided and centred on 0 Hz, because a baseband channel
+is not conjugate symmetric and the negative half carries information the
+positive half does not. `nfft` defaults to `max(1024, 2·h.size)` — the padding
+interpolates between DFT bins and resolves nothing the record length cannot,
+and the floor of 1024 is there so a short tap set still draws as a curve.
+Magnitude in dB is the caller's, since `20·log10|H|` is `-inf` at a perfect
+null and the floor chosen sets how deep the null is drawn. It exists so the
+channel's response can be obtained without drawing it: `plot_channel` calls
+it for its right-hand panel rather than transforming the taps itself.
+
+The two are not exact inverses. Composing them puts a 40-tap real `h` back
+with a peak error of 1.8e-4, because the inverse zeroes every bin outside the
+band it was handed — Nyquist included, which `channel_response`'s grid reaches
+and its does not.
 
 `impulse_response_from_transfer_function` resamples `H` onto the uniform DFT
 grid over `[0, fs/2]` and inverse-transforms. Left to itself it sizes that
@@ -1044,7 +1061,7 @@ The *result* attributes are the ones a run does rewrite: `frequencies`, `tf`,
 (the conditioning of the fit, `'ls_fir'` only) and `coh` (coherence,
 `'welch'` only). Every call rewrites all of them, so a reused `FRF` cannot
 report a previous method's result. Draw them with `plot_frf`,
-`plot_coherence` and `plot_impulse_response_info`.
+`plot_coherence` and `plot_lsfir_diagnostics`.
 
 **Match the FIR order to the band you excite.** `'ls_fir'` fits through the
 normal equations `X.T @ X`, whose condition number is the square of the design

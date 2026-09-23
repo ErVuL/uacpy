@@ -269,7 +269,7 @@ def test_fetch_environment_altimetry_local(wind_cache, monkeypatch):
     env = env_mod.fetch_environment(
         (0.6, 0.6), bathymetry=2000.0, ssp=1500.0, date='2021-03-15',
         transect_to=(0.9, 0.9), altimetry_sources='local',
-        sea_surface_n_points=32, sea_surface_seed=5)
+        altimetry_n_points=32, altimetry_seed=5)
     assert env.altimetry is not None
     assert 'nbs' in [s.source.id for s in env.data_sources]
 
@@ -511,3 +511,29 @@ def test_the_published_climatology_reports_its_own_reference_period(
                         lambda name, *rest: cache.joinpath(*rest))
     wind_local._CLIM.clear()
     assert wind_local.climatology_period() == '1991-2020 (climatology)'
+
+
+def test_the_two_surfaces_keep_their_own_prefixes():
+    """`fetch_environment` describes two different objects that both live at
+    the top of the water column, and their names used to cross over.
+
+    The **ice boundary** is `surface`, `surface_sources`,
+    `range_dependent_surface`, `surface_n_points`. The **wave realisation**
+    is `altimetry`, `altimetry_sources` — and used to be
+    `sea_surface_n_points`, `sea_surface_seed`, so the wave group changed its
+    own prefix halfway and landed `sea_surface_n_points` next to a different
+    object's `surface_n_points`. Reaching for the obvious name was accepted,
+    did nothing to the waves, and warned about nothing.
+    """
+    import inspect
+    from uacpy.data.environment import fetch_environment
+
+    names = set(inspect.signature(fetch_environment).parameters)
+    assert {'surface', 'surface_sources', 'range_dependent_surface',
+            'surface_n_points'} <= names
+    assert {'altimetry', 'altimetry_sources', 'altimetry_n_points',
+            'altimetry_seed'} <= names
+    crossover = {n for n in names if n.startswith('sea_surface')}
+    assert not crossover, (
+        f'{sorted(crossover)} uses a third prefix for the wave realisation, '
+        f'which is spelled altimetry_* everywhere else in this signature')

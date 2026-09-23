@@ -112,6 +112,39 @@ _COLLINS_ARRAY_LIMITS = {
 }
 
 
+# ── Per-backend facts, each stated once ──────────────────────────────────────
+# Each of these is asked for rather than re-derived at the call, so a fact
+# about a backend cannot disagree with itself across the module. They sit
+# beside ``_COLLINS_ARRAY_LIMITS``, which is the same idea as a table.
+
+def _deck_convention(kind: str) -> str:
+    """The deck dialect a backend parses.
+
+    ``ramgeo`` reads ramsurf's, so the writer must be told ``'ramsurf'`` for
+    it; the other two read their own.
+    """
+    return 'ramsurf' if kind == 'ramgeo' else kind
+
+
+def _is_seafloor_relative(kind: str) -> bool:
+    """Whether the backend's sediment depths are measured DOWN FROM THE
+    SEAFLOOR rather than from the sea surface.
+
+    ``rams`` takes absolute depths; ``ramgeo`` and ``ramsurf`` take
+    seafloor-relative ones, which is why their layer blocks start at 0.
+    """
+    return kind in ('ramgeo', 'ramsurf')
+
+
+def _depth_index_base(kind: str) -> int:
+    """First index of the backend's output depth grid.
+
+    ``rams0.5`` writes from index ``1 + ndz``, ``ramsurf1.5`` and ``ramgeo``
+    from ``ndz`` (``third_party/ramsurf/{rams0.5,ramsurf1.5}.f``, ``outpt``).
+    """
+    return 1 if kind == 'rams' else 0
+
+
 # Lytaev grid-accuracy target used when the caller does not pin one.
 DEFAULT_RAM_ACCURACY = 1e-3
 
@@ -2728,7 +2761,7 @@ class RAM(PropagationModel):
         # Collins files already carry the 1/√r scaling, so apply_radial=False.
         pressure = psi_to_travelling_wave(
             psi_out,
-            convention='ramsurf' if kind == 'ramgeo' else kind,
+            convention=_deck_convention(kind),
             ranges_m=rcv_r,
             range_axis=1,
             k0=2.0 * np.pi * fc / self._resolve_c0(env),
@@ -3114,7 +3147,7 @@ class RAM(PropagationModel):
             )
             # rams0.5 writes its output grid from index 1+ndz, ramsurf1.5
             # from ndz (third_party/ramsurf/{rams0.5,ramsurf1.5}.f outpt).
-            depth_index_offset = 1 if kind == 'rams' else 0
+            depth_index_offset = _depth_index_base(kind)
             ranges, depths, tl = read_tl_grid(
                 tlgrid, dr=dr, ndr=ndr, dz=dz, ndz=ndz,
                 depth_index_offset=depth_index_offset
@@ -3217,7 +3250,7 @@ class RAM(PropagationModel):
         n = int(np.ceil(max(float(target_depth), 0.0) / dz)) + 1
         # Round up onto an index the output loop actually visits; it starts at
         # ``base + ndz``, so at least one stride is always needed.
-        base = 1 if kind == 'rams' else 0
+        base = _depth_index_base(kind)
         n = base + max(1, int(np.ceil((n - base) / ndz))) * ndz
         return min((n + 0.75) * dz, float(zmax))
 
@@ -3230,7 +3263,7 @@ class RAM(PropagationModel):
         dz = float(dz)
         ndz = max(1, int(ndz))
         nzplt = int(float(zmplt) / dz - 0.5)
-        base = 1 if kind == 'rams' else 0
+        base = _depth_index_base(kind)
         # Loop indices are base + k·ndz for k >= 1, up to nzplt.
         k = (nzplt - base) // ndz
         return (base + k * ndz - 1) * dz if k >= 1 else -1.0
@@ -3976,7 +4009,7 @@ class RAM(PropagationModel):
             # identical to ramsurf1.5's, so it uses the same phase convention.
             H = psi_to_travelling_wave(
                 H,
-                convention='ramsurf' if kind == 'ramgeo' else kind,
+                convention=_deck_convention(kind),
                 ranges_m=rcv_r,
                 range_axis=1,
                 k0=omega / c0,
@@ -4169,7 +4202,7 @@ class RAM(PropagationModel):
             else ('sound_speed', 'density', 'attenuation')
         )
         b = env.bottom
-        seafloor_relative = kind in ('ramgeo', 'ramsurf')
+        seafloor_relative = _is_seafloor_relative(kind)
         rho_w = float(env.water_density)
 
         breaks = {0.0}
@@ -4348,7 +4381,7 @@ class RAM(PropagationModel):
         absorbing_width = self._absorbing_width(env, freq)
         water_attn = self._water_attenuation_active(env)
         out = []
-        seafloor_relative = kind in ('ramgeo', 'ramsurf')
+        seafloor_relative = _is_seafloor_relative(kind)
         for seg, (attn, z_sediment_base, z_bottom, seafloor) in zip(
                 base['segments'], base['ramps']):
             done = dict(

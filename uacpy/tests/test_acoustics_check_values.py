@@ -22,20 +22,20 @@ from uacpy.core.acoustics import (
     bubble_resonance,
     pressure,
     spl,
-    bubble_soundspeed,
+    bubble_sound_speed,
     bubble_surface_loss,
     density,
     power_to_dB,
-    soundspeed,
-    soundspeed_delgrosso,
-    soundspeed_teos10,
-    soundspeed_unesco,
+    sound_speed_mackenzie,
+    sound_speed_delgrosso,
+    sound_speed_teos10,
+    sound_speed_unesco,
 )
 from uacpy.core.constants import PRESSURE_FLOOR, REFERENCE_PRESSURE_WATER
 
 
 class TestMackenzieValidityWarnings:
-    """``soundspeed`` warns (core/acoustics/seawater.py) whenever an input leaves
+    """``sound_speed_mackenzie`` warns (core/acoustics/seawater.py) whenever an input leaves
     Mackenzie's validated ranges — T ∈ [-2, 30] °C, S ∈ [25, 40] PSU,
     D ∈ [0, 8000] m — and stays silent inside them."""
 
@@ -49,18 +49,18 @@ class TestMackenzieValidityWarnings:
     ])
     def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
         with pytest.warns(UserWarning, match='outside validated range'):
-            soundspeed(**kwargs)
+            sound_speed_mackenzie(**kwargs)
 
     def test_in_range_defaults_are_silent(self):
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            c = soundspeed()                     # T=27, S=35, D=10
+            c = sound_speed_mackenzie()                     # T=27, S=35, D=10
         # The default-point value the environment.md bubble example quotes.
         assert c == pytest.approx(1539.087, abs=1e-3)
 
 
 class TestUnescoValidityWarnings:
-    """``soundspeed_unesco`` announces extrapolation the way ``soundspeed``
+    """``sound_speed_unesco`` announces extrapolation the way ``sound_speed_mackenzie``
     does. Its pressure argument is **decibars** while Chen & Millero state the
     range in bar, so the bound is 10 000 dbar and not 1000: a 5000 m cast is
     comfortably inside it. The cold end warns below −3 °C rather than the
@@ -72,12 +72,12 @@ class TestUnescoValidityWarnings:
         # 10x trap would have flagged.
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            c = soundspeed_unesco(2.0, 34.7, 9000.0)
+            c = sound_speed_unesco(2.0, 34.7, 9000.0)
         assert 1500.0 < c < 1700.0
 
     def test_pressure_past_the_range_warns_and_names_the_unit(self):
         with pytest.warns(UserWarning, match='DECIBARS'):
-            soundspeed_unesco(15.0, 35.0, 10001.0)
+            sound_speed_unesco(15.0, 35.0, 10001.0)
 
     @pytest.mark.parametrize('kwargs', [
         dict(temperature=41.0),          # T > 40
@@ -87,7 +87,7 @@ class TestUnescoValidityWarnings:
     ])
     def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
         with pytest.warns(UserWarning, match='outside validated range'):
-            soundspeed_unesco(**kwargs)
+            sound_speed_unesco(**kwargs)
 
     def test_negative_salinity_is_reported_as_undefined_and_returns_nan(self):
         """Eqn 36's ``B(T,P)·S^1.5`` has no real value below S = 0, so the
@@ -96,12 +96,12 @@ class TestUnescoValidityWarnings:
         numpy's own "invalid value encountered in power" is suppressed so the
         one diagnostic that names the cause is the one that reaches them."""
         with pytest.warns(UserWarning, match='undefined, not extrapolated'):
-            value = soundspeed_unesco(salinity=-1.0)
+            value = sound_speed_unesco(salinity=-1.0)
         assert np.isnan(value)
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            soundspeed_unesco(salinity=-1.0)
+            sound_speed_unesco(salinity=-1.0)
         assert not [w for w in caught if w.category is RuntimeWarning], (
             [str(w.message) for w in caught])
 
@@ -110,13 +110,13 @@ class TestUnescoValidityWarnings:
         extrapolation evaluates the formula at exactly −3 °C."""
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            assert soundspeed_unesco(-3.0, 34.7, 0.0) == pytest.approx(
+            assert sound_speed_unesco(-3.0, 34.7, 0.0) == pytest.approx(
                 1434.45, abs=0.01)
 
     def test_in_range_defaults_are_silent(self):
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            assert soundspeed_unesco() == pytest.approx(1507.0, abs=1.0)
+            assert sound_speed_unesco() == pytest.approx(1507.0, abs=1.0)
 
 
 class TestSeawaterDensityEOS80CheckValues:
@@ -156,15 +156,15 @@ class TestBubbleResonance:
 class TestBubbleSoundspeed:
     def test_documented_void_fraction_drop(self):
         """environment.md §5: a void fraction of only 1e-6 drops
-        ``bubble_soundspeed`` by 15.5 m/s (1539.1 → 1523.6) at its default
+        ``bubble_sound_speed`` by 15.5 m/s (1539.1 → 1523.6) at its default
         reference — Wood's equation is that sensitive to entrained gas."""
-        c0 = soundspeed()
-        c_bubbly = bubble_soundspeed(1e-6)
+        c0 = sound_speed_mackenzie()
+        c_bubbly = bubble_sound_speed(1e-6)
         assert c_bubbly == pytest.approx(1523.557, abs=1e-3)
         assert c0 - c_bubbly == pytest.approx(15.53, abs=0.01)
 
     def test_zero_void_fraction_recovers_the_water_speed(self):
-        assert bubble_soundspeed(0.0) == pytest.approx(soundspeed(),
+        assert bubble_sound_speed(0.0) == pytest.approx(sound_speed_mackenzie(),
                                                        rel=1e-12)
 
 
@@ -218,11 +218,11 @@ class TestPowerToDb:
 
 
 class TestDelGrossoValidityWarnings:
-    """``soundspeed_delgrosso`` announces extrapolation the way its two
+    """``sound_speed_delgrosso`` announces extrapolation the way its two
     siblings do.
 
-    It shipped with no domain guard at all while :func:`soundspeed` and
-    :func:`soundspeed_unesco` both had one, so the function its own docstring
+    It shipped with no domain guard at all while :func:`sound_speed_mackenzie` and
+    :func:`sound_speed_unesco` both had one, so the function its own docstring
     recommends "at high pressure / in deep water" was the one that said
     nothing when handed 50 °C, S = -5 or a pressure ten times its fit.
 
@@ -242,7 +242,7 @@ class TestDelGrossoValidityWarnings:
     ])
     def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
         with pytest.warns(UserWarning, match='outside validated range'):
-            soundspeed_delgrosso(**kwargs)
+            sound_speed_delgrosso(**kwargs)
 
     def test_a_deep_open_ocean_cast_is_silent(self):
         """The bounds are in the argument's decibars, not the paper's kg/cm2.
@@ -251,23 +251,23 @@ class TestDelGrossoValidityWarnings:
         decibar pair."""
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            c = soundspeed_delgrosso(2.0, 34.7, 5000.0)
+            c = sound_speed_delgrosso(2.0, 34.7, 5000.0)
         assert 1500.0 < c < 1600.0
 
     def test_the_pressure_message_names_the_unit(self):
         with pytest.warns(UserWarning, match='DECIBARS'):
-            soundspeed_delgrosso(15.0, 35.0, 9900.0)
+            sound_speed_delgrosso(15.0, 35.0, 9900.0)
 
     def test_the_salinity_message_points_at_the_equation_that_covers_fresher(self):
         """29 ppt is a floor, not a formality: below it the caller needs a
         different equation, and the message says which."""
-        with pytest.warns(UserWarning, match='soundspeed_unesco'):
-            soundspeed_delgrosso(salinity=5.0)
+        with pytest.warns(UserWarning, match='sound_speed_unesco'):
+            sound_speed_delgrosso(salinity=5.0)
 
     def test_in_range_defaults_are_silent(self):
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            assert soundspeed_delgrosso() == pytest.approx(1506.67, abs=0.01)
+            assert sound_speed_delgrosso() == pytest.approx(1506.67, abs=0.01)
 
     def test_polar_deep_water_is_silent(self):
         """The cold end is relaxed to −3 °C for the same reason UNESCO's is:
@@ -276,7 +276,7 @@ class TestDelGrossoValidityWarnings:
         Grosso's own 0.05 m/s standard deviation of UNESCO at −3 °C."""
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            assert soundspeed_delgrosso(-3.0, 34.7, 0.0) == pytest.approx(
+            assert sound_speed_delgrosso(-3.0, 34.7, 0.0) == pytest.approx(
                 1434.51, abs=0.01)
 
 
@@ -451,14 +451,14 @@ class TestArrayCapableHelpersAnnotateArrayReturns:
     in the package is what a downstream type checker sees. A helper annotated
     ``-> float`` that hands back an ``ndarray`` for array input makes the
     checker reject the array call — including the package's own, at
-    ``SoundSpeedProfile.from_mackenzie``, which calls ``soundspeed`` on three
+    ``SoundSpeedProfile.from_temperature_salinity``, which calls ``sound_speed_mackenzie`` on three
     raveled arrays."""
 
     #: ``(function, array kwargs, scalar kwargs)`` for every helper in
     #: ``core.acoustics`` documented to take either. Both spellings are driven,
     #: so an annotation that admits only one of them fails here.
     CASES = [
-        ('soundspeed',
+        ('sound_speed_mackenzie',
          dict(temperature=np.array([10.0, 20.0]), salinity=35.0, depth=10.0),
          dict(temperature=10.0, salinity=35.0, depth=10.0)),
         ('density',
@@ -537,12 +537,12 @@ def test_unesco_reproduces_the_canonical_high_pressure_check_value():
     """Fofonoff & Millard (UNESCO 1983) check value: c = 1731.995 m/s at
     S = 40 PSU, T = 40 °C on the IPTS-68 scale, P = 10000 dbar (1000 bar).
     The temperature argument is ITS-90, so T68 = 40 enters as 40/1.00024."""
-    c = soundspeed_unesco(40.0 / 1.00024, 40.0, 10000.0)
+    c = sound_speed_unesco(40.0 / 1.00024, 40.0, 10000.0)
     assert float(c) == pytest.approx(1731.995, rel=1e-6)
 
 
 class TestTeos10SoundSpeedEvaluatesTheGibbsFunction:
-    """``soundspeed_teos10`` is Eqn. (2.17.1) of the TEOS-10 manual (IOC
+    """``sound_speed_teos10`` is Eqn. (2.17.1) of the TEOS-10 manual (IOC
     Manuals and Guides 56, p. 22), ``c = g_P·sqrt(g_TT / (g_TP² − g_TT·g_PP))``,
     evaluated on the IAPWS-09 pure-water plus IAPWS-08 saline Gibbs function
     whose coefficients the manual tabulates in appendices G and H. It takes
@@ -569,7 +569,7 @@ class TestTeos10SoundSpeedEvaluatesTheGibbsFunction:
     ])
     def test_matches_the_gsw_reference_to_ten_micrometres_per_second(
             self, temperature, salinity, pressure, expected):
-        assert soundspeed_teos10(temperature, salinity, pressure) == \
+        assert sound_speed_teos10(temperature, salinity, pressure) == \
             pytest.approx(expected, abs=1e-5)
 
     def test_fresh_water_is_finite_where_the_saline_term_has_x_squared_ln_x(self):
@@ -577,18 +577,18 @@ class TestTeos10SoundSpeedEvaluatesTheGibbsFunction:
         limit 0, not ``0 × (−inf) = nan``."""
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            c = soundspeed_teos10(10.0, 0.0, 0.0)
+            c = sound_speed_teos10(10.0, 0.0, 0.0)
         assert c == pytest.approx(1447.284153, abs=1e-5)
 
     def test_returns_a_python_float_for_scalars_and_broadcasts_arrays(self):
-        assert isinstance(soundspeed_teos10(15.0, 35.0, 0.0), float)
+        assert isinstance(sound_speed_teos10(15.0, 35.0, 0.0), float)
         t = np.array([0.0, 15.0, 25.0])
         p = np.array([[0.0], [4000.0]])
-        c = soundspeed_teos10(t, 35.0, p)
+        c = sound_speed_teos10(t, 35.0, p)
         assert c.shape == (2, 3)
         assert c[0, 1] == pytest.approx(1506.673601, abs=1e-5)
         assert c[1, 0] == pytest.approx(
-            soundspeed_teos10(0.0, 35.0, 4000.0), abs=1e-9)
+            sound_speed_teos10(0.0, 35.0, 4000.0), abs=1e-9)
 
     def test_sits_with_del_grosso_not_unesco_in_deep_water(self):
         """The Feistel (2008) Gibbs function was fitted to sound-speed data
@@ -597,13 +597,13 @@ class TestTeos10SoundSpeedEvaluatesTheGibbsFunction:
         uncorrected Chen–Millero polynomial (APL-UW TR 9407, "Chen-Millero-Li
         Equation"). Measured 2026-09-07 at the audit's deep fixture point."""
         t, s, p = 2.0, 34.7, 5000.0
-        c = soundspeed_teos10(t, s, p)
-        assert abs(c - soundspeed_delgrosso(t, s, p)) < 0.05
-        assert soundspeed_unesco(t, s, p) - c > 0.5
+        c = sound_speed_teos10(t, s, p)
+        assert abs(c - sound_speed_delgrosso(t, s, p)) < 0.05
+        assert sound_speed_unesco(t, s, p) - c > 0.5
 
 
 class TestTeos10ValidityWarnings:
-    """``soundspeed_teos10`` announces extrapolation the way its siblings do.
+    """``sound_speed_teos10`` announces extrapolation the way its siblings do.
 
     The domain is the manual's own (§2.6): the saline Gibbs function "is
     valid over the ranges 0 < S_A < 42 g/kg, −6.0 °C < t < 40 °C, and
@@ -620,23 +620,23 @@ class TestTeos10ValidityWarnings:
     ])
     def test_out_of_range_input_warns_of_extrapolation(self, kwargs):
         with pytest.warns(UserWarning, match='outside validated range'):
-            soundspeed_teos10(**kwargs)
+            sound_speed_teos10(**kwargs)
 
     def test_negative_salinity_is_undefined_not_extrapolated(self):
         """``x = sqrt(S_A / S_u)`` has no real value below zero; the result is
         NaN and the message says so, as UNESCO's does for its ``S^1.5``."""
         with pytest.warns(UserWarning, match='undefined'):
-            c = soundspeed_teos10(10.0, -1.0, 0.0)
+            c = sound_speed_teos10(10.0, -1.0, 0.0)
         assert np.isnan(c)
 
     def test_the_pressure_message_names_the_unit(self):
         with pytest.warns(UserWarning, match='DECIBARS'):
-            soundspeed_teos10(15.0, 35.0, 10100.0)
+            sound_speed_teos10(15.0, 35.0, 10100.0)
 
     def test_a_deep_polar_cast_and_the_defaults_are_silent(self):
         """−3 °C sits inside this equation's own −6 °C floor, so unlike the
         two older fits nothing here is relaxed."""
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
-            assert 1400.0 < soundspeed_teos10(-3.0, 34.7, 5000.0) < 1600.0
-            assert soundspeed_teos10() == pytest.approx(1506.67, abs=0.01)
+            assert 1400.0 < sound_speed_teos10(-3.0, 34.7, 5000.0) < 1600.0
+            assert sound_speed_teos10() == pytest.approx(1506.67, abs=0.01)

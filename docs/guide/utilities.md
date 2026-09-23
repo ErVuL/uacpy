@@ -247,10 +247,10 @@ re-exported from the package, so you reach them all as
 
 | Function | Implements | Inputs |
 |---|---|---|
-| `soundspeed(temperature, salinity, depth)` | Mackenzie (1981), nine-term | °C, PSU, **metres** |
-| `soundspeed_unesco(temperature, salinity, pressure)` | UNESCO (1983) / Chen & Millero (1977) | °C (ITS-90), PSU (PSS-78), **decibars** |
-| `soundspeed_delgrosso(temperature, salinity, pressure)` | Del Grosso (1974), "NRL II" | °C, PSU, **decibars** |
-| `soundspeed_teos10(temperature, salinity, pressure)` | TEOS-10 (IOC/SCOR/IAPSO 2010), Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function | °C (ITS-90), PSU (PSS-78), **decibars** |
+| `sound_speed_mackenzie(temperature, salinity, depth)` | Mackenzie (1981), nine-term | °C, PSU, **metres** |
+| `sound_speed_unesco(temperature, salinity, pressure)` | UNESCO (1983) / Chen & Millero (1977) | °C (ITS-90), PSU (PSS-78), **decibars** |
+| `sound_speed_delgrosso(temperature, salinity, pressure)` | Del Grosso (1974), "NRL II" | °C, PSU, **decibars** |
+| `sound_speed_teos10(temperature, salinity, pressure)` | TEOS-10 (IOC/SCOR/IAPSO 2010), Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function | °C (ITS-90), PSU (PSS-78), **decibars** |
 
 Note the third argument: Mackenzie takes **depth in metres**, the other three
 take **pressure in decibars**. They are numerically close (≈ 1 dbar per metre)
@@ -258,7 +258,7 @@ but they are not the same quantity, and the standard equations are defined
 in pressure.
 
 UNESCO was the international standard algorithm until TEOS-10 replaced it,
-and it stays available as `formula='unesco'`. `soundspeed_unesco` accepts
+and it stays available as `formula='unesco'`. `sound_speed_unesco` accepts
 ITS-90 temperature and converts internally to the IPTS-68 scale the polynomial
 was fitted on. Valid for `T ∈ [0, 40] °C`, `S ∈ [0, 40] PSU`,
 `P ∈ [0, 1000] bar`.
@@ -271,7 +271,7 @@ The paper predates PSS-78 and states that salinity range in ‰ (ppt); the
 `salinity` argument here is PSU, the scale that replaced it.
 
 TEOS-10 is the current international standard for seawater thermodynamics.
-`soundspeed_teos10` evaluates the manual's sound-speed definition,
+`sound_speed_teos10` evaluates the manual's sound-speed definition,
 `c = g_P·sqrt(g_TT / (g_TP² − g_TT·g_PP))`, on the full Gibbs function (the
 IAPWS-09 pure-water and IAPWS-08 saline coefficient tables are written out in
 `core/acoustics/seawater.py`; no library is needed). It takes the same
@@ -282,7 +282,7 @@ real seawater is not applied (≈ 0.03 m/s). Valid over `S ∈ [0, 41.8] PSU`,
 the laboratory sound-speed data (rms 0.035 m/s), so at depth it reproduces
 Del Grosso and not UNESCO: the Chen–Millero polynomial as published carries
 a pressure-dependent bias of about +0.6 m/s below 3000 dbar (the Millero &
-Li 1994 correction, which `soundspeed_unesco` does not include). That is
+Li 1994 correction, which `sound_speed_unesco` does not include). That is
 27 ms of travel time per 100 km — invisible in a transmission-loss curve,
 real for tomography or any comparison with a TEOS-10-based tool. It is the
 default `formula` on every data route that turns T/S into sound speed.
@@ -297,14 +297,14 @@ All four vectorise over any argument.
 temperatures = np.linspace(0.0, 30.0, 121)
 pressures = np.linspace(0.0, 6000.0, 121)          # dbar ≈ metres
 
-unesco = acoustics.soundspeed_unesco(temperatures, 35.0, 0.0)
-delgrosso = acoustics.soundspeed_delgrosso(temperatures, 35.0, 0.0)
-teos10 = acoustics.soundspeed_teos10(temperatures, 35.0, 0.0)
-mackenzie = acoustics.soundspeed(temperatures, 35.0, 0.0)
+unesco = acoustics.sound_speed_unesco(temperatures, 35.0, 0.0)
+delgrosso = acoustics.sound_speed_delgrosso(temperatures, 35.0, 0.0)
+teos10 = acoustics.sound_speed_teos10(temperatures, 35.0, 0.0)
+mackenzie = acoustics.sound_speed_mackenzie(temperatures, 35.0, 0.0)
 
 T, P = np.meshgrid(temperatures, pressures)
-delta = (acoustics.soundspeed_delgrosso(T, 35.0, P)
-         - acoustics.soundspeed_unesco(T, 35.0, P))
+delta = (acoustics.sound_speed_delgrosso(T, 35.0, P)
+         - acoustics.sound_speed_unesco(T, 35.0, P))
 ```
 
 ![Sound-speed equations](figures/util_soundspeed.png)
@@ -329,7 +329,7 @@ presents, the two agree far better: over the Biscay cast the [data
 guide](data.md) plots, 0 to 4800 m, the difference never exceeds 0.67 m/s and
 averages 0.29. Which is still worth having for tomography and long-baseline
 positioning, and for little else.
-`SoundSpeedProfile.from_mackenzie` is the built-in route from a measured
+`SoundSpeedProfile.from_temperature_salinity` is the built-in route from a measured
 `T(z)`/`S(z)` cast to a profile; see [environment](environment.md).
 
 ### Density, and everything else
@@ -342,7 +342,7 @@ positioning, and for little else.
 | `doppler(speed, frequency, c=None)` | Doppler shift, `speed ≪ c` |
 | `bubble_resonance(radius, depth=0.0, …)` | Minnaert resonance (Medwin & Clay 1998) |
 | `bubble_surface_loss(windspeed, frequency, angle)` | APL-UW (1994) surface loss — returns a **linear multiplier** in `(0, 1]` |
-| `bubble_soundspeed(void_fraction, …)` | Wood (1964) / Buckingham (1997) two-phase speed |
+| `bubble_sound_speed(void_fraction, …)` | Wood (1964) / Buckingham (1997) two-phase speed |
 | `pekeris_root(gamma2)` | The Pekeris branch of `sqrt`, enforcing decay in the half-space |
 
 `density` returns **kg/m³**, while the seabed carriers use **g/cm³**. That is

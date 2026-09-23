@@ -79,10 +79,10 @@ def sound_speed_equations():
     temperatures = np.linspace(0.0, 30.0, 121)
     pressures = np.linspace(0.0, 6000.0, 121)          # dbar ≈ metres
 
-    unesco = acoustics.soundspeed_unesco(temperatures, 35.0, 0.0)
-    delgrosso = acoustics.soundspeed_delgrosso(temperatures, 35.0, 0.0)
-    teos10 = acoustics.soundspeed_teos10(temperatures, 35.0, 0.0)
-    mackenzie = acoustics.soundspeed(temperatures, 35.0, 0.0)
+    unesco = acoustics.sound_speed_unesco(temperatures, 35.0, 0.0)
+    delgrosso = acoustics.sound_speed_delgrosso(temperatures, 35.0, 0.0)
+    teos10 = acoustics.sound_speed_teos10(temperatures, 35.0, 0.0)
+    mackenzie = acoustics.sound_speed_mackenzie(temperatures, 35.0, 0.0)
 
     fig, axes = plt.subplots(1, 3, figsize=(12.0, 4.0))
 
@@ -113,8 +113,8 @@ def sound_speed_equations():
 
     ax = axes[2]
     T, P = np.meshgrid(temperatures, pressures)
-    delta = (acoustics.soundspeed_delgrosso(T, 35.0, P)
-             - acoustics.soundspeed_unesco(T, 35.0, P))
+    delta = (acoustics.sound_speed_delgrosso(T, 35.0, P)
+             - acoustics.sound_speed_unesco(T, 35.0, P))
     limit = float(np.max(np.abs(delta)))
     mesh = ax.pcolormesh(temperatures, pressures, delta, cmap='RdBu_r',
                          vmin=-limit, vmax=limit, shading='auto')

@@ -17,7 +17,7 @@ from uacpy.acoustic_signal.arrays import (
 from uacpy.visualization.plots.signal import (
     plot_fk, plot_radon, plot_taup,
     plot_angular_spectrum, plot_band_levels, plot_coherence, plot_frf,
-    plot_impulse_response_info, plot_psd)
+    plot_lsfir_diagnostics, plot_psd)
 
 
 def test_plot_fk_returns_fig_ax():
@@ -63,13 +63,13 @@ _FREQS3 = np.array([10.0, 100.0, 1000.0])
      (_FREQS3, np.array([1.0 + 1.0j, 2.0 + 0.0j, 0.5 - 0.5j]))),
     (plot_coherence, ('frequencies', 'coh', 'ax'),
      (_FREQS3, np.array([0.9, 0.95, 0.99]))),
-    (plot_impulse_response_info, ('Minfo', 'Vinfo', 'g'),
+    (plot_lsfir_diagnostics, ('Minfo', 'Vinfo', 'g'),
      (np.eye(3), np.arange(3.0), np.linspace(0.0, 1.0, 4))),
 ])
 def test_signal_plotter_signature_and_smoke(fn, params, args):
     # Each plotter exposes its documented parameters and draws from a
     # minimal call; plot_frf returns a 2-tuple of axes and
-    # plot_impulse_response_info a 3-panel list, so axes are flattened.
+    # plot_lsfir_diagnostics a 3-panel list, so axes are flattened.
     sig = inspect.signature(fn)
     assert all(p in sig.parameters for p in params)
     fig, axes = fn(*args)
@@ -78,9 +78,9 @@ def test_signal_plotter_signature_and_smoke(fn, params, args):
     plt.close(fig)
 
 
-def test_plot_impulse_response_info_is_figure_level():
+def test_plot_lsfir_diagnostics_is_figure_level():
     # It builds its own three-panel figure and takes no ax=.
-    assert 'ax' not in inspect.signature(plot_impulse_response_info).parameters
+    assert 'ax' not in inspect.signature(plot_lsfir_diagnostics).parameters
 
 
 class TestFixedYWindowsAreEscapable:

@@ -195,7 +195,9 @@ def test_the_excitation_plot_draws_both_views_against_mode_angle():
     src = uacpy.Source(depths=zs, frequencies=F0)
     modes = Kraken(verbose=False).compute_modes(env, src)
 
-    fig, ax = plot_mode_excitation(modes, src)
+    # env= reads the speed at the source depth off the profile; the call
+    # refuses to invent one, because the x axis IS an angle against it.
+    fig, ax = plot_mode_excitation(modes, src, env=env)
     stems = [c for c in ax.collections] + ax.get_lines()
     assert stems, "nothing drawn"
     assert 'angle' in ax.get_xlabel().lower(), ax.get_xlabel()

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import uacpy
-from uacpy.core.absorption import FrancoisGarrison, Thorp
+from uacpy.core.absorption import FrancoisGarrison, absorption_thorp
 
 
 def _env():
@@ -101,13 +101,18 @@ def test_ssp_plot_forwards_line_kwargs():
     assert ax.lines[0].get_alpha() == 0.5
 
 
-# ── Absorption.plot ──────────────────────────────────────────────────────────
+# ── AbsorptionCoefficient.plot ───────────────────────────────────────────────
+# `Absorption.plot(frequencies)` used to compute a curve and draw it in one
+# call. It was the third spelling of one thing — beside
+# `plot_absorption(f, model=...)` and `plot_absorption(f, absorption=...)` —
+# so it went. Evaluation and drawing are now separate: `.alpha(...)` returns
+# the carrier, and the carrier draws itself.
 
 _FREQS = np.logspace(2, 4, 20)          # 100 Hz – 10 kHz
 
 
-def test_thorp_plot_frequency_curve():
-    fig, ax = Thorp().plot(_FREQS)
+def test_thorp_curve_is_drawn_from_the_carrier():
+    fig, ax = absorption_thorp(_FREQS).plot()
     assert ax.get_xlabel() == 'Frequency (Hz)'
     assert ax.get_ylabel() == 'Absorption (dB/km)'
     line = ax.lines[0]
@@ -115,38 +120,49 @@ def test_thorp_plot_frequency_curve():
     assert np.all(line.get_ydata() > 0)
 
 
-def test_absorption_plot_requires_frequencies():
+def test_evaluating_requires_frequencies():
     with pytest.raises(TypeError):
-        Thorp().plot()
+        absorption_thorp()
 
 
-def test_francois_garrison_plot_depth_dependent():
+def test_a_scalar_depth_gives_a_curve_not_a_one_row_grid():
+    """The shape rule: a scalar depth is a place to evaluate, an array is an
+    axis to span. Asking for one depth must not produce a heatmap."""
     fg = FrancoisGarrison(temperature_c=10, salinity_psu=35, pH=8.0, z_bar_m=0)
-    fig, ax = fg.plot(_FREQS, depth=1000.0)
+    curve = fg.alpha(_FREQS, depths=1000.0)
+    assert not curve.is_depth_dependent
+    fig, ax = curve.plot()
     assert ax.get_xlabel() == 'Frequency (Hz)'
     assert np.all(ax.lines[0].get_ydata() > 0)
+    assert fg.alpha(_FREQS, depths=[0.0, 1000.0]).is_depth_dependent
 
 
-def test_absorption_plot_forwards_kwargs():
-    fig, ax = Thorp().plot(_FREQS, title='α(f)')
+def test_plot_forwards_kwargs():
+    fig, ax = absorption_thorp(_FREQS).plot(title='α(f)')
     assert ax.get_title(loc='left') == 'α(f)'   # plot_absorption titles left
 
 
-def test_biological_plot_outside_layer_warns():
+def test_a_curve_that_is_all_zero_warns_before_drawing_a_blank_log_axis():
     from uacpy.core.absorption import Biological
     bio = Biological(layers=[(40.0, 60.0, 1000.0, 5.0, 10.0)])
     # depth 0 m is outside the 40-60 m layer → α ≡ 0 → blank log-log axes.
-    with pytest.warns(UserWarning, match='depth 0'):
-        fig, ax = bio.plot(_FREQS, depth=0.0)
+    curve = bio.alpha(_FREQS, depths=0.0)
+    with pytest.warns(UserWarning, match='entirely non-positive'):
+        curve.plot()
+    # The warning belongs to the drawing, so the direct call gets it too —
+    # that is the form the plotting guide documents.
+    from uacpy.visualization.plots.environment import plot_absorption
+    with pytest.warns(UserWarning, match='entirely non-positive'):
+        plot_absorption(curve)
 
 
-def test_biological_plot_inside_layer_no_warning():
+def test_inside_the_layer_it_does_not_warn():
     import warnings
     from uacpy.core.absorption import Biological
     bio = Biological(layers=[(40.0, 60.0, 1000.0, 5.0, 10.0)])
     with warnings.catch_warnings():
         warnings.simplefilter('error', UserWarning)
-        fig, ax = bio.plot(_FREQS, depth=50.0)
+        fig, ax = bio.alpha(_FREQS, depths=50.0).plot()
     assert np.all(ax.lines[0].get_ydata() > 0)
 
 
@@ -212,14 +228,14 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
         ('SoundSpeedProfile', 'plot'),
         ('Bathymetry', 'plot'),
         ('Altimetry', 'plot'),
-        ('Absorption', 'plot'),
+        ('AbsorptionCoefficient', 'plot'),
         ('Field', 'plot_impulse_response'),
         ('Field', 'plot_transfer_function'),
     ])
     def test_the_parameter_is_named_and_visible(self, owner, method):
         import inspect
 
-        from uacpy.core.absorption import Absorption
+        from uacpy.core.absorption import AbsorptionCoefficient
         from uacpy.core.altimetry import Altimetry
         from uacpy.core.bathymetry import Bathymetry
         from uacpy.core.environment import Environment
@@ -227,8 +243,8 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
         from uacpy.core.ssp import SoundSpeedProfile
         owners = {'Environment': Environment, 'SoundSpeedProfile':
                   SoundSpeedProfile, 'Bathymetry': Bathymetry,
-                  'Altimetry': Altimetry, 'Absorption': Absorption,
-                  'Field': Field}
+                  'Altimetry': Altimetry, 'Field': Field,
+                  'AbsorptionCoefficient': AbsorptionCoefficient}
         parameters = inspect.signature(
             getattr(owners[owner], method)).parameters
         assert 'ax' in parameters, (
@@ -240,7 +256,8 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
         for draw in (lambda ax: env.plot(ax=ax),
                      lambda ax: env.ssp.plot(ax=ax),
                      lambda ax: env.bathymetry.plot(ax=ax),
-                     lambda ax: Thorp().plot(np.array([1e3, 1e4]), ax=ax)):
+                     lambda ax: absorption_thorp(
+                         np.array([1e3, 1e4])).plot(ax=ax)):
             fig, ax = plt.subplots()
             draw(ax)
             assert ax.lines or ax.collections or ax.patches, draw

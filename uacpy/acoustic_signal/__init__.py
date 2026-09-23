@@ -103,6 +103,7 @@ _EXPORTS = {
     'bartlett_spectrum': 'arrays', 'beamform': 'arrays',
     'BeamformResult': 'arrays', 'music_spectrum': 'arrays',
     'mvdr_spectrum': 'arrays', 'sample_covariance': 'arrays',
+    'snapshots': 'arrays', 'Snapshots': 'arrays',
     'steering_vectors': 'arrays', 'shading_taper': 'arrays',
     'beamform_field': 'arrays', 'BeamformedField': 'arrays',
     'plane_wave_array_gain': 'arrays', 'matched_replica_gain': 'arrays',
@@ -121,6 +122,7 @@ _EXPORTS = {
     'fractional_delay_taps': 'system',
     'impulse_response': 'system',
     'impulse_response_from_transfer_function': 'system',
+    'channel_response': 'system',
     'simulate_reception': 'system',
     # modal
     'modal_group_velocity': 'system', 'unwarp_signal': 'system',
@@ -157,7 +159,8 @@ __all__ = [
     # system identification
     "FRF",
     # arrays
-    "steering_vectors", "beamform", "BeamformResult", "sample_covariance", "bartlett_spectrum",
+    "steering_vectors", "beamform", "BeamformResult", "sample_covariance",
+    "snapshots", "Snapshots", "bartlett_spectrum",
     "mvdr_spectrum", "music_spectrum", "shading_taper",
     "beamform_field", "BeamformedField", "plane_wave_array_gain",
     "matched_replica_gain", "independent_beams",
@@ -170,7 +173,8 @@ __all__ = [
     "radon_transform", "inverse_radon", "RadonResult",
     # channel
     "impulse_response", "simulate_reception",
-    "impulse_response_from_transfer_function", "fractional_delay_taps",
+    "impulse_response_from_transfer_function", "channel_response",
+    "fractional_delay_taps",
     # modal
     "modal_group_velocity", "warp_signal", "unwarp_signal",
     # time-frequency

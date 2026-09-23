@@ -59,7 +59,8 @@ from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
                                  check_grain_size_selection)
 from uacpy.data.sediment import bottom_from_class, bottom_from_grain_size
 from uacpy.data.sound_speed import (
-    extend_ssp_below_data, fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
+    DEFAULT_SOUND_SPEED_FORMULA, extend_ssp_below_data, fetch_ssp,
+    fetch_ssp_transect, fetch_ts_profile,
 )
 from uacpy.data.sources import SOURCES, DataProvenance
 
@@ -215,8 +216,8 @@ def fetch_environment(
     surface_sources: Union[str, Sequence[str], None] = None,
     altimetry=None,
     altimetry_sources: Optional[str] = None,
-    sea_surface_n_points: Optional[int] = None,
-    sea_surface_seed: Optional[int] = None,
+    altimetry_n_points: Optional[int] = None,
+    altimetry_seed: Optional[int] = None,
     transect_to: Optional[Coordinate] = None,
     n_points: Union[int, str] = 50,
     max_points: int = DEFAULT_MAX_TRANSECT_POINTS,
@@ -229,7 +230,7 @@ def fetch_environment(
     with_absorption: bool = False,
     max_distance_km: Optional[float] = None,
     max_days: Optional[int] = None,
-    formula: str = 'teos10',
+    formula: str = DEFAULT_SOUND_SPEED_FORMULA,
     resolution: str = '1.00',
     timeout: float = 120.0,
     verbose: Union[bool, str] = False,
@@ -434,12 +435,12 @@ def fetch_environment(
         (the realization spans the transect range and sea state is time-
         specific); a single point has no range, so point altimetry is not
         fetched. Default ``None`` (flat surface unless ``altimetry=`` is given).
-    sea_surface_n_points : int, optional
+    altimetry_n_points : int, optional
         Range samples in a fetched sea-surface realization. Default ``None``:
         :func:`~uacpy.data.fetch_sea_surface` sizes it from the sea state, so
         the realization resolves the wave spectrum's peak over the whole
         transect (a fixed count aliases the waves away on a long one).
-    sea_surface_seed : int, optional
+    altimetry_seed : int, optional
         Random seed for a fetched sea-surface realization (reproducibility).
     bottom_environment : str, optional
         Which of Hamilton & Bachman's three fits ``bottom_model=DEFAULT_GRAIN_SIZE_MODEL``
@@ -813,7 +814,7 @@ def fetch_environment(
             altimetry_result, altimetry_src = fetch_sea_surface(
                 (lat, lon), date=date,
                 max_range=transect_length((lat, lon), transect_to),
-                n_points=sea_surface_n_points, seed=sea_surface_seed,
+                n_points=altimetry_n_points, seed=altimetry_seed,
                 source=altimetry_sources, max_days=max_days,
                 timeout=timeout, verbose=verbose)
         except (DataFetchError, ConfigurationError):

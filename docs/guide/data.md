@@ -121,7 +121,7 @@ fetched environment with no `bottom_sources=` has a *made-up* seabed.
 | `ssp_n_points` | `'auto'` | one column per distinct WOA23 cell crossed |
 | `bottom_n_points` | `6` | seabed samples; `'auto'` probes every waypoint |
 | `surface_n_points` | `'auto'` | ice/open-water zones collapsed to one boundary each |
-| `sea_surface_n_points`, `sea_surface_seed` | `None`, `None` | fetched sea-surface realisation; `n_points=None` sizes the grid from the sea state (8 samples per Pierson-Moskowitz peak wavelength, floored at 500), so a long transect resolves its waves instead of aliasing them flat |
+| `altimetry_n_points`, `altimetry_seed` | `None`, `None` | fetched sea-surface realisation; `n_points=None` sizes the grid from the sea state (8 samples per Pierson-Moskowitz peak wavelength, floored at 500), so a long transect resolves its waves instead of aliasing them flat |
 
 **Tolerances and numerics**
 
@@ -131,7 +131,7 @@ fetched environment with no `bottom_sources=` has a *made-up* seabed.
 | `with_absorption` | `False` | build `FrancoisGarrison` from the site's T/S column (and GLODAP pH) |
 | `max_distance_km` | `None` | distance guard for the **nearest-sample** sources (`argo`, `grainsize`, `mars`); ignored by grids and polygons |
 | `max_days` | `None` | staleness guard for the **time-specific** SSP sources (`argo`, `copernicus`); ignored by climatologies |
-| `formula` | `'teos10'` | sound-speed equation; `'unesco'` (Chen–Millero 1977, ≈ 0.6 m/s high in deep water), `'delgrosso'` (open-ocean salinity only) and `'mackenzie'` (the nine-term equation behind `SoundSpeedProfile.from_mackenzie`) also available, see [utilities](utilities.md) |
+| `formula` | `'teos10'` | sound-speed equation; `'unesco'` (Chen–Millero 1977, ≈ 0.6 m/s high in deep water), `'delgrosso'` (open-ocean salinity only) and `'mackenzie'` (the nine-term equation behind `SoundSpeedProfile.from_temperature_salinity`) also available, see [utilities](utilities.md) |
 | `resolution` | `'1.00'` | WOA23 grid spacing in degrees (`'0.25'` for the fine grid) |
 | `timeout`, `verbose` | `120.0`, `False` | forwarded to the fetchers |
 
@@ -593,7 +593,7 @@ realisation:
 ```python
 env = uacpy.data.fetch_environment(
     A, transect_to=B, date='2026-01-15',
-    altimetry_sources='local', sea_surface_seed=11)
+    altimetry_sources='local', altimetry_seed=11)
 ```
 
 `'waves'` inverts an observed significant wave height to the effective PM wind

@@ -14,9 +14,10 @@ frequency:
    10 kHz warming *reduces* attenuation — the sign people get wrong;
 3. pure-water viscous absorption, above ~500 kHz — proportional to f².
 
-Uses: core.absorption.thorp_dB_per_km · francois_garrison_dB_per_km ·
-convert_attenuation_units · core.acoustics.soundspeed · plot_absorption
-(pre-computed arrays and its own model= API)
+Uses: absorption_thorp · absorption_francois_garrison ·
+core.absorption.thorp_dB_per_km · francois_garrison_dB_per_km ·
+convert_attenuation_units · core.acoustics.sound_speed_mackenzie ·
+AbsorptionCoefficient.plot (curve, overlay, and the α(f, z) heatmap)
 """
 
 import os
@@ -30,7 +31,7 @@ import uacpy
 from uacpy.core.absorption import (convert_attenuation_units,
                                    francois_garrison_dB_per_km,
                                    thorp_dB_per_km)
-from uacpy.core.acoustics import soundspeed
+from uacpy.core.acoustics import sound_speed_mackenzie
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -39,9 +40,11 @@ OUT.mkdir(parents=True, exist_ok=True)
 # ── The two models over the full band, at standard conditions ───────────────
 frequencies = np.logspace(1, 6, 500)                 # 10 Hz - 1 MHz
 TEMPERATURE, SALINITY, PH, DEPTH = 10.0, 35.0, 8.0, 100.0
-thorp = thorp_dB_per_km(frequencies)
-francois = francois_garrison_dB_per_km(frequencies, TEMPERATURE, SALINITY,
-                                       PH, DEPTH)
+a_thorp = uacpy.absorption_thorp(frequencies)
+a_francois = uacpy.absorption_francois_garrison(
+    frequencies, temperature_c=TEMPERATURE, salinity_psu=SALINITY, pH=PH,
+    z_bar_m=DEPTH)
+thorp, francois = a_thorp.values, a_francois.values
 
 print(f"  at {TEMPERATURE:.0f} °C, S={SALINITY:.0f}, pH {PH}, {DEPTH:.0f} m:")
 for probe in (100, 1000, 10000, 100000):
@@ -51,24 +54,23 @@ for probe in (100, 1000, 10000, 100000):
           f" dB/km")
 
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-# plot_absorption draws α(f) on log-log axes; a second call with the same ax=
+# A carrier draws itself on log-log axes; a second .plot() with the same ax=
 # overlays the other model.
-uacpy.plot.plot_absorption(frequencies, thorp, ax=axes[0], label='Thorp (1967)',
-                           title='Attenuation vs frequency (full range)',
-                           color='b', linewidth=2.5, alpha=0.8)
-uacpy.plot.plot_absorption(frequencies, francois, ax=axes[0],
-                           label='Francois-Garrison (1982)', color='r',
-                           linewidth=2.5, alpha=0.8)
+a_thorp.plot(ax=axes[0], label='Thorp (1967)',
+             title='Attenuation vs frequency (full range)',
+             color='b', linewidth=2.5, alpha=0.8)
+a_francois.plot(ax=axes[0], label='Francois-Garrison (1982)', color='r',
+                linewidth=2.5, alpha=0.8)
 axes[0].set_xlim([frequencies[0], frequencies[-1]])
 
-low = frequencies <= 10000
-uacpy.plot.plot_absorption(frequencies[low], thorp[low], ax=axes[1],
-                           label='Thorp',
-                           title='Low frequency (10 Hz - 10 kHz)', color='b',
-                           linewidth=2.5, alpha=0.8)
-uacpy.plot.plot_absorption(frequencies[low], francois[low], ax=axes[1],
-                           label='Francois-Garrison', color='r',
-                           linewidth=2.5, alpha=0.8)
+low_band = frequencies[frequencies <= 10000]
+uacpy.absorption_thorp(low_band).plot(
+    ax=axes[1], label='Thorp', title='Low frequency (10 Hz - 10 kHz)',
+    color='b', linewidth=2.5, alpha=0.8)
+uacpy.absorption_francois_garrison(
+    low_band, temperature_c=TEMPERATURE, salinity_psu=SALINITY, pH=PH,
+    z_bar_m=DEPTH).plot(ax=axes[1], label='Francois-Garrison', color='r',
+                        linewidth=2.5, alpha=0.8)
 axes[1].set_yscale('linear')
 
 axes[2].semilogx(frequencies / 1000, francois - thorp, 'g-', linewidth=2.5)
@@ -128,7 +130,7 @@ print(f"  warming 10 → 20 °C at 10 kHz: {cool:.3f} → {warm:.3f} dB/km "
       f"({100 * (warm / cool - 1):+.0f}%, a decrease)")
 
 # ── The same number in every unit ───────────────────────────────────────────
-sound_speed = soundspeed()
+sound_speed = sound_speed_mackenzie()
 per_km = float(thorp_dB_per_km(PROBE_HZ))
 print(f"  {PROBE_HZ / 1000:.0f} kHz, c={sound_speed:.1f} m/s, "
       f"λ={sound_speed / PROBE_HZ:.4f} m:")
@@ -155,15 +157,14 @@ fig.savefig(OUT / 'example_12c_unit_conversions.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
-# plot_absorption can also compute the model itself, rather than being handed
-# a pre-computed array as above.
-fig, ax = uacpy.plot.plot_absorption(frequencies, model='thorp', label='Thorp')
-uacpy.plot.plot_absorption(
-    frequencies, model='francois_garrison', ax=ax,
-    label='François–Garrison (10 °C, 35 PSU, 100 m)',
-    model_kwargs=dict(temperature=TEMPERATURE, salinity=SALINITY, pH=PH,
-                      depth=DEPTH))
-ax.set_title('Volume absorption — plot_absorption()', loc='left')
-fig.savefig(OUT / 'example_12d_plot_absorption.png', dpi=150,
+# α over depth as well as frequency: pass a depth axis and the same carrier
+# draws a heatmap instead. Thorp is depth independent, so this is F-G's
+# pressure dependence on its own.
+fig, ax = plt.subplots(figsize=(8, 5))
+uacpy.absorption_francois_garrison(
+    frequencies, temperature_c=TEMPERATURE, salinity_psu=SALINITY, pH=PH,
+    z_bar_m=DEPTH, depths=np.linspace(0.0, 4000.0, 60)).plot(
+        ax=ax, title='Volume absorption α(f, z) — Francois-Garrison')
+fig.savefig(OUT / 'example_12d_absorption_over_depth.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)

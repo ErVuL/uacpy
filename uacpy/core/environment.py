@@ -13,6 +13,7 @@ from typing import Union, List, Tuple, Optional
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._carrier_validate import (
+    DEPTH_COLLAPSE_METHODS, _method_list,
     _DeepCopyMixin,
     _sanitize_title, _dedupe_provenance, _scalar_or_none,
 )
@@ -540,8 +541,9 @@ class Environment(_DeepCopyMixin):
             return float(depths[0])
         else:
             raise ConfigurationError(
-                f"Environment.get_representative_depth: unknown method={method!r}; "
-                "valid: 'max', 'median', 'mean', 'min', 'initial'"
+                f"Environment.get_representative_depth: unknown "
+                f"method={method!r}; "
+                f"valid: {_method_list(DEPTH_COLLAPSE_METHODS)}"
             )
 
 

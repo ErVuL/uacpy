@@ -114,6 +114,25 @@ class ChannelTaps(NamedTuple):
     sps: int
     first_arrival_s: float
 
+    def plot(self, **kwargs):
+        """Draw these taps through :func:`uacpy.visualization.plot_channel`.
+
+        The sample rate the plotter needs is not a field: taps spaced at
+        ``sps`` samples per symbol at ``symbol_rate`` symbols per second sit
+        at ``symbol_rate * sps`` Hz, so it is derived rather than asked for.
+        ``kwargs`` reach the plotter.
+
+        Returns ``(fig, ax)`` where ``ax`` is a **pair** — ``plot_channel``
+        draws the delay and frequency panels side by side — unlike the
+        single axis the rest of the family returns.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would make
+        # ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_channel(
+            self.taps, float(self.symbol_rate) * int(self.sps), **kwargs)
+
 
 # Coherence bandwidth = 1 / (factor * rms delay spread), by convention name.
 # 'inverse_spread' is the corpus's: APL-UW TR 9407 sect. II.7.b, p. II-32

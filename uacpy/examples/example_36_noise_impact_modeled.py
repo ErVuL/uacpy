@@ -9,7 +9,7 @@ Running Bellhop per decidecade band is the point: transmission loss is
 frequency-dependent in a way a spreading law cannot capture, and the weighted
 level is what an assessment turns on.
 
-Uses: soundspeed_unesco → Environment SSP · decidecade_bands ·
+Uses: sound_speed_unesco → Environment SSP · decidecade_bands ·
 radiated_noise_level / monopole_source_level (ISO 17208) · Bellhop per band ·
 apply_weighting · env.ssp.plot
 """
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.core.acoustics import soundspeed_unesco
+from uacpy.core.acoustics import sound_speed_unesco
 from uacpy.acoustic_signal.estimate import decidecade_bands
 from uacpy.noise import (apply_weighting, monopole_source_level,
                          nominal_source_depth, radiated_noise_level)
@@ -31,11 +31,11 @@ OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
 
-# A summer thermocline, turned into c(z) by UNESCO. soundspeed_unesco takes
+# A summer thermocline, turned into c(z) by UNESCO. sound_speed_unesco takes
 # pressure in dbar, which is ~1 dbar per metre at these depths.
 depths = np.array([0.0, 25.0, 50.0, 100.0, 200.0])
 temperatures = np.array([18.0, 16.0, 12.0, 8.0, 6.0])
-sound_speeds = np.array([soundspeed_unesco(t, 35.0, z)
+sound_speeds = np.array([sound_speed_unesco(t, 35.0, z)
                          for t, z in zip(temperatures, depths)])
 env = uacpy.Environment(
     name="UNESCO thermocline", bathymetry=200.0,

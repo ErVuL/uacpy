@@ -1178,6 +1178,84 @@ class Field(Result):
             f".dB first if only the level is wanted.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
+    def _warn_if_phase_view_aliases(self, where: str) -> None:
+        """Warn when a phase-sensitive VIEW of this field is spatially aliased.
+
+        A wrapped phase resolves the carrier only while it turns less than
+        half a cycle between neighbouring samples, so the bound here is the
+        **half** wavelength, not the quarter wavelength of
+        :meth:`_warn_if_undersampled`. The two numbers must not be shared
+        because the two guards answer different questions: that one asks
+        whether uacpy may interpolate *between* stored samples, where a
+        quarter wavelength is what keeps the interpolant off the
+        opposite-phase lobe; this one asks whether the stored samples
+        themselves resolve the carrier, and that is Nyquist. Between the two
+        bounds a phase map is coarse but honest, and warning there would cry
+        wolf on grids that draw correctly.
+
+        Nothing is interpolated and no level is biased -- the heatmap draws
+        flat cells (``shading='nearest'``) and a line cut joins stored
+        samples. What goes wrong is that the picture is a faithful drawing of
+        an aliased signal, and an aliased phase reads as smooth large-scale
+        structure rather than as noise, so it does not look wrong. Measured on
+        the 100 m Pekeris guide at 200 Hz (lambda 7.5 m) over 1000-1300 m: at
+        dr = 15 m the panel shows broad diagonal bands that are entirely an
+        artefact of the grid, while dr = 0.94 m over the same window shows the
+        one-wrap-per-wavelength fringes the field actually has. The two agree
+        exactly at the ranges they share (max |dphase| = 0), so the field is
+        right and only the view is wrong -- which is why this warns instead of
+        raising, and why ``value='dB'`` of the same coarse field is left
+        alone: |p| varies on the interference scale, not on the carrier.
+
+        Only the spatial axes are judged. The frequency axis carries the same
+        carrier, but against range rather than wavelength, and
+        :meth:`plot_transfer_function` draws a phase panel along it on
+        purpose; :meth:`_warn_if_frequency_axis_undersamples` is that axis's
+        guard and this one must not fire on it.
+        """
+        if not self.is_complex:
+            return
+        axes = [(name, np.asarray(self.coords[name], dtype=float))
+                for name in ('depth', 'range', 'source_depth')
+                if self.coords.get(name) is not None
+                and self.coords[name].size > 1]
+        if not axes:
+            return
+        f_hi = self._highest_frequency()
+        if not f_hi:
+            warnings.warn(
+                f"{where}: this Field carries no frequency, so whether its "
+                f"spatial grid resolves the carrier cannot be checked. A "
+                f"phase view of an undersampled grid draws structure that is "
+                f"not in the field; plot value='dB' if only the level is "
+                f"wanted.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            return
+        # |diff|: a descending axis is the same physical grid stored the other
+        # way round, and it is drawn from the same samples.
+        half = DEFAULT_SOUND_SPEED / (2.0 * float(f_hi))
+        # ``>=``, not ``>``: at exactly half a wavelength the carrier advances
+        # exactly pi between samples, and +pi and -pi are the same wrapped
+        # value, so the direction of rotation is already unrecoverable.
+        # Nyquist is the first aliased spacing, not the last good one.
+        coarse = [(name, float(np.max(np.abs(np.diff(a))))) for name, a in axes
+                  if float(np.max(np.abs(np.diff(a)))) >= half]
+        if not coarse:
+            return
+        detail = ' and '.join(f"{name} samples are {d:g} m apart"
+                              for name, d in coarse)
+        turns = max(d for _, d in coarse) / (2.0 * half)
+        warnings.warn(
+            f"{where}: {detail}, at or over the {half:.3g} m half "
+            f"wavelength at {float(f_hi):g} Hz (nominal "
+            f"c={DEFAULT_SOUND_SPEED:g} m/s), so "
+            f"the carrier turns up to {turns:.2f} cycles between neighbouring "
+            f"samples and this view is aliased. The large-scale pattern it "
+            f"draws belongs to the grid, not to the field. Re-run on a grid "
+            f"finer than the half wavelength, or plot value='dB' if only the "
+            f"level is wanted.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
     def resample_to(
         self,
         *,

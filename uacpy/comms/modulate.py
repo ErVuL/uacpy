@@ -13,7 +13,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.acoustic_signal._signal_validate import require_below_nyquist
 import warnings
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.comms.receive import regularizer
+from uacpy.comms.receive import regularizer, _QAM_ORDERS as _QAM
 import zlib
 
 
@@ -24,7 +24,6 @@ import zlib
 # ──────────────────────────────────────────────────────────────────────
 
 _PSK = {"bpsk": 2, "qpsk": 4, "8psk": 8, "16psk": 16}
-_QAM = {"16qam": 16, "64qam": 64, "256qam": 256}
 
 # Symbols per Modulator.demodulate block: the pairwise distance matrix is
 # (block, M) instead of (N, M), so its size is bounded whatever the record
@@ -444,8 +443,41 @@ def ofdm_demodulate(rx, n_subcarriers, cp_len, channel=None, snr_linear=None):
                 f"each block's convolution tail outlives the prefix and "
                 f"leaks inter-block interference into the next block.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-        freq = equalize_subcarriers(freq, np.fft.fft(hc, nsc), snr_linear)
+        freq = equalize_subcarriers(
+            freq, subcarrier_response(hc, nsc), snr_linear)
     return freq.ravel()
+
+
+def subcarrier_response(channel, n_subcarriers):
+    """Channel response ``H`` sampled on the OFDM subcarrier grid.
+
+    ``H[k]`` is the gain the subcarrier :func:`ofdm_modulate` and
+    :func:`ofdm_demodulate` address as ``k``: an ``n_subcarriers``-point DFT
+    of the impulse response, **unshifted**, so the index is the subcarrier
+    number and not a position on a two-sided frequency axis. That is what
+    separates this from
+    :func:`uacpy.acoustic_signal.channel_response`, which centres its grid on
+    0 Hz and returns a frequency axis with it — the right answer for a
+    spectrum, the wrong indexing for a subcarrier.
+
+    Public because it is the equalizer's input: ``ofdm_demodulate(...,
+    channel=h)`` computes it internally, and a caller who wants to see which
+    subcarriers the channel has nulled — or to supply an estimate rather than
+    an impulse response — needs the same grid, by the same convention.
+    """
+    nsc = _require_subcarrier_count(n_subcarriers, "subcarrier_response")
+    h = np.asarray(channel, dtype=complex).ravel()
+    if h.size == 0:
+        raise ConfigurationError(
+            "subcarrier_response: channel is empty, so there is no response "
+            "to sample.")
+    if h.size > nsc:
+        raise ConfigurationError(
+            f"subcarrier_response: the channel is {h.size} taps and the grid "
+            f"is {nsc} subcarriers, so the DFT would alias the tail back over "
+            f"the head rather than truncate it. Use at least {h.size} "
+            f"subcarriers, or shorten the channel.")
+    return np.fft.fft(h, nsc)
 
 
 def equalize_subcarriers(freq, H, snr_linear=None):

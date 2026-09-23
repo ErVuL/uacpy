@@ -179,11 +179,17 @@ def _etfe_divide(Y, X, caller: str, quantity="the transfer function",
 
 
 class FRF:
-    """Frequency Response Function (FRF) computation and visualization."""
+    """Frequency Response Function (FRF) computation.
+
+    Computation only: the drawing is :func:`uacpy.plot.plot_frf`, and the
+    LS-FIR diagnostics are :func:`uacpy.plot.plot_lsfir_diagnostics`. This
+    class keeps state — the estimator and its settings — so one configured
+    instance answers several signal pairs; it has no ``.plot()``.
+    """
 
     def __init__(self, method="welch", estimator="H1", m=512, **kwargs):
         """
-        Transfer Function (Frequency Response Function, FRF) computation and visualization class.
+        Transfer Function (Frequency Response Function, FRF) computation.
 
         Parameters
         ----------
@@ -981,6 +987,60 @@ def simulate_reception(transmit, amplitudes, delays_s, sample_rate: float):
     y = np.convolve(x, h)
     t = np.arange(y.size) / float(sample_rate)
     return t, y
+
+
+def channel_response(h, sample_rate: float, *, nfft: Optional[int] = None):
+    """Frequency response ``H(f)`` of a baseband impulse response ``h``.
+
+    Returns ``(frequencies, H)`` with ``H`` **complex** and both axes
+    centred on 0 Hz: a baseband channel response is two-sided and not
+    conjugate symmetric, so the negative half carries information the
+    positive half does not, and ``rfft`` rejects complex input outright.
+
+    This is the direction :func:`impulse_response_from_transfer_function`
+    does not go, but the two are not exact inverses and composing them is
+    not a no-op. That one models a **real** channel from a one-sided
+    ``H(f)`` sampled anywhere, so it resamples onto its own DFT grid and
+    zeroes every bin outside the band it was handed — including Nyquist,
+    which this function's grid reaches and its does not. Measured: a
+    40-tap real ``h`` taken here at ``nfft=1024``, half-band sliced and
+    passed back, returns with a peak error of 1.8e-4 and the same 1.8e-4
+    smeared past the original support.
+
+    ``nfft`` defaults to ``max(1024, 2 * h.size)``. Zero-padding
+    **interpolates** between DFT bins — it draws the shape between the
+    nulls, it does not resolve anything the ``h.size / sample_rate`` record
+    cannot. The floor of 1024 is there so a short tap set still plots as a
+    curve rather than a polygon; the factor of two puts a sample between
+    every pair of natural bins. Pass ``nfft`` to pin it.
+
+    Magnitude in dB is the caller's: ``20 * log10(abs(H))`` is ``-inf`` at a
+    perfect null, so whoever renders it picks the floor that sets how deep a
+    null is drawn, rather than inheriting one chosen here.
+
+    Returns ``(frequencies, H)``, each of length ``nfft``.
+    """
+    ir = np.asarray(h, dtype=complex)
+    if ir.ndim != 1:
+        raise ConfigurationError(
+            f"channel_response: h must be a 1-D impulse response; got shape "
+            f"{ir.shape}. Transform one channel at a time.")
+    if ir.size == 0:
+        raise ConfigurationError(
+            "channel_response: h is empty, so there is no channel to "
+            "transform.")
+    fs = require_positive_finite_scalar(
+        sample_rate, "channel_response", "sample_rate", " Hz")
+    n = max(1024, 2 * ir.size) if nfft is None else int(nfft)
+    if n < ir.size:
+        raise ConfigurationError(
+            f"channel_response: nfft={n} is shorter than the {ir.size}-tap "
+            f"impulse response, which would truncate it — the tail beyond "
+            f"the {n}th tap would be dropped, not folded. Pass nfft >= "
+            f"{ir.size}.")
+    freqs = np.fft.fftshift(np.fft.fftfreq(n, d=1.0 / fs))
+    H = np.fft.fftshift(np.fft.fft(ir, n))
+    return freqs, H
 
 
 def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,

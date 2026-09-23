@@ -10,7 +10,7 @@ Weighting is the step that matters: a porpoise and a baleen whale hear the same
 spectrum very differently, so the unweighted received level is not the number
 an assessment turns on.
 
-Uses: soundspeed_unesco · decidecade_bands · nominal_source_depth ·
+Uses: sound_speed_unesco · decidecade_bands · nominal_source_depth ·
 radiated_noise_level · monopole_source_level · apply_weighting ·
 thorp_dB_per_km · plot_source_level · plot_weighting
 """
@@ -24,7 +24,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.core.absorption import thorp_dB_per_km
-from uacpy.core.acoustics import soundspeed_unesco
+from uacpy.core.acoustics import sound_speed_unesco
 from uacpy.acoustic_signal.estimate import decidecade_bands
 from uacpy.noise import (apply_weighting, monopole_source_level,
                          nominal_source_depth, radiated_noise_level)
@@ -34,7 +34,7 @@ OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
 OUT.mkdir(parents=True, exist_ok=True)
 
 temperature, salinity, depth_dbar = 12.0, 35.0, 50.0
-sound_speed = soundspeed_unesco(temperature, salinity, depth_dbar)
+sound_speed = sound_speed_unesco(temperature, salinity, depth_dbar)
 _, band_centres, _ = decidecade_bands(10, 25000)
 print(f"  site c (UNESCO, {temperature}°C, S={salinity}, "
       f"{depth_dbar:.0f} m): {sound_speed:.2f} m/s")

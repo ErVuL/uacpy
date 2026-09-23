@@ -100,9 +100,10 @@ QUANTITIES: Mapping[str, Quantity] = {
 #: dB quantities whose numbers run BACKWARDS — less of them is louder. A loss
 #: is what a source level can be subtracted from and what an intensity sum has
 #: to invert before adding; a level, a residual, a normalised ambiguity power
-#: and a signal excess are none of those. ``uacpy.visualization`` keeps its own
-#: copy for the axis direction; this one is the data layer's, so a new kind is
-#: declared in one place and both read it.
+#: and a signal excess are none of those. This is the only
+#: declaration: ``uacpy.visualization`` asks :func:`is_loss` for the axis
+#: direction rather than keeping a copy, so a new kind is added here once and
+#: every consumer follows.
 LOSS_KINDS = ('pressure', 'reverberation')
 
 

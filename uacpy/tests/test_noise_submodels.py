@@ -423,3 +423,393 @@ def test_the_drdc_report_is_cited_by_its_own_year():
     assert 'Tollefsen & Pecknold (2018)' not in src
     assert 'Tollefsen & Pecknold 2018' not in src
     assert src.count('2022') >= 4
+
+
+class TestKnudsenMatchesThePublishedCurves:
+    """``44 + 20·log10(U_kn) - 17·log10(f_kHz)`` against the 1948 figure.
+
+    The expected side is Knudsen, Alford & Emling (1948) Fig. 4 Part C read
+    off the page — the overall 0.1-10 kc level of each of the seven curves —
+    together with the two statements the paper makes in its own text: a
+    -5 dB/octave spectrum slope, and levels referred to 0.0002 dyne/cm²
+    (= 20 µPa, so +26.0 dB to reach dB re 1 µPa²/Hz). Nothing here calls
+    into the model to build its own expectation.
+
+    The model is a straight-line closed form and the curves are not quite
+    straight in log10(U), so the test is that they agree inside the scatter
+    the paper reports for its own observations ("of the order of 4 to 5 db")
+    — not that they agree exactly. Demanding exactness would be demanding
+    something the data does not support.
+
+    Hildebrand et al. (2021) Table IV gives a third party's reading of the
+    same figure, which bounds the risk that it was misread once here.
+    """
+
+    #: Fig. 4 Part C legend: overall 0.1-10 kc level per curve, keyed by
+    #: wind force, in the paper's own dB re 0.0002 dyne/cm². Seven curves;
+    #: the set skips force 6 (it plots sea states 0, ½, 1, 2, 3, 4 and 6).
+    FIG4_OVERALL_DB = {0: 57.0, 1: 63.0, 2: 68.0, 3: 74.0, 4: 77.0,
+                       5: 79.0, 7: 83.0}
+    SLOPE_DB_PER_OCTAVE = 5.0
+    BAND_HZ = (100.0, 10000.0)
+    REF_SHIFT_DB = 20.0 * np.log10(20.0)       # 0.0002 dyne/cm² = 20 µPa
+
+    #: Hildebrand et al. (2021) Table IV, "Knudsen (1948)" row: 1 kHz
+    #: spectrum level, dB re 1 µPa²/Hz, by Beaufort force. The paper states
+    #: these carry 0.5 dB precision, "due to the difficulty of estimation
+    #: from published graphics".
+    HILDEBRAND_TABLE_IV = {1: 51.0, 2: 55.5, 3: 61.5, 4: 64.5, 5: 66.5,
+                           7: 71.0}
+
+    @classmethod
+    def _published_1k_levels(cls):
+        """Fig. 4's curves as 1 kHz spectrum levels, dB re 1 µPa²/Hz."""
+        a = (cls.SLOPE_DB_PER_OCTAVE / np.log10(2.0)) / 10.0
+        f1, f2 = cls.BAND_HZ
+        band = 10.0 * np.log10(1000.0 ** a / (a - 1.0)
+                               * (f1 ** (1.0 - a) - f2 ** (1.0 - a)))
+        return {force: lvl - band + cls.REF_SHIFT_DB
+                for force, lvl in cls.FIG4_OVERALL_DB.items()}
+
+    def test_the_two_readings_of_the_figure_agree(self):
+        """This file's reading against Hildebrand's, before either is used
+        to judge the model. Without this, a misread figure would be checked
+        against itself."""
+        mine = self._published_1k_levels()
+        for force, want in self.HILDEBRAND_TABLE_IV.items():
+            assert abs(mine[force] - want) <= 0.6, (
+                f'force {force}: this file {mine[force]:.1f}, '
+                f'Hildebrand Table IV {want:.1f}')
+
+    def test_the_slope_is_the_paper_s_five_db_per_octave(self):
+        """-17 dB/decade is -5 dB/octave rounded; the gap is what rounding
+        costs, 0.12 dB per octave."""
+        f = np.array([500.0, 1000.0, 2000.0, 4000.0])
+        steps = np.diff(N.WIND_MODELS['knudsen'](f, wind_speed_kn=15.0))
+        assert np.allclose(steps, -5.0, atol=0.15), steps
+
+    def test_it_sits_inside_the_scatter_of_the_curves_it_fits(self):
+        from uacpy.core.units import beaufort_to_wind_speed
+        published = self._published_1k_levels()
+        diffs = []
+        for force in sorted(self.HILDEBRAND_TABLE_IV):
+            u = beaufort_to_wind_speed(force)
+            got = float(N.WIND_MODELS['knudsen'](np.array([1000.0]),
+                                                 wind_speed_kn=u)[0])
+            diffs.append(got - published[force])
+        rms = float(np.sqrt(np.mean(np.square(diffs))))
+        assert rms < N.KNUDSEN_UNCERTAINTY_DB, (rms, diffs)
+
+    def test_the_constant_is_the_calm_curve(self):
+        """At 1 knot and 1 kHz the formula is its constant, 44 dB, and
+        Fig. 4's force-0 curve lands within a decibel of it."""
+        got = float(N.WIND_MODELS['knudsen'](np.array([1000.0]),
+                                             wind_speed_kn=1.0)[0])
+        assert got == pytest.approx(44.0)
+        assert abs(self._published_1k_levels()[0] - 44.0) < 1.0
+
+    def test_it_is_the_stated_formula(self):
+        f = np.array([250.0, 1000.0, 8000.0])
+        got = N.WIND_MODELS['knudsen'](f, wind_speed_kn=12.0)
+        want = 44.0 + 20.0 * np.log10(12.0) - 17.0 * np.log10(f / 1000.0)
+        assert np.allclose(got, want)
+
+    def test_zero_wind_switches_the_source_off(self):
+        lvl = N.WIND_MODELS['knudsen'](np.array([1e3]), wind_speed_kn=0.0)
+        assert np.all(np.isneginf(lvl))
+
+    def test_the_curves_are_parallel_as_knudsen_drew_them(self):
+        """His curves shift with wind by the same amount at every
+        frequency, which is the property the straight-line form keeps."""
+        f = np.array([200.0, 1000.0, 5000.0])
+        a = N.WIND_MODELS['knudsen'](f, wind_speed_kn=5.0)
+        b = N.WIND_MODELS['knudsen'](f, wind_speed_kn=25.0)
+        assert np.allclose(b - a, (b - a)[0])
+
+
+class TestAnEnvironmentKnobNoSubmodelReadsIsReported:
+    """A setting that is accepted, validated, and then has no effect.
+
+    ``water_depth='shallow'`` with the Coates submodels produced a spectrum
+    identical to the deep-water one: Coates carries no depth term and
+    swallowed the argument through ``**_``. Nothing here invents a depth
+    dependence — the warning reports that the knob did nothing, which is
+    the part the caller cannot otherwise see.
+    """
+
+    F = np.array([1000.0])
+
+    def _build(self, **kw):
+        return N.WenzNoise(self.F, wind_speed_kn=15.0, **kw)
+
+    def test_it_warns_when_no_selected_submodel_carries_the_term(self):
+        with pytest.warns(UserWarning, match="water_depth='shallow' was not"):
+            self._build(water_depth='shallow', wind_model='coates',
+                        shipping_model='coates')
+
+    def test_the_warning_is_true_the_spectrum_really_is_unchanged(self):
+        """Measured, not asserted: the two spectra are bit-identical."""
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            shallow = self._build(water_depth='shallow', wind_model='coates',
+                                  shipping_model='coates').total
+        deep = self._build(water_depth='deep', wind_model='coates',
+                           shipping_model='coates').total
+        assert np.array_equal(shallow, deep)
+
+    def test_it_stays_silent_when_a_submodel_does_carry_the_term(self):
+        import warnings as _w
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter('always')
+            self._build(water_depth='shallow', wind_model='merklinger')
+        assert not [c for c in caught if 'was not used' in str(c.message)]
+
+    def test_it_stays_silent_when_the_knob_is_left_at_its_default(self):
+        """Only a value the caller chose can be reported as ignored."""
+        import warnings as _w
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter('always')
+            self._build(water_depth='deep', wind_model='coates',
+                        shipping_model='coates')
+        assert not [c for c in caught if 'was not used' in str(c.message)]
+
+
+class TestTheWindScaleConversions:
+    """m/s to knots, and the Beaufort/sea-state scales, as callables.
+
+    The factor and the Beaufort table both existed only as prose — the
+    factor in two docstrings ("multiply the m/s returned here by 1.9438")
+    and the table inside ``WenzNoise``'s docstring — while every fetcher
+    returns m/s and every noise and scattering entry point takes knots.
+    """
+
+    def test_the_seam_these_close_costs_a_measured_5_7_db(self):
+        """Why the conversion is a function: reading a m/s value as knots
+        understates the total by this much, and nothing used to stop it."""
+        from uacpy.core.units import ms_to_knots
+        f = np.array([1000.0])
+        kw = dict(water_depth='deep', shipping_level='medium')
+        wrong = N.WenzNoise(f, wind_speed_kn=10.0, **kw).total[0]
+        right = N.WenzNoise(f, wind_speed_kn=ms_to_knots(10.0), **kw).total[0]
+        assert 5.5 < right - wrong < 6.0, right - wrong
+
+    def test_knots_and_ms_round_trip(self):
+        from uacpy.core.units import ms_to_knots, knots_to_ms
+        for v in (0.0, 1.0, 7.3, 40.0):
+            assert np.isclose(knots_to_ms(ms_to_knots(v)), v)
+
+    def test_one_knot_is_the_standard_metres_per_second(self):
+        from uacpy.core.units import knots_to_ms
+        assert abs(float(knots_to_ms(1.0)) - 0.514444) < 1e-5
+
+    @pytest.mark.parametrize('force, low, high', [
+        (0, 0.0, 1.0), (3, 7.0, 10.0), (5, 17.0, 21.0), (8, 34.0, 40.0)])
+    def test_a_force_maps_inside_its_own_band(self, force, low, high):
+        from uacpy.core.units import beaufort_to_wind_speed
+        u = beaufort_to_wind_speed(force)
+        assert low <= u <= high
+
+    def test_the_scale_agrees_with_the_table_in_wenznoise_s_docstring(self):
+        """The table was prose; this pins the callable to it."""
+        from uacpy.core.units import BEAUFORT_SCALE
+        doc = N.WenzNoise.__doc__
+        for force, (_sea_state, (low, high)) in BEAUFORT_SCALE.items():
+            if force == 0:
+                continue
+            assert f'{low:g} – {high:g}' in doc, (force, low, high)
+
+    def test_sea_state_six_resolves_to_force_eight(self):
+        """Sea state 6 spans forces 7 and 8. Dahl et al. (2007) state the
+        WMO correspondence as force 8, which is the branch taken."""
+        from uacpy.core.units import (sea_state_to_wind_speed,
+                                      beaufort_to_wind_speed)
+        assert (sea_state_to_wind_speed(6)
+                == beaufort_to_wind_speed(8))
+
+    def test_wind_speed_to_beaufort_inverts_the_band(self):
+        from uacpy.core.units import (beaufort_to_wind_speed,
+                                      wind_speed_to_beaufort)
+        for force in range(9):
+            assert wind_speed_to_beaufort(
+                beaufort_to_wind_speed(force)) == force
+
+    def test_units_are_selectable_and_consistent(self):
+        from uacpy.core.units import beaufort_to_wind_speed, knots_to_ms
+        kn = beaufort_to_wind_speed(5, units='kn')
+        ms = beaufort_to_wind_speed(5, units='m/s')
+        assert np.isclose(knots_to_ms(kn), ms)
+
+    @pytest.mark.parametrize('bad', [-1, 9, 'gale'])
+    def test_a_force_off_the_table_is_refused(self, bad):
+        from uacpy.core.units import beaufort_to_wind_speed
+        with pytest.raises(ConfigurationError, match='force must be one of'):
+            beaufort_to_wind_speed(bad)
+
+    def test_an_unknown_unit_is_refused(self):
+        from uacpy.core.units import beaufort_to_wind_speed
+        with pytest.raises(ConfigurationError, match="units must be"):
+            beaufort_to_wind_speed(5, units='mph')
+
+
+class TestEverySubmodelUacpyShipsIsRecognisedAsItsOwn:
+    """`_is_builtin_submodel` decides whose signature may be trusted.
+
+    The "this knob was not used" warning only fires for submodels this
+    package wrote, because a caller's own callable can read a parameter its
+    signature never names — judging one by its signature produced a warning
+    claiming a 26.8 dB difference did not exist.
+
+    The test is `fn.__module__ == 'uacpy.noise.ambient'`, which is exact
+    today because every built-in lives there. It is also silent if that
+    stops being true: a submodel defined in or moved to another uacpy module
+    becomes "custom", the warning quietly stops covering it, and no existing
+    test notices. This is that notice.
+    """
+
+    def test_every_registered_submodel_is_recognised(self):
+        registries = (N.WIND_MODELS, N.SHIPPING_MODELS, N.RAIN_MODELS,
+                      N.THERMAL_MODELS, N.TURBULENCE_MODELS)
+        shipped = {f'{r_name}[{key!r}]': fn
+                   for r_name, registry in zip(
+                       ('WIND', 'SHIPPING', 'RAIN', 'THERMAL', 'TURBULENCE'),
+                       registries)
+                   for key, fn in registry.items()}
+        # Silence must mean "all recognised", never "none were found".
+        assert len(shipped) >= 8, sorted(shipped)
+        unrecognised = [name for name, fn in shipped.items()
+                        if not N._is_builtin_submodel(fn)]
+        assert not unrecognised, (
+            f'submodel(s) uacpy ships that _is_builtin_submodel does not '
+            f'recognise: {sorted(unrecognised)}. The unused-knob warning '
+            f'has silently stopped covering them — either move them back '
+            f'beside the registries or widen the test to the package.')
+
+    def test_a_callers_own_function_is_not_recognised(self):
+        """The other direction: whatever the caller passes stays theirs,
+        including one they registered by name, which is a documented route
+        (``WIND_MODELS['mine'] = fn``) and used to fail this."""
+        def mine(f, **k):
+            return np.zeros_like(f)
+        assert not N._is_builtin_submodel(mine)
+        N.WIND_MODELS['mine'] = mine
+        try:
+            assert not N._is_builtin_submodel(N.WIND_MODELS['mine'])
+        finally:
+            del N.WIND_MODELS['mine']
+
+    def test_a_registered_custom_model_draws_no_false_warning(self):
+        """End to end, on the shape that produced the false claim: a
+        ``(f, **k)`` submodel that reads the knob through its kwargs."""
+        import warnings as _w
+
+        def depth_aware(f, **k):
+            return np.full_like(
+                f, 60.0 if k['water_depth'] == 'shallow' else 55.0)
+
+        N.WIND_MODELS['depth_aware'] = depth_aware
+        try:
+            grid = np.array([1000.0])
+            with _w.catch_warnings(record=True) as caught:
+                _w.simplefilter('always')
+                shallow = N.WenzNoise(grid, wind_speed_kn=15.0,
+                                      water_depth='shallow',
+                                      wind_model='depth_aware',
+                                      shipping_model='coates').total[0]
+            deep = N.WenzNoise(grid, wind_speed_kn=15.0, water_depth='deep',
+                               wind_model='depth_aware',
+                               shipping_model='coates').total[0]
+        finally:
+            del N.WIND_MODELS['depth_aware']
+        # The model demonstrably reads the knob...
+        assert abs(shallow - deep) > 1.0, (shallow, deep)
+        # ...so claiming it did not would be false.
+        assert not [c for c in caught if 'was not used' in str(c.message)]
+
+
+class TestTheKnotHasOneValueAndOneHome:
+    """One number, one declaration, and the SI definition as its source.
+
+    It had three homes and two values — `1.9438445` twice and
+    `1852.0/3600.0` once — which is the numeric case of the duplicate that
+    `test_no_vocabulary_is_declared_twice` catches for strings and does not
+    cover for constants. Nothing pinned any of them.
+    """
+
+    def test_it_is_the_si_definition(self):
+        from uacpy.core.units import KNOTS_PER_M_PER_S, knots_to_ms
+        # 1852 m in a nautical mile, 3600 s in an hour — not a rounded
+        # literal, so the one value in the package is the exact one.
+        assert KNOTS_PER_M_PER_S == 3600.0 / 1852.0
+        assert float(knots_to_ms(1.0)) == pytest.approx(0.5144444444, abs=1e-10)
+
+    def test_the_sonar_copy_derives_from_it_bit_for_bit(self):
+        """`sonar.scattering` held its own `1852.0/3600.0`. It now reads the
+        one home, and the reciprocal is bit-identical to what it replaced —
+        which is not automatic, since 1/(a/b) need not equal b/a."""
+        from uacpy.core.units import KNOTS_PER_M_PER_S
+        from uacpy.sonar.scattering import _KNOT_TO_MS
+        assert _KNOT_TO_MS == 1.0 / KNOTS_PER_M_PER_S
+        assert _KNOT_TO_MS == 1852.0 / 3600.0
+
+    def test_no_module_computes_with_a_copy_of_the_factor(self):
+        """The shape the duplicate took: a hand-rounded copy of the factor.
+
+        Parsed rather than grepped. The factor's digits legitimately appear
+        in prose — a comment recalling what the docs used to say, another
+        rescaling a different coefficient — and a text sweep flags those
+        while missing a literal written any other way. ``ast`` sees only
+        numbers the interpreter will use.
+        """
+        import ast
+        import pathlib
+        import uacpy
+        root = pathlib.Path(uacpy.__file__).parent
+        offenders, scanned = [], 0
+        for path in sorted(root.rglob('*.py')):
+            if 'third_party' in path.parts or 'tests' in path.parts:
+                continue
+            scanned += 1
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Constant)
+                        and isinstance(node.value, float)
+                        and abs(node.value - 1.9438444924406046) < 1e-4):
+                    offenders.append(
+                        f'{path.relative_to(root)}:{node.lineno}')
+        # Silence must mean "none found", never "nothing was parsed".
+        assert scanned > 50, scanned
+        assert not offenders, (
+            f'the knots factor computed from a copy at {offenders}; '
+            f'uacpy.core.units.KNOTS_PER_M_PER_S is its one home.')
+
+
+class TestTheForeignCarrierRefusalSaysWhatToDoInstead:
+    """The refusal's remedy has to be true for every carrier it can name.
+
+    It used to end "Use that result's own .plot()" — which three public
+    carriers (`BeamformResult`, `NoiseComponents`, `Snapshots`) do not have,
+    so the advice was wrong for exactly the results least likely to be
+    recognised.
+    """
+
+    def test_it_does_not_promise_a_plot_that_may_not_exist(self):
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from uacpy.acoustic_signal import snapshots
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.visualization import plot_spectrogram
+        record = np.random.default_rng(0).standard_normal((512, 4))
+        carrier = snapshots(record, 2000.0, 200.0, nperseg=256)
+        assert not hasattr(carrier, 'plot')
+        try:
+            with pytest.raises(ConfigurationError) as caught:
+                plot_spectrogram(carrier)
+        finally:
+            plt.close('all')
+        message = str(caught.value)
+        # It names what it got and what the plotter wants...
+        assert 'Snapshots' in message and 'plot_spectrogram' in message
+        # ...and offers a remedy that exists for a carrier without .plot().
+        assert 'arrays' in message

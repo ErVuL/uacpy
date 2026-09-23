@@ -12,7 +12,8 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.results import Field
-from uacpy.core.results.quantities import label as quantity_label
+from uacpy.core.results.quantities import (label as quantity_label,
+                                           is_loss)
 from uacpy.core.units import m_to_km
 from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE_SOLID, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
@@ -63,6 +64,109 @@ def typed_plot_error(plotter):
             _close_figures_since(before)
             raise
     return wrapper
+
+
+def _carrier_or_arrays(first, others, *, count, who, fields,
+                       carrier=None):
+    """The carrier's leading field values when one was passed for the arrays.
+
+    Every result uacpy returns is a named carrier that knows how to draw
+    itself, and every such plotter also takes the bare arrays, so the two
+    calls below have to mean the same thing::
+
+        plot_spectrogram(result)
+        plot_spectrogram(result.frequencies, result.times, result.power)
+
+    Returns ``None`` when the call passed arrays, leaving the caller's own
+    parameters alone. A carrier is recognised only when every *other*
+    positional argument is ``None`` — that is what separates the two forms,
+    and it means an explicit array call is never reinterpreted.
+
+    ``carrier`` is ``(accepted class names, expected leading fields)``
+    for the result this plotter draws; both are checked, because two
+    carriers here share a field tuple.
+
+    ``count`` is how many leading fields the plotter draws, which is not
+    always the carrier's width: :class:`~uacpy.acoustic_signal.ComplexCepstrum`
+    carries its ``delay`` as a second field that the plot does not use.
+    """
+    if others and any(other is not None for other in others):
+        return None
+    # A *named* tuple, not any tuple. Every carrier here is one, and the
+    # distinction is load-bearing: ``plot_cepstrum(tuple_of_64_floats)`` is a
+    # legitimate array call with nothing else to disambiguate it, and reading
+    # it as a carrier silently drew its first element as a 1-point line
+    # instead of refusing or drawing 64.
+    if not (isinstance(first, tuple) and hasattr(first, '_fields')):
+        return None
+    if len(first) < count:
+        raise ConfigurationError(
+            f"{who}: this is a {type(first).__name__} of {len(first)} "
+            f"field(s); {who} needs {count} ({', '.join(fields)}). Pass "
+            f"this result's own arrays, or the plotter its docstring "
+            f"names.")
+    # The carrier must be the one this plotter draws, not merely one of the
+    # right width. Declaring the arrays as required positionals used to give
+    # that check for free; with defaults, plot_spectrogram(FKResult) became a
+    # figure with wavenumbers on an axis labelled "Time (s)". Field names
+    # carry the identity, and comparing them keeps this module from importing
+    # the carrier classes — which live in a sibling package.
+    if carrier is not None:
+        names, fields_wanted = carrier
+        # The class NAME as well as the fields. Two carriers in this package
+        # share a field tuple exactly — SpectrogramResult and
+        # CQSpectrogramResult are both (frequencies, times, power) — and
+        # drawing one with the other's plotter is a unit error in both
+        # directions: a density comes out labelled Pa², geometric bins get a
+        # linear axis, and linear bins get a log axis whose first bin is
+        # 0 Hz. Fields alone cannot see that.
+        # Searched along the MRO, not on the exact class: a user's subclass
+        # of a carrier is still that carrier, and an exact-name test refused
+        # it from its own plotter. The two carriers this has to separate —
+        # SpectrogramResult and CQSpectrogramResult — appear in neither of
+        # each other's MROs, so widening costs nothing it was buying.
+        lineage = {klass.__name__ for klass in type(first).__mro__}
+        if (lineage.isdisjoint(names)
+                or tuple(first._fields[:count]) != tuple(fields_wanted)):
+            raise ConfigurationError(
+                f"{who}: this is a {type(first).__name__}"
+                f"{tuple(first._fields)}, not the "
+                f"{' or '.join(names)} that {who} draws. Every result that "
+                f"has a .plot() draws itself with it; otherwise pass this "
+                f"one's own arrays, or the plotter its docstring names.")
+    return tuple(first[:count])
+
+
+def _refuse_spread_carrier(ax, who, field, also=None):
+    """Reject a non-axis in ``ax=``, naming every call that produces one.
+
+    A carrier wider than the plotter's positional arrays spills its extra
+    field into ``ax=``, which fails deep inside matplotlib about a type it
+    never names.
+
+    The two calls that land here are indistinguishable from inside:
+    ``plot_cepstrum(*result)`` and ``plot_cepstrum(c, 1000.0)`` both arrive
+    as an array and a float, and only the caller knows which they wrote. So
+    ``also`` carries the other remedy and the message offers both rather
+    than asserting the one that fits a spread.
+    """
+    def _is_axes(obj):
+        # Duck-typed rather than imported: matplotlib's Axes is the only
+        # thing here with a .plot, and importing it would pull pyplot into
+        # a module every plotter imports.
+        return hasattr(obj, 'plot')
+
+    if ax is None or _is_axes(ax) or (
+            isinstance(ax, (tuple, list, np.ndarray))
+            and len(ax) and all(_is_axes(a) for a in np.ravel(ax))):
+        return
+    remedy = (f"{who}(*result) spreads the result's {field} into ax= — pass "
+              f"the result itself, {who}(result)")
+    if also:
+        remedy += f"; or you meant {also}"
+    raise ConfigurationError(
+        f"{who}: ax= received {type(ax).__name__}, which is not an axis. "
+        f"{remedy}.")
 
 
 def _plot_warn(message, category=UserWarning) -> None:
@@ -407,12 +511,8 @@ def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
 _TL_LIMITS: Tuple[float, float] = (20.0, 120.0)
 
 
-#: The kinds whose dB view is a LOSS rather than a level. Transmission loss
-#: (``pressure`` in dB) is ``-20·log10|p|``; OASS reverberation is
-#: ``-10·log10 E[|p_scat|²]`` (``third_party/oases/src/oassun26.f:633-637``
-#: and ``:853-857``). Both carry the leading minus, so for both the LEAST of
-#: the quantity is the loudest — the same pair :meth:`Field.max` documents.
-_LOSS_KINDS = ('pressure', 'reverberation')
+# Which kinds are losses is asked of ``quantities.is_loss``, never restated
+# here, so ``Field.max`` and a 1-D cut always agree on which end is loud.
 
 
 def _is_loss_view(field: Field, value: str) -> bool:
@@ -422,7 +522,7 @@ def _is_loss_view(field: Field, value: str) -> bool:
     1-D loss cut is drawn with its value axis increasing DOWNWARD, putting the
     loud end at the top. Two quantities read that way: transmission loss (the
     dB view of a ``pressure`` field) and OASS reverberation, whose stored
-    numbers are a loss for the reason ``_LOSS_KINDS`` gives. Every other dB
+    numbers are a loss for the reason ``quantities.LOSS_KINDS`` gives. Every other dB
     view is a **level** (signal excess, ``mag_dB``) and more of a level is
     more, so it reads upward like any other quantity.
 
@@ -431,7 +531,7 @@ def _is_loss_view(field: Field, value: str) -> bool:
     a real dB grid or derived from complex pressure. Every entry point that
     draws a value axis asks here, so one field cuts the same way through
     :func:`plot_field` and :func:`compare` alike."""
-    return (value == 'dB' and field.kind in _LOSS_KINDS
+    return (value == 'dB' and is_loss(field.kind)
             and (field.is_complex or field.unit == 'dB'))
 
 

@@ -1051,8 +1051,50 @@ def probabilistic_sound_exposure(
         _caller="probabilistic_sound_exposure")
 
 
-CQTResult = namedtuple("CQTResult", "frequencies coefficients")
-CQSpectrogramResult = namedtuple("CQSpectrogramResult", "frequencies times power")
+class CQTResult(namedtuple("CQTResult", "frequencies coefficients")):
+    """Constant-Q transform: geometric ``frequencies`` and complex ``coefficients``.
+
+    The tuple is the measurement, so ``frequencies, coefficients = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_constant_q_transform`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_constant_q_transform(self.frequencies, self.coefficients, **kwargs)
+
+
+class CQSpectrogramResult(namedtuple("CQSpectrogramResult", "frequencies times power")):
+    """Constant-Q spectrogram: geometric ``frequencies``, ``times``, ``power``.
+
+    The tuple is the measurement, so ``frequencies, times, power = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_constant_q_spectrogram`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_constant_q_spectrogram(self.frequencies, self.times, self.power, **kwargs)
+
+
 #: The constant-Q helpers speak the same two-valued vocabulary the bin
 #: estimators do; an energy is not one of them (see
 #: :func:`_require_bin_scaling`).
@@ -1839,10 +1881,76 @@ def decidecade_band_levels(psd, frequencies, ref=REFERENCE_PRESSURE_WATER):
 # cepstrum.
 # ──────────────────────────────────────────────────────────────────────
 
-WignerVilleResult = namedtuple("WignerVilleResult",
-                               "frequencies times distribution")
-CWTResult = namedtuple("CWTResult", "frequencies coefficients")
-SpectrogramResult = namedtuple("SpectrogramResult", "frequencies times power")
+
+class WignerVilleResult(namedtuple("WignerVilleResult", "frequencies times distribution")):
+    """Wigner-Ville distribution over ``frequencies`` and ``times``.
+
+    The tuple is the measurement, so ``frequencies, times, distribution = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_wigner_ville`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_wigner_ville(self.frequencies, self.times, self.distribution, **kwargs)
+
+
+class CWTResult(namedtuple("CWTResult", "frequencies coefficients")):
+    """Continuous wavelet transform: ``frequencies`` and ``coefficients``.
+
+    The tuple is the measurement, so ``frequencies, coefficients = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, sample_rate, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_cwt`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+
+        ``sample_rate`` is required: the scalogram's time axis is
+        drawn from it and this carrier does not hold it, so it
+        cannot be defaulted without inventing the axis.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_cwt(
+            self, sample_rate=sample_rate, **kwargs)
+
+
+class SpectrogramResult(namedtuple("SpectrogramResult", "frequencies times power")):
+    """Spectrogram: ``frequencies``, ``times`` and the ``power`` panel.
+
+    The tuple is the measurement, so ``frequencies, times, power = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_spectrogram`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_spectrogram(self.frequencies, self.times, self.power, **kwargs)
 
 
 def analytic_signal(data):
@@ -2334,7 +2442,26 @@ def cepstrum(data, *, window=None, nfft=None, lifter=None):
     return c
 
 
-ComplexCepstrum = namedtuple("ComplexCepstrum", "cepstrum delay")
+class ComplexCepstrum(namedtuple("ComplexCepstrum", "cepstrum delay")):
+    """Complex cepstrum and the ``delay`` its phase unwrapping removed.
+
+    The tuple is the measurement, so ``cepstrum, delay = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_cepstrum`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_cepstrum(self.cepstrum, **kwargs)
 
 
 def complex_cepstrum(data):

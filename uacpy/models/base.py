@@ -58,6 +58,9 @@ import numpy as np
 import uacpy._stack  # noqa: F401 — side-effect: raise RLIMIT_STACK
 from uacpy._log import _resolve_threshold, log_message
 from uacpy.core.absorption import Thorp
+from uacpy.core._carrier_validate import (
+    COLUMN_COLLAPSE_METHODS, DEPTH_COLLAPSE_METHODS, RANGE_COLLAPSE_METHODS,
+)
 from uacpy.core.bottom import BoundaryProperties, Bottom
 from uacpy.core.constants import (
     DEFAULT_BROADBAND_N_FREQS, DEFAULT_BROADBAND_BANDWIDTH_FACTOR,
@@ -187,13 +190,21 @@ DEFAULT_COLLAPSE: Dict[str, str] = {
 # Allowed method strings per collapse key (validated at construction in
 # ``PropagationModel.__init__`` so bad values fail loudly rather than deep
 # inside a writer at ``run()``-time).
+#
+# Read from the carriers that implement each method, never spelled out here:
+# this table and the carrier decide the same question from two files, so a
+# literal copy lets a method be accepted at construction and refused from
+# inside ``run()`` — the exact failure the construction-time check exists to
+# prevent. ``'altimetry'`` and ``'elastic'`` are implemented in this module
+# (``_project_environment`` drops an altimetry; ``_collapse_elastic`` below
+# reads this entry back), so they are the only two written out.
 VALID_COLLAPSE_METHODS: Dict[str, frozenset] = {
-    'bathymetry':        frozenset({'max', 'median', 'mean', 'min', 'initial'}),
-    'ssp':               frozenset({'r0', 'rmax', 'mean', 'median'}),
-    'bottom_range':      frozenset({'r0', 'rmax', 'mean', 'median'}),
-    'bottom_layers':     frozenset({'halfspace', 'top_layer', 'volume_average'}),
+    'bathymetry':        frozenset(DEPTH_COLLAPSE_METHODS),
+    'ssp':               frozenset(RANGE_COLLAPSE_METHODS),
+    'bottom_range':      frozenset(RANGE_COLLAPSE_METHODS),
+    'bottom_layers':     frozenset(COLUMN_COLLAPSE_METHODS),
     'altimetry':         frozenset({'drop'}),
-    'surface':           frozenset({'r0', 'rmax', 'mean', 'median'}),
+    'surface':           frozenset(RANGE_COLLAPSE_METHODS),
     'elastic':           frozenset({'fluid', 'vacuum'}),
 }
 # Dev invariants on the collapse-policy constants (raise, not assert, so they
@@ -208,7 +219,9 @@ if not all(DEFAULT_COLLAPSE[k] in VALID_COLLAPSE_METHODS[k] for k in DEFAULT_COL
 # 'point'  -> AT 'R', cylindrical spreading applied
 # 'line'   -> AT 'X', Cartesian spreading
 # 'scaled' -> AT 'S', point source with cylindrical spreading removed
-VALID_SOURCE_TYPES: frozenset = frozenset({'point', 'line', 'scaled'})
+# Declared with Source itself and re-exported here, which this module's
+# public surface names, so both layers validate against one set.
+from uacpy.core.source import VALID_SOURCE_TYPES     # noqa: E402,F401
 
 # Fewest frequencies an auto-derived TIME_SERIES grid may carry. Δf is
 # 1/waveform-duration, so a short pulse over a narrow band can derive 2-3 bins
@@ -918,18 +931,21 @@ class PropagationModel(ABC):
         # ``collapse={'bathymetry': 'min', 'ssp': 'mean', ...}`` to override
         # any subset; missing keys keep the defaults.
         #
-        # 'bathymetry'    : 'max'|'median'|'mean'|'min'|'initial'
-        # 'ssp'           : 'r0'|'rmax'|'mean'|'median'
-        # 'bottom_range'  : 'r0'|'rmax'|'mean'|'median' — reduce a range-
-        #                   dependent bottom to one column (mean/median
-        #                   numeric only for an all-half-space bottom)
-        # 'bottom_layers' : 'halfspace'|'top_layer'|'volume_average' — flatten
-        #                   each column's layer stack to a half-space; see
+        # ``VALID_COLLAPSE_METHODS`` above lists the methods each key
+        # takes, and is itself read from the carriers that implement them, so
+        # the values are not restated here. What each key reduces:
+        #
+        # 'bathymetry'    : a range-dependent depth profile to one depth
+        # 'ssp'           : a range-dependent sound-speed field to one column
+        # 'bottom_range'  : a range-dependent bottom to one column ('mean' and
+        #                   'median' are numeric, so an all-half-space bottom
+        #                   only — a layer stack cannot be averaged)
+        # 'bottom_layers' : each column's layer stack to a half-space; see
         #                   SeabedColumn.collapse for what each method keeps
-        # 'altimetry'     : 'drop'
-        # 'surface'       : 'r0'|'rmax'|'mean'|'median' — reduce a range-
-        #                   dependent Surface to a single boundary
-        # 'elastic'       : 'fluid' (zero shear) | 'vacuum'
+        # 'altimetry'     : a rough sea surface, dropped entirely
+        # 'surface'       : a range-dependent Surface to a single boundary
+        # 'elastic'       : a shear-supporting boundary to one that does not
+        #                   ('fluid' zeroes the shear, 'vacuum' replaces it)
         #
         # ``self._collapse`` is the resolved policy (defaults ← spec ← user);
         # ``self.collapse`` keeps the constructor argument verbatim, because
@@ -2995,10 +3011,11 @@ class PropagationModel(ABC):
             b.shear_speed = 0.0
             b.shear_attenuation = 0.0
 
-        if method not in ('fluid', 'vacuum'):
+        valid = sorted(VALID_COLLAPSE_METHODS['elastic'])
+        if method not in valid:
             raise ConfigurationError(
                 f"Unknown elastic collapse method {method!r}. Use "
-                "'fluid' or 'vacuum'."
+                f"{' or '.join(repr(m) for m in valid)}."
             )
         if isinstance(boundary, Bottom):
             if method == 'vacuum':
@@ -3126,7 +3143,7 @@ class PropagationModel(ABC):
                 f"bathymetry; collapsed to {new_depth:.1f} m "
                 f"(method={method!r}, range {min_d:.1f}–{max_d:.1f} m). "
                 f"Override via `collapse={{'bathymetry': "
-                f"'min'|'median'|'mean'|'max'|'initial'}}`.",
+                f"{'|'.join(repr(m) for m in DEPTH_COLLAPSE_METHODS)}}}`.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 

@@ -561,7 +561,7 @@ def plot_greens_function(
     source_index: int = 0,
     depth: Optional[float] = None,
     modes: Optional[Modes] = None,
-    vmin_db: float = -60.0,
+    vmin_dB: float = -60.0,
     cmap: str = 'viridis',
     figsize: Tuple[float, float] = (9, 6),
     title: Optional[str] = None,
@@ -599,7 +599,7 @@ def plot_greens_function(
         Draw the cut at this receiver depth (m) instead of the 2-D image.
     modes : Modes, optional
         Overlay ``Re(k_m)`` from a Kraken solve of the same environment.
-    vmin_db : float, optional
+    vmin_dB : float, optional
         Floor of the dB scale, relative to the panel maximum (default -60).
     """
     required = ('G', 'cVec', 'freq', 'rd')
@@ -651,7 +651,7 @@ def plot_greens_function(
         with np.errstate(divide='ignore'):
             db = 20.0 * np.log10(np.maximum(panel, PRESSURE_FLOOR) / ref)
         im = ax.pcolormesh(k_r, z, db, shading='auto', cmap=cmap,
-                           vmin=vmin_db, vmax=0.0)
+                           vmin=vmin_dB, vmax=0.0)
         fig.colorbar(im, ax=ax, label='$|G|$ (dB re panel max)')
         ax.set_ylabel('depth (m)')
         invert_yaxis_once(ax)
@@ -662,7 +662,7 @@ def plot_greens_function(
                 np.maximum(panel[j], PRESSURE_FLOOR) / ref)
         ax.plot(k_r, cut, lw=1.0, color='C0')
         ax.set_ylabel('$|G|$ (dB re panel max)')
-        ax.set_ylim(vmin_db, 5.0)
+        ax.set_ylim(vmin_dB, 5.0)
         ax.set_title(_title_or(
             title, f'Green\'s function at z = {z[j]:.1f} m, {freq:g} Hz'))
 
@@ -1352,8 +1352,10 @@ def plot_mode_excitation(
     sound_speed : float, optional
         Reference speed (m/s) the grazing angles are measured against.
         ``None`` (default) reads it from ``env`` at the source depth — the
-        depth at which the array factor's ``θ`` is a launch angle — and
-        falls back to 1500 m/s when no ``env`` is given. A mode whose phase
+        depth at which the array factor's ``θ`` is a launch angle. With
+        neither, the call is **refused**: the x axis is an angle measured
+        against this speed, so defaulting it silently moved every stem (up to
+        5.3° on a 1545 m/s environment). A mode whose phase
         speed is below it has no real grazing angle at that depth and is
         dropped, with a warning naming how many: clipping them onto 0°
         would pile evanescent modes on the axis origin as if they travelled
@@ -1368,27 +1370,33 @@ def plot_mode_excitation(
     import numpy as _np
 
     if sound_speed is None:
-        sound_speed = 1500.0
-        if env is not None:
-            try:
-                z_s = float(_np.atleast_1d(source.depths)[0])
-                sound_speed = float(_np.atleast_1d(
-                    env.ssp.speed_at(z_s))[0])
-            except Exception:                     # noqa: BLE001
-                sound_speed = 1500.0
+        if env is None:
+            raise ConfigurationError(
+                "plot_mode_excitation: the x axis is a grazing angle, "
+                "arccos(c/v_m), so it needs the speed those angles are "
+                "measured against. Pass sound_speed= (the speed at the "
+                "source depth), or env= to read it off the profile.",
+                remediation="sound_speed=env.get_sound_speed("
+                            "source.depths[0])")
+        # env.get_sound_speed is the accessor for a speed at a depth, and it
+        # is called unguarded: a failure here must surface, because a
+        # substituted reference speed moves every stem (5.3 degrees on a
+        # 1545 m/s environment, one mode from 8.0 to 15.9).
+        z_s = float(_np.atleast_1d(source.depths)[0])
+        sound_speed = float(_np.atleast_1d(env.get_sound_speed(z_s))[0])
     amp = _np.abs(modes.excitation(source, sound_speed=sound_speed))
-    speeds = _np.asarray(modes.compute_phase_speeds(), dtype=float)
-    with _np.errstate(invalid='ignore'):
-        angles = _np.degrees(_np.arccos(
-            _np.clip(float(sound_speed) / speeds, -1.0, 1.0)))
-    # arccos is only defined where v_p >= c; a slower mode is evanescent at
-    # this depth and has no grazing angle. Drop those rather than let the
-    # clip stack them on 0 deg.
-    propagating = speeds >= float(sound_speed)
+    # One home for arccos(c/v_m): Modes owns it, and owns the knowledge that
+    # a mode below the reference speed is evanescent and has no real angle.
+    angles = modes.grazing_angles(sound_speed)
+    propagating = _np.isfinite(angles)
     dropped = int(_np.sum(~propagating))
-    if dropped:
+    # Silent when the source carries a pattern: Modes.excitation has already
+    # warned about these same modes against this same reference speed, and
+    # said they come back as NaN. Two warnings for one condition teach the
+    # reader to skip both, and "returned as NaN" already implies "not drawn".
+    if dropped and getattr(source, 'beam_pattern', None) is None:
         _plot_warn(
-            f"plot_mode_excitation: {dropped} of {speeds.size} modes have a "
+            f"plot_mode_excitation: {dropped} of {angles.size} modes have a "
             f"phase speed below the {float(sound_speed):g} m/s reference, so "
             f"they have no real grazing angle there and are not drawn. Pass "
             f"sound_speed= (or env=) for the speed at the source depth.")

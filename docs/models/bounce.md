@@ -211,11 +211,6 @@ def reflection(bottom, frequency=200.0):
     """Plane-wave reflection coefficient of ``bottom`` at ``frequency``."""
     source = uacpy.Source(depths=25.0, frequencies=frequency)
     return Bounce(**GRID).run(seabed(bottom), source, PROBE)
-
-
-def critical_angle(sound_speed):
-    """Grazing angle below which a wave in the water cannot enter ``sound_speed``."""
-    return np.degrees(np.arccos(WATER_SPEED / sound_speed))
 ```
 
 ### The critical angle
@@ -289,7 +284,7 @@ for i, name in enumerate(names):
     ax.plot(rc.theta, rc.R, color=colour, lw=1.6,
             label=f'{name} ({bottom.sound_speed:.0f} m/s)')
     if bottom.sound_speed > WATER_SPEED:
-        theta_c = critical_angle(bottom.sound_speed)
+        theta_c = uacpy.critical_angle(bottom.sound_speed, WATER_SPEED)
         ax.plot([theta_c], [np.interp(theta_c, rc.theta, rc.R)],
                 'o', color=colour, ms=5.0)
 ```

@@ -23,6 +23,7 @@ import pytest
 from uacpy import comms
 from uacpy.acoustic_signal.system import _MAX_DEFAULT_IR_SAMPLES
 from uacpy.acoustic_signal import (
+    channel_response,
     impulse_response,
     impulse_response_from_transfer_function,
     simulate_reception,
@@ -359,3 +360,98 @@ class TestImpulseResponseDropWarnings:
         clipped = next(m for m in msgs if 'truncated' in m)
         assert 'quantise instead' not in clipped
         assert 'dropped arrival' in clipped
+
+
+class TestChannelResponseIsObtainableWithoutDrawingIt:
+    """``h`` to ``H(f)`` is a public transform, not a step inside a plotter.
+
+    ``plot_channel`` used to build the frequency panel itself, so the only
+    way to get the channel's response with uacpy's conventions was to draw
+    it and read the axes — and the two choices that shape the answer, the
+    zero-padding rule and the dB floor, were buried in the plotter with no
+    way to state either at the call.
+    """
+
+    FS = 4000.0
+
+    @staticmethod
+    def _taps(n=37, seed=0):
+        rng = np.random.default_rng(seed)
+        return rng.standard_normal(n) + 1j * rng.standard_normal(n)
+
+    def test_it_returns_the_two_sided_complex_response_centred_on_zero(self):
+        f, H = channel_response(self._taps(), self.FS)
+        assert np.iscomplexobj(H)
+        assert f.size == H.size
+        # Centred: the grid runs -fs/2 .. +fs/2, with 0 Hz on a bin.
+        assert f[0] == pytest.approx(-self.FS / 2.0)
+        assert np.any(f == 0.0)
+        assert np.all(np.diff(f) > 0.0)
+
+    def test_the_default_zero_padding_floors_a_short_response_at_1024(self):
+        """Interpolation, not resolution: a 37-tap set still draws a curve."""
+        assert channel_response(self._taps(37), self.FS)[0].size == 1024
+        assert channel_response(self._taps(900), self.FS)[0].size == 1800
+
+    def test_nfft_pins_the_grid(self):
+        assert channel_response(self._taps(), self.FS, nfft=2048)[0].size == 2048
+
+    def test_zero_padding_interpolates_rather_than_moving_the_bins(self):
+        """The padded grid contains the unpadded one, value for value.
+
+        The guarantee that makes the default safe: padding adds samples
+        between the natural bins, it does not shift the ones already there.
+        """
+        h = self._taps(64)
+        f_nat, H_nat = channel_response(h, self.FS, nfft=64)
+        _f_pad, H_pad = channel_response(h, self.FS, nfft=128)
+        assert np.allclose(H_pad[::2], H_nat, atol=1e-12)
+
+    def test_a_real_response_comes_back_conjugate_symmetric(self):
+        """A real ``h`` has ``H(-f) = conj(H(f))`` — the property the
+        one-sided inverse relies on, measured rather than assumed."""
+        f, H = channel_response(np.arange(1.0, 9.0), self.FS, nfft=64)
+        # -fs/2 is on the grid and +fs/2 is not, so the Nyquist bin has no
+        # partner to pair with: 32 negative frequencies against 31 positive.
+        neg, pos = (f < 0) & (f > -self.FS / 2.0), f > 0
+        assert H[neg].size == H[pos].size == 31
+        assert np.allclose(H[neg], np.conj(H[pos][::-1]), atol=1e-12)
+
+    def test_plot_channel_draws_exactly_what_the_transform_returns(self):
+        """The plotter is a consumer: its curve is the transform in dB.
+
+        Pinned by value, so extracting the computation cannot quietly
+        change the picture the books and examples already show.
+        """
+        import matplotlib
+        matplotlib.use('Agg')
+        from uacpy.visualization.plots.comms import plot_channel
+        h = self._taps()
+        fig, ax = plot_channel(h, self.FS)
+        try:
+            drawn_f, drawn_db = ax[1].lines[0].get_data()
+        finally:
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+        f, H = channel_response(h, self.FS)
+        assert np.array_equal(drawn_f, f)
+        assert np.array_equal(drawn_db, 20 * np.log10(np.abs(H) + 1e-12))
+
+    @pytest.mark.parametrize('h, fragment', [
+        (np.zeros((2, 4)), '1-D impulse response'),
+        (np.array([]), 'no channel to transform'),
+    ])
+    def test_it_refuses_an_input_that_is_not_one_channel(self, h, fragment):
+        with pytest.raises(ConfigurationError, match=fragment):
+            channel_response(h, 4000.0)
+
+    def test_an_nfft_shorter_than_the_response_is_refused_not_truncated(self):
+        """Truncation drops the tail rather than folding it, and nothing in
+        the returned H says so — so it is refused at the call."""
+        with pytest.raises(ConfigurationError, match='shorter than the 37-tap'):
+            channel_response(self._taps(), self.FS, nfft=8)
+
+    @pytest.mark.parametrize('rate', [0.0, -1.0, np.nan, np.inf])
+    def test_an_unusable_sample_rate_is_refused(self, rate):
+        with pytest.raises(ConfigurationError, match='sample_rate'):
+            channel_response(self._taps(), rate)

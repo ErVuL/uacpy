@@ -28,6 +28,7 @@ from scipy.optimize import brentq
 
 from uacpy.core.acoustics import bubble_surface_loss
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.units import KNOTS_PER_M_PER_S
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 # Mackenzie (1961) deep-water bottom backscattering constant 10*log10(mu) [dB].
@@ -39,7 +40,9 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 LAMBERT_MU_DB = -27.0
 
 #: 1 international knot in m/s, for comparing against JKPS' m/s ceiling.
-_KNOT_TO_MS = 1852.0 / 3600.0
+#: Read from the one home rather than restated: uacpy.core.units holds
+#: the knot, and a second declaration is a second thing to keep right.
+_KNOT_TO_MS = 1.0 / KNOTS_PER_M_PER_S
 
 #: Grazing angle past which Lambert's law stops matching the data. Etter
 #: Sect. 9.2: the relationship "appears to provide a good approximation to the

@@ -48,7 +48,7 @@ from uacpy.visualization.plots.signal import (
     plot_constant_q_psd, plot_constant_q_ppsd,
     plot_band_levels, plot_angular_spectrum, plot_ambiguity,
     plot_matched_field,
-    plot_frf, plot_coherence, plot_impulse_response_info,
+    plot_frf, plot_coherence, plot_lsfir_diagnostics,
 )
 from uacpy.visualization.plots.comms import (
     plot_channel, plot_doppler_ambiguity, plot_convergence, plot_sync_metric,
@@ -57,6 +57,32 @@ from uacpy.visualization.plots.comms import (
 )
 from uacpy.visualization.plots.noise import (
     plot_wenz, plot_weighting, plot_source_level, plot_roc,
+)
+
+
+#: Which plotter draws each :class:`~uacpy.core.results.Result`, and whether
+#: that view can draw an environment. One row per result type, in isinstance
+#: order (no subclass pairs today, so declaration order is free).
+#:
+#: A table rather than a ladder because the ladder stated the same knowledge
+#: twice inside one function: the branches said which plotter, and a second
+#: tuple below them re-listed the results that refuse ``env=``, as the exact
+#: complement of the branches that accept it. Adding a result type and
+#: forgetting the tuple left ``env=`` accepted and silently ignored — the
+#: defect the refusal exists to prevent, arriving by omission. Both answers
+#: now come off the same row.
+#:
+#: ``ResultStack`` is not here: it dispatches on the type of the slabs it
+#: holds, not on its own, so it is handled before the lookup.
+_PLOTTERS = (
+    # result type             plotter                       draws an env
+    (Field,                   plot_field,                   True),
+    (Rays,                    _plot_rays,                   True),
+    (Arrivals,                _plot_arrivals,               False),
+    (Modes,                   _plot_mode_functions,         False),
+    (Covariance,              _plot_covariance,             False),
+    (Replicas,                _plot_replicas,               False),
+    (ReflectionCoefficient,   _plot_reflection_coefficient, False),
 )
 
 
@@ -73,32 +99,23 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
             f"plot_result: this ResultStack holds {result.slab_type.__name__} "
             "slabs — pick one with stack[i] or stack.at(...) before plotting."
         )
-    if isinstance(result, Field):
-        return plot_field(result, env=env, **kwargs)
-    if isinstance(result, Rays):
-        return _plot_rays(result, env=env, **kwargs)
-
-    # Plotters with no spatial cross-section to overlay an environment on.
-    # Accepting env= silently would look like it had an effect. Checked after
-    # the type is known to be one we render, so an unregistered type still
-    # reports that it has no plotter rather than blaming env=.
-    if env is not None and isinstance(
-            result, (Arrivals, Modes, Covariance, Replicas,
-                     ReflectionCoefficient)):
-        raise ConfigurationError(
-            f"{type(result).__name__}.plot: env= has no effect on this view — "
-            "only Field and Rays plots draw the environment. Drop env=."
-        )
-    if isinstance(result, Arrivals):
-        return _plot_arrivals(result, **kwargs)
-    if isinstance(result, Modes):
-        return _plot_mode_functions(result, **kwargs)
-    if isinstance(result, Covariance):
-        return _plot_covariance(result, **kwargs)
-    if isinstance(result, Replicas):
-        return _plot_replicas(result, **kwargs)
-    if isinstance(result, ReflectionCoefficient):
-        return _plot_reflection_coefficient(result, **kwargs)
+    for result_type, plotter, draws_env in _PLOTTERS:
+        if not isinstance(result, result_type):
+            continue
+        if draws_env:
+            return plotter(result, env=env, **kwargs)
+        # Refused rather than dropped: this view has no spatial cross-section
+        # to overlay an environment on, and accepting env= silently would
+        # look like it had an effect. Reached only once the type is known to
+        # be one we render, so an unregistered type still reports that it has
+        # no plotter rather than blaming env=.
+        if env is not None:
+            raise ConfigurationError(
+                f"{type(result).__name__}.plot: env= has no effect on this "
+                f"view — only Field and Rays plots draw the environment. "
+                f"Drop env=."
+            )
+        return plotter(result, **kwargs)
     raise ConfigurationError(
         f"plot_result: no plotter registered for {type(result).__name__}"
     )
@@ -151,7 +168,7 @@ __all__ = [
     'plot_matched_field',
     'plot_frf',
     'plot_coherence',
-    'plot_impulse_response_info',
+    'plot_lsfir_diagnostics',
     'plot_channel',
     'plot_doppler_ambiguity',
     'plot_convergence',

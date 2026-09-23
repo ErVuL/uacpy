@@ -383,8 +383,16 @@ def pulse_shape(symbols, sps, rolloff=0.25, span=8):
     return np.convolve(up, rrc_filter(sps, rolloff, span))
 
 
-def matched_filter(samples, sps, rolloff=0.25, span=8):
-    """Matched root-raised-cosine filter (completes the Nyquist response)."""
+def rrc_matched_filter(samples, sps, rolloff=0.25, span=8):
+    """Matched root-raised-cosine filter (completes the Nyquist response).
+
+    Named for the filter, not for the operation: "matched filter" alone means
+    replica correlation everywhere else in the package
+    (:func:`uacpy.acoustic_signal.matched_filter`, which takes a replica
+    where this takes a samples-per-symbol count), and reading this module a
+    bare ``matched_filter`` looked like that one. ``uacpy.comms`` has always
+    exported it under this name; the definition now agrees.
+    """
     return np.convolve(np.asarray(samples, dtype=complex),
                        rrc_filter(sps, rolloff, span))
 
@@ -870,7 +878,7 @@ class CommsReceiver:
         """Down-convert, matched-filter, and timing-recover to symbol-rate samples."""
         _require_passband_fits(sample_rate, fc, sps, rolloff, 'from_passband')
         bb = downconvert(np.asarray(samples, dtype=float), sample_rate, fc)
-        mf = matched_filter(bb, sps, rolloff, span)
+        mf = rrc_matched_filter(bb, sps, rolloff, span)
         return symbol_sync(mf, sps, loop_bw=loop_bw, start=span * sps)
 
     def receive(self, symbols, threshold=0.4):

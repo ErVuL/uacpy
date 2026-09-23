@@ -300,12 +300,6 @@ class Modes(Result):
         source. Mode shapes are interpolated onto the source depths from
         this result's tabulation.
 
-        Parameters
-        ----------
-        source : Source
-            Its ``depths`` and complex ``weights``. A single-depth source
-            gives that depth's mode shapes scaled by its one weight.
-
         A directional element shades this too. ``field.f90`` multiplies the
         modal excitation by ``S(θₘ)`` before summing (``C = C * REAL(S)``),
         and every element of a uacpy ``Source`` shares one ``beam_pattern``
@@ -317,6 +311,9 @@ class Modes(Result):
 
         Parameters
         ----------
+        source : Source
+            Its ``depths`` and complex ``weights``. A single-depth source
+            gives that depth's mode shapes scaled by its one weight.
         sound_speed : float, optional
             Reference speed (m/s) for the mode grazing angles
             ``θₘ = arccos(c / vₚ,ₘ)`` the element pattern is sampled at.
@@ -364,11 +361,45 @@ class Modes(Result):
                 "those angles are measured against. Pass sound_speed= (the "
                 "speed at the source depth), or drop the pattern."
             )
+        angles = self.grazing_angles(sound_speed)
+        undefined = ~np.isfinite(angles)
+        if np.any(undefined):
+            warnings.warn(
+                f"Modes.excitation: {int(np.sum(undefined))} of "
+                f"{angles.size} modes have a phase speed below the "
+                f"{float(sound_speed):g} m/s reference, so they are "
+                f"evanescent there and have no real grazing angle. Their "
+                f"excitation is returned as NaN rather than weighted by the "
+                f"beam pattern at a fabricated angle — clipping them to "
+                f"broadside attenuated one by a factor of 100 through a "
+                f"-40 dB notch, silently. Pass the speed at the source "
+                f"depth if these modes matter.",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        weighted = excited * source.element_directivity(
+            np.where(undefined, 0.0, angles))
+        return np.where(undefined, np.nan, weighted)
+
+    def grazing_angles(self, sound_speed: float) -> np.ndarray:
+        """Each mode's grazing angle in degrees against ``sound_speed``.
+
+        ``theta_m = arccos(c / v_m)``, the dictionary between the modal and
+        ray pictures, and the one home for that formula — every caller asks
+        here rather than spelling it again. A mode whose phase speed is below
+        ``c`` is evanescent there and has no real angle, so it comes back
+        ``nan``; clipping the ratio to 1.0 instead would stack those modes on
+        broadside, where a patterned source applies its notch to them.
+        """
+        c = float(sound_speed)
+        if not c > 0.0:
+            raise ConfigurationError(
+                f"Modes.grazing_angles: sound_speed must be > 0 m/s; got {c}")
         speeds = np.asarray(self.compute_phase_speeds(), dtype=float)
+        # No clip. ``c / v_m`` exceeds 1 exactly for the evanescent modes, and
+        # ``arccos`` of that is already nan — which is the right answer. The
+        # old spelling clipped the ratio to 1.0 first, turning "no angle" into
+        # "broadside" and handing a patterned source its notch.
         with np.errstate(invalid='ignore'):
-            angles = np.degrees(np.arccos(
-                np.clip(float(sound_speed) / speeds, -1.0, 1.0)))
-        return excited * source.element_directivity(angles)
+            return np.degrees(np.arccos(c / speeds))
 
     def _on_depths(self, values, name: str) -> np.ndarray:
         """``values`` as one entry per tabulated depth: a scalar is spread
@@ -617,7 +648,8 @@ class Modes(Result):
         # A vacuum / rigid / file / precalc boundary carries no seabed
         # geoacoustics: its cp, rho and attenuation are the placeholders
         # __post_init__ resolved (1600 m/s, 1.5 g/cm3, 0.5 dB/lambda), and
-        # reading them as a half-space fabricates an absorption the seabed does
+        # reading them as a half-space fabricates an attenuation the seabed
+        # does
         # not have. `Bottom.all_sound_speeds` states the same rule for the same
         # data. Measured on an ideal 100 m guide at 50 Hz with a RIGID seabed,
         # passing bottom=BoundaryProperties('rigid') added 0.40 / 0.51 dB of
@@ -635,7 +667,7 @@ class Modes(Result):
             if _btype in _NON_GEOACOUSTIC_TYPES:
                 if _btype in ('vacuum', 'rigid'):
                     # No energy enters the bottom, so the first-order
-                    # bottom-absorption term is exactly zero and the
+                    # bottom-attenuation term is exactly zero and the
                     # water-column integral alone is the right answer.
                     bottom = None
                 else:
@@ -643,7 +675,8 @@ class Modes(Result):
                         f"Modes.with_attenuation: a {_btype!r} seabed carries "
                         f"its loss in a reflection-coefficient table, not in "
                         f"cp/rho/attenuation — those are placeholders, so "
-                        f"no first-order bottom-absorption term can be formed "
+                        f"no first-order bottom-attenuation term can be "
+                        f"formed "
                         f"from them.",
                         remediation="Drop bottom= to get the water-column "
                                     "term alone (reported as an upper bound), "
@@ -725,7 +758,7 @@ class Modes(Result):
             # into the denominator, so the invented loss scaled with the
             # library's length unit — the same physics expressed in km came
             # back 1000x different. There is no finite first-order bottom-
-            # absorption perturbation for a radiating mode: the tail integral
+            # attenuation perturbation for a radiating mode: the tail integral
             # diverges, so the closed form this line specialises does not exist.
             bottom_term = np.where(
                 trapped,

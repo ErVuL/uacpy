@@ -24,6 +24,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
 from uacpy.core._grid import _nearest_index_on_axis
 from uacpy.core._carrier_validate import (
+    RANGE_COLLAPSE_METHODS, _method_list,
     _DeepCopyMixin,
     _require_non_negative, _require_strictly_increasing, _dedupe_provenance,
     _reject_complex,
@@ -218,16 +219,21 @@ class Surface(_DeepCopyMixin):
         reflection file with only the roughness reduced, and raise when the
         files differ (tables cannot be blended), again mirroring
         :meth:`Bottom.select_range`."""
+        # Validated before the early return: a range-independent
+        # carrier has nothing to reduce, and returning self first
+        # made a typo silent until the user switched to a
+        # range-dependent environment — the moment they are least
+        # looking for one.
+        if method not in RANGE_COLLAPSE_METHODS:
+            raise ConfigurationError(
+                f"Surface.collapse: unknown method={method!r}; "
+                f"valid: {_method_list(RANGE_COLLAPSE_METHODS)}")
         if not self.is_range_dependent:
             return self
         if method == 'r0':
             return Surface(properties=[_copy.deepcopy(self.properties[0])])
         if method == 'rmax':
             return Surface(properties=[_copy.deepcopy(self.properties[-1])])
-        if method not in ('mean', 'median'):
-            raise ConfigurationError(
-                f"Surface.collapse: unknown method={method!r}; valid: 'r0', "
-                "'rmax', 'mean', 'median'")
         return Surface(properties=[_reduce_uniform_nodes(
             self.properties, method, 'Surface.collapse', 'nodes')])
 

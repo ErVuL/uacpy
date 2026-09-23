@@ -743,8 +743,8 @@ class TestWindNoiseBandGrid:
 class TestWenzNoiseNamesItsWindSpeedInKnots:
     """``chapman_harris_surface(wind_speed_kn=)`` and ``WenzNoise`` take the
     same unit; only the second one failed to say so. The unit itself is not in
-    question — ``_wind_coates`` divides the input by 1.9438445 to *leave*
-    knots, and the coefficients are natively in knots
+    question — ``_wind_coates`` calls ``knots_to_ms`` to *leave*
+    knots at the boundary, and the coefficients are natively in knots
     (DRDC-RDDC-2022-D051 §2.3 eq. 8) — so this is a rename, not a conversion.
     Feeding a 10 m/s reading in as knots understates the total by 5.74 dB at
     1 kHz."""

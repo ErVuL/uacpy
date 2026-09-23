@@ -16,7 +16,7 @@ from uacpy.comms.modulate import dpsk_demodulate, dpsk_modulate
 from uacpy.comms.modulate import (
     ofdm_demodulate, ofdm_modulate, schmidl_cox_preamble, schmidl_cox_sync,
 )
-from uacpy.comms.link import matched_filter as phy_matched_filter
+from uacpy.comms.link import rrc_matched_filter as phy_matched_filter
 from uacpy.comms.link import pulse_shape, symbol_sync
 from uacpy.comms.receive import detect_preamble, matched_filter_metric
 from uacpy.core.exceptions import ConfigurationError
@@ -2455,7 +2455,8 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
         The loop constants are per symbol; applying the correction in samples
         unscaled left the gain sps times too small, and pull-in took ~380
         symbols — far past a 64-symbol preamble. Scaled, ~50."""
-        from uacpy.comms.link import pulse_shape, matched_filter, symbol_sync
+        from uacpy.comms.link import (pulse_shape, rrc_matched_filter,
+                                      symbol_sync)
         from uacpy.comms.receive import slicer
         rng = np.random.default_rng(7)
         mod = comms.Modulator('16qam')
@@ -2464,7 +2465,7 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
         sps, span = 8, 8
         bb = pulse_shape(symbols, sps, 0.25, span)
         bb = np.concatenate([np.zeros(2, dtype=complex), bb])       # quarter-symbol late
-        mf = matched_filter(bb, sps, 0.25, span)
+        mf = rrc_matched_filter(bb, sps, 0.25, span)
         rec = symbol_sync(mf, sps, loop_bw=0.005, start=span * sps)
         n = min(rec.size, symbols.size)
         gain = np.vdot(symbols[300:n], rec[300:n]) / np.vdot(symbols[300:n], symbols[300:n])
@@ -2480,13 +2481,14 @@ class TestTheDefaultReceiverRecoversPhaseGainAndTiming:
         The docstring used to promise only a pull-in figure and nothing about
         where the loop comes to rest."""
         import uacpy.comms.link as phy
-        from uacpy.comms.link import pulse_shape, matched_filter, symbol_sync
+        from uacpy.comms.link import (pulse_shape, rrc_matched_filter,
+                                      symbol_sync)
         sps, span, rolloff = 8, 8, 0.25
         rng = np.random.default_rng(7)
         mod = comms.Modulator('16qam')
         symbols = mod.modulate(rng.integers(0, 2, 4 * 1500))
-        mf = matched_filter(pulse_shape(symbols, sps, rolloff, span),
-                            sps, rolloff, span)
+        mf = rrc_matched_filter(pulse_shape(symbols, sps, rolloff, span),
+                                sps, rolloff, span)
 
         # Record the on-time interpolation instant of every symbol. The loop
         # calls _interp twice per symbol, on-time first then mid-symbol.
@@ -2692,3 +2694,66 @@ class TestChannelTapsDriveTheLinkHarness:
         expect = np.angle(np.exp(1j * (np.pi - 2 * np.pi * fc * dtau)))
         got = np.angle(tap_s / tap_d)
         assert abs(np.degrees(np.angle(np.exp(1j * (got - expect))))) < 5.0
+
+
+class TestSubcarrierResponseIsObtainableWithoutDrawingIt:
+    """``H`` on the OFDM subcarrier grid is a public call, not a private step.
+
+    The same ``np.fft.fft(h, nsc)`` sat inside ``ofdm_demodulate``'s
+    equalizer and inside ``plot_subcarriers``, with no door to either: the
+    only way to see which subcarriers a channel had nulled was to draw them
+    and read the axes, and the only way to equalize was to hand the
+    demodulator an impulse response and let it transform.
+    """
+
+    NSC = 64
+
+    @staticmethod
+    def _channel():
+        return np.array([1.0, 0.0, 0.4j, -0.2])
+
+    def test_it_returns_the_grid_the_demodulator_equalizes_against(self):
+        H = comms.subcarrier_response(self._channel(), self.NSC)
+        assert H.shape == (self.NSC,)
+        assert np.iscomplexobj(H)
+
+    def test_index_k_is_the_subcarrier_ofdm_modulate_addresses_as_k(self):
+        """Unshifted. A single non-zero subcarrier round-trips to itself.
+
+        This is the property that separates it from
+        ``acoustic_signal.channel_response``, which centres its grid on 0 Hz:
+        there, bin ``k`` is a frequency, not a subcarrier number.
+        """
+        for k in (0, 1, 7, self.NSC - 1):
+            freq = np.zeros(self.NSC, dtype=complex)
+            freq[k] = 1.0
+            # ofdm_symbol's IFFT of that spectrum, stripped of its prefix, is
+            # a channel whose subcarrier response is non-zero only at k.
+            h = np.fft.ifft(freq)
+            H = comms.subcarrier_response(h, self.NSC)
+            assert int(np.argmax(np.abs(H))) == k
+            assert np.abs(H[k]) == pytest.approx(1.0)
+
+    def test_it_is_what_the_equalizer_divides_by(self):
+        """Measured against ofdm_demodulate, not asserted of it: equalizing
+        through the public call reproduces the demodulator's own symbols."""
+        rng = np.random.default_rng(3)
+        mod = comms.Modulator('qpsk')
+        symbols = mod.modulate(rng.integers(0, 2, 2 * self.NSC))
+        cp, h = 16, self._channel()
+        tx = comms.ofdm_modulate(symbols, self.NSC, cp)
+        rx = np.convolve(tx, h)[:tx.size]
+        internal = comms.ofdm_demodulate(rx, self.NSC, cp, channel=h)
+        raw = comms.ofdm_demodulate(rx, self.NSC, cp)
+        external = comms.equalize_subcarriers(
+            raw.reshape(-1, self.NSC),
+            comms.subcarrier_response(h, self.NSC)).ravel()
+        assert np.allclose(internal, external, atol=1e-12)
+
+    def test_a_channel_longer_than_the_grid_is_refused_not_aliased(self):
+        with pytest.raises(ConfigurationError, match='alias the tail'):
+            comms.subcarrier_response(np.ones(80), self.NSC)
+
+    def test_an_empty_channel_is_refused(self):
+        with pytest.raises(ConfigurationError, match='channel is empty'):
+            comms.subcarrier_response([], self.NSC)

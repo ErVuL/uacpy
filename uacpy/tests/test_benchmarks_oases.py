@@ -159,8 +159,8 @@ def test_oasn_surface_noise_level_in_an_infinitely_deep_ocean_is_the_source_leve
     accounts for −0.031 dB of that in exact quadrature); the 0.2 dB bound is
     10x the measurement, and a factor 2 in power is +3.01 dB.
     """
-    diag_db = 10.0 * np.log10(np.real(np.diag(oasn_halfspace_covariance)))
-    err = diag_db - _NOISE_LEVEL_DB
+    diag_dB = 10.0 * np.log10(np.real(np.diag(oasn_halfspace_covariance)))
+    err = diag_dB - _NOISE_LEVEL_DB
     assert np.max(np.abs(err)) < 0.2, (
         f"diagonal is {err.min():.3f}..{err.max():.3f} dB from SSLEV")
 

@@ -22,11 +22,36 @@ from uacpy.acoustic_signal._signal_validate import require_positive_finite_scala
 # record, and what the compression buys.
 # ──────────────────────────────────────────────────────────────────────
 
-AmbiguityResult = namedtuple("AmbiguityResult", "delays_s doppler_hz amplitude")
+
+class AmbiguityResult(namedtuple("AmbiguityResult", "delays_s doppler_hz amplitude")):
+    """Ambiguity surface ``|chi|`` over ``delays_s`` and ``doppler_hz``.
+
+    The tuple is the measurement, so ``delays_s, doppler_hz, amplitude = ...``
+    keeps working; :meth:`plot` is the one obvious way to draw it.
+    """
+
+    __slots__ = ()
+
+    def plot(self, **kwargs):
+        """Draw this result through :func:`uacpy.visualization.plot_ambiguity`.
+
+        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
+        every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would
+        # make ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_ambiguity(self.delays_s, self.doppler_hz, self.amplitude, **kwargs)
 
 
 def matched_filter(received, replica, *, mode: str = "full", normalize: bool = True):
     """Matched-filter (replica-correlation) output = pulse compression.
+
+    The sonar operation: correlate against a known transmit waveform. The
+    comms receive filter that completes a Nyquist pulse is
+    :func:`uacpy.comms.rrc_matched_filter`, a different thing under a name
+    that is standard in its own field.
 
     Cross-correlates ``received`` with ``replica`` by convolving against the
     conjugated, time-reversed replica. For an LFM/HFM/m-sequence transmit, the

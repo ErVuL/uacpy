@@ -44,7 +44,8 @@ from uacpy.data._geo import (
 )
 from uacpy.data._time import parse_date
 from uacpy.data.sound_speed import (
-    _FORMULAS, assemble_range_dependent, extend_column_to_seafloor,
+    _FORMULAS, DEFAULT_SOUND_SPEED_FORMULA, assemble_range_dependent,
+    extend_column_to_seafloor,
 )
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
@@ -83,7 +84,7 @@ def fetch_ssp_operational(
     point: Coordinate,
     *,
     date: Union[str, _dt.date],
-    formula: str = 'teos10',
+    formula: str = DEFAULT_SOUND_SPEED_FORMULA,
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
     verbose: Union[bool, str] = False,
@@ -161,7 +162,7 @@ def fetch_ssp_transect_operational(
     *,
     date: Union[str, _dt.date],
     n_points: int = 6,
-    formula: str = 'teos10',
+    formula: str = DEFAULT_SOUND_SPEED_FORMULA,
     max_days: int = DEFAULT_MAX_DAYS,
     dataset_id: str = DEFAULT_DATASET_ID,
     verbose: Union[bool, str] = False,

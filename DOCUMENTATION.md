@@ -426,7 +426,7 @@ Environment(bathymetry=5000, ssp=SoundSpeedProfile.from_munk(5000))
 SoundSpeedProfile.from_isovelocity(depth_max=100, sound_speed=1500)
 SoundSpeedProfile.from_pairs([(0, 1520), (200, 1480)])
 SoundSpeedProfile.from_munk(depth_max=5000)                  # canonical Munk
-SoundSpeedProfile.from_mackenzie(depths, temperature_c, salinity_psu)  # from T/S
+SoundSpeedProfile.from_temperature_salinity(depths, temperature_c, salinity_psu)  # from T/S
 ```
 
 A **range-dependent** (2-D) profile carries a `data[n_depth, n_range]` matrix
@@ -584,8 +584,14 @@ the type test. `Biological` takes its layers either as
 `BiologicalLayer(z_top_m, z_bottom_m, f0_hz, Q, a0)` objects or as the bare
 5-tuples above — the constructor coerces.
 
-Default is `None` (no explicit volume absorption). The bare formulas are
-available for plotting attenuation curves directly, from
+Default is `None` (no explicit volume absorption). To evaluate a model
+rather than attach one, call `uacpy.absorption_thorp(frequencies)`,
+`uacpy.absorption_francois_garrison(frequencies, temperature_c=…,
+salinity_psu=…, pH=…, z_bar_m=…)`, `uacpy.absorption_biological(…, layers=…)`
+or `uacpy.absorption_constant(…, value_dB_per_wavelength=…)`. Each returns an
+`AbsorptionCoefficient` — α over frequency, and over depth when `depths=` is a
+sequence — carrying its own units and the model that made it, with `.plot()`
+and `.to_units()`. The closed-form kernels underneath are still in
 `uacpy.core.absorption` (they are not re-exported on the top-level `uacpy`
 namespace):
 
@@ -1606,7 +1612,8 @@ The convention is uniform: **every result and every *shape* carrier plots
 itself** — results (`tl.plot()`, `rays.plot()`, `arrivals.plot()`,
 `modes.plot()`, …) and the carriers that reduce to a curve (`env.plot()`,
 `env.ssp.plot()`, `env.bathymetry.plot()`, `env.altimetry.plot()`,
-`absorption.plot(freqs)`). The *property* carriers `Bottom` and `Surface` have
+`absorption_thorp(freqs).plot()`). The *property* carriers `Bottom` and
+`Surface` have
 no `.plot()`: a stack of boundary types is not a single curve, and drawing it
 needs the seafloor an `Environment` supplies — use `plot_bottom_properties(env)`
 or `env.plot()` instead.
@@ -1638,7 +1645,7 @@ in a `from … import` statement use the real modules
 | `env.plot()` | SSP + seafloor cross-section, optional `source=`/`receiver=` markers |
 | `ssp.plot()` / `env.ssp.plot()` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent). `label=` / `color=` overlay several profiles on one `ax=`: an explicit colour draws the whole profile in it and drops the range colourbar, and the label names the profile rather than each column. `legend=` forces the legend on or off |
 | `bathymetry.plot()` / `altimetry.plot()` | seafloor depth / sea-surface height vs range — the shape carriers |
-| `absorption.plot(frequencies)` / `plot_absorption(frequencies, …)` | volume absorption `α(f)` (dB/km, log-log); the free function also takes a precomputed `absorption=` array and a `model=` name for the credit line |
+| `absorption_thorp(f).plot()` / `plot_absorption(coefficient)` | volume absorption `α(f)` (dB/km, log-log), or an α(f, z) heatmap when the carrier has a depth axis. The plotter draws a carrier and computes nothing: build one with the `absorption_*` functions or `model.alpha(...)` |
 | `plot_bottom_properties(env)` | seabed `c` / `ρ` / `α` vs depth, per layer stack |
 | `plot_bottom_loss(materials, water_speed=…)` | plane-wave bottom loss vs grazing angle, one curve per seabed. Takes a preset name, a property dict (`sound_speed` / `density` / `attenuation`), a sequence of either, or a `{label: material}` mapping, so a fetched seabed and the canonical presets share one axes and one `water_speed` — the critical angle is the ratio of the two speeds, so curves drawn against different water are not comparable. `mark_critical=True` rules each critical angle, skipping any seabed slower than the water, which has an angle of intromission instead |
 | `plot_mode_excitation(modes, source)` | what a source array drives, both descriptions on one angle axis: a stem per mode at its grazing angle, height `|Σₙ wₙ·φₘ(zₙ)|` — the modal excitation, which is what sets the field in a waveguide — over the same array's free-field pattern: `Source.array_beam_pattern` gives `P(θ)=f(θ)·A(θ)`, the product theorem's element pattern times `Source.array_factor`'s point-source factor (Butler & Sherman §7.1.1). The two agree while the pattern is symmetric in ±θ and diverge once steering breaks that, so both are drawn |
@@ -1673,7 +1680,7 @@ its leading positional arguments, then an optional `ax` — always passable by
 keyword, and best passed that way, because its position follows the number of
 data arrays (`plot_psd(frequencies, psd_linear, ax)` but
 `plot_spectrogram(frequencies, times, Sxx, ax)`). All return `(fig, ax)`, except
-`plot_impulse_response_info(Minfo, Vinfo, g)`, which takes no `ax` at all — it
+`plot_lsfir_diagnostics(Minfo, Vinfo, g)`, which takes no `ax` at all — it
 builds its own three-panel figure and returns `(fig, [ax1, ax2, ax3])`.
 
 - **Spectra / levels:** `plot_psd`, `plot_ppsd`, `plot_sel`, `plot_spectrogram`,
@@ -1686,7 +1693,7 @@ builds its own three-panel figure and returns `(fig, [ax1, ax2, ax3])`.
 - **Arrays / active / system-ID:** `plot_angular_spectrum`, `plot_ambiguity`
   (`dB=True` for the sidelobes, which sit tens of dB down), `plot_matched_field`
   (a `Covariance.bartlett` / `.mvdr` surface over a replica grid, dB re its own
-  peak), `plot_frf`, `plot_coherence`, `plot_impulse_response_info`.
+  peak), `plot_frf`, `plot_coherence`, `plot_lsfir_diagnostics`.
 - **Comms:** `plot_channel`, `plot_constellation`, `plot_scatter`,
   `plot_eye_diagram`, `plot_ber_curve`, `plot_convergence`, `plot_sync_metric`,
   `plot_doppler_ambiguity`, `plot_subcarriers`.
@@ -1753,13 +1760,13 @@ fitted state). All plotting lives in `uacpy.visualization` (`plot_psd`,
 | Noise synthesis | `make_noise_waveform`, `make_bandlimited_noise`, `synthesize_noise_from_psd`, `fourier_synthesis`, `add_noise` |
 | Spectral / levels | One estimator per statistic: `welch` and `constant_q` (both `scaling='density'` or `'spectrum'`), `sound_exposure` (the ISO 18405 band energy), and a histogram twin of each — `probabilistic_welch`, `probabilistic_constant_q`, `probabilistic_sound_exposure` (→ `SpectralEstimate` / `ProbabilisticSpectralEstimate`). Each takes only the parameters its own statistic can honour: `sound_exposure` has no window, overlap, detrending or averaging, because a band sum is the band's energy only when every bin is counted once and whole, and asking a bin estimator for `scaling='exposure'` raises and names it. `fmin`, `fmax` and `integration_time` mean the same thing in all six. `BAND_TYPES` names the ladders (`'decidecade'` by default, also `'third_octave'`, `'octave'`, `'linear'`). Two result types cover the family: a name that fixes one scaling would say "density" over band power |
 | Decidecade (ISO 18405) | `decidecade_bands`, `decidecade_band_levels` |
-| Arrays | `steering_vectors`, `beamform`, `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` (→ `BeamformResult`) |
+| Arrays | `steering_vectors`, `beamform`, `snapshots` (→ `Snapshots`), `sample_covariance`, `bartlett_spectrum`, `mvdr_spectrum`, `music_spectrum`, `shading_taper` (→ `BeamformResult`) |
 | Arrays over a field | `beamform_field` (→ `BeamformedField`: beam power over a whole `(n_elements, *grid)` field, with `.best`, `.best_angle`, `.array_gain()`), `plane_wave_array_gain` (`|Σw|²/‖w‖²`), `matched_replica_gain` (the `10log10(N)` ceiling), `independent_beams` (orthogonal looks in a scanned sector — pair with `per_look_false_alarm`) |
 | Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain`, `ambiguity_function` (→ `AmbiguityResult`) |
 | Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt`, `inverse_cwt`, `cepstrum`, `complex_cepstrum`, `inverse_complex_cepstrum` (→ `SpectrogramResult`/`WignerVilleResult`/`CWTResult`/`ComplexCepstrum`) |
 | Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_spectrogram`, and `constant_q` / `probabilistic_constant_q` (→ `CQTResult`/`SpectralEstimate`/`CQSpectrogramResult`/`ProbabilisticSpectralEstimate`) |
 | Gather transforms | `fk_transform`, `taup_transform`, `radon_transform`, `inverse_fk`, `inverse_taup`, `inverse_radon` (→ `FKResult`/`TauPResult`/`RadonResult`). `FKResult.scaling` says whether `power` is a calibrated density per Hz·rad/m (`normalize=True`) or the raw unnormalised `\|FK\|²`, and `plot_fk` labels the panel from it |
-| System ID / channel | `FRF`, `impulse_response`, `impulse_response_from_transfer_function`, `simulate_reception`, `fractional_delay_taps` |
+| System ID / channel | `FRF`, `impulse_response`, `channel_response`, `impulse_response_from_transfer_function`, `simulate_reception`, `fractional_delay_taps` |
 | Modal / dispersion | `warp_signal`, `unwarp_signal`, `modal_group_velocity` |
 
 `FRF` is a class because it keeps the fit. `FRF(method=…, estimator=…, m=…)`
@@ -1907,7 +1914,7 @@ verified bit-exact against CMRE janus-c).
 | Link harness | `simulate_link`, `ber_sweep`, `LinkResult`, `ChannelTaps` (from `Arrivals.channel_taps(symbol_rate, carrier=…)`; hand it to the link harness as its `channel=`) |
 | Metrics | `bit_error_rate`, `symbol_error_rate`, `evm`, `ber_theory` |
 | Coding / spread | `ConvCode`, `conv_encode`, `viterbi_decode`, `viterbi_hard`, `interleave`, `deinterleave`, `m_sequence`, `spread`, `despread`, `processing_gain_dB` |
-| OFDM | `ofdm_modulate`, `ofdm_demodulate`, `ofdm_symbol`, `equalize_subcarriers`, `schmidl_cox_preamble`, `schmidl_cox_sync`, `apply_cfo`, `estimate_channel`, `OFDMTransmitter`, `OFDMReceiver` |
+| OFDM | `ofdm_modulate`, `ofdm_demodulate`, `ofdm_symbol`, `subcarrier_response`, `equalize_subcarriers`, `schmidl_cox_preamble`, `schmidl_cox_sync`, `apply_cfo`, `estimate_channel`, `OFDMTransmitter`, `OFDMReceiver` |
 | JANUS | `janus_encode`, `janus_decode`, `janus_modulate`, `janus_demodulate`, `janus_detect`, `janus_transmit`, `janus_receive`, `JanusPacket` |
 
 `simulate_link` composes transmit → channel → receive and measures BER;
@@ -1961,11 +1968,11 @@ Hearing groups: `LF, HF, VHF, SI, PCW, OCW, PCA, OCA`. See examples 9, 35, 36.
 These standards-grounded helpers live in their natural packages rather than a
 single module — each is sourced to its standard:
 
-- **`uacpy.core.acoustics.soundspeed_unesco`** — seawater sound speed, UNESCO
+- **`uacpy.core.acoustics.sound_speed_unesco`** — seawater sound speed, UNESCO
   (Chen & Millero 1977 / UNESCO 1983), `c(T, S, pressure)`.
-- **`uacpy.core.acoustics.soundspeed_delgrosso`** — Del Grosso 1974 alternative,
+- **`uacpy.core.acoustics.sound_speed_delgrosso`** — Del Grosso 1974 alternative,
   preferred at high pressure / deep water.
-- **`uacpy.core.acoustics.soundspeed_teos10`** — TEOS-10 (IOC/SCOR/IAPSO 2010),
+- **`uacpy.core.acoustics.sound_speed_teos10`** — TEOS-10 (IOC/SCOR/IAPSO 2010),
   Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function; agrees with Del Grosso at depth.
 - **`uacpy.acoustic_signal.decidecade_bands`** / `decidecade_band_levels` —
   decidecade bands, ISO 18405 / IEC 61260-1. Base-ten (`1000·10^(n/10)`), which
@@ -1981,12 +1988,12 @@ single module — each is sourced to its standard:
 
 ```python
 from uacpy.core.acoustics import (
-    soundspeed_unesco, soundspeed_delgrosso, soundspeed_teos10,
+    sound_speed_unesco, sound_speed_delgrosso, sound_speed_teos10,
 )
 
-soundspeed_unesco(15, 35, 0)      # 1506.675 m/s  (T °C, S PSU, pressure dbar)
-soundspeed_delgrosso(15, 35, 0)   # 1506.667 m/s
-soundspeed_teos10(15, 35, 0)      # 1506.674 m/s
+sound_speed_unesco(15, 35, 0)      # 1506.675 m/s  (T °C, S PSU, pressure dbar)
+sound_speed_delgrosso(15, 35, 0)   # 1506.667 m/s
+sound_speed_teos10(15, 35, 0)      # 1506.674 m/s
 ```
 
 Example 35 chains site sound speed → decidecade bands → ship SL → weighted level.
@@ -2071,10 +2078,10 @@ uacpy is SI throughout; underwater levels reference **1 µPa**.
 
 ### Sound speed & density
 
-- Sound-speed helpers: **`soundspeed` = Mackenzie (1981)** (T °C, S ppt, depth m)
-  is `SoundSpeedProfile.from_mackenzie`'s equation; **`soundspeed_teos10`** (T °C,
+- Sound-speed helpers: **`sound_speed_mackenzie` = Mackenzie (1981)** (T °C, S ppt, depth m)
+  is `SoundSpeedProfile.from_temperature_salinity`'s equation; **`sound_speed_teos10`** (T °C,
   S PSU, **pressure in dbar**) is the data routes' default `formula`, with
-  **`soundspeed_unesco` = Chen & Millero / UNESCO** and `soundspeed_delgrosso`
+  **`sound_speed_unesco` = Chen & Millero / UNESCO** and `sound_speed_delgrosso`
   as alternatives.
 - **Density has two distinct roles** — do not conflate them:
   - *Acoustic input* density (bottom/sediment, and the water column on disk) is

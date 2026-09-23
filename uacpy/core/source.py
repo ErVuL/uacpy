@@ -18,6 +18,12 @@ from uacpy.core._carrier_validate import (
 )
 
 
+#: The source geometries a deck may ask for. This is the only declaration:
+#: ``Source`` validates against it and ``uacpy.models.base`` re-exports it, so
+#: a geometry added here reaches every layer that checks one.
+VALID_SOURCE_TYPES: frozenset = frozenset({'point', 'line', 'scaled'})
+
+
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 @dataclass(eq=False)
 class Source(_DeepCopyMixin):
@@ -175,10 +181,9 @@ class Source(_DeepCopyMixin):
                                      min_step=DECK_DEPTH_RESOLUTION_M)
         _require_positive(self.frequencies, "source frequencies", hint="Hz")
 
-        valid_types = ['point', 'line', 'scaled']
-        if self.source_type not in valid_types:
+        if self.source_type not in VALID_SOURCE_TYPES:
             raise ConfigurationError(
-                f"source_type must be one of {valid_types}; "
+                f"source_type must be one of {sorted(VALID_SOURCE_TYPES)}; "
                 f"got {self.source_type!r}"
             )
 

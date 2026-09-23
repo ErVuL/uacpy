@@ -76,7 +76,7 @@ to look for.
 
 `generate_sea_surface` builds a Pierson-Moskowitz surface realisation and takes
 an integer `seed=` rather than a generator. The data layer reaches it through
-`fetch_sea_surface(seed=…)` and `fetch_environment(sea_surface_seed=…)`, both
+`fetch_sea_surface(seed=…)` and `fetch_environment(altimetry_seed=…)`, both
 defaulting to `None`; a plain `fetch_environment` call draws nothing, because
 its `altimetry_sources` defaults to `None` too.
 
@@ -189,7 +189,7 @@ export OMP_NUM_THREADS=1
 1. **Seed every draw.** `rng=np.random.default_rng(seed)` on any of the nine
    unseeded-by-default functions in
    [§2](#2-the-analysis-layer-is-deterministic) — `seed=` on
-   `generate_sea_surface`, or `sea_surface_seed=` when you reach it through
+   `generate_sea_surface`, or `altimetry_seed=` when you reach it through
    `fetch_environment` — and record the seed next to the result.
    `schmidl_cox_preamble`, the tenth, already carries a fixed seed.
 2. **Pin the Bellhop backend** — `Bellhop(backend='fortran')` — if a Bellhop

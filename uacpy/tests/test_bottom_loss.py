@@ -10,7 +10,7 @@ import pytest
 
 from uacpy.core.acoustics import boundaries
 from uacpy.core.acoustics import (
-    bottom_loss_curve, density, reflection_coeff, soundspeed)
+    bottom_loss_curve, density, reflection_coeff, sound_speed_mackenzie)
 from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
 
 # The water density every deck writes (1.027 g/cm³), which is also the
@@ -235,11 +235,11 @@ class TestDefaultWaterColumnIsAnnounced:
         assert len(record) == 1, [str(w.message) for w in record]
         assert record[0].category is UserWarning
         message = str(record[0].message)
-        assert 'soundspeed()' in message
+        assert 'sound_speed_mackenzie()' in message
         # The number itself, not just the fact of a fallback: 1539.087 m/s is
         # what a reader has to be able to compare against the 1500.0 m/s the
         # wrapper pins, and 1022.72 kg/m³ against its 1027 kg/m³.
-        assert f"{soundspeed():.3f}" in message
+        assert f"{sound_speed_mackenzie():.3f}" in message
         assert f"{density():.2f}" in message
 
     def test_the_notice_names_the_callers_file(self):
@@ -293,7 +293,7 @@ class TestDefaultWaterColumnIsAnnounced:
 
     def test_the_returned_coefficient_matches_the_explicit_seawater_defaults(self):
         """The notice is the whole change: the number the fallback produces is
-        still ``soundspeed()``/``density()`` evaluated at their own defaults,
+        still ``sound_speed_mackenzie()``/``density()`` evaluated at their own defaults,
         bit for bit, and the docstring's worked example still reads 0.1198 /
         -18.43 dB."""
         with warnings.catch_warnings():
@@ -301,7 +301,7 @@ class TestDefaultWaterColumnIsAnnounced:
             R_default = reflection_coeff(np.pi / 4.0, 1800.0, 1700.0)
             R_doc = reflection_coeff(np.pi / 4, 1200, 1600)
         R_explicit = reflection_coeff(np.pi / 4.0, 1800.0, 1700.0,
-                                      rho=density(), c=soundspeed())
+                                      rho=density(), c=sound_speed_mackenzie())
         assert R_default == R_explicit
         assert f"{R_doc:.4f}" == '0.1198'
         assert f"{20.0 * np.log10(abs(R_doc)):.2f}" == '-18.43'
@@ -312,7 +312,7 @@ class TestDefaultWaterColumnIsAnnounced:
         finely the grid samples there (4.29 dB on the wrapper's own 181-point
         grid, 4.34 dB at 100x that), so the bound is loose on purpose."""
         crit_pinned = np.degrees(np.arccos(1500.0 / 1700.0))
-        crit_fallback = np.degrees(np.arccos(soundspeed() / 1700.0))
+        crit_fallback = np.degrees(np.arccos(sound_speed_mackenzie() / 1700.0))
         assert crit_pinned == pytest.approx(28.072, abs=0.001)
         assert crit_fallback == pytest.approx(25.130, abs=0.001)
 
@@ -513,3 +513,56 @@ class TestPlotBottomLoss:
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError, match='no materials'):
             plot_bottom_loss([])
+
+
+class TestTheCriticalAngleHasAnEntryPointOfItsOwn:
+    """`arccos(c_water / c_bottom)` used to be spelled only inside
+    `plot_bottom_loss`, which ruled it on the axes. The number could not be
+    obtained without drawing the figure — `critical` appeared in no public
+    name in `uacpy`, `uacpy.core.acoustics` or `uacpy.sonar`.
+    """
+
+    def test_a_faster_seabed_has_one(self):
+        import uacpy
+        assert uacpy.critical_angle(1650.0, 1500.0) == pytest.approx(
+            np.degrees(np.arccos(1500.0 / 1650.0)), rel=1e-12)
+
+    def test_a_seabed_no_faster_than_the_water_has_none(self):
+        """`clay` is 1500 m/s, under sea water: it reflects weakly at every
+        angle and shows an angle of intromission instead. Returning 0 there
+        would read as "totally reflecting everywhere", the opposite."""
+        import uacpy
+        from uacpy.core.materials import get_material
+        assert np.isnan(uacpy.critical_angle(
+            float(get_material('clay')['sound_speed']), 1500.0))
+        assert np.isnan(uacpy.critical_angle(1400.0, 1500.0))
+
+    def test_a_non_positive_speed_is_refused(self):
+        import uacpy
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='must be > 0'):
+            uacpy.critical_angle(0.0, 1500.0)
+
+    def test_the_figure_rules_exactly_what_the_function_returns(self):
+        """One formula: the plotter asks, it does not re-derive."""
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import uacpy
+        from uacpy.core.materials import get_material
+        from uacpy.visualization import plot_bottom_loss
+
+        names = ['sand', 'granite', 'clay']
+        fig, ax = plot_bottom_loss(names, mark_critical=True,
+                                   water_speed=1500.0)
+        try:
+            ruled = sorted(float(l.get_xdata()[0]) for l in ax.lines
+                           if l.get_linestyle() == ':')
+            want = sorted(
+                a for a in (uacpy.critical_angle(
+                    float(get_material(n)['sound_speed']), 1500.0)
+                    for n in names) if np.isfinite(a))
+            assert ruled == pytest.approx(want, rel=1e-12)
+            assert len(ruled) == 2, 'clay must not be ruled'
+        finally:
+            plt.close(fig)

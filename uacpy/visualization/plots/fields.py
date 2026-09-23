@@ -47,6 +47,12 @@ from uacpy.core.constants import PRESSURE_FLOOR
 
 _DB_VALUES = ('dB', 'mag_dB')
 
+#: Views that draw the carrier itself rather than its envelope, so a grid
+#: coarser than half a wavelength draws structure the field does not have.
+#: ``Field._warn_if_phase_view_aliases`` is the check; it is keyed here so
+#: ``plot_field`` and ``compare`` cannot drift on which views need it.
+_PHASE_VALUES = ('phase', 'real', 'imag')
+
 #: Magnitude of the no-energy marker on a dB axis, 600. ``PRESSURE_FLOOR``
 #: is what the package writes where a model reported no energy at all (as
 #: against NaN, which is no data), so a sample of this size is a marker
@@ -177,6 +183,8 @@ def plot_field(
 
     if value is None:
         value = _default_value(field)
+    if value in _PHASE_VALUES:
+        field._warn_if_phase_view_aliases(f"plot_field(value={value!r})")
     arr, value_label = _value_array(field, value)
     axes_present = list(field.coords)
     n_axes = len(axes_present)
@@ -908,6 +916,8 @@ def compare(
             # Every field shares the first one's kind, so its default view
             # is the shared view.
             value = _default_value(fields[0])
+        if value in _PHASE_VALUES:
+            f._warn_if_phase_view_aliases(f"compare(value={value!r})")
         axes = list(f.coords)
         if len(axes) != 1:
             raise ConfigurationError(
@@ -1375,9 +1385,27 @@ def plot_field_difference(
 def _rms_between(field, reference, depth):
     """RMS dB difference at ``depth``, over the ranges both fields computed.
 
-    ``NaN`` when they share no range at all — nothing to compare, which is
-    not the same as agreeing.
+    ``NaN`` when there is nothing to compare, which is not the same as
+    agreeing: either the two share no range at all, or they are different
+    physical quantities. The figure masks NaN grey, so a pair that cannot be
+    compared reads as "no answer" rather than as a number.
+
+    This deliberately does what :func:`uacpy.metrics.tl_rmse` refuses to —
+    interpolate onto a shared grid — because comparing models run on
+    different range axes is the whole job of this figure. It does not get to
+    skip the *other* refusal: ``metrics._validate_tl_pair_and_window``
+    rejects a kind mismatch because "their
+    difference is not an agreement metric", and a figure that prints a green
+    agreement cell for a reverberation field against a pressure field is that
+    same wrong answer with a colour on it.
     """
+    if field.kind != reference.kind:
+        _plot_warn(
+            f"compare_models: a {field.kind!r} field and a "
+            f"{reference.kind!r} field are different physical quantities, so "
+            f"their RMS difference is not an agreement metric. That cell is "
+            f"left blank rather than scored.")
+        return np.nan
     tl_a = np.asarray(field.at(depth=depth).dB)
     tl_b = np.asarray(reference.at(depth=depth).dB)
     r_a = np.asarray(field.ranges, dtype=float)
@@ -1495,7 +1523,8 @@ def plot_field_statistics(
         comparable = rms[np.isfinite(rms)]
         limit = (max(10.0, float(np.percentile(rms[rms > 0], 95)))
                  if comparable.size and comparable.max() > 0 else 15.0)
-        # Only a pair with no shared range is masked. The diagonal stays a
+        # Masked: a pair with no shared range, and a pair of different
+        # kinds — both are "no answer", not agreement. The diagonal stays a
         # real 0.0 and lands on the colormap's own deep green.
         cmap = plt.get_cmap('RdYlGn_r').with_extremes(bad='0.85')
         image = axes[1].imshow(np.ma.masked_invalid(rms), cmap=cmap,

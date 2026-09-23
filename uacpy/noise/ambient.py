@@ -23,12 +23,15 @@ Nichols, S. M. & Bradley, D. L. (2016). Global examination of the
    wind-dependence of low-frequency ambient noise. (cited via the
    report.)
 """
+import inspect
 import warnings
 from collections import namedtuple
 
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.units import knots_to_ms
 
 
 NoiseComponents = namedtuple(
@@ -367,7 +370,7 @@ def _as_frequency_array(frequencies, caller: str) -> np.ndarray:
     ``list / 1000.0`` as a ``TypeError`` in one submodel and a 0-d array as
     ``'float' object is not subscriptable`` in another, and returned a bare
     scalar from most and a ``(1,)`` array from one. Every submodel converts
-    here first, so all seven answer the same shapes.
+    here first, so they all answer the same shapes.
     """
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     if f.ndim != 1:
@@ -401,9 +404,71 @@ def _wind_coates(frequencies, *, wind_speed_kn, **_):
     fk = _as_frequency_array(frequencies, "_wind_coates") / 1000.0
     if float(wind_speed_kn) == 0:
         return np.full(fk.shape, -np.inf, dtype=float)
-    w_ms = float(wind_speed_kn) / 1.9438445       # knots → m/s
+    w_ms = float(knots_to_ms(wind_speed_kn))
     return (50.0 + 7.5 * np.sqrt(w_ms) + 20.0 * np.log10(fk)
             - 40.0 * np.log10(fk + 0.4))
+
+
+#: Standard deviation of the observations about Knudsen's published curves,
+#: from the paper itself: "of the order of 4 to 5 db", smaller at high wind
+#: than at low. Any closed form through those curves sits inside this, which
+#: is what makes choosing one a matter of convention rather than accuracy.
+KNUDSEN_UNCERTAINTY_DB = 4.5
+
+
+def _wind_knudsen(frequencies, *, wind_speed_kn, **_):
+    """Wind (Knudsen, Alford & Emling 1948), in the form most commonly used.
+
+    ``NL = 44 + 20·log10(U_kn) - 17·log10(f_kHz)``, dB re 1 µPa²/Hz.
+
+    Straight parallel lines in log-log, which is the shape Knudsen published:
+    his curves shift with wind by the same amount at every frequency. Both
+    coefficients are his. ``-17`` dB/decade is the paper's stated
+    -5 dB/octave (-16.61 dB/decade) to 0.4 dB/decade — Dahl et al. (2007)
+    restate the same slope as a "5 dB reduction in average pressure spectral
+    density per factor of two increase in frequency". The constant 44 is his
+    calm curve: wind force 0, whose overall 0.1-10 kc level of 57 dB re
+    0.0002 dyne/cm² works out at 44.8 dB re 1 µPa²/Hz at 1 kHz.
+
+    Checked against the figure rather than assumed. Reading the Fig. 4
+    Part C curves off the page, shifting them by the +26.0 dB that the
+    paper's 0.0002 dyne/cm² (= 20 µPa) reference costs, and reducing the
+    overall band levels to 1 kHz spectrum levels puts this formula +1.6 dB
+    biased and 2.0 dB rms against the **six** curves from wind force 1
+    upward — inside the paper's own 4-5 dB scatter
+    (:data:`KNUDSEN_UNCERTAINTY_DB`), and the six Hildebrand et al. (2021)
+    Table IV also reads. Those curves are the expected side of this model's
+    tests.
+
+    Force 0 is the seventh curve and is left out of that statistic because
+    the straight line cannot follow it: at 0.5 kn the formula reads 6.9 dB
+    **low**, since ``20·log10(U)`` falls away without limit as the wind
+    drops while the published curves flatten onto a calm-sea floor. Over all
+    seven the figures are +0.4 dB bias and 3.2 dB rms. Treat a flat calm as
+    outside this model at the bottom end, as force 7 is at the top.
+
+    Two things to know when comparing it with something else. Knudsen is not
+    truly a power law in wind speed — the curve spacing is non-linear in
+    log10(U), which Hildebrand et al. (2021) note is "not substantiated by
+    the present model" between Beaufort 2-5 — so the straight-line form
+    trades that curvature away. And being a power law it keeps rising with
+    wind past force 7, where the published curves stop.
+
+    Not to be confused with the longer expression also called a Knudsen
+    curve in parts of the literature,
+    ``44 + 28·log(1+w^0.75) + 19·log(f) - 18·log(f² + 1/(2.78+0.14w^0.75)²)``
+    (w in m/s). That one carries a spectral peak, which Knudsen's straight
+    parallel lines do not; it is a Wenz-shaped fit under his name. Use
+    ``'merklinger'`` for a peaked wind spectrum.
+
+    These are coastal/shallow measurements — Hildebrand et al. list Knudsen
+    under "Shallow" — and the model carries no depth term of its own.
+    """
+    f = _as_frequency_array(frequencies, "_wind_knudsen")
+    u = float(wind_speed_kn)
+    if u == 0:
+        return np.full(f.shape, -np.inf, dtype=float)
+    return 44.0 + 20.0 * np.log10(u) - 17.0 * np.log10(f / 1000.0)
 
 
 def _shipping_wenz(frequencies, *, shipping_level, water_depth, **_):
@@ -511,7 +576,9 @@ def _rain_torres_costa(frequencies, *, rain_rate, **_):
     return out
 
 
-WIND_MODELS = {'merklinger': _wind_merklinger, 'coates': _wind_coates}
+WIND_MODELS = {'merklinger': _wind_merklinger,
+               'coates': _wind_coates,
+               'knudsen': _wind_knudsen}
 SHIPPING_MODELS = {'wenz': _shipping_wenz, 'coates': _shipping_coates}
 RAIN_MODELS = {'torres_costa': _rain_torres_costa}
 THERMAL_MODELS = {'mellen': _thermal_mellen}
@@ -537,6 +604,89 @@ def _resolve_submodel(value, registry, default, label):
     raise ConfigurationError(
         f"{label} must be None, a name {sorted(registry)}, or a callable; "
         f"got {type(value).__name__}")
+
+
+#: Default of each environmental knob ``WenzNoise`` forwards to its
+#: submodels, so a value the user did not choose is never reported as
+#: ignored. Kept beside the check rather than read off the signature: a
+#: default that changes should change this line deliberately.
+_ENVIRONMENT_DEFAULTS = {'water_depth': 'deep', 'shipping_level': 'medium',
+                         'rain_rate': 'no'}
+
+
+def _is_builtin_submodel(fn) -> bool:
+    """Whether ``fn`` is one of the submodels shipped in these registries.
+
+    The signature test below can only be trusted for functions whose bodies
+    this module owns. A caller's own callable is written however they like —
+    ``lambda f, **k: ...`` indexing ``k['rain_rate']`` is a working submodel
+    that reads the knob, and its signature says nothing about that.
+    """
+    # Asked of the function, not of the registries. Membership was the
+    # obvious test and is wrong twice over: ``WIND_MODELS['mine'] = my_fn``
+    # is a documented way to register your own submodel, which would put it
+    # back under a signature test it cannot pass; and ``fn in dict_values``
+    # runs the caller's ``__eq__``, so a callable whose ``__eq__`` returns
+    # an array crashed ``WenzNoise.__init__`` with a bare ValueError about
+    # an ambiguous truth value.
+    return getattr(fn, '__module__', None) == __name__
+
+
+def _consumes(fn, name: str) -> bool:
+    """Whether ``fn`` can be shown to read ``name``.
+
+    Every built-in submodel ends in ``**_`` so it can be handed the whole
+    parameter set, which means an argument it does not model is accepted in
+    silence; naming the parameter is the only signal that it is used, and
+    this reads that signal.
+
+    A callable this module did not write is credited with reading
+    everything, whatever its signature says. ``lambda f, **k:
+    k['rain_rate']`` is a working submodel whose signature names nothing —
+    and it is the spelling this package's own tests use — so judging it by
+    its signature produced a warning claiming a 26.8 dB difference did not
+    exist. Unprovable is not the same as false.
+    """
+    if not _is_builtin_submodel(fn):
+        return True
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):       # pragma: no cover - exotic callables
+        return True
+    return any(p.name == name
+               and p.kind is not inspect.Parameter.VAR_KEYWORD
+               for p in params.values())
+
+
+def _warn_unused_environment(selected, chosen, names, label='WenzNoise'):
+    """Warn for each environmental knob no selected submodel reads.
+
+    ``water_depth='shallow'`` with ``wind_model='coates',
+    shipping_model='coates'`` was accepted, validated, and then had no
+    effect on any component: neither Coates formula carries a depth term,
+    and both swallowed the argument through ``**_``. The setting looked
+    applied and was not. Both are needed for the example — the default
+    ``shipping_model='wenz'`` does read ``water_depth``, so switching the
+    wind model alone still moves the total (measured 5.4 dB). Nothing here
+    invents a depth dependence for a model that has none: it reports that
+    the knob did nothing, which is the part the caller cannot otherwise
+    see.
+    """
+    for name, default in _ENVIRONMENT_DEFAULTS.items():
+        if chosen.get(name) == default:
+            continue
+        readers = [c for c, fn in selected.items() if _consumes(fn, name)]
+        if readers:
+            continue
+        warnings.warn(
+            f"{label}: {name}={chosen[name]!r} was not used. None of the "
+            f"submodels selected ("
+            f"{', '.join(f'{c}={names[c]!r}' for c in sorted(names))}"
+            f") carries a {name} term, so the spectrum is identical to the "
+            f"one you would get with {name}={default!r}. Pick a submodel "
+            f"that models it, or drop the argument.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
 
 
 def _eval_submodel(fn, label, f, params):
@@ -594,7 +744,7 @@ class WenzNoise:
         Keyword-only, so the unit is stated at every call site; a wind reading
         in m/s passed here understates the total ambient level (measured
         5.7 dB at 1 kHz for a 10 m/s reading). Convert with
-        ``kn = m_per_s * 1.9438445``.
+        ``uacpy.core.units.ms_to_knots`` converts.
     rain_rate : {'no', 'light', 'moderate', 'heavy', 'veryheavy'}
         Default ``'no'``.
     water_depth : {'deep', 'shallow'}
@@ -706,6 +856,13 @@ class WenzNoise:
                                        'mellen', 'thermal_model')
         ufn, uname = _resolve_submodel(turbulence_model, TURBULENCE_MODELS,
                                        'wenz', 'turbulence_model')
+        _warn_unused_environment(
+            {'wind': wfn, 'shipping': sfn, 'rain': rfn,
+             'thermal': tfn, 'turbulence': ufn},
+            {'water_depth': water_depth, 'shipping_level': shipping_level,
+             'rain_rate': rain_rate},
+            {'wind': wname, 'shipping': sname, 'rain': rname,
+             'thermal': tname, 'turbulence': uname})
         self.wind = _eval_submodel(wfn, 'wind', f, params)
         self.shipping = _eval_submodel(sfn, 'shipping', f, params)
         self.rain = _eval_submodel(rfn, 'rain', f, params)
@@ -730,6 +887,21 @@ class WenzNoise:
         ``(total, wind, shipping, rain, thermal, turbulence)``."""
         return NoiseComponents(self.total, self.wind, self.shipping,
                                self.rain, self.thermal, self.turbulence)
+
+    def plot(self, **kwargs):
+        """Draw this spectrum through :func:`uacpy.visualization.plot_wenz`.
+
+        The plotter already takes the whole ``WenzNoise``, reading the total
+        and the five components off it, so this hands it ``self``.
+        ``kwargs`` reach the plotter — ``show_components=False`` for the
+        total alone, ``ymin`` / ``ymax``, any matplotlib keyword. Returns
+        ``(fig, ax)``, as every plotter in the package does.
+        """
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this at file scope would make
+        # ``import uacpy`` raise (docs/DEV.md section 7).
+        from uacpy import visualization
+        return visualization.plot_wenz(self, **kwargs)
 
     def as_psd(self, ref=1.0):
         """Linear total PSD, by default in **µPa²/Hz** — the *same* 1 µPa

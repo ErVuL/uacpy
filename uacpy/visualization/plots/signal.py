@@ -13,12 +13,11 @@ from uacpy.core.constants import (REFERENCE_PRESSURE_AIR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.acoustics import power_to_dB
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.visualization.plots._common import (ZORDER_LEGEND, ZORDER_SOURCE,
-                                               _cell_edge_extent, _flip_y,
-                                               _require_nonempty,
-                                               fig_ax, typed_plot_error,
-                                               _plot_warn, _title_or)
-from uacpy.visualization.style import SOURCE_MARKER_STYLE
+from uacpy.visualization.plots._common import (
+    ZORDER_LEGEND, ZORDER_SOURCE, _carrier_or_arrays, _cell_edge_extent,
+    _flip_y, _plot_warn, _refuse_spread_carrier, _require_nonempty,
+    _title_or, fig_ax, typed_plot_error)
+from uacpy.visualization.style import SOURCE_MARKER_STYLE, cmap_for_field
 
 
 def _require_image_grid(arr, n0, n1, caller, name0, name1):
@@ -249,10 +248,14 @@ def plot_fk(frequencies, wavenumbers=None, power=None, ax=None, *,
     # its scaling from it. The result's fourth element is the spectrum, so
     # plot_fk(*result) would land it in ax=; say so instead of failing inside
     # matplotlib.
-    result = (frequencies if wavenumbers is None and power is None
-              and isinstance(frequencies, tuple) else None)
-    if result is not None:
-        frequencies, wavenumbers, power = result[0], result[1], result[2]
+    result = None
+    _unpacked = _carrier_or_arrays(
+        frequencies, (wavenumbers, power), count=3, who="plot_fk",
+        carrier=(('FKResult',), ('frequencies', 'wavenumbers', 'power')),
+        fields=('frequencies', 'wavenumbers', 'power'))
+    if _unpacked is not None:
+        result = frequencies
+        frequencies, wavenumbers, power = _unpacked
     elif isinstance(ax, np.ndarray):
         raise ConfigurationError(
             "plot_fk: ax= received an array — plot_fk(*result) spreads the "
@@ -326,11 +329,23 @@ def _plot_tau_panel(x, taus, amp, ax, *, vmin, vmax, cmap, figsize,
 
 
 @typed_plot_error
-def plot_radon(moveout, taus, R, ax=None, *, kind="linear", vmin=None,
+def plot_radon(moveout, taus=None, R=None, ax=None, *, kind="linear",
+               vmin=None,
                vmax=None, cmap="jet", title=None, figsize=(8, 6),
                show_colorbar=True, **mpl_kw):
     """Image ``|R|`` (moveout on x, intercept time on y). Consumes
     :func:`radon_transform` output."""
+    # One RadonResult in place of the arrays — the same call
+    # ``RadonResult.plot()`` makes, so the two spellings agree.
+    _unpacked = _carrier_or_arrays(
+        moveout, (taus, R,), count=3, who="plot_radon",
+        carrier=(('RadonResult',), ('moveout', 'taus', 'panel')),
+        fields=('moveout', 'taus', 'R'))
+    if _unpacked is not None:
+        moveout, taus, R = _unpacked
+    if taus is None or R is None:
+        raise ConfigurationError(
+            "plot_radon: pass every array, or one RadonResult.")
     amp = _require_image_grid(np.abs(np.asarray(R)), len(moveout), len(taus),
                               "plot_radon", "moveout", "taus")
     xlabel, scale = _RADON_AXIS.get(kind, ("Moveout", 1.0))
@@ -354,11 +369,23 @@ def draw_slowness_line(ax, tau_max, sound_speed, *, color="w", ls="--",
 
 
 @typed_plot_error
-def plot_taup(slownesses, taus, taup, ax=None, *, vmin=None, vmax=None,
+def plot_taup(slownesses, taus=None, taup=None, ax=None, *, vmin=None,
+              vmax=None,
               cmap="jet", sound_speed=None, title=None, figsize=(8, 6),
               show_colorbar=True, **mpl_kw):
     """Image a tau-p panel (slowness s/km on x, intercept time on y). Consumes
     :func:`taup_transform` output."""
+    # One TauPResult in place of the arrays — the same call
+    # ``TauPResult.plot()`` makes, so the two spellings agree.
+    _unpacked = _carrier_or_arrays(
+        slownesses, (taus, taup,), count=3, who="plot_taup",
+        carrier=(('TauPResult',), ('slownesses', 'taus', 'panel')),
+        fields=('slownesses', 'taus', 'taup'))
+    if _unpacked is not None:
+        slownesses, taus, taup = _unpacked
+    if taus is None or taup is None:
+        raise ConfigurationError(
+            "plot_taup: pass every array, or one TauPResult.")
     p_skm = np.asarray(slownesses) * 1000.0      # taup_transform returns s/m
     amp = _require_image_grid(np.abs(np.asarray(taup)), len(slownesses),
                               len(taus), "plot_taup", "slownesses", "taus")
@@ -615,7 +642,7 @@ def plot_sel(sel_pa2s, bands=None, ax=None, *, ref=REFERENCE_PRESSURE_WATER,
 # ── Time-frequency (timefreq) ───────────────────────────────────────────────
 
 @typed_plot_error
-def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
+def plot_spectrogram(frequencies, times=None, Sxx=None, ax=None, *,
                      ref=REFERENCE_PRESSURE_WATER, ymin=1, ymax=None, vmin=0,
                      vmax=200, cmap="jet", title=None, figsize=(10, 6),
                      show_colorbar=True, **mpl_kw):
@@ -626,6 +653,19 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
     the 1 Hz clamp the default applies. A clamp that sits above the record's
     whole band would reverse the axis, so such a band starts at its own first
     positive bin instead."""
+    # One SpectrogramResult in place of the arrays — the same call
+    # ``SpectrogramResult.plot()`` makes, so the two spellings agree.
+    # Recognised only when the other positional arguments are
+    # None, so an explicit array call is never reinterpreted.
+    _unpacked = _carrier_or_arrays(
+        frequencies, (times, Sxx,), count=3, who="plot_spectrogram",
+        carrier=(('SpectrogramResult',), ('frequencies', 'times', 'power')),
+        fields=('frequencies', 'times', 'Sxx'))
+    if _unpacked is not None:
+        frequencies, times, Sxx = _unpacked
+    if times is None or Sxx is None:
+        raise ConfigurationError(
+            "plot_spectrogram: pass every array, or one SpectrogramResult.")
     Sxx_dB = _require_image_grid(power_to_dB(np.asarray(Sxx), ref),
                                  len(frequencies), len(times),
                                  'plot_spectrogram', 'frequencies', 'times')
@@ -649,7 +689,7 @@ def plot_spectrogram(frequencies, times, Sxx, ax=None, *,
 # ── Constant-Q (Brown 1991) ─────────────────────────────────────────────────
 
 @typed_plot_error
-def plot_constant_q_transform(frequencies, coefficients, ax=None, *,
+def plot_constant_q_transform(frequencies, coefficients=None, ax=None, *,
                               label=None, title=None, figsize=(10, 6),
                               **mpl_kw):
     """Line plot of one constant-Q frame's magnitude (log frequency). Consumes
@@ -661,6 +701,17 @@ def plot_constant_q_transform(frequencies, coefficients, ax=None, *,
     :func:`plot_constant_q_psd`, whose estimator applies that conversion; this
     panel shows the raw transform a single frame returns.
     """
+    # One CQTResult in place of the arrays — the same call
+    # ``CQTResult.plot()`` makes, so the two spellings agree.
+    _unpacked = _carrier_or_arrays(
+        frequencies, (coefficients,), count=2, who="plot_constant_q_transform",
+        carrier=(('CQTResult',), ('frequencies', 'coefficients')),
+        fields=('frequencies', 'coefficients'))
+    if _unpacked is not None:
+        frequencies, coefficients = _unpacked
+    if coefficients is None:
+        raise ConfigurationError(
+            "plot_constant_q_transform: pass every array, or one CQTResult.")
     magnitude = np.abs(np.asarray(coefficients))
     if magnitude.ndim != 1 or magnitude.size != len(frequencies):
         raise ConfigurationError(
@@ -681,7 +732,8 @@ def plot_constant_q_transform(frequencies, coefficients, ax=None, *,
 
 
 @typed_plot_error
-def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
+def plot_constant_q_spectrogram(frequencies, times=None, power=None,
+                                ax=None, *,
                                 ref=REFERENCE_PRESSURE_WATER, scaling="spectrum",
                                 vmin=0, vmax=200, cmap="jet", title=None,
                                 figsize=(10, 6), show_colorbar=True, **mpl_kw):
@@ -690,6 +742,17 @@ def plot_constant_q_spectrogram(frequencies, times, power, ax=None, *,
     the same ``scaling`` used there so the unit reads ``Pa²`` (band power) or
     ``Pa²/Hz`` (density)."""
     unit = f"{_ref_label(ref)}{_SCALING_UNIT[scaling]}"
+    # One CQSpectrogramResult in place of the arrays — the same call
+    # ``CQSpectrogramResult.plot()`` makes, so the two spellings agree.
+    _unpacked = _carrier_or_arrays(
+        frequencies, (times, power,), count=3, who="plot_constant_q_spectrogram",
+        carrier=(('CQSpectrogramResult',), ('frequencies', 'times', 'power')),
+        fields=('frequencies', 'times', 'power'))
+    if _unpacked is not None:
+        frequencies, times, power = _unpacked
+    if times is None or power is None:
+        raise ConfigurationError(
+            "plot_constant_q_spectrogram: pass every array, or one CQSpectrogramResult.")
     power_dB = _require_image_grid(power_to_dB(np.asarray(power), ref),
                                    len(frequencies), len(times),
                                    'plot_constant_q_spectrogram',
@@ -765,10 +828,30 @@ def plot_constant_q_ppsd(result, ax=None, *, scaling="spectrum", ymin=0,
 
 
 @typed_plot_error
-def plot_cwt(frequencies, W, sample_rate, ax=None, *, cmap="jet", title=None,
-             figsize=(10, 6), show_colorbar=True, **mpl_kw):
+def plot_cwt(frequencies, W=None, sample_rate=None, ax=None, *, cmap="jet",
+             title=None, figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Scalogram ``|W|`` (time on x, frequency on y). Consumes :func:`cwt`
-    output ``(frequencies, W)``."""
+    output ``(frequencies, W)``.
+
+    Takes either the two arrays plus a rate, ``plot_cwt(f, W, fs)``, or a
+    whole :class:`~uacpy.acoustic_signal.CWTResult` with the rate as a
+    keyword, ``plot_cwt(result, sample_rate=fs)`` — the call
+    ``CWTResult.plot(sample_rate=fs)`` makes.
+
+    ``sample_rate`` stays required in both forms. The time axis is drawn
+    from it and the carrier does not hold one, so defaulting it would
+    invent the axis rather than read it.
+    """
+    _unpacked = _carrier_or_arrays(frequencies, (W,), count=2,
+                                   who='plot_cwt',
+                                   carrier=(('CWTResult',), ('frequencies', 'coefficients')),
+                                   fields=('frequencies', 'coefficients'))
+    if _unpacked is not None:
+        frequencies, W = _unpacked
+    if W is None or sample_rate is None:
+        raise ConfigurationError(
+            "plot_cwt: pass (frequencies, W, sample_rate), or one CWTResult "
+            "with sample_rate= as a keyword.")
     amp = np.abs(np.asarray(W))
     if amp.ndim != 2 or amp.shape[0] != len(frequencies):
         raise ConfigurationError(
@@ -786,10 +869,24 @@ def plot_cwt(frequencies, W, sample_rate, ax=None, *, cmap="jet", title=None,
 
 
 @typed_plot_error
-def plot_wigner_ville(frequencies, times, W, ax=None, *, cmap="jet", title=None,
+def plot_wigner_ville(frequencies, times=None, W=None, ax=None, *,
+                      cmap="jet", title=None,
                       figsize=(10, 6), show_colorbar=True, **mpl_kw):
     """Wigner-Ville distribution image. Consumes :func:`wigner_ville` output
     ``(frequencies, times, W)``."""
+    # One WignerVilleResult in place of the arrays — the same call
+    # ``WignerVilleResult.plot()`` makes, so the two spellings agree.
+    # Recognised only when the other positional arguments are
+    # None, so an explicit array call is never reinterpreted.
+    _unpacked = _carrier_or_arrays(
+        frequencies, (times, W,), count=3, who="plot_wigner_ville",
+        carrier=(('WignerVilleResult',), ('frequencies', 'times', 'distribution')),
+        fields=('frequencies', 'times', 'W'))
+    if _unpacked is not None:
+        frequencies, times, W = _unpacked
+    if times is None or W is None:
+        raise ConfigurationError(
+            "plot_wigner_ville: pass every array, or one WignerVilleResult.")
     W_real = _require_image_grid(np.real(np.asarray(W)), len(frequencies),
                                  len(times), 'plot_wigner_ville',
                                  'frequencies', 'times')
@@ -807,7 +904,23 @@ def plot_wigner_ville(frequencies, times, W, ax=None, *, cmap="jet", title=None,
 @typed_plot_error
 def plot_cepstrum(c, ax=None, *, sample_rate=None, title=None, figsize=(9, 4),
                   **mpl_kw):
-    """Line plot of a cepstrum vs quefrency. Consumes :func:`cepstrum` output."""
+    """Line plot of a cepstrum vs quefrency. Consumes :func:`cepstrum` output.
+
+    Takes either the cepstrum array or a whole
+    :class:`~uacpy.acoustic_signal.ComplexCepstrum`, which is the call
+    ``ComplexCepstrum.plot()`` makes. That carrier is two wide — its second
+    field is the ``delay`` the phase unwrapping removed, which this plot does
+    not draw — so ``plot_cepstrum(*result)`` would land the delay in ``ax=``
+    and is refused by name rather than failing inside matplotlib.
+    """
+    _refuse_spread_carrier(
+        ax, 'plot_cepstrum', 'second field (delay)',
+        also='sample_rate=, which is keyword-only: plot_cepstrum(c, sample_rate=...)')
+    _unpacked = _carrier_or_arrays(c, (), count=1, who='plot_cepstrum',
+                                   carrier=(('ComplexCepstrum',), ('cepstrum',)),
+                                   fields=('cepstrum',))
+    if _unpacked is not None:
+        (c,) = _unpacked
     _require_nonempty('plot_cepstrum', c=c)
     c = np.real(np.asarray(c))
     fig, ax = fig_ax(ax, figsize)
@@ -875,7 +988,7 @@ def plot_angular_spectrum(angles_deg, spectrum, ax=None, *, dB=True, label=None,
 
 @typed_plot_error
 def plot_matched_field(x_m, z_m, surface, ax=None, *, dynamic_range=20.0,
-                       cmap="viridis", true_position=None, mark_peak=True,
+                       cmap=None, true_position=None, mark_peak=True,
                        title=None, figsize=(8, 5), show_colorbar=True,
                        show_legend=True, **mpl_kw):
     """Matched-field ambiguity surface over a replica grid, in dB re its peak.
@@ -936,6 +1049,11 @@ def plot_matched_field(x_m, z_m, surface, ax=None, *, dynamic_range=20.0,
     # log10(0) is -inf plus a RuntimeWarning.
     floor = 10.0 ** (-abs(dynamic_range) / 10.0)
     SdB = 10.0 * np.log10(np.clip(S / peak, floor, None))
+    # One colormap for one quantity: both ambiguity surfaces ask the
+    # style registry rather than naming a literal, so they cannot drift
+    # apart from each other or from ``plot_field(kind='ambiguity')``.
+    if cmap is None:
+        cmap = cmap_for_field('ambiguity', dB=True)
     fig, ax = fig_ax(ax, figsize)
     im = ax.pcolormesh(x / 1000.0, z, SdB, cmap=cmap, vmin=-abs(dynamic_range),
                        vmax=0.0, shading='auto', **mpl_kw)
@@ -975,12 +1093,26 @@ def plot_matched_field(x_m, z_m, surface, ax=None, *, dynamic_range=20.0,
 
 
 @typed_plot_error
-def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, dB=False,
-                   dynamic_range=40.0, cmap="jet",
+def plot_ambiguity(delays_s, doppler_hz=None, chi=None, ax=None, *,
+                   dB=False,
+                   dynamic_range=40.0, cmap=None,
                    title=None, figsize=(8, 6), show_colorbar=True, **mpl_kw):
     """Range-Doppler ambiguity surface ``|chi|``. Consumes
     :func:`ambiguity_function` output. ``dB=True`` shows it relative to its
     peak over ``dynamic_range`` decibels."""
+    # One AmbiguityResult in place of the arrays — the same call
+    # ``AmbiguityResult.plot()`` makes, so the two spellings agree.
+    # Recognised only when the other positional arguments are
+    # None, so an explicit array call is never reinterpreted.
+    _unpacked = _carrier_or_arrays(
+        delays_s, (doppler_hz, chi,), count=3, who="plot_ambiguity",
+        carrier=(('AmbiguityResult',), ('delays_s', 'doppler_hz', 'amplitude')),
+        fields=('delays_s', 'doppler_hz', 'chi'))
+    if _unpacked is not None:
+        delays_s, doppler_hz, chi = _unpacked
+    if doppler_hz is None or chi is None:
+        raise ConfigurationError(
+            "plot_ambiguity: pass every array, or one AmbiguityResult.")
     amp = _require_image_grid(np.abs(np.asarray(chi)), len(doppler_hz),
                               len(delays_s), "plot_ambiguity",
                               "doppler_hz", "delays_s")
@@ -998,6 +1130,20 @@ def plot_ambiguity(delays_s, doppler_hz, chi, ax=None, *, dB=False,
         mpl_kw.setdefault("vmin", -abs(dynamic_range))
         mpl_kw.setdefault("vmax", 0.0)
         label = "|χ| (dB re peak)"
+    # One colormap for one quantity: both ambiguity surfaces ask the style
+    # registry rather than naming a literal, so they cannot drift from each
+    # other or from ``plot_field(kind='ambiguity')``. style.py states why the
+    # map is perceptually ordered rather than diverging.
+    #
+    # ``dB=True`` on both paths, including the linear default, and that is
+    # not a description of the view: |chi| is a magnitude, unsigned at either
+    # scaling, so it wants the quantity's own ordered map both times.
+    # cmap_for_field's dB=False arm returns LINEAR_VIEW_COLORMAP, the signed
+    # diverging map every linear *Field* view takes, which would spend half
+    # its range on negative values this surface cannot hold. Nothing here
+    # varies with ``dB``; the flag selects the map, not the axis.
+    if cmap is None:
+        cmap = cmap_for_field('ambiguity', dB=True)
     fig, ax = fig_ax(ax, figsize)
     im = ax.imshow(amp, aspect="auto", origin="lower",
                    extent=_cell_edge_extent(np.asarray(delays_s) * 1e3,
@@ -1072,7 +1218,7 @@ def plot_coherence(frequencies, coh, ax=None, *, label=None, title=None,
 
 
 @typed_plot_error
-def plot_impulse_response_info(Minfo, Vinfo, g, *, title=None, figsize=(12, 8)):
+def plot_lsfir_diagnostics(Minfo, Vinfo, g, *, title=None, figsize=(12, 8)):
     """LS-FIR diagnostics: information matrix, vector, and impulse response."""
     from matplotlib.gridspec import GridSpec
     fig = plt.figure(figsize=figsize)

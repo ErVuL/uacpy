@@ -10,7 +10,7 @@ construction, and rules each critical angle — clay gets none, being slower
 than the water it is bounced against, so it has an angle of intromission
 instead.
 
-Uses: SoundSpeedProfile.from_isovelocity / from_munk / from_mackenzie ·
+Uses: SoundSpeedProfile.from_isovelocity / from_munk / from_temperature_salinity ·
 ssp.plot(ax=, label=, color=) · visualization.plot_bottom_loss
 """
 
@@ -40,7 +40,7 @@ uacpy.SoundSpeedProfile.from_isovelocity(
         ax=axes[0], label='isovelocity', color='C0')
 uacpy.SoundSpeedProfile.from_munk(depth_max=4000.0, n_points=81).plot(
     ax=axes[0], label='Munk', color='C1')
-uacpy.SoundSpeedProfile.from_mackenzie(depths, temperature, salinity).plot(
+uacpy.SoundSpeedProfile.from_temperature_salinity(depths, temperature, salinity).plot(
     ax=axes[0], label='Mackenzie T,S', color='C2')
 axes[0].set_title('Canonical SSP shapes')
 

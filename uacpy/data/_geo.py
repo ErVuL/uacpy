@@ -424,47 +424,12 @@ def run_boundary_indices(keys) -> 'list[int]':
     return out
 
 
-def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
-    """Depth (m) → pressure (dbar), Leroy & Parthiot (1998) standard ocean.
-
-    JASA 103(3), 1346-1352, eqs. (8)-(11) — ``h(Z,phi) = h(Z,45)·k(Z,phi)``
-    with ``Z`` in metres and ``h`` in MPa, hence the ×100 to dbar. The authors
-    give the fit as accurate to ±500 Pa over the whole depth/latitude range.
-
-    This is the standard ocean: the per-region geopotential corrective term
-    ``delta_h_i`` of their eq. (12) / Table II is not applied, so a basin with
-    a strongly non-standard T/S profile (Mediterranean, Baltic, Black Sea)
-    carries that residual. ``soundspeed_*`` expect dbar.
-    """
-    z = np.asarray(depth_m, dtype=float)
-    phi = np.radians(latitude_deg)
-    g_phi = 9.7803 * (1 + 5.3e-3 * np.sin(phi) ** 2)
-    h45 = (1.00818e-2 * z + 2.465e-8 * z ** 2
-           - 1.25e-13 * z ** 3 + 2.8e-19 * z ** 4)          # MPa
-    k = (g_phi - 2e-5 * z) / (9.80612 - 2e-5 * z)
-    return h45 * k * 100.0                                   # MPa → dbar
-
-
-def pressure_dbar_to_depth(pres_dbar, lat) -> np.ndarray:
-    """Pressure (dbar) → depth (m): Newton inversion of
-    :func:`depth_to_pressure_dbar`.
-
-    Pressure-indexed sources (Argo reports pressure) need depth for a
-    ``SoundSpeedProfile``, and only the depth → pressure direction has a
-    closed form. The derivative is taken as a central difference on
-    :func:`depth_to_pressure_dbar` rather than analytically, so the Leroy &
-    Parthiot coefficients live in exactly one place; a 1 m step is safe
-    because ``h(z)`` is a smooth quartic whose curvature over a metre is
-    negligible against its ~1 dbar/m slope.
-    """
-    p = np.asarray(pres_dbar, dtype=float)
-    z = p * 0.9905                                   # ~1 m per dbar initial guess
-    for _ in range(5):
-        f = depth_to_pressure_dbar(z, lat) - p
-        df = (depth_to_pressure_dbar(z + 1.0, lat)
-              - depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
-        z = z - f / df
-    return z
+# Converting a depth to a pressure is seawater physics, so it lives in
+# uacpy.core.acoustics.seawater, which ``core`` can reach and ``data`` cannot
+# be imported from. Re-exported here for this module's callers.
+from uacpy.core.acoustics.seawater import (          # noqa: E402
+    depth_to_pressure_dbar, pressure_dbar_to_depth,
+)
 
 
 def _adiabatic_gradient(sal, temp, pres):

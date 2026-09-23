@@ -225,19 +225,19 @@ def absorption_models():
     freqs = np.logspace(1, 5.7, 400)
     fig, ax = plt.subplots(figsize=(8.0, 5.0))
 
-    uacpy.Thorp().plot(freqs, ax=ax, label='Thorp')
-    uacpy.FrancoisGarrison(
-        temperature_c=20.0, salinity_psu=35.0, pH=8.0, z_bar_m=50.0,
-    ).plot(freqs, depth=50.0, ax=ax,
-           label='Francois–Garrison, 20 °C / 50 m')
-    uacpy.FrancoisGarrison(
-        temperature_c=4.0, salinity_psu=35.0, pH=8.0, z_bar_m=3000.0,
-    ).plot(freqs, depth=3000.0, ax=ax,
-           label='Francois–Garrison, 4 °C / 3000 m')
-    uacpy.ConstantAbsorption(value_dB_per_wavelength=1.0e-4).plot(
-        freqs, ax=ax, label='ConstantAbsorption, 1e-4 dB/λ')
-    uacpy.Biological(layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)]).plot(
-        freqs, depth=50.0, ax=ax, label='Biological, f0 = 1.5 kHz')
+    uacpy.absorption_thorp(freqs).plot(ax=ax, label='Thorp')
+    uacpy.absorption_francois_garrison(
+        freqs, temperature_c=20.0, salinity_psu=35.0, pH=8.0, z_bar_m=50.0,
+    ).plot(ax=ax, label='Francois–Garrison, 20 °C / 50 m')
+    uacpy.absorption_francois_garrison(
+        freqs, temperature_c=4.0, salinity_psu=35.0, pH=8.0, z_bar_m=3000.0,
+    ).plot(ax=ax, label='Francois–Garrison, 4 °C / 3000 m')
+    uacpy.absorption_constant(
+        freqs, value_dB_per_wavelength=1.0e-4,
+    ).plot(ax=ax, label='ConstantAbsorption, 1e-4 dB/λ')
+    uacpy.absorption_biological(
+        freqs, layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)], depths=50.0,
+    ).plot(ax=ax, label='Biological, f0 = 1.5 kHz')
 
     ax.set_title('Absorption — volume attenuation models', loc='left',
                  fontweight='bold')

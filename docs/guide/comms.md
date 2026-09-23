@@ -1,6 +1,6 @@
 # Communications — digital modems for the underwater channel
 
-> `uacpy.comms` · 78 public names · modulation, coding, equalisation,
+> `uacpy.comms` · 79 public names · modulation, coding, equalisation,
 > synchronisation, OFDM, DSSS, Doppler, and the NATO JANUS standard
 
 `uacpy.comms` is a digital-communications toolbox built for the one channel
@@ -504,6 +504,7 @@ tens of milliseconds, and every sample of it is throughput you do not send.
 | `ofdm_modulate(symbols, n_subcarriers, cp_len)` | map + IFFT + prepend CP |
 | `ofdm_demodulate(rx, n_subcarriers, cp_len, channel=, snr_linear=)` | strip CP + FFT + optional ZF/MMSE |
 | `ofdm_symbol(freq, n_sc, cp)` | one CP-prefixed symbol from one length-`n_sc` spectrum |
+| `subcarrier_response(channel, n_subcarriers)` | `H[k]` on the subcarrier grid — the equalizer's input, unshifted so `k` is the subcarrier index |
 | `equalize_subcarriers(freq, H, snr_linear=None)` | the one-tap-per-subcarrier division on its own |
 | `OFDMTransmitter(modulation, n_subcarriers, cp_len, code=)` | full frame: preamble, pilot, data, guard |
 | `OFDMReceiver(..., snr_linear=).from_passband(samples, fs, fc)` | resample away the common Doppler scale, down-convert, decimate |

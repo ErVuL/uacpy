@@ -233,7 +233,7 @@ range-independent case.
 | `SoundSpeedProfile.from_pairs([(z, c), …])` | measured cast — the common case |
 | `SoundSpeedProfile.from_isovelocity(depth_max, sound_speed=1500.0)` | constant column |
 | `SoundSpeedProfile.from_munk(depth_max, n_points=101)` | deep-water canonical profile |
-| `SoundSpeedProfile.from_mackenzie(depths, T, S)` | from in-situ `T(z)` and `S(z)` |
+| `SoundSpeedProfile.from_temperature_salinity(depths, T, S)` | from in-situ `T(z)` and `S(z)` |
 | `SoundSpeedProfile.from_2d(depths, ranges, matrix)` | range-dependent `c(z, r)` |
 
 `Environment(ssp=…)` coerces the shorthands for you: `None` → isovelocity at
@@ -566,9 +566,9 @@ it with a warning naming what was dropped.
 
 What `Surface` and `altimetry` between them do **not** carry is a bubble layer.
 Wind-driven bubbles change the sound speed in the top few metres — a void
-fraction of only 1e-6 drops `bubble_soundspeed` by 15.5 m/s (1539.1 → 1523.6 at
+fraction of only 1e-6 drops `bubble_sound_speed` by 15.5 m/s (1539.1 → 1523.6 at
 its default reference) — and add an excess attenuation no boundary property
-reproduces. `uacpy.core.acoustics` has `bubble_soundspeed`, `bubble_resonance`
+reproduces. `uacpy.core.acoustics` has `bubble_sound_speed`, `bubble_resonance`
 and `bubble_surface_loss` for quantifying this by hand, but none of the three
 feeds an `Environment`: they are calculators, not carriers. Note also that
 `bubble_surface_loss` returns a per-bounce amplitude multiplier in `(0, 1]` and
@@ -614,19 +614,29 @@ evaluated per bin on a broadband sweep.
 ```python
 freqs = np.logspace(1, 5.7, 400)
 
-uacpy.Thorp().plot(freqs, label='Thorp')
-uacpy.FrancoisGarrison(temperature_c=20.0, salinity_psu=35.0,
-                       pH=8.0, z_bar_m=50.0).plot(freqs, depth=50.0)
-uacpy.FrancoisGarrison(temperature_c=4.0, salinity_psu=35.0,
-                       pH=8.0, z_bar_m=3000.0).plot(freqs, depth=3000.0)
-uacpy.ConstantAbsorption(value_dB_per_wavelength=1.0e-4).plot(freqs)
-uacpy.Biological(layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)]).plot(freqs, depth=50.0)
+uacpy.absorption_thorp(freqs).plot(label='Thorp')
+uacpy.absorption_francois_garrison(freqs, temperature_c=20.0,
+                                   salinity_psu=35.0, pH=8.0,
+                                   z_bar_m=50.0).plot()
+uacpy.absorption_francois_garrison(freqs, temperature_c=4.0,
+                                   salinity_psu=35.0, pH=8.0,
+                                   z_bar_m=3000.0).plot()
+uacpy.absorption_constant(freqs, value_dB_per_wavelength=1.0e-4).plot()
+uacpy.absorption_biological(freqs, layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)],
+                            depths=50.0).plot()
 ```
 
 ![Absorption models](figures/env_absorption.png)
 
-`Absorption.plot()` requires `frequencies` because absorption *is* a function
-of frequency, and takes `depth=` for the depth-dependent models.
+Evaluating and drawing are separate steps. `model.alpha(frequencies)` returns
+an `AbsorptionCoefficient` — α in stated units, carrying the frequency axis and
+the model that made it — and the carrier draws itself. `depths=` takes a scalar
+(evaluate there, one curve) or a sequence (a depth axis, drawn as an α(f, z)
+heatmap); without it, each model uses its own reference depth, which for
+Francois–Garrison is its `z_bar_m`. Every model has both spellings — `absorption_thorp`,
+`absorption_francois_garrison`, `absorption_biological` and
+`absorption_constant` are the function forms of the four classes, and return
+the same carrier.
 
 Reading the curves:
 

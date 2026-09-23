@@ -48,11 +48,6 @@ def reflection(bottom, frequency=200.0):
     return Bounce(**GRID).run(seabed(bottom), source, PROBE)
 
 
-def critical_angle(sound_speed):
-    """Grazing angle below which a wave in the water cannot enter ``sound_speed``."""
-    return np.degrees(np.arccos(WATER_SPEED / sound_speed))
-
-
 def reflection_coefficient():
     """The canonical one-liner: |R(θ)| and its phase, from ``.plot()``."""
     sand = uacpy.BoundaryProperties(
@@ -81,7 +76,7 @@ def attenuation_ladder():
         ))
         ax.plot(rc.theta, rc.R, style, lw=1.6,
                 label=f'α = {alpha:g} dB/λ')
-    theta_c = critical_angle(1650.0)
+    theta_c = uacpy.critical_angle(1650.0, WATER_SPEED)
     ax.axvline(theta_c, color='0.35', lw=1.0,
                label=f'critical angle {theta_c:.1f}°')
     ax.set_xlim(0.0, 90.0)
@@ -111,7 +106,7 @@ def material_presets():
         ax.plot(rc.theta, rc.R, color=colour, lw=1.6,
                 label=f'{name} ({bottom.sound_speed:.0f} m/s)')
         if bottom.sound_speed > WATER_SPEED:
-            theta_c = critical_angle(bottom.sound_speed)
+            theta_c = uacpy.critical_angle(bottom.sound_speed, WATER_SPEED)
             ax.plot([theta_c], [np.interp(theta_c, rc.theta, rc.R)],
                     'o', color=colour, ms=5.0)
     ax.set_xlim(0.0, 90.0)
@@ -143,8 +138,8 @@ def shear_loss():
         ax_r.plot(rc.theta, rc.R, style, lw=1.6, label=label)
         ax_p.plot(rc.theta, np.degrees(rc.phi), style, lw=1.6, label=label)
 
-    theta_s = critical_angle(elastic.shear_speed)
-    theta_p = critical_angle(elastic.sound_speed)
+    theta_s = uacpy.critical_angle(elastic.shear_speed, WATER_SPEED)
+    theta_p = uacpy.critical_angle(elastic.sound_speed, WATER_SPEED)
     for ax in (ax_r, ax_p):
         ax.axvline(theta_s, color='0.35', lw=1.0,
                    label=f'shear critical {theta_s:.0f}°')

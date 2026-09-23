@@ -7,9 +7,13 @@ bound a scan — ``plane_wave_array_gain``, ``matched_replica_gain`` and
 ``independent_beams``.
 """
 
+import re
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+
+from uacpy import acoustic_signal as N
 
 from uacpy.acoustic_signal import (
     bartlett_spectrum,
@@ -1261,3 +1265,114 @@ class TestBeamformValidatesOwnArguments:
         snr, angles, peak = beamform(np.ones((4, 3), dtype=complex),
                                      np.arange(4.0), 100.0)
         assert snr.shape == (angles.size, 3) and np.isfinite(peak)
+
+
+class TestSnapshotsBridgeARecordToTheCovarianceEstimators:
+    """From what an array records to what the covariance estimators take.
+
+    ``sample_covariance`` averages over snapshots, but an array delivers a
+    real time series per element. Closing that by hand means segmenting,
+    windowing, transforming, reading one bin and transposing — five steps,
+    and the last two are where it goes wrong silently: the record is
+    ``(n_samples, n_elements)`` while the covariance wants
+    ``(n_elements, n_snapshots)``, and the bin that answers the request is
+    not the frequency requested.
+    """
+
+    FS, N_CH, N_T, C, DX = 2000.0, 12, 8192, 1500.0, 1.0
+    TRUE_BEARING = 15.0
+
+    @classmethod
+    def _record(cls, f0=200.0, noise=0.5, seed=0):
+        """A plane wave from ``TRUE_BEARING``, built with a true time delay
+        per element so the array phase is ``2*pi*f*tau`` at every frequency,
+        not only at ``f0``. A single-frequency steering vector applied to a
+        waveform is only a plane wave at that one frequency, which is a
+        fixture that quietly fails for anything broadband."""
+        rng = np.random.default_rng(seed)
+        pos = np.arange(cls.N_CH) * cls.DX
+        tau = pos * np.sin(np.radians(cls.TRUE_BEARING)) / cls.C
+        k = np.fft.rfftfreq(cls.N_T, 1.0 / cls.FS)
+        spec = np.zeros(k.size, complex)
+        spec[int(round(f0 * cls.N_T / cls.FS))] = cls.N_T / 2
+        rec = np.fft.irfft(
+            spec[:, None] * np.exp(-2j * np.pi * k[:, None] * tau[None, :]),
+            n=cls.N_T, axis=0)
+        rec = rec / np.sqrt(np.mean(rec ** 2)) * 3.0
+        return pos, rec + noise * rng.standard_normal(rec.shape)
+
+    def test_it_transposes_the_record_into_snapshot_orientation(self):
+        _pos, rec = self._record()
+        result = N.snapshots(rec, self.FS, 200.0, nperseg=1024)
+        assert rec.shape == (self.N_T, self.N_CH)
+        assert result.data.shape[0] == self.N_CH
+        assert np.iscomplexobj(result.data)
+
+    def test_the_snapshot_count_follows_the_segmentation(self):
+        _pos, rec = self._record()
+        for nperseg, noverlap in ((1024, 512), (1024, 0), (512, 256)):
+            got = N.snapshots(rec, self.FS, 200.0, nperseg=nperseg,
+                              noverlap=noverlap).data.shape[1]
+            want = len(range(0, self.N_T - nperseg + 1, nperseg - noverlap))
+            assert got == want, (nperseg, noverlap, got, want)
+
+    def test_it_returns_the_bin_it_used_not_the_one_requested(self):
+        """The trap this exists to close: a 1024-point segment at 2 kHz
+        resolves 1.95 Hz, so 200 Hz is answered at 199.22 Hz."""
+        _pos, rec = self._record()
+        result = N.snapshots(rec, self.FS, 200.0, nperseg=1024)
+        assert result.frequency != 200.0
+        assert result.frequency == pytest.approx(199.21875)
+        # and it is the nearest bin, not merely a nearby one
+        bins = np.fft.rfftfreq(1024, 1.0 / self.FS)
+        assert result.frequency == pytest.approx(
+            bins[int(np.argmin(np.abs(bins - 200.0)))])
+
+    def test_the_returned_frequency_is_the_one_the_replicas_need(self):
+        """Steering with the bin recovers the bearing; the whole point of
+        handing it back is that the replica cannot drift from the data."""
+        pos, rec = self._record()
+        f_bin, data = N.snapshots(rec, self.FS, 200.0, nperseg=1024)
+        angles = np.linspace(-60.0, 60.0, 1201)
+        surface = np.asarray(N.bartlett_spectrum(
+            N.sample_covariance(data, diagonal_loading=1e-3),
+            N.steering_vectors(pos, angles, f_bin, self.C)), float)
+        peak = angles[int(np.argmax(surface))]
+        assert abs(peak - self.TRUE_BEARING) < 0.5, peak
+
+    def test_covariance_is_the_same_as_calling_sample_covariance(self):
+        _pos, rec = self._record()
+        result = N.snapshots(rec, self.FS, 200.0, nperseg=1024)
+        assert np.array_equal(result.covariance(),
+                              N.sample_covariance(result.data))
+        assert np.array_equal(
+            result.covariance(diagonal_loading=0.05),
+            N.sample_covariance(result.data, diagonal_loading=0.05))
+
+    def test_the_result_unpacks_as_frequency_and_data(self):
+        _pos, rec = self._record()
+        frequency, data = N.snapshots(rec, self.FS, 200.0, nperseg=1024)
+        assert np.isscalar(frequency) or np.ndim(frequency) == 0
+        assert data.ndim == 2
+
+    @pytest.mark.parametrize('kwargs, fragment', [
+        (dict(nperseg=99999), 'must be in [1, n_samples'),
+        (dict(nperseg=1024, noverlap=1024), 'must be in [0, nperseg'),
+        (dict(nperseg=1024, noverlap=-1), 'must be in [0, nperseg'),
+    ])
+    def test_a_segmentation_that_cannot_work_is_refused(self, kwargs,
+                                                        fragment):
+        _pos, rec = self._record()
+        with pytest.raises(ConfigurationError, match=re.escape(fragment)):
+            N.snapshots(rec, self.FS, 200.0, **kwargs)
+
+    def test_a_frequency_off_the_record_is_refused(self):
+        """Above Nyquist there is no bin to read, and rounding to one would
+        answer a question the record cannot answer."""
+        _pos, rec = self._record()
+        with pytest.raises(ConfigurationError, match='Nyquist'):
+            N.snapshots(rec, self.FS, 1500.0, nperseg=1024)
+
+    def test_a_one_dimensional_record_is_refused(self):
+        with pytest.raises(ConfigurationError, match='must be 2-D'):
+            N.snapshots(np.zeros(1024), self.FS, 200.0, nperseg=512)

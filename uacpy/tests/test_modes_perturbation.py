@@ -271,7 +271,7 @@ class TestLeakyModesGetNoBottomTerm:
     That number carries units of 1/m, so the invented loss scaled with the
     library's length unit: the identical physics expressed in km came back
     exactly 1000x different. Physically there is no finite first-order
-    bottom-absorption perturbation for a radiating mode — the tail integral
+    bottom-attenuation perturbation for a radiating mode — the tail integral
     ``int_D^inf psi^2 dz`` diverges, so the closed form ``psi^2(D)/(2*gamma)``
     this line specialises does not exist."""
 
@@ -975,3 +975,116 @@ class TestUnsolvableModesGetNoAttenuation:
         out = _pekeris_modes(n_modes=3).with_attenuation(
             0.01, sound_speed_z=1500.0, density_z=1.0)
         assert np.isfinite(out.k.imag).all()
+
+
+class TestTheGrazingAngleHasOneHomeAndOneGuard:
+    """arccos(c/v_m) was spelled twice — in `Modes.excitation` and again in
+    `plot_mode_excitation` — and only the plotter's copy knew that a mode
+    whose phase speed is below the reference is evanescent there and has no
+    real angle. The carrier clipped instead, stacking those modes on
+    broadside, where a patterned source multiplied them by the notch.
+    """
+
+    @staticmethod
+    def _modes():
+        from uacpy.core.results.modes import Modes
+        z = np.linspace(0.0, 100.0, 51)
+        # Three modes: two faster than the 1500 m/s reference, one slower.
+        k = 2 * np.pi * 100.0 / np.array([1600.0, 1520.0, 1400.0])
+        phi = np.stack([np.sin((m + 1) * np.pi * z / 100.0)
+                        for m in range(3)], axis=1)
+        return Modes(k=k, phi=phi, depths=z, frequencies=100.0, model='Test')
+
+    def test_a_mode_below_the_reference_speed_has_no_angle(self):
+        a = self._modes().grazing_angles(1500.0)
+        assert np.isfinite(a[0]) and np.isfinite(a[1])
+        assert np.isnan(a[2]), 'an evanescent mode must not be clipped to 0 deg'
+
+    def test_the_angle_is_arccos_of_the_speed_ratio(self):
+        m = self._modes()
+        speeds = np.asarray(m.compute_phase_speeds(), dtype=float)
+        a = m.grazing_angles(1500.0)
+        np.testing.assert_allclose(
+            a[0], np.degrees(np.arccos(1500.0 / speeds[0])), rtol=1e-12)
+
+    def test_a_non_positive_reference_speed_is_refused(self):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='must be > 0'):
+            self._modes().grazing_angles(0.0)
+
+
+def test_the_dropped_mode_warning_can_actually_be_emitted():
+    """The warning path of `plot_mode_excitation`, executed.
+
+    When the duplicated angle formula was removed from the plotter, the local
+    `speeds` went with it — but the warning below still interpolated
+    `speeds.size`, so the branch raised `NameError` the moment a mode was
+    dropped. Nothing caught it: the warning only fires when a mode sits below
+    the reference speed, and no test had put one there. This one does.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import uacpy
+    from uacpy.core.results.modes import Modes
+    from uacpy.visualization import plot_mode_excitation
+
+    z = np.linspace(0.0, 100.0, 51)
+    # Phase speeds 1600 / 1520 / 1400 m/s: the last is below the reference.
+    k = 2 * np.pi * 100.0 / np.array([1600.0, 1520.0, 1400.0])
+    phi = np.stack([np.sin((m + 1) * np.pi * z / 100.0) for m in range(3)],
+                   axis=1)
+    modes = Modes(k=k, phi=phi, depths=z, frequencies=100.0, model='Test')
+    src = uacpy.Source(depths=50.0, frequencies=100.0)
+
+    with pytest.warns(UserWarning, match='have no real grazing angle'):
+        fig, ax = plot_mode_excitation(modes, src, sound_speed=1500.0)
+    plt.close(fig)
+
+
+def test_a_patterned_source_gets_one_warning_for_the_dropped_modes():
+    """One condition, one warning.
+
+    `Modes.excitation` warns that an evanescent mode comes back as NaN
+    rather than weighted at a fabricated angle; `plot_mode_excitation` warned
+    again that the same modes, against the same reference speed, are not
+    drawn. Both fired for the only caller that produces both, and two
+    warnings for one condition teach the reader to skip both. The plotter now
+    speaks only for the case `excitation` is silent about — an un-patterned
+    source.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import uacpy
+    from uacpy.core.results.modes import Modes
+    from uacpy.visualization import plot_mode_excitation
+
+    z = np.linspace(0.0, 100.0, 51)
+    k = 2 * np.pi * 100.0 / np.array([1600.0, 1520.0, 1400.0])
+    phi = np.stack([np.sin((m + 1) * np.pi * z / 100.0) for m in range(3)],
+                   axis=1)
+    modes = Modes(k=k, phi=phi, depths=z, frequencies=100.0, model='Test')
+
+    plain = uacpy.Source(depths=50.0, frequencies=100.0)
+    # A flat two-point pattern: directional as far as the code path is
+    # concerned (excitation takes the patterned branch), and 0 dB at every
+    # angle, so it changes no value and the warning is the only difference.
+    shaded = uacpy.Source(depths=[45.0, 50.0, 55.0], frequencies=100.0,
+                          beam_pattern=np.array([[-90.0, 0.0], [90.0, 0.0]]))
+
+    counts = {}
+    for label, src in (('plain', plain), ('shaded', shaded)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            fig, _ax = plot_mode_excitation(modes, src, sound_speed=1500.0)
+            plt.close(fig)
+        counts[label] = [str(w.message) for w in caught
+                         if 'grazing angle' in str(w.message)]
+
+    assert len(counts['plain']) == 1, counts['plain']
+    assert 'are not drawn' in counts['plain'][0]
+    # The patterned source still learns about the same modes — from the
+    # carrier, which says what happened to their values.
+    assert len(counts['shaded']) == 1, counts['shaded']
+    assert 'returned as NaN' in counts['shaded'][0]

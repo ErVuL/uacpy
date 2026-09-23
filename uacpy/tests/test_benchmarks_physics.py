@@ -18,7 +18,7 @@ import pytest
 
 pytestmark = [pytest.mark.benchmark]
 
-from uacpy.core.acoustics import soundspeed
+from uacpy.core.acoustics import sound_speed_mackenzie
 
 
 def _mackenzie(T, S, D):
@@ -30,15 +30,15 @@ def _mackenzie(T, S, D):
 
 
 def test_mackenzie_published_check_value():
-    """uacpy.soundspeed (Mackenzie 1981) reproduces the paper's check value
+    """uacpy.sound_speed_mackenzie (Mackenzie 1981) reproduces the paper's check value
     c = 1550.744 m/s at T=25 °C, S=35 ppt, D=1000 m — the standard way a
     Mackenzie implementation is validated."""
-    c = soundspeed(temperature=25.0, salinity=35.0, depth=1000.0)
+    c = sound_speed_mackenzie(temperature=25.0, salinity=35.0, depth=1000.0)
     assert c == pytest.approx(1550.744, abs=1e-3), f"got {c} m/s"
 
 
-def test_soundspeed_matches_mackenzie_equation_table():
-    """uacpy.soundspeed reproduces the published nine-term Mackenzie equation
+def test_sound_speed_mackenzie_matches_the_equation_table():
+    """uacpy.sound_speed_mackenzie reproduces the published nine-term Mackenzie equation
     across a (T, S, D) table — an independent-transcription cross-check that
     catches a wrong coefficient (which would shift only some rows)."""
     table = [
@@ -47,7 +47,7 @@ def test_soundspeed_matches_mackenzie_equation_table():
         (30.0, 40.0, 100.0), (2.0, 35.0, 4000.0),
     ]
     for T, S, D in table:
-        got = soundspeed(temperature=T, salinity=S, depth=D)
+        got = sound_speed_mackenzie(temperature=T, salinity=S, depth=D)
         assert got == pytest.approx(_mackenzie(T, S, D), abs=1e-6), \
             f"T={T},S={S},D={D}: uacpy={got} vs Mackenzie eq {_mackenzie(T, S, D)}"
 
@@ -95,13 +95,13 @@ def test_constant_absorption_adds_the_expected_loss(model_name):
 
 def test_unesco_and_delgrosso_documented_pair_at_15c_35psu_surface():
     """DOCUMENTATION.md §14 quotes this pair as its worked example:
-    ``soundspeed_unesco(15, 35, 0)`` = 1506.675 m/s and
-    ``soundspeed_delgrosso(15, 35, 0)`` = 1506.667 m/s — the two standard
+    ``sound_speed_unesco(15, 35, 0)`` = 1506.675 m/s and
+    ``sound_speed_delgrosso(15, 35, 0)`` = 1506.667 m/s — the two standard
     algorithms (UNESCO/Chen & Millero; Del Grosso NRL II, σ = 0.05 m/s)
     agreeing to ~8 mm/s at the reference point. abs=1e-3 is the doc's own
     rounding (the values print as 1506.6746 / 1506.6666)."""
-    from uacpy.core.acoustics import soundspeed_delgrosso, soundspeed_unesco
-    assert soundspeed_unesco(15.0, 35.0, 0.0) == pytest.approx(1506.675,
+    from uacpy.core.acoustics import sound_speed_delgrosso, sound_speed_unesco
+    assert sound_speed_unesco(15.0, 35.0, 0.0) == pytest.approx(1506.675,
                                                                abs=1e-3)
-    assert soundspeed_delgrosso(15.0, 35.0, 0.0) == pytest.approx(1506.667,
+    assert sound_speed_delgrosso(15.0, 35.0, 0.0) == pytest.approx(1506.667,
                                                                   abs=1e-3)

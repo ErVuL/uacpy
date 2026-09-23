@@ -522,3 +522,169 @@ class TestFrancoisGarrisonPhScale:
         assert fg.ph_nbs > 7.9
         assert build_francois_garrison([0.0, 100.0], [10.0, 8.0],
                                        [35.0, 35.0]).ph_scale == 'nbs'
+
+
+class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
+    """alpha(f, z) through one door, in whichever units are asked for.
+
+    Before this, the package exposed the same formula twice and the two were
+    transposes of each other: ``francois_garrison_dB_per_km`` vectorised over
+    frequency with a scalar depth, ``FrancoisGarrison.alpha_dB_per_m``
+    vectorised over depth with a scalar frequency, and an array frequency into
+    the second raised ``TypeError: only 0-dimensional arrays can be converted
+    to Python scalars``. Neither could answer alpha(f, z).
+    """
+
+    FG = dict(temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=100.0)
+    F = np.array([1e3, 1e4, 1e5])
+
+    def test_an_array_of_frequencies_is_evaluated_elementwise(self):
+        """One value per frequency, from one call."""
+        from uacpy.core.absorption import Thorp
+        a = Thorp().alpha(self.F)
+        assert a.values.shape == (3,)
+
+    def test_both_axes_together_give_a_depth_by_frequency_grid(self):
+        """Depth-first, the shape convention the package uses everywhere."""
+        from uacpy.core.absorption import absorption_francois_garrison
+        z = np.array([0.0, 50.0, 100.0, 200.0])
+        a = absorption_francois_garrison(self.F, depths=z, **self.FG)
+        assert a.values.shape == (z.size, self.F.size)
+        assert a.n_depths == 4 and a.n_frequencies == 3
+        assert a.is_depth_dependent
+
+    def test_the_grid_agrees_with_both_old_doors_elementwise(self):
+        """The row-and-column check that would have caught the transpose:
+        every cell must equal what the frequency-vectorised free function and
+        the depth-vectorised method each return for that cell."""
+        from uacpy.core.absorption import (absorption_francois_garrison,
+                                           francois_garrison_dB_per_km,
+                                           FrancoisGarrison)
+        z = np.array([0.0, 100.0, 250.0])
+        grid = absorption_francois_garrison(self.F, depths=z, **self.FG).values
+        for j, f in enumerate(self.F):                     # column <- old method
+            col = FrancoisGarrison(**self.FG).alpha_dB_per_m(f, z) * 1000.0
+            np.testing.assert_allclose(grid[:, j], col, rtol=1e-12)
+        for i, zz in enumerate(z):                         # row <- old function
+            row = francois_garrison_dB_per_km(
+                self.F, temperature=self.FG['temperature_c'],
+                salinity=self.FG['salinity_psu'], pH=self.FG['pH'], depth=zz)
+            np.testing.assert_allclose(grid[i, :], row, rtol=1e-12)
+
+    def test_without_depths_francois_garrison_sits_at_its_own_z_bar(self):
+        """``z_bar_m`` is the model's own depth; a caller-supplied axis
+        overrides it (the class docstring says so), and no axis means the
+        model's own value rather than an invented surface."""
+        from uacpy.core.absorption import absorption_francois_garrison
+        flat = absorption_francois_garrison(self.F, **self.FG)
+        at_zbar = absorption_francois_garrison(
+            self.F, depths=[self.FG['z_bar_m']], **self.FG)
+        assert not flat.is_depth_dependent
+        np.testing.assert_allclose(flat.values, at_zbar.values[0], rtol=1e-12)
+
+    def test_the_two_spellings_are_one_evaluator(self):
+        from uacpy.core.absorption import absorption_thorp, Thorp
+        np.testing.assert_array_equal(absorption_thorp(self.F).values,
+                                      Thorp().alpha(self.F).values)
+
+    def test_the_carrier_records_which_formula_made_it(self):
+        """Provenance, mirroring ``SoundSpeedProfile.formula``."""
+        from uacpy.core.absorption import (absorption_thorp,
+                                           absorption_francois_garrison)
+        assert absorption_thorp(self.F).model == 'thorp'
+        assert absorption_francois_garrison(
+            self.F, **self.FG).model == 'francois_garrison'
+
+    def test_units_are_carried_not_baked_into_a_name(self):
+        from uacpy.core.absorption import absorption_thorp
+        a = absorption_thorp(self.F)
+        assert a.units == 'dB/km'
+        np.testing.assert_allclose(a.to_units('dB/m').values,
+                                   a.values / 1000.0, rtol=1e-12)
+        assert a.to_units('dB/m').units == 'dB/m'
+
+    def test_a_frequency_dependent_unit_needs_the_axis_the_carrier_keeps(self):
+        """The structural reason for a carrier rather than a bare array:
+        dB/wavelength, Q and L cannot be evaluated once the frequency axis is
+        gone. Converting to one must use each frequency, not a single value."""
+        from uacpy.core.absorption import absorption_thorp
+        from uacpy.core.absorption import convert_attenuation_units
+        a = absorption_thorp(self.F)
+        got = a.to_units('dB/wavelength', sound_speed=1500.0).values
+        want = [float(convert_attenuation_units(v, f, 'dB/km', 'dB/wavelength',
+                                                sound_speed=1500.0))
+                for v, f in zip(a.values, self.F)]
+        np.testing.assert_allclose(got, want, rtol=1e-12)
+
+    def test_francois_garrison_refuses_to_invent_an_ocean(self):
+        """The kernel defaults T/S/pH/depth; the function does not. F&G's
+        answer is a statement about a particular ocean."""
+        from uacpy.core.absorption import absorption_francois_garrison
+        with pytest.raises(TypeError):
+            absorption_francois_garrison(self.F)
+
+
+def test_every_absorption_model_has_a_function_spelling():
+    """Four models, four functions — no model you have to remember is special.
+
+    The first draft gave `Thorp` and `FrancoisGarrison` a function form and
+    left `Biological` and `ConstantAbsorption` reachable only as classes, on
+    the reasoning that a layer list and a scalar "are not a frequency-grid
+    call". They are ordinary parameters; the asymmetry was a leftover from a
+    registry design that no longer exists, and it cost a reader one special
+    case to memorise. This fails if a fifth model arrives without one.
+    """
+    import inspect
+    import uacpy.core.absorption as A
+    concrete = {c for c in vars(A).values()
+                if inspect.isclass(c) and issubclass(c, A.Absorption)
+                and c is not A.Absorption}
+    have = {name[len('absorption_'):] for name in vars(A)
+            if name.startswith('absorption_') and callable(getattr(A, name))}
+    want = {c(**{f.name: _SAMPLE[f.name] for f in dataclasses.fields(c)
+                 if f.name in _SAMPLE})._model_name()
+            if c is not A.FrancoisGarrison else 'francois_garrison'
+            for c in concrete}
+    assert want <= have, f"models with no absorption_* function: {want - have}"
+
+
+#: Minimal constructor arguments for the models the symmetry test builds.
+_SAMPLE = {'temperature_c': 10.0, 'salinity_psu': 35.0, 'pH': 8.0,
+           'z_bar_m': 100.0, 'layers': [(20.0, 80.0, 1500.0, 4.0, 0.02)],
+           'value_dB_per_wavelength': 1e-4}
+
+
+def test_the_two_formula_families_are_reached_the_same_way():
+    """Sound speed and absorption are the same shape — a family of named
+    equations, a registry, a carrier — so they must import the same way.
+
+    They did not. `uacpy.absorption_thorp` resolved while
+    `uacpy.sound_speed_teos10` did not, because the absorption functions were
+    exported beside `Thorp`/`FrancoisGarrison` and the sound-speed ones were
+    left under `uacpy.acoustics`. Same shape, two import paths, and nothing
+    noticed until someone asked where a file was.
+
+    `density` is deliberately NOT promoted: a bare `uacpy.density` would be
+    seawater density sitting next to `BoundaryProperties(density=)`, which is
+    the seabed's.
+    """
+    import uacpy
+    from uacpy.core.acoustics.seawater import SOUND_SPEED_FORMULAS
+    import uacpy.core.absorption as absorption_module
+
+    speeds = {f'sound_speed_{name}' for name in SOUND_SPEED_FORMULAS}
+    absorptions = {n for n in dir(absorption_module)
+                   if n.startswith('absorption_')
+                   and callable(getattr(absorption_module, n))}
+
+    for family, names in (('sound speed', speeds), ('absorption', absorptions)):
+        missing = {n for n in names if not hasattr(uacpy, n)}
+        assert not missing, (
+            f'{family}: {sorted(missing)} is not reachable as uacpy.<name>, '
+            f'while the other family is')
+        assert names <= set(uacpy.__all__), (
+            f'{family}: reachable but absent from uacpy.__all__')
+
+    assert not hasattr(uacpy, 'density'), (
+        'uacpy.density would collide in meaning with '
+        'BoundaryProperties(density=), which is the seabed"s')

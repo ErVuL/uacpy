@@ -56,12 +56,19 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, freq_title=None,
     ax[0].set_title(_title_or(title_delay, "Channel impulse response"),
                     loc="left")
     ax[0].grid(alpha=0.3)
-    # h is complex (baseband IR): use the full FFT, not rfft (which rejects
-    # complex input), and fftshift so |H(f)| is centred on 0 Hz.
-    nfft = max(1024, 2 * h.size)
-    f = np.fft.fftshift(np.fft.fftfreq(nfft, d=1.0 / fs))
-    H = 20 * np.log10(np.abs(np.fft.fftshift(np.fft.fft(h, nfft))) + 1e-12)
-    ax[1].plot(f, H, **mpl_kw)
+    # Deferred into the body, like every compute-side import in this
+    # module: at file scope it pulls uacpy.acoustic_signal — and scipy.signal
+    # behind it — into every ``import uacpy.visualization``, which
+    # test_importing_the_plotting_surface_leaves_the_comms_toolkit_unloaded
+    # refuses.
+    from uacpy.acoustic_signal.system import channel_response
+    # The transform is public, so a reader can get these numbers without
+    # drawing them: it picks the two-sided FFT and the zero-padding, and
+    # returns complex H. The dB floor is the plotter's, because it is a
+    # drawing decision — it sets how deep a null is painted, and 20*log10 of
+    # a perfect null is -inf, which no axis can show.
+    f, H = channel_response(h, fs)
+    ax[1].plot(f, 20 * np.log10(np.abs(H) + 1e-12), **mpl_kw)
     ax[1].set_xlabel("Frequency (Hz)")
     ax[1].set_ylabel("|H(f)| (dB)")
     ax[1].set_title(_title_or(title_freq, "Frequency response"), loc="left")
@@ -127,8 +134,17 @@ def plot_sync_metric(metric, ax=None, *, threshold=None, title=None,
 def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
                      figsize=(8, 3.5), **mpl_kw):
     """Channel magnitude across the OFDM subcarriers."""
-    nsc = int(n_subcarriers)
-    H = np.fft.fft(np.asarray(channel, dtype=complex), nsc)
+    # Deferred into the body: a module-scope import here pulls the whole
+    # comms toolkit into every ``import uacpy.visualization``, which is the
+    # defect test_importing_the_plotting_surface_leaves_the_comms_toolkit_
+    # unloaded exists to catch.
+    from uacpy.comms.modulate import subcarrier_response
+    # comms owns the subcarrier grid, including the unshifted indexing
+    # ofdm_modulate/ofdm_demodulate address k by, so the plotter asks for it
+    # rather than repeating the DFT: the same expression used to sit here and
+    # inside ofdm_demodulate's equalizer, with no public door to either.
+    H = subcarrier_response(channel, n_subcarriers)
+    nsc = H.size
     fig, ax = fig_ax(ax, figsize)
     # Unshifted, so index k is the subcarrier ``ofdm_modulate`` /
     # ``ofdm_demodulate`` address as k.

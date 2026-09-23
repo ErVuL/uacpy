@@ -23,9 +23,6 @@ from typing import Union
 import numpy as np
 
 from uacpy._log import log_message
-from uacpy.core.acoustics import (
-    soundspeed_delgrosso, soundspeed_teos10, soundspeed_unesco,
-)
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
                                    FileFormatError)
@@ -46,8 +43,11 @@ DEFAULT_MAX_DISTANCE_KM = 250.0
 # temporal slack here than for the smoother daily-mean Copernicus model
 # (DEFAULT_MAX_DAYS=31). The tolerance tracks how slowly the field varies.
 DEFAULT_MAX_DAYS = 15
-_FORMULAS = {'unesco': soundspeed_unesco, 'delgrosso': soundspeed_delgrosso,
-             'teos10': soundspeed_teos10}
+# Imported, never redefined, so every fetcher accepts the same set of
+# formula names.
+from uacpy.data.sound_speed import (           # noqa: E402
+    _FORMULAS, DEFAULT_SOUND_SPEED_FORMULA,
+)
 _GOOD_QC = {'1', '2'}                       # good / probably-good Argo QC flags
 # ERDDAP returns columns in the order requested, and the rows below are unpacked
 # positionally, so the header is checked against this list before it is trusted.
@@ -205,7 +205,7 @@ def fetch_argo_profile(
 
 def fetch_ssp_argo(
     point: Coordinate, *, date,
-    formula: str = 'teos10',
+    formula: str = DEFAULT_SOUND_SPEED_FORMULA,
     max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
     max_days: int = DEFAULT_MAX_DAYS,
     base_url: str = ARGO_ERDDAP_URL,

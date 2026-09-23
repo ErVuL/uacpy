@@ -47,6 +47,72 @@ rays.plot(env=env, ax=axes[1][1], show_receivers=False, show_legend=False,
           title='rays.plot(env=env)  —  Rays')
 ```
 
+### The contract
+
+`result = compute(...)` then `fig, ax = result.plot()` holds for **every**
+measurement uacpy returns — the propagation results, the medium carriers, the
+spectral estimators and every transform:
+
+```
+sig.welch(x, fs).plot()                       # SpectralEstimate
+sig.spectrogram(x, fs).plot()                 # SpectrogramResult
+sig.cwt(x, fs).plot(sample_rate=fs)           # CWTResult
+sig.wigner_ville(x, fs).plot()                # WignerVilleResult
+sig.complex_cepstrum(x).plot()                # ComplexCepstrum
+sig.constant_q_transform(x, fs).plot()        # CQTResult
+sig.ambiguity_function(x, fs).plot()          # AmbiguityResult
+sig.fk_transform(panel, fs, dx).plot()        # FKResult
+sig.taup_transform(panel, fs, dx).plot()      # TauPResult
+sig.radon_transform(panel, fs, dx, p).plot()  # RadonResult
+uacpy.absorption_thorp(f).plot()              # AbsorptionCoefficient
+WenzNoise(f, wind_speed_kn=15).plot()         # WenzNoise
+arrivals.channel_taps(...).plot()             # ChannelTaps
+env.ssp.plot()                                # SoundSpeedProfile
+```
+
+Every one returns `(fig, ax)`, and every one takes `ax=` so it composes.
+
+`.plot()` is the one obvious way, not the only way. Each delegates to the free
+plotter named in its docstring, and **that plotter takes either spelling** —
+the carrier, or the bare arrays:
+
+```
+plot_spectrogram(result)                                  # the carrier
+plot_spectrogram(result.frequencies, result.times, result.power)
+```
+
+Both draw the same thing, which `test_architecture.py` checks by comparing
+what actually lands on the axes. The array form is what you want when the
+numbers did not come from uacpy. The carrier form is recognised only when the
+other positional arguments are left out, so passing arrays always means
+arrays, and an incomplete call is refused by name rather than failing inside
+matplotlib:
+
+```
+plot_spectrogram(f, t)
+ConfigurationError: plot_spectrogram: pass every array, or one
+SpectrogramResult.
+```
+
+Carriers come in two shapes, chosen rather than defaulted. A result that *is*
+a few arrays you would unpack stays a `namedtuple`, so `f, t, S =
+spectrogram(x, fs)` keeps working; metadata a plot needs but an unpack should
+not see rides as an attribute beside the tuple (`SpectralEstimate.scaling`,
+`FKResult.scaling`), which is why the dB axis can label itself `Pa²/Hz` or
+`Pa²` without being told. A result you would *ask something* is a full class —
+`Field.at()`, `Rays.filter_by_bounces()`, `Modes.excitation()`.
+
+`CWTResult.plot` is the single exception that asks for an argument. A
+scalogram's time axis is drawn from the sample rate and the carrier does not
+hold one, so it cannot be defaulted without inventing the axis.
+
+A carrier that carries everything its plotter needs derives the rest rather
+than asking: `ChannelTaps.plot()` works out its sample rate as
+`symbol_rate * sps`.
+
+`test_architecture.py` enforces this — a new result carrier cannot ship
+without a `.plot()` unless it is recorded there as having no plotter at all.
+
 ### Results
 
 `Result.plot(**kwargs)` forwards to **`plot_result`**, which dispatches on type
@@ -240,6 +306,43 @@ speckle: interference nulls put a 90 dB level everywhere. Contours read on a
 smooth field, which in practice means an incoherent run, so that is the panel
 they are shown on.
 
+### The phase panel needs a grid the level panel does not
+
+`value='phase'`, and equally `'real'` and `'imag'`, draw the **carrier**
+rather than its envelope, and a wrapped phase resolves the carrier only while
+it turns less than half a cycle between neighbouring samples. That is
+Nyquist, so the bound is the half wavelength — on **both** spatial axes, and
+at the highest frequency the field carries. Past it the panel does not go
+noisy, it goes *smooth*: an aliased phase draws broad, confident-looking
+bands that belong to the grid and not to the field, which is why uacpy warns
+rather than trusting you to notice.
+
+The bottom-left panel above is that trap, not an illustration of good
+practice. At 50 Hz the half wavelength is 15 m, while that receiver grid is
+42 m in depth and 331 m in range, so the carrier turns eleven times between
+neighbouring samples:
+
+```
+plot_field(value='phase'): depth samples are 42.0168 m apart and range samples
+are 331.104 m apart, at or over the 15 m half wavelength at 50 Hz (nominal
+c=1500 m/s), so the carrier turns up to 11.04 cycles between neighbouring
+samples and this view is aliased. ...
+```
+
+The panel is kept because it is the honest shape of the mistake — a deep-water
+field over 100 km simply has no readable phase map, since resolving it would
+take some 6600 range samples and the fringes would still fall below a pixel.
+Read phase on a window you can afford to sample, and read `dB` everywhere
+else: `|p|` varies on the interference scale rather than on the carrier, so
+the level panels on this same grid are coarse but honest, and they are left
+unguarded for that reason.
+
+This is a different bound from the one [`resample_to` and
+`eval`](results.md) enforce. Those interpolate *between* stored samples, and
+keeping the interpolant off the opposite-phase lobe takes a **quarter**
+wavelength; this one asks only whether the stored samples resolve the carrier
+at all. Between the two a phase map is coarse but unambiguous.
+
 ---
 
 ## 3. Overlays: `env=`, `source=`, `receiver=`
@@ -420,7 +523,7 @@ the panels that should share one.)
 
 A handful of plotters are **figure-level** and take no `ax=`, because one axes
 is not enough to hold what they draw: `compare_models`,
-`plot_bottom_properties`, `plot_overview`, `plot_impulse_response_info`,
+`plot_bottom_properties`, `plot_overview`, `plot_lsfir_diagnostics`,
 `plot_time_snapshots` (multi-panel), `plot_result` (it forwards to whichever
 plotter fits) and `save_animation` (it writes a file). Two plotters take a
 **2-tuple** of axes instead: `plot_frf` and `plot_channel`, which are inherently
@@ -546,7 +649,7 @@ yours), `shared_colorbar` (a colorbar on an existing figure) and the two
 | `plot_modes_heatmap(modes, n_modes=None, ax=None, …)` | ✓ | ψ_m(z) as a (depth, mode index) image |
 | `plot_mode_speeds(modes, ax=None, c_bottom=None, …)` | ✓ | phase speed per mode index, plus group speed when the result carries it |
 | `plot_dispersion(modes_by_frequency, ax=None, n_modes=3, …)` | ✓ | phase and group speed vs frequency — the dispersion diagram |
-| `plot_greens_function(grn, ax=None, frequency_index=0, depth=None, modes=None, vmin_db=-60, …)` | ✓ | \|G(k_r, z)\| from a Scooter `.grn`; `modes=` marks the trapped eigenvalues on it |
+| `plot_greens_function(grn, ax=None, frequency_index=0, depth=None, modes=None, vmin_dB=-60, …)` | ✓ | \|G(k_r, z)\| from a Scooter `.grn`; `modes=` marks the trapped eigenvalues on it |
 | `plot_wavenumber_sampling(frequency, c_low, c_high, delta_k, ax=None, r_max=None, …)` | ✓ | the k_r axis a Hankel transform is sampled on, with the wrap-around limit `r_max` implies |
 
 Ray fans, arrival stems, mode functions, covariance, replicas and reflection
@@ -603,7 +706,7 @@ against an omni one.
 |---|---|---|
 | `plot_bottom_properties(env, properties=None, n_range=240, n_depth=200)` | — | small-multiples seabed cross-sections, one panel per property → [environment](environment.md) |
 | `plot_bottom_loss(materials, ax=None, water_speed=1500.0, mark_critical=False)` | ✓ | plane-wave bottom loss vs grazing angle, one curve per seabed — a preset name, a property dict, a sequence, or a `{label: material}` mapping. Draws what `core.acoustics.bottom_loss_curve` computes; `mark_critical=True` rules each **faster-than-water** seabed's critical angle (a slower one has none) |
-| `plot_absorption(frequencies, absorption=None, ax=None, model=None, label=None)` | ✓ | α(f) in dB/km, log-log; `absorption.plot(frequencies)` is the object form |
+| `plot_absorption(coefficient, ax=None, label=None)` | ✓ | draws an `AbsorptionCoefficient`: α(f) log-log, or α(f, z) as a heatmap. `absorption_thorp(f).plot()` is the object form |
 
 ### Maps
 
@@ -653,7 +756,7 @@ Every one consumes the output of the same-named routine in
 | `plot_angular_spectrum(angles_deg, spectrum, ax=None, dB=True, …)` | ✓ | a Bartlett / MVDR / MUSIC spectrum → [arrays](arrays.md) |
 | `plot_frf(frequencies, tf, ax=None, tag='', …)` | 2-tuple | `FRF` — magnitude (dB) over phase (deg) |
 | `plot_coherence(frequencies, coh, ax=None, …)` | ✓ | `FRF` coherence vs frequency |
-| `plot_impulse_response_info(Minfo, Vinfo, g)` | — | LS-FIR diagnostics: information matrix, vector, impulse response |
+| `plot_lsfir_diagnostics(Minfo, Vinfo, g)` | — | LS-FIR diagnostics: information matrix, vector, impulse response |
 
 ### Communications
 

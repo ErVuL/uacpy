@@ -32,9 +32,15 @@ from uacpy.core.environment import (
     Environment, BoundaryProperties, SedimentLayer, SeabedColumn, Bottom,
     SoundSpeedProfile, generate_sea_surface, Bathymetry, Altimetry, Surface,
 )
+from uacpy.core.acoustics.boundaries import critical_angle
+from uacpy.core.acoustics.seawater import (
+    sound_speed_mackenzie, sound_speed_unesco, sound_speed_delgrosso,
+    sound_speed_teos10, doppler,
+)
 from uacpy.core.absorption import (
     Absorption, Thorp, FrancoisGarrison, Biological, BiologicalLayer,
-    ConstantAbsorption,
+    ConstantAbsorption, AbsorptionCoefficient, absorption_thorp,
+    absorption_francois_garrison, absorption_biological, absorption_constant,
 )
 from uacpy.core.receiver import Receiver
 from uacpy.core.results import (
@@ -168,6 +174,12 @@ __all__ = [
     'Bottom',
     'SoundSpeedProfile', 'generate_sea_surface', 'Bathymetry', 'Altimetry', 'Surface',
     'Absorption', 'Thorp', 'FrancoisGarrison',
+    'critical_angle',
+    'sound_speed_mackenzie', 'sound_speed_unesco',
+    'sound_speed_delgrosso', 'sound_speed_teos10', 'doppler',
+    'AbsorptionCoefficient', 'absorption_thorp',
+    'absorption_francois_garrison', 'absorption_biological',
+    'absorption_constant',
     'Biological', 'BiologicalLayer', 'ConstantAbsorption',
     'Receiver',
     'Result', 'PhaseReference', 'Field', 'ResultStack',

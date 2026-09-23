@@ -405,6 +405,184 @@ def convert_attenuation_units(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def absorption_thorp(
+    frequencies: _ArrayLike,
+    *,
+    depths: Optional[_ArrayLike] = None,
+    units: str = 'dB/km',
+    sound_speed: float = DEFAULT_SOUND_SPEED,
+) -> "AbsorptionCoefficient":
+    """Thorp (1967) seawater absorption, as a carrier.
+
+    Depth independent, so ``depths`` only sets the shape of the answer.
+    """
+    return Thorp().alpha(frequencies, depths=depths, units=units,
+                         sound_speed=sound_speed)
+
+
+def absorption_francois_garrison(
+    frequencies: _ArrayLike,
+    *,
+    temperature_c: float,
+    salinity_psu: float,
+    pH: float,
+    z_bar_m: float,
+    ph_scale: str = 'nbs',
+    depths: Optional[_ArrayLike] = None,
+    units: str = 'dB/km',
+    sound_speed: float = DEFAULT_SOUND_SPEED,
+) -> "AbsorptionCoefficient":
+    """Francois-Garrison (1982) seawater absorption, as a carrier.
+
+    The four environmental parameters are **required**. F&G is a statement
+    about a particular ocean — boric acid, magnesium sulfate and pure water,
+    each keyed to its temperature, salinity and pH — so there is no default
+    ocean to fall back on, and inventing one is what the old
+    ``plot_absorption(model='fg')`` did.
+
+    ``z_bar_m`` is the depth this instance describes; passing ``depths``
+    overrides it and evaluates per depth.
+    """
+    model = FrancoisGarrison(temperature_c=temperature_c,
+                             salinity_psu=salinity_psu, pH=pH,
+                             z_bar_m=z_bar_m, ph_scale=ph_scale)
+    return model.alpha(frequencies, depths=depths, units=units,
+                       sound_speed=sound_speed)
+
+
+def absorption_biological(
+    frequencies: _ArrayLike,
+    *,
+    layers,
+    depths: Optional[_ArrayLike] = None,
+    units: str = 'dB/km',
+    sound_speed: float = DEFAULT_SOUND_SPEED,
+) -> "AbsorptionCoefficient":
+    """Layered biological absorption (fish-bladder resonance), as a carrier.
+
+    ``layers`` is the list :class:`Biological` takes — :class:`BiologicalLayer`
+    instances or ``(z_top, z_bottom, f0, Q, a0)`` tuples.
+
+    Unlike the seawater formulas this one is zero outside its layers, so a
+    depth matters: pass ``depths`` inside a layer, or the curve is flat zero
+    and :meth:`AbsorptionCoefficient.plot` will say so.
+    """
+    return Biological(layers=layers).alpha(
+        frequencies, depths=depths, units=units, sound_speed=sound_speed)
+
+
+def absorption_constant(
+    frequencies: _ArrayLike,
+    *,
+    value_dB_per_wavelength: float,
+    depths: Optional[_ArrayLike] = None,
+    units: str = 'dB/km',
+    sound_speed: float = DEFAULT_SOUND_SPEED,
+) -> "AbsorptionCoefficient":
+    """A constant dB-per-wavelength absorption, as a carrier.
+
+    Constant in *wavelength*, so in dB/km it still rises with frequency.
+    """
+    return ConstantAbsorption(
+        value_dB_per_wavelength=value_dB_per_wavelength).alpha(
+            frequencies, depths=depths, units=units, sound_speed=sound_speed)
+
+
+@dataclass(frozen=True)
+class AbsorptionCoefficient:
+    """alpha over frequency, and optionally over depth, in stated units.
+
+    The carrier an :class:`Absorption` model returns when evaluated. It is a
+    property of the **medium**, not a solver output, so it lives here beside
+    the models rather than under ``core/results`` — every quantity registered
+    in ``core/results/quantities.py`` is something a model computed, and
+    absorption is something you supply. Its shape follows
+    :class:`~uacpy.core.results.reflection.ReflectionCoefficient`, the other
+    coefficient-over-an-axis in the package.
+
+    ``values`` is 1-D over frequency when no depth axis was asked for, and
+    ``(n_depths, n_frequencies)`` when one was — depth first, the convention
+    every other 2-D quantity here uses.
+
+    The carrier exists for :meth:`to_units` rather than for :meth:`plot`.
+    Three of the six conventions :func:`convert_attenuation_units` supports —
+    ``dB/wavelength``, ``Q`` and ``L`` — are frequency dependent, so they
+    cannot be evaluated once the frequency axis has been discarded. Returning
+    a bare array would mean the unit had to be known at the call; keeping the
+    axis means it can be changed after it. The unit is a value the result
+    carries, never a suffix in a name.
+    """
+
+    frequencies: np.ndarray
+    values: np.ndarray
+    units: str
+    model: str
+    depths: Optional[np.ndarray] = None
+    #: The one depth a 1-D curve was evaluated at, in metres — the scalar
+    #: ``alpha(depths=...)`` was given, or the model's
+    #: :attr:`Absorption.reference_depth_m` when it was given none. ``None``
+    #: exactly when :attr:`depths` is an axis. Separate from ``depths``
+    #: because ``depths`` is the *shape* flag and must stay ``None`` for a
+    #: curve; without this the evaluation depth was used and then dropped, so
+    #: a Francois-Garrison carrier could not say whether it stood at the
+    #: instance's ``z_bar_m`` or at an override, and the empty-curve warning
+    #: told a Biological user to "evaluate at a depth inside a layer"
+    #: without naming the depth they had just evaluated at.
+    depth_m: Optional[float] = None
+
+    @property
+    def is_depth_dependent(self) -> bool:
+        return self.depths is not None
+
+    @property
+    def n_frequencies(self) -> int:
+        return int(np.size(self.frequencies))
+
+    @property
+    def n_depths(self) -> int:
+        return 0 if self.depths is None else int(np.size(self.depths))
+
+    def to_units(self, units: str, *,
+                 sound_speed: float = DEFAULT_SOUND_SPEED
+                 ) -> "AbsorptionCoefficient":
+        """The same alpha in another convention, converted per frequency.
+
+        Per frequency, not once for the array: ``dB/wavelength``, ``Q`` and
+        ``L`` all divide by the wavelength, so a single frequency applied to
+        the whole axis would be right at one bin and wrong at every other.
+        """
+        if units == self.units:
+            return self
+        f = np.atleast_1d(np.asarray(self.frequencies, dtype=float))
+        out = np.empty_like(np.asarray(self.values, dtype=float))
+        flat = np.atleast_2d(np.asarray(self.values, dtype=float))
+        view = np.atleast_2d(out)
+        for j, fj in enumerate(f):
+            view[:, j] = convert_attenuation_units(
+                flat[:, j], float(fj), self.units, units,
+                sound_speed=sound_speed)
+        return AbsorptionCoefficient(
+            frequencies=self.frequencies, values=out, units=units,
+            model=self.model, depths=self.depths, depth_m=self.depth_m)
+
+    def plot(self, ax=None, **kwargs):
+        """Draw alpha against frequency (log-log), or as a depth-frequency
+        heatmap when a depth axis is present."""
+        # Deferred into the body: ``uacpy.visualization`` imports
+        # ``uacpy.core`` at module scope, so this line at file scope makes
+        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
+        # the inversion.
+        from uacpy.visualization.plots.environment import plot_absorption
+        return plot_absorption(self, ax=ax, **kwargs)
+
+    def __repr__(self) -> str:
+        span = (f"{self.n_frequencies} freq" if not self.is_depth_dependent
+                else f"{self.n_depths} depth x {self.n_frequencies} freq")
+        at = '' if self.depth_m is None else f" at {self.depth_m:g} m"
+        return (f"AbsorptionCoefficient(model={self.model!r}, {span}{at}, "
+                f"units={self.units!r})")
+
+
 @dataclass
 class Absorption:
     """Abstract base for water-column absorption models. Do not
@@ -463,6 +641,73 @@ class Absorption:
             )
         return self._alpha_dB_per_m(f, depths)
 
+    @property
+    def reference_depth_m(self) -> float:
+        """The depth :meth:`alpha` evaluates at when given no depth axis.
+
+        Zero for every model whose alpha does not depend on depth, so the
+        choice is immaterial; :class:`FrancoisGarrison` overrides it with its
+        own ``z_bar_m``, which is the depth that instance describes.
+        """
+        return 0.0
+
+    def alpha(
+        self,
+        frequencies: _ArrayLike,
+        *,
+        depths: Optional[_ArrayLike] = None,
+        units: str = 'dB/km',
+        sound_speed: float = DEFAULT_SOUND_SPEED,
+    ) -> AbsorptionCoefficient:
+        """Evaluate alpha over frequency, and over depth if asked.
+
+        Vectorised on **both** axes, so one call answers alpha(f, z): an
+        array of frequencies, an array of depths, or both together.
+
+        The depth argument decides the shape, the way a scalar and a
+        sequence decide it on :class:`~uacpy.core.receiver.Receiver`:
+
+        - ``depths=None`` — evaluate at :attr:`reference_depth_m`, 1-D over
+          frequency.
+        - ``depths=50.0`` — a scalar: evaluate there, still 1-D. This is the
+          single-depth curve, not a one-row grid.
+        - ``depths=[0, 50, 100]`` — an axis: ``(n_depths, n_frequencies)``.
+
+        A caller-supplied depth overrides the model's own, the rule
+        :class:`FrancoisGarrison` already documented for
+        :meth:`alpha_dB_per_m`.
+        """
+        f = np.atleast_1d(np.asarray(frequencies, dtype=float))
+        if not np.all(f > 0.0):
+            raise ConfigurationError(
+                f"{type(self).__name__}.alpha: every frequency must be > 0 "
+                f"Hz; got {frequencies!r}")
+        # A scalar depth is a place to evaluate, not an axis to span: it
+        # collapses like ``depths=None`` and returns a curve, so asking for
+        # one depth never yields a one-row heatmap.
+        scalar_depth = depths is not None and np.ndim(depths) == 0
+        z_axis = (None if depths is None or scalar_depth
+                  else np.atleast_1d(np.asarray(depths, dtype=float)))
+        if depths is None:
+            z_eval = np.array([self.reference_depth_m], dtype=float)
+        elif scalar_depth:
+            z_eval = np.array([float(depths)], dtype=float)
+        else:
+            z_eval = z_axis
+        # dB/m out of the per-model kernel, one column per frequency.
+        grid = np.stack([np.asarray(self._alpha_dB_per_m(float(fj), z_eval),
+                                    dtype=float) for fj in f], axis=1)
+        carrier = AbsorptionCoefficient(
+            frequencies=f,
+            values=grid if z_axis is not None else grid[0, :],
+            units='dB/m', model=self._model_name(), depths=z_axis,
+            depth_m=None if z_axis is not None else float(z_eval[0]))
+        return carrier.to_units(units, sound_speed=sound_speed)
+
+    def _model_name(self) -> str:
+        """The name this model records on the carrier it produces."""
+        return type(self).__name__.lower()
+
     def _alpha_dB_per_m(
         self,
         frequency: float,
@@ -472,32 +717,6 @@ class Absorption:
         :meth:`alpha_dB_per_m` with ``frequency`` already checked positive."""
         raise NotImplementedError
 
-    def plot(self, frequencies, *, depth: float = 0.0, ax=None, **kwargs):
-        """Plot this model's volume absorption ``α(f)`` (dB/km, log-log).
-
-        Dispatches to :func:`uacpy.visualization.plot_absorption` — the carrier
-        counterpart of :meth:`Result.plot`. ``frequencies`` (Hz) is required
-        because absorption *is* a function of frequency; ``depth`` (m) is the
-        evaluation depth (matters for depth-dependent models such as
-        Francois-Garrison; Thorp is depth-invariant). ``ax`` draws into an
-        existing Axes, spelled the way every other uacpy plot method spells
-        it; the remaining ``kwargs`` are forwarded."""
-        # Deferred into the body: ``uacpy.visualization`` imports
-        # ``uacpy.core`` at module scope, so this line at file scope makes
-        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
-        # the inversion.
-        from uacpy.visualization import plot_absorption
-        freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))
-        alpha_km = np.array([
-            float(np.asarray(self.alpha_dB_per_m(f, depth)).reshape(-1)[0])
-            * 1000.0 for f in freqs])
-        if not np.any(alpha_km > 0):
-            warnings.warn(
-                f"Absorption.plot: α(f) is entirely non-positive at depth "
-                f"{depth:g} m, so the log-log plot will be blank. For layered "
-                f"models (e.g. Biological) pick a depth inside a layer.",
-                UserWarning, stacklevel=2)
-        return plot_absorption(freqs, absorption=alpha_km, ax=ax, **kwargs)
 
 
 @dataclass
@@ -699,6 +918,13 @@ class FrancoisGarrison(Absorption):
             float(self.temperature_c), float(self.salinity_psu),
             self.ph_nbs, float(self.z_bar_m),
         )
+
+    @property
+    def reference_depth_m(self) -> float:
+        return float(self.z_bar_m)
+
+    def _model_name(self) -> str:
+        return 'francois_garrison'
 
     def _alpha_dB_per_m(
         self,
@@ -961,6 +1187,9 @@ class ConstantAbsorption(Absorption):
         _require_attenuation_in_range(
             self.value_dB_per_wavelength,
             "ConstantAbsorption.value_dB_per_wavelength")
+
+    def _model_name(self) -> str:
+        return 'constant'
 
     def topopt_code(self) -> str:
         return ' '

@@ -15,7 +15,7 @@ One module per subject, each answering a different question:
                    to SPL, power to dB
 
 Every public name is re-exported here, so a caller writes
-``uacpy.acoustics.soundspeed`` and never names a sub-module: those boundaries
+``uacpy.acoustics.sound_speed_mackenzie`` and never names a sub-module: those boundaries
 are for whoever maintains the package.
 
 Note
@@ -37,22 +37,23 @@ and uacpy/third_party/arlpy/NOTICE lists which function came from where.
 """
 
 from uacpy.core.acoustics.seawater import (
-    soundspeed,
-    soundspeed_unesco,
-    soundspeed_delgrosso,
-    soundspeed_teos10,
+    sound_speed_mackenzie,
+    sound_speed_unesco,
+    sound_speed_delgrosso,
+    sound_speed_teos10,
     density,
     doppler,
 )
 from uacpy.core.acoustics.boundaries import (
     reflection_coeff,
     bottom_loss_curve,
+    critical_angle,
     pekeris_root,
 )
 from uacpy.core.acoustics.bubbles import (
     bubble_resonance,
     bubble_surface_loss,
-    bubble_soundspeed,
+    bubble_sound_speed,
 )
 from uacpy.core.acoustics.levels import (
     pressure,
@@ -61,17 +62,18 @@ from uacpy.core.acoustics.levels import (
 )
 
 __all__ = [
-    'soundspeed',
-    'soundspeed_unesco',
-    'soundspeed_delgrosso',
-    'soundspeed_teos10',
+    'sound_speed_mackenzie',
+    'sound_speed_unesco',
+    'sound_speed_delgrosso',
+    'sound_speed_teos10',
     'density',
     'doppler',
     'reflection_coeff',
     'bottom_loss_curve',
+    'critical_angle',
     'bubble_resonance',
     'bubble_surface_loss',
-    'bubble_soundspeed',
+    'bubble_sound_speed',
     'pressure',
     'spl',
     'power_to_dB',
