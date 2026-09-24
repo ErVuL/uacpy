@@ -93,6 +93,99 @@ def awgn(signal, snr_dB, *, rng=None):
     return x + noise
 
 
+def pulse_shaped_taps(gains, delays_s, symbol_rate, *, pulse='rc',
+                      rolloff=0.25, sps=1, span=8,
+                      who: str = "pulse_shaped_taps"):
+    """Symbol-rate tap vector from sparse arrivals, through a pulse shape.
+
+    Where :func:`multipath_channel` lays each arrival on the nearest
+    sample of a tap-delay line, this lays each one down as the pulse the
+    modem actually transmits::
+
+        h[k] = sum_i g_i * p(k*T - tau_i)
+
+    with ``p`` a raised-cosine or root-raised-cosine. It is the right
+    placement when the taps will be used as a **symbol-rate** channel for
+    an equalizer, because what such an equalizer sees is the combined
+    response of the transmit filter, the channel and the receive filter —
+    not the channel alone. ``impulse_response``'s windowed-sinc
+    fractional-delay kernel is a different, and for this purpose wrong,
+    placement: it interpolates a bandlimited sample, it does not apply a
+    modulation pulse.
+
+    Parameters
+    ----------
+    gains : array_like
+        Complex path gains, carrying per-path phase.
+    delays_s : array_like
+        Path delays (s), measured from whatever origin the caller wants
+        the tap grid to start at. They are used as given: subtract the
+        first arrival yourself if the taps should start there.
+    symbol_rate : float
+        Symbol rate (Bd). ``T = 1/symbol_rate``.
+    pulse : {'rc', 'rrc'}
+        Raised cosine (normalised to unit peak, so it samples at Nyquist
+        instants) or root raised cosine (normalised to unit energy over
+        its own span, matching what a matched filter pair expects).
+    rolloff : float
+        Excess bandwidth of the pulse, in ``[0, 1]``.
+    sps : int
+        Samples per symbol of the returned grid. ``1`` is symbol-rate.
+    span : int
+        Pulse length in symbols. The grid is offset by ``span/2`` symbols
+        so the pulse's own centre lands on its arrival.
+
+    Returns
+    -------
+    (ndarray, ndarray)
+        ``(taps, times_s)`` — the complex taps and the time of each,
+        which starts at ``-span/(2*symbol_rate)`` by construction.
+    """
+    gains = np.asarray(gains)
+    rel = np.asarray(delays_s, dtype=float).ravel()
+    if gains.size != rel.size:
+        raise ConfigurationError(
+            f"{who}: gains and delays_s must have the same length; got "
+            f"{gains.size} and {rel.size}.")
+    if pulse not in ('rc', 'rrc'):
+        raise ConfigurationError(
+            f"{who}: pulse must be 'rc' or 'rrc'; got {pulse!r}.")
+    symbol_rate = float(symbol_rate)
+    if not (np.isfinite(symbol_rate) and symbol_rate > 0.0):
+        raise ConfigurationError(
+            f"{who}: symbol_rate must be positive and finite (Bd); got "
+            f"{symbol_rate!r}.")
+    sps = int(sps)
+    span = int(span)
+    if span < 1:
+        raise ConfigurationError(
+            f"{who}: span must be >= 1 symbol; got {span!r}.")
+    if sps < 1:
+        raise ConfigurationError(
+            f"{who}: sps must be >= 1 sample per symbol; got {sps!r}.")
+    fs = symbol_rate * sps
+    half = span * sps / 2.0
+    # The 1e-9 keeps an arrival a rounding error past a sample instant
+    # from adding an empty tap.
+    n_taps = int(np.ceil(rel.max() * fs - 1e-9)) + span * sps + 1
+    times = (np.arange(n_taps) - half) / fs
+    if pulse == 'rc':
+        shape, norm = rc_pulse, 1.0     # unit peak: Nyquist samples
+    else:
+        grid = (np.arange(span * sps + 1) - half) / sps
+        shape = rrc_pulse
+        norm = float(np.sqrt(np.sum(rrc_pulse(grid, rolloff) ** 2)))
+    taps = np.zeros(n_taps, dtype=complex)
+    for gain, tau in zip(gains, rel):
+        arg = (times - tau) * symbol_rate
+        g = shape(arg, rolloff)
+        # The pulse ends at +-span/2 inclusive, as rrc_filter's grid does;
+        # the 1e-9 keeps rounding from dropping an end tap.
+        g[np.abs(arg) > span / 2.0 + 1e-9] = 0.0
+        taps += gain * g / norm
+    return taps, times
+
+
 def multipath_channel(gains, delays_s, sample_rate, *, fractional=False):
     """Static FIR tap vector from sparse arrivals ``(gain, delay)``.
 

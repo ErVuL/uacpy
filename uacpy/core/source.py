@@ -71,7 +71,7 @@ class Source(_DeepCopyMixin):
         the one weight. ``[1, -1]`` drives two sources in antiphase;
         ``[1, 1j]`` puts them in quadrature. Every weight must be finite.
     source_level_dB : float, optional
-        How hard a unit-weight element is driven, in dB re 1 uPa at 1 m.
+        How hard a unit-weight element is driven, in dB re 1 µPa at 1 m.
         ``None`` (default) leaves it unstated, which is what transmission
         loss assumes -- TL is referenced to a *unit* source, so a run
         without this says how much quieter each cell is than the source
@@ -227,7 +227,7 @@ class Source(_DeepCopyMixin):
             level = float(self.source_level_dB)
             if not np.isfinite(level):
                 raise ConfigurationError(
-                    f"Source source_level_dB must be finite (dB re 1 uPa at "
+                    f"Source source_level_dB must be finite (dB re 1 µPa at "
                     f"1 m); got {self.source_level_dB!r}"
                 )
             self.source_level_dB = level
@@ -294,7 +294,20 @@ class Source(_DeepCopyMixin):
         that element at the same mean depth.
         By the product theorem the array's far field is the field of one
         element at that centre times this factor (Balanis, *Antenna Theory*,
-        eq. 6-5). The theorem is stated for arrays of **identical**
+        eq. 6-5).
+
+        **Its relation to** :func:`~uacpy.acoustic_signal.steering_vectors`,
+        which is the same geometry seen from the beamformer::
+
+            AF(θ) = sqrt(N) * conj(steering_vectors(z - z.mean(), θ, f, c)) @ w
+
+        and this method is that line. Two things differ and neither shows in
+        the modulus, so composing the two without them agrees in level and
+        can be more than a radian out in phase: ``steering_vectors`` returns
+        the **conjugate** convention (``exp(-ikz sinθ)``, the replica you
+        correlate against), and it measures depth from **zero** where this
+        measures it from the array's phase centre. The ``sqrt(N)`` undoes
+        the replica's unit-norm scaling. The theorem is stated for arrays of **identical**
         elements — which a uacpy ``Source`` satisfies, since one
         ``beam_pattern`` and one ``source_type`` describe every depth —
         and within that it holds for any magnitudes, phases and spacings.
@@ -344,10 +357,12 @@ class Source(_DeepCopyMixin):
             raise ConfigurationError(
                 f"Source.array_factor: sound_speed must be positive and "
                 f"finite; got {sound_speed!r}.")
-        k = 2.0 * np.pi * frequency / float(sound_speed)
+        # Deferred: acoustic_signal imports core, so this import at module
+        # scope would close the loop.
+        from uacpy.acoustic_signal.arrays import steering_vectors
         offsets = self.depths - self.depths.mean()
-        phase = k * np.outer(np.sin(np.deg2rad(angles)), offsets)
-        return np.exp(1j * phase) @ self.weights
+        replicas = steering_vectors(offsets, angles, frequency, sound_speed)
+        return np.sqrt(offsets.size) * np.conj(replicas) @ self.weights
 
     def element_directivity(self, angles_deg) -> np.ndarray:
         """This source's ``beam_pattern`` as a linear amplitude at

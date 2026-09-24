@@ -154,7 +154,7 @@ def write_wav(
     >>> with tempfile.TemporaryDirectory() as d:
     ...     path = os.path.join(d, 'level.wav')
     ...     write_wav(path, 12.5 * tone, 48000, encoding='float32',
-    ...               metadata={'comment': 'modelled receive level, uPa'})
+    ...               metadata={'comment': 'modelled receive level, µPa'})
     ...     print(os.path.getsize(path) > 4 * tone.size)
     True
     """

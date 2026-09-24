@@ -5298,6 +5298,36 @@ def test_the_range_axis_label_and_its_pinned_subtitle_share_one_unit_entry():
     assert _pinned_subtitle(field) == 'Range = 1.5 km'
 
 
+def test_a_band_averaged_map_is_titled_with_its_band_not_its_centroid():
+    """``broadband_loss`` and ``sound_exposure_level`` collapse a band and
+    pin its weighted CENTROID, so a 50 Hz and a 400 Hz average about the
+    same centre would otherwise caption identically — naming the one
+    frequency the map is not. Both record ``metadata['band_hz']`` for this,
+    and the subtitle prefers it. A field that really is at one frequency
+    carries no ``band_hz`` and must be unaffected."""
+    from uacpy.visualization.plots._common import _pinned_subtitle
+    narrow = Field(data=np.zeros((2, 2)),
+                   coords={'depth': np.arange(2.0), 'range': np.arange(2.0)},
+                   pinned={'frequency': 1000.0},
+                   metadata={'kind': 'pressure', 'unit': 'dB',
+                             'band_hz': (975.0, 1025.0)})
+    wide = Field(data=np.zeros((2, 2)),
+                 coords={'depth': np.arange(2.0), 'range': np.arange(2.0)},
+                 pinned={'frequency': 1000.0},
+                 metadata={'kind': 'pressure', 'unit': 'dB',
+                           'band_hz': (800.0, 1200.0)})
+    assert 'average' in _pinned_subtitle(narrow)
+    assert _pinned_subtitle(narrow) != _pinned_subtitle(wide)
+    assert '0.975' in _pinned_subtitle(narrow)
+    assert '1.2' in _pinned_subtitle(wide)
+
+    single = Field(data=np.zeros((2, 2)),
+                   coords={'depth': np.arange(2.0), 'range': np.arange(2.0)},
+                   pinned={'frequency': 1000.0},
+                   metadata={'kind': 'pressure', 'unit': 'dB'})
+    assert _pinned_subtitle(single) == 'Frequency = 1.00 kHz'
+
+
 class TestSharedColorbar:
     """One bar over several panels, and the guard that makes it honest.
 

@@ -180,7 +180,7 @@ def test_sel_parseval():
 def test_sel_conserves_energy_for_any_nfft():
     """``sound_exposure``'s contract is Parseval: the summed band exposure
     equals
-    ``sum(p**2)/fs`` in Pa^2 s. Bin width and segment duration cancel
+    ``sum(p**2)/fs`` in Pa²·s. Bin width and segment duration cancel
     (``(fs/nfft) * (nfft/fs) == 1``), so it must hold for any ``nfft``."""
     from scipy.signal import butter, sosfiltfilt
     fs = 48000.0
@@ -471,7 +471,7 @@ def test_sel_counts_tone_exactly_on_the_top_band_edge():
     closed), so a tone at fmax carries its full exposure."""
     fs = 8000.0
     t = np.arange(int(fs)) / fs
-    x = np.sqrt(2.0) * np.cos(2 * np.pi * 3000.0 * t)   # 1 Pa^2 over 1 s
+    x = np.sqrt(2.0) * np.cos(2 * np.pi * 3000.0 * t)   # 1 Pa² over 1 s
     out = _band_exposure(x, fs, band_type="linear", fmin=100, fmax=3000, num_bands=8)
     assert out.power.sum() == pytest.approx(1.0, rel=1e-9)
     assert out.power[-1] == pytest.approx(1.0, rel=1e-9)
@@ -597,7 +597,7 @@ class TestDecidecadeGuards:
 class TestSilentZerosAreAnnounced:
     def test_sel_warns_for_bands_holding_no_fft_bin(self):
         # 'linear' bands are used as given, so a fmax above Nyquist produces
-        # whole bands that sum to exactly 0 Pa^2*s — indistinguishable from a
+        # whole bands that sum to exactly 0 Pa²·s — indistinguishable from a
         # measured silence. The octave ladders clamp instead.
         rng = np.random.default_rng(0)
         x = rng.normal(size=4000)
@@ -617,7 +617,7 @@ class TestSilentZerosAreAnnounced:
                       "spectrogram"])
     def test_complex_input_warns_about_the_two_sided_axis(self, estimator):
         # These three accept complex input and return an unsorted two-sided
-        # axis, not the one-sided Pa^2/Hz their docstrings describe.
+        # axis, not the one-sided Pa²/Hz their docstrings describe.
         rng = np.random.default_rng(0)
         z = rng.normal(size=2048) + 1j * rng.normal(size=2048)
         with pytest.warns(UserWarning, match="TWO-SIDED"):

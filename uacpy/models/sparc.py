@@ -1064,7 +1064,7 @@ class SPARC(PropagationModel):
         The ``'R'`` / ``'D'`` modes synthesise range inline in ``EXTRACT``
         as a direct ``Δk`` sum over that grid (``sparc.f90:595,622``), and
         the ``'S'`` snapshot is transformed in-tree by the same kind of
-        direct DFT (``grn_reader._hankel_transform``) — no FFT anywhere. A
+        direct DFT (``core.acoustics.hankel_transform``) — no FFT anywhere. A
         uniform-``Δk`` sum is periodic in range with period ``2π/Δk =
         RMax``, so the alias is a visible non-physical wave at the far range
         edge unless ``RMax`` is pushed well past the receivers.

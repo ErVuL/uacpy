@@ -77,6 +77,10 @@ def steering_vectors(positions_m, angles_deg, frequency: float,
     c = require_positive_finite_scalar(c, "steering_vectors", "c", " m/s")
     k = 2.0 * np.pi * frequency / c
     phase = np.outer(np.sin(np.deg2rad(angles)), z)
+    # The MINUS sign is the replica convention: this is what you correlate
+    # a snapshot against, so it is the conjugate of the field a source
+    # array radiates. Source.array_factor is
+    # sqrt(N) * conj(this, about the phase centre) @ w, and says so.
     e = np.exp(-1j * k * phase)
     return e / np.sqrt(z.size)
 

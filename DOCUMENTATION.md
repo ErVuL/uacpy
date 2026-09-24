@@ -1792,7 +1792,15 @@ fitted state). All plotting lives in `uacpy.visualization` (`plot_psd`,
 | Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt`, `inverse_cwt`, `cepstrum`, `complex_cepstrum`, `inverse_complex_cepstrum` (→ `SpectrogramResult`/`WignerVilleResult`/`CWTResult`/`ComplexCepstrum`) |
 | Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_spectrogram`, and `constant_q` / `probabilistic_constant_q` (→ `CQTResult`/`SpectralEstimate`/`CQSpectrogramResult`/`ProbabilisticSpectralEstimate`) |
 | Gather transforms | `fk_transform`, `taup_transform`, `radon_transform`, `inverse_fk`, `inverse_taup`, `inverse_radon` (→ `FKResult`/`TauPResult`/`RadonResult`). `FKResult.scaling` says whether `power` is a calibrated density per Hz·rad/m (`normalize=True`) or the raw unnormalised `\|FK\|²`, and `plot_fk` labels the panel from it |
-| System ID / channel | `FRF`, `impulse_response`, `channel_response`, `impulse_response_from_transfer_function`, `simulate_reception`, `fractional_delay_taps` |
+| System ID / channel | `FRF`, `impulse_response`, `channel_response`, `impulse_response_from_transfer_function`, `transfer_function_from_impulse_response`, `simulate_reception`, `fractional_delay_taps` |
+| Channel statistics (arrays) | `arrival_transfer_function`, `broadband_propagation_loss`, `gate_transfer_function`, `rms_delay_spread`, `energy_support`, `coherence_bandwidth`, `coherence_factor`, `COHERENCE_BANDWIDTH_FACTORS`, `channel_regime`, `ChannelRegime`, `uniform_frequency_step`, `pulse_shaped_taps`, `tone_phasor`, `waveform_spectrum_at`, `simulate_arrival_reception` |
+| Modal acoustics (arrays) | `core.acoustics.modal_attenuation`, `core.acoustics.modal_field` |
+| Wavenumber domain (arrays) | `core.acoustics.hankel_transform`, `core.acoustics.wavenumber_taper`, `alias_period`, `ranges_fit_alias_period` |
+| Boundary / waveguide scalars (arrays) | `core.acoustics.reflection_coeff`, `critical_angle`, `bottom_loss_curve`, `pekeris_root` |
+| Seawater & bubbles (arrays) | `core.acoustics.sound_speed_mackenzie` / `_delgrosso` / `_teos10` / `_unesco`, `density`, `doppler`, `bubble_sound_speed`, `bubble_resonance`, `bubble_surface_loss` |
+| Model agreement | `metrics.tl_rmse` (same grid), `metrics.tl_rmse_on_shared_ranges` (resampling) |
+| Levels (arrays) | `core.acoustics.spl`, `peak_level`, `sound_exposure_level`, `power_to_dB`, `transmission_loss_dB` |
+| PE grid quality (arrays) | `models.optimize_grid`, `grid_error`, `optimal_c0`, `numerov_error`, `combined_error`, `rams_stable_dr`, `rams_stable_theta`, `rams_growth_margin`, `rams_dz_shear_cap`, `rotated_pade_coefficients`, `rotated_cn_growth`, `rotated_growth_floor`, `seabed_leak_rate` |
 | Modal / dispersion | `warp_signal`, `unwarp_signal`, `modal_group_velocity` |
 
 `FRF` is a class because it keeps the fit. `FRF(method=…, estimator=…, m=…)`
@@ -2028,6 +2036,54 @@ Example 35 chains site sound speed → decidecade bands → ship SL → weighted
 
 uacpy is SI throughout; underwater levels reference **1 µPa**.
 
+### Objects wrap functions
+
+A computation that makes sense on data from anywhere else — another model, a
+file, a measurement, an array you typed in — lives in a **function over plain
+arrays**, and the carrier's method is a wrapper around it. The method
+contributes what only an object can: axis and coordinate bookkeeping,
+arguments read off its own identity (band, sample rate, geometry), units and
+provenance, re-wrapping the result, and refusals only it can raise.
+
+```python
+# the same computation, two ways in
+spread = arrivals.rms_delay_spread()                  # from a model result
+spread = rms_delay_spread(tau_measured, power_measured)   # from anywhere else
+```
+
+This is a correctness rule, not a tidiness one. Two implementations of one
+computation drift, and the drift is invisible to the tests you would naturally
+write: `Field.to_transfer_function` and
+`transfer_function_from_impulse_response` were written with different
+normalisations and disagreed by a factor of `fs` **with the phase exact to
+1e-16**, so every phase assertion passed. `Arrivals.transfer_function` and
+Bellhop's broadband synthesis disagreed by up to 10.7 dB per bin on a negative
+amplitude, because one took `abs` and the other did not.
+
+Three things make delegation possible, and their absence is what forces a
+method to re-implement:
+
+* the function takes `axis=` (or is otherwise N-D), so a `(depth, range, …)`
+  grid needs no loop;
+* the function takes `who=`, so a refusal names the call the user made rather
+  than an internal function they have never heard of;
+* one **stated** convention per transform pair, pinned by a test on the
+  **ratio** — the only quantity a normalisation error moves.
+
+Where two conventions legitimately coexist, both are written down. The
+array-level pair `impulse_response_from_transfer_function` /
+`transfer_function_from_impulse_response` is **unscaled** (`irfft` one way,
+`rfft` the other); `Field.to_time_trace` / `Field.to_transfer_function` use the
+**density** convention (`ifft·fs`, `rfft·dt`) because a model's `H` is a
+density. Each pair round-trips to floating point; mixing halves is off by
+`fs`.
+
+One caveat worth stating plainly: every carrier is exported and constructible
+from plain arrays, so a method-only computation was never strictly
+unreachable. What it cost was learning the canonical coord order, the
+`kind`/`unit` tags and which metadata keys the method reads — a real coupling
+to pay for arithmetic that needs none of it.
+
 ### Units
 
 | Quantity | Unit | Note |
@@ -2202,7 +2258,7 @@ have their own measurements —
 
 ## 17. Examples Index
 
-All 45 runnable scripts live in `uacpy/examples/`. Run them **by script
+All 46 runnable scripts live in `uacpy/examples/`. Run them **by script
 path** from the repo root — `python uacpy/examples/example_01_basic_shallow_water.py`
 — the form `run_all_examples.py` and the test suite use. The module form
 (`python -m uacpy.examples.example_01_…`) also works, from a source checkout;
@@ -2258,6 +2314,7 @@ uacpy calls it demonstrates are named in its own docstring.
 | 43 | Which end of the path carries the sources — reciprocity on a range-dependent section, the cost of the mirror geometry against the solver's own residual, and `Source(beam_pattern=)` as per-element receive directivity |
 | 44 | Two propagation models through one detection chain — a symmetric comparison protocol with its own measured noise floor, maps that agree where headline ranges do not, and the beam's broadband reception |
 | 45 | The level a signal with bandwidth or duration reaches, as a map — broadband propagation loss against the continuous-wave answer and against the incoherent stand-in, and the sound exposure level of one burst at a stated source level |
+| 46 | The same acoustics on data that never came from a model — a measured power delay profile, a recorded waveform and a hand-written mode set, through the array-level functions the carriers wrap |
 
 ## 18. Parameter Reference
 

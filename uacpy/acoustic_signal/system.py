@@ -12,12 +12,13 @@ dispersion.
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 import numpy as np
 import scipy.signal as _sig
 from scipy.linalg import get_lapack_funcs, toeplitz
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from typing import Optional
+from typing import Optional, Tuple
 from uacpy.acoustic_signal._signal_validate import (
     require_increasing_axis, require_positive_finite_scalar)
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
@@ -73,7 +74,7 @@ def _info_matrices(u, y, N, order):
 #: a *reciprocal condition number*, which is dimensionless and invariant to the
 #: amplitude scale of the data — ``rcond(c*Minfo) == rcond(Minfo)`` exactly,
 #: because both norms in it scale by the same ``c`` — so the branch below
-#: cannot make the fit depend on whether a record is read in Pa or in uPa.
+#: cannot make the fit depend on whether a record is read in Pa or in µPa.
 _INFO_RCOND_FLOOR = np.finfo(float).eps
 
 
@@ -151,7 +152,7 @@ def _etfe_divide(Y, X, caller: str, quantity="the transfer function",
     The threshold is relative to ``max|X|`` because a transfer function is a
     ratio: adding an absolute epsilon made the estimate at a numerically empty
     bin a function of the units the caller happened to use — the same signal
-    in Pa and in uPa gave answers 1e12 apart, and a bin with no excitation
+    in Pa and in µPa gave answers 1e12 apart, and a bin with no excitation
     came back as a finite ~1/eps number rather than as undefined.
     ``quantity`` and ``denominator`` name the estimate and its denominator
     spectrum in the warning (the Welch H2 and coherence guards divide by
@@ -1043,6 +1044,144 @@ def channel_response(h, sample_rate: float, *, nfft: Optional[int] = None):
     return freqs, H
 
 
+def transfer_function_from_impulse_response(h, sample_rate: float, *,
+                                            t0: float = 0.0, band=None,
+                                            axis: int = -1, who=None):
+    """One-sided ``H(f)`` from a real impulse response — the inverse of
+    :func:`impulse_response_from_transfer_function`.
+
+    For an ``h`` whose first sample sits at ``t0``::
+
+        H(f) = rfft(h) * exp(-2j pi f t0)
+
+    Returns ``(frequencies, H)``, both 1-D, with ``frequencies`` running
+    from 0 to the Nyquist frequency unless ``band`` narrows it.
+
+    **The rotation is what makes it an inverse.** A record starting at
+    ``t0`` carries that offset in every sample, so a bare ``rfft`` returns
+    ``H`` multiplied by ``exp(+2j pi f t0)`` — right in magnitude, wrong in
+    phase. Checked against a two-path ``H``: with the rotation the round
+    trip reproduces it to ``max|err| = 0.0000``; without it, 3.16. Magnitude
+    alone looks perfect either way, which is why this is easy to get wrong
+    and hard to notice — the error only shows once two such spectra
+    interfere.
+
+    **Unscaled, because its counterpart is.**
+    :func:`impulse_response_from_transfer_function` is a plain
+    ``irfft`` — no ``df``, no ``fs`` — so this is a plain ``rfft`` and the
+    pair round-trips to floating point. Do not add a ``1/sample_rate``
+    here to make it a spectral density: the first draft of this function
+    did, and the round trip came back a factor of ``fs`` short with the
+    PHASE still perfect, which is the hardest kind of error to notice.
+    ``Field.to_time_trace`` and :meth:`Field.to_transfer_function` use the
+    density convention instead, and that pair round-trips too — the two
+    conventions each close, and must not be mixed.
+
+    **What it cannot recover.** Only what the record holds: an ``h`` that
+    was itself band-limited carries no information outside that band, and
+    the bins there come back as whatever the synthesis left — near zero for
+    a clean record, and the edge artefacts of the original transform
+    otherwise. Pass ``band`` to keep the span the data actually supports.
+    Nor can it undo a fold: an arrival later than the record wrapped before
+    it ever reached these samples.
+
+    Parameters
+    ----------
+    h : array_like
+        Real impulse response, 1-D. A complex array's real part is used —
+        a pressure history is real, and transforming an analytic signal as
+        though it were one would double the positive-frequency content.
+    sample_rate : float
+        Rate (Hz) ``h`` is sampled at, positive and finite.
+    t0 : float, default 0.0
+        Time (s) of ``h[0]``. Leave at 0 for a response that starts at the
+        origin; pass the record's start for one that does not, e.g.
+        ``Field.to_time_trace``'s ``times[0]``.
+    band : (float, float), optional
+        ``(low, high)`` in Hz to keep.
+    axis : int, default -1
+        Time axis of ``h``. Every other axis is carried through untouched,
+        so a ``(depth, range, time)`` block of responses transforms in one
+        call — which is how :meth:`~uacpy.Field.to_transfer_function` uses
+        this.
+    who : str, optional
+        Name to put in the refusals. A method that delegates here passes
+        its own, so the message names the call the user made rather than
+        this function, which they may never have heard of.
+
+    Returns
+    -------
+    (ndarray, ndarray)
+        ``(frequencies, H)``. ``H`` keeps ``h``'s shape with ``axis``
+        replaced by the kept bins.
+
+    Raises
+    ------
+    ConfigurationError
+        A zero-dimensional ``h`` or one with fewer than two samples along
+        ``axis``, an ``axis`` the array does not have, a non-positive or
+        non-finite ``sample_rate``, a non-finite ``t0``, or a ``band``
+        keeping no bin.
+    """
+    who = who or "transfer_function_from_impulse_response"
+    samples = np.asarray(h)
+    if samples.ndim == 0:
+        raise ConfigurationError(
+            f"{who}: h must have a time axis; got a scalar.")
+    try:
+        requested = int(axis)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{who}: axis must be an integer; got {axis!r}.") from exc
+    if not -samples.ndim <= requested < samples.ndim:
+        raise ConfigurationError(
+            f"{who}: axis={requested} is not an axis of an array with "
+            f"shape {samples.shape}.")
+    axis = requested % samples.ndim
+    if samples.shape[axis] < 2:
+        raise ConfigurationError(
+            f"{who}: h needs at least two samples along axis {axis}; got "
+            f"{samples.shape[axis]} (shape {samples.shape}).")
+    if np.iscomplexobj(samples):
+        samples = samples.real
+    samples = samples.astype(float)
+    fs = float(sample_rate)
+    if not np.isfinite(fs) or fs <= 0.0:
+        raise ConfigurationError(
+            f"{who}: sample_rate must be positive and finite; got "
+            f"{sample_rate!r}.")
+    if not np.isfinite(float(t0)):
+        raise ConfigurationError(
+            f"{who}: t0 must be finite; got {t0!r}.")
+    n_time = samples.shape[axis]
+    frequencies = np.fft.rfftfreq(n_time, 1.0 / fs)
+    H = np.fft.rfft(samples, axis=axis)
+    # The rotation multiplies along the frequency axis, which is `axis` in
+    # the result; broadcasting it needs that shape, not a bare 1-D vector.
+    shape = [1] * H.ndim
+    shape[axis] = frequencies.size
+    H = H * np.exp(-2j * np.pi * frequencies * float(t0)).reshape(shape)
+    if band is not None:
+        low, high = float(band[0]), float(band[1])
+        # An edge bin sits ON `low` or `high` by construction whenever the
+        # band came from the grid that produced h, and a bare `>=`/`<=`
+        # then keeps or drops it on floating-point dust: re-inverting a
+        # sample rate moved the 995 Hz edge by 1e-13 Hz and cost a bin.
+        # A billionth of a bin is far below the df that separates
+        # neighbours, so this admits the edge and nothing else.
+        tol = 1e-9 * (fs / n_time)
+        keep = (frequencies >= low - tol) & (frequencies <= high + tol)
+        if not keep.any():
+            raise ConfigurationError(
+                f"{who}: band=({low:g}, {high:g}) Hz keeps no bin of a "
+                f"spectrum spanning {frequencies[0]:g} to "
+                f"{frequencies[-1]:g} Hz at {fs / n_time:g} Hz "
+                f"spacing.")
+        frequencies = frequencies[keep]
+        H = np.compress(keep, H, axis=axis)
+    return frequencies, H
+
+
 def impulse_response_from_transfer_function(H, frequencies, sample_rate: float,
                                             n_samples: Optional[int] = None):
     """Real impulse response from a one-sided transfer function ``H(f)``.
@@ -1314,8 +1453,14 @@ def modal_group_velocity(frequencies, k_horizontal):
     # this function and Modes.compute_group_velocity, which differences one
     # step directly. dkr is aligned with the FIRST of each pair.
     step = np.diff(kr, axis=0)
+    # `grid=` lets the notice prescribe a MEASURED step, which needs a grid
+    # it can decimate. Two frequencies cannot separate truncation from
+    # storage — that is the case warn_if_storage_under_resolves documents
+    # as giving the test instead of the step — so the grid is withheld and
+    # the notice falls back to the advice that does not need one.
     warn_if_storage_under_resolves(
-        kr[:-1], step, v_g[:-1], "modal_group_velocity", grid=(omega, kr))
+        kr[:-1], step, v_g[:-1], "modal_group_velocity",
+        grid=(omega, kr) if omega.size >= 3 else None)
     return v_g
 
 
@@ -1594,3 +1739,1156 @@ def unwarp_signal(warped, t_warp, sample_rate: float, range_m: float,
     signal = _resample_uniform(w_unweighted, tw[0], dt_w, t_w_of_t,
                                method=interpolation, who='unwarp_signal')
     return t, signal
+
+
+# ── power delay profile ───────────────────────────────────────────────────
+#
+# A power delay profile is a list of delays and the power arriving at each.
+# It comes from a model's arrival list, from a chirp sounding, from a
+# measured channel in a file — these functions ask nothing about which.
+# `Arrivals` supplies its own delays and absorption-corrected powers and
+# wraps each of them.
+
+#: ``k`` of ``1 / (k tau_rms)``. ``inverse_spread`` is the corpus's own
+#: statement (APL-UW TR 9407 sect. II.7.b p. II-32; Abraham sect. 8.7);
+#: the Rappaport correlation rules (2nd ed. sect. 5.4.3, eqs 5.39-5.40)
+#: come from outside the corpus, so they are options and not the default.
+COHERENCE_BANDWIDTH_FACTORS = {'inverse_spread': 1.0,
+                               'rappaport_0.5': 5.0,
+                               'rappaport_0.9': 50.0}
+
+
+@dataclass(frozen=True)
+class ChannelRegime:
+    """Verdict of :func:`channel_regime` for one symbol rate.
+
+    ``frequency_selective`` is
+    ``signal_bandwidth_hz > coherence_bandwidth_hz``:
+    the symbol band spans more than one fade of the channel, so the symbols
+    overlap their neighbours (``isi_symbols`` of them, the rms delay spread
+    in symbol periods) and a flat gain cannot describe the link.
+    """
+    coherence_bandwidth_hz: float
+    signal_bandwidth_hz: float
+    rms_delay_spread_s: float
+    symbol_duration_s: float
+    frequency_selective: bool
+    isi_symbols: float
+    convention: str
+
+    def __str__(self) -> str:
+        verdict = ("frequency-selective" if self.frequency_selective
+                   else "frequency-flat")
+        sign = ">" if self.frequency_selective else "<="
+        return (f"{verdict}: signal {self.signal_bandwidth_hz:g} Hz {sign} "
+                f"coherence {self.coherence_bandwidth_hz:g} Hz "
+                f"[{self.convention}] (rms delay spread "
+                f"{self.rms_delay_spread_s:g} s = {self.isi_symbols:g} "
+                f"symbols of {self.symbol_duration_s:g} s)")
+
+
+def _profile(delays_s, powers, who):
+    """The two arrays every function below takes, checked once."""
+    delays = np.asarray(delays_s, dtype=float).ravel()
+    power = np.asarray(powers, dtype=float).ravel()
+    if delays.size != power.size:
+        raise ConfigurationError(
+            f"{who}: delays_s and powers must have the same length; got "
+            f"{delays.size} and {power.size}.")
+    if np.any(power < 0.0):
+        raise ConfigurationError(
+            f"{who}: powers must be non-negative — this is a POWER delay "
+            f"profile, so pass |a|**2, not the complex amplitudes.")
+    return delays, power
+
+
+def rms_delay_spread(delays_s, powers, *,
+                     who: str = "rms_delay_spread") -> float:
+    """Energy-weighted spread of a power delay profile, in seconds.
+
+    The second central moment of the profile: delays weighted by ``powers``,
+    about their weighted mean. It measures how much the arrival pattern
+    smears a pulse in time, so it bounds the time resolution any processing
+    of the channel can have — the smearing of a transmitted pulse, the
+    length a replica or matched filter has to cover, the interval a symbol
+    would have to exceed to avoid overlapping its neighbour.
+
+    Prefer it to the peak-to-peak spread ``ptp(delays)``, which is set by
+    whichever path arrives last no matter how faint: on a 1 km
+    bottom-to-bottom path in 1000 m of water at 40 kHz the two differ by
+    more than two orders of magnitude, because a path tens of dB down lands
+    seconds late while almost all the energy arrives within a millisecond
+    of the first.
+
+    Parameters
+    ----------
+    delays_s : array_like
+        Arrival delays (s). Order does not matter.
+    powers : array_like
+        Power at each delay, same length. Non-negative: pass ``|a|**2``.
+        Any consistent scaling works — the result is scale-invariant.
+
+    Returns
+    -------
+    float
+        Seconds. ``0.0`` for a single arrival and for a profile carrying no
+        energy at all; ``nan`` if a delay or power is non-finite, rather
+        than a spread computed from whatever else was finite.
+
+    Notes
+    -----
+    Its reciprocal is the frequency scale over which the transfer function
+    decorrelates — see :func:`coherence_bandwidth`, which states the
+    constant relating the two.
+    """
+    delays, power = _profile(delays_s, powers, who)
+    total = float(power.sum())
+    if delays.size < 2 or total <= 0.0:
+        return 0.0
+    weights = power / total
+    mean = float((weights * delays).sum())
+    return float(np.sqrt((weights * (delays - mean) ** 2).sum()))
+
+
+def energy_support(delays_s, powers, fraction: float = 0.999, *,
+                   who: str = "energy_support") -> float:
+    """Delay span holding ``fraction`` of a profile's energy, in seconds.
+
+    Measured from the first arrival to the one by which ``fraction`` of the
+    energy has arrived. It answers the question a synthesis window asks —
+    how long does the response have to be? — which neither of the other two
+    measures does: ``ptp(delays)`` is an extremum, moved by one faint
+    straggler however little it carries, and :func:`rms_delay_spread` is a
+    second moment, a width rather than a span the energy fits inside.
+
+    Parameters
+    ----------
+    delays_s, powers : array_like
+        The profile, as for :func:`rms_delay_spread`.
+    fraction : float, default 0.999
+        Share of the total energy the span must hold, in ``(0, 1]``. ``1.0``
+        is the peak-to-peak span. The default leaves a thousandth of the
+        energy — 30 dB down — outside.
+
+    Returns
+    -------
+    float
+        Seconds. ``0.0`` for a single arrival and for a profile carrying no
+        energy at all; ``nan`` if a delay or power is non-finite.
+    """
+    fraction = float(fraction)
+    if not 0.0 < fraction <= 1.0:
+        raise ConfigurationError(
+            f"{who}: fraction={fraction:g} is not a share of the energy. "
+            f"Pass 0 < fraction <= 1 (1.0 spans every arrival, i.e. the "
+            f"peak-to-peak delay).")
+    delays, power = _profile(delays_s, powers, who)
+    if delays.size < 2:
+        return 0.0
+    if not (np.all(np.isfinite(delays)) and np.all(np.isfinite(power))):
+        return float('nan')
+    total = float(power.sum())
+    if total <= 0.0:
+        return 0.0
+    order = np.argsort(delays)
+    delays = delays[order]
+    # The cumulative share is monotone, so the first entry at or above the
+    # target is the last arrival that has to fit. Rounding can leave the
+    # final entry a hair under 1.0, which would put the index one past the
+    # end, so clamp it.
+    cumulative = np.cumsum(power[order]) / total
+    cut = min(int(np.searchsorted(cumulative, fraction, side='left')),
+              delays.size - 1)
+    return float(delays[cut] - delays[0])
+
+
+def coherence_factor(convention: str = 'inverse_spread', factor=None, *,
+                     who: str = "coherence_factor") -> float:
+    """The ``k`` of ``1 / (k tau_rms)``: ``factor`` when given (any finite
+    ``k > 0``), else the named convention's — see
+    :data:`COHERENCE_BANDWIDTH_FACTORS`."""
+    if factor is not None:
+        factor = float(factor)
+        if not (np.isfinite(factor) and factor > 0.0):
+            raise ConfigurationError(
+                f"{who}: factor must be a finite number > 0 (the k of "
+                f"1 / (k * tau_rms)); got {factor!r}. Leave it out to "
+                f"use convention={convention!r}.")
+        return factor
+    try:
+        return COHERENCE_BANDWIDTH_FACTORS[convention]
+    except KeyError:
+        raise ConfigurationError(
+            f"{who}: convention must be one of "
+            f"{sorted(COHERENCE_BANDWIDTH_FACTORS)} (1/tau_rms, "
+            f"1/(5 tau_rms), 1/(50 tau_rms)), or pass factor=k for "
+            f"1/(k tau_rms); got {convention!r}.") from None
+
+
+def coherence_bandwidth(delays_s, powers, *,
+                        convention: str = 'inverse_spread',
+                        factor=None, who: str = "coherence_bandwidth"
+                        ) -> float:
+    """Bandwidth over which a channel's transfer function stays correlated,
+    in Hz, as ``1 / (k * tau_rms)`` with ``tau_rms`` the
+    :func:`rms_delay_spread` of the profile.
+
+    The default ``k = 1`` is the convention the corpus states: "the inverse
+    [of the elongation time] in hertz is a measure of the coherence
+    bandwidth of the channel" (APL-UW TR 9407, sect. II.7.b, p. II-32) and
+    ``W < 1 / sigma_t = W_c`` (Abraham, *Underwater Acoustic Signal
+    Processing*, sect. 8.7, Fig. 8.34: 33 ms of spreading gives 30 Hz). The
+    named options ``'rappaport_0.5'`` (``k = 5``) and ``'rappaport_0.9'``
+    (``k = 50``) are the 0.5- and 0.9-correlation rules of Rappaport,
+    *Wireless Communications*, 2nd ed., sect. 5.4.3, eqs 5.39-5.40 — a
+    source outside the corpus, so they are options and not the default.
+
+    Returns ``inf`` for a single arrival (no spread, a flat channel), and
+    ``nan`` when the spread is.
+    """
+    k = coherence_factor(convention, factor, who=who)
+    spread = rms_delay_spread(delays_s, powers, who=who)
+    if not np.isfinite(spread):
+        return float('nan')
+    if spread <= 0.0:
+        return float('inf')
+    return 1.0 / (k * spread)
+
+
+def channel_regime(delays_s, powers, symbol_rate: float, *,
+                   convention: str = 'inverse_spread', factor=None,
+                   rolloff: float = 0.0,
+                   who: str = "channel_regime") -> ChannelRegime:
+    """Whether a modem at ``symbol_rate`` sees this profile as flat or
+    frequency-selective.
+
+    Compares the signal bandwidth ``(1 + rolloff) * symbol_rate`` with
+    :func:`coherence_bandwidth` under ``convention`` / ``factor``:
+    selective when the signal is the wider (Proakis, *Digital
+    Communications*, 4th ed., sect. 14.1.2; Stojanovic and Preisig 2009,
+    sect. II). ``isi_symbols`` is the rms delay spread in symbol periods,
+    the number of neighbours each symbol overlaps. The result records the
+    convention it was judged under (``factor=k`` is recorded as
+    ``'factor=k'``).
+
+    Parameters
+    ----------
+    delays_s, powers : array_like
+        The profile, as for :func:`rms_delay_spread`.
+    symbol_rate : float
+        Symbol rate (Bd).
+    convention, factor
+        As on :func:`coherence_bandwidth`.
+    rolloff : float, default 0.0
+        Excess bandwidth of the pulse; ``0`` takes the Nyquist bandwidth
+        equal to the symbol rate.
+    """
+    symbol_rate = float(symbol_rate)
+    if not (np.isfinite(symbol_rate) and symbol_rate > 0.0):
+        raise ConfigurationError(
+            f"{who}: symbol_rate must be positive and finite (Bd); got "
+            f"{symbol_rate!r}.")
+    rolloff = float(rolloff)
+    if not 0.0 <= rolloff <= 1.0:
+        raise ConfigurationError(
+            f"{who}: rolloff must be in [0, 1]; got {rolloff!r}.")
+    k = coherence_factor(convention, factor, who=who)
+    coherence = coherence_bandwidth(delays_s, powers, factor=k, who=who)
+    spread = rms_delay_spread(delays_s, powers, who=who)
+    signal = (1.0 + rolloff) * symbol_rate
+    return ChannelRegime(
+        coherence_bandwidth_hz=coherence,
+        signal_bandwidth_hz=signal,
+        rms_delay_spread_s=spread,
+        symbol_duration_s=1.0 / symbol_rate,
+        frequency_selective=bool(signal > coherence),
+        isi_symbols=spread * symbol_rate,
+        convention=(str(convention) if factor is None
+                    else f"factor={float(factor):g}"),
+    )
+
+
+def arrival_transfer_function(frequencies, amplitudes, delays_s, *,
+                              delays_imag_s=None, phases_rad=None,
+                              phase_offset: float = 0.0,
+                              who: str = "arrival_transfer_function"):
+    """``H(f)`` of a discrete multipath arrival list.
+
+    .. math::
+        H(f) = \\sum_i A_i\\,e^{i\\varphi_i}\\,
+               e^{\\omega\\,\\mathrm{Im}\\tau_i}\\,
+               e^{-i\\omega\\,\\mathrm{Re}\\tau_i}
+
+    The absorption term is separate because ray codes put volume absorption
+    in the **imaginary travel time**, not in the amplitude: Bellhop writes
+    ``delay_imag`` as its own field (``ArrMod.f90:118-125``), so the
+    received amplitude is ``A·exp(ω·Im τ)`` and grows more negative with
+    frequency across a band. Scoring on ``A`` alone treats a late, heavily
+    absorbed path as though the water were lossless.
+
+    Parameters
+    ----------
+    frequencies : array_like
+        Frequencies (Hz) to evaluate at.
+    amplitudes : array_like
+        Arrival amplitudes, as **non-negative magnitudes**. A sign belongs
+        in ``phases_rad`` as ``pi``, not here — see below.
+    delays_s : array_like
+        Real travel times (s), same length as ``amplitudes``.
+    delays_imag_s : array_like, optional
+        Imaginary travel times (s). ``None`` means a lossless list, i.e.
+        zeros — which is what a hand-built arrival set without the field
+        carries.
+    phases_rad : array_like, optional
+        Per-arrival phase (radians). ``None`` means zeros.
+    phase_offset : float, default 0
+        Added to every ``phases_rad``.
+    who : str, optional
+        Name to put in the refusals, for a method that delegates here.
+
+    Returns
+    -------
+    ndarray
+        Complex ``H(f)``, one entry per frequency.
+
+    Raises
+    ------
+    ConfigurationError
+        Mismatched lengths, a complex or negative amplitude, or a
+        non-finite delay.
+
+    Notes
+    -----
+    **Why a negative amplitude is refused rather than accepted.** This
+    package had two implementations of this sum, and they disagreed on
+    exactly that input: one took ``abs`` of the amplitude and the other did
+    not, so a negative entry silently produced two different spectra — up
+    to 10.7 dB apart per bin — with no error on either side. An amplitude
+    here is a magnitude and the phase column carries the sign, so a
+    negative value means the caller has mixed the two conventions. Saying
+    so is the only answer that cannot be silently wrong.
+    """
+    freqs = np.asarray(frequencies, dtype=float).ravel()
+    amp = np.asarray(amplitudes).ravel()
+    delays = np.asarray(delays_s, dtype=float).ravel()
+    if np.iscomplexobj(amp):
+        raise ConfigurationError(
+            f"{who}: amplitudes must be real magnitudes; got a complex "
+            f"array. Pass |A| here and its argument in phases_rad.")
+    amp = amp.astype(float)
+    if amp.size != delays.size:
+        raise ConfigurationError(
+            f"{who}: amplitudes and delays_s must have the same length; "
+            f"got {amp.size} and {delays.size}.")
+    if np.any(amp < 0.0):
+        n = int(np.count_nonzero(amp < 0.0))
+        raise ConfigurationError(
+            f"{who}: {n} of {amp.size} amplitudes are negative. An arrival "
+            f"amplitude is a magnitude and its sign lives in the phase, so "
+            f"pass abs(A) with pi added to phases_rad for each one. "
+            f"Accepting it silently is what made two paths in this package "
+            f"disagree by up to 10.7 dB per bin.")
+    if not np.all(np.isfinite(delays)):
+        raise ConfigurationError(
+            f"{who}: an arrival has a non-finite delay, so its phase term "
+            f"is undefined at every frequency.")
+    imag = (np.zeros_like(delays) if delays_imag_s is None
+            else np.asarray(delays_imag_s, dtype=float).ravel())
+    phase = (np.zeros_like(delays) if phases_rad is None
+             else np.asarray(phases_rad, dtype=float).ravel())
+    for name, arr in (('delays_imag_s', imag), ('phases_rad', phase)):
+        if arr.size != delays.size:
+            raise ConfigurationError(
+                f"{who}: {name} must have one entry per arrival "
+                f"({delays.size}); got {arr.size}.")
+    omega = 2.0 * np.pi * freqs
+    gains = amp * np.exp(1j * (phase + float(phase_offset)))
+    with np.errstate(over='ignore'):
+        contrib = gains[:, None] * np.exp(np.outer(imag, omega)
+                                          - 1j * np.outer(delays, omega))
+    return contrib.sum(axis=0)
+
+
+def broadband_propagation_loss(H, weights=None, *, axis: int = -1,
+                               who: str = "broadband_propagation_loss"):
+    """Propagation loss of a signal with bandwidth — Ainslie Eq. 11.46.
+
+    .. math::
+        \\mathrm{PL} = 10\\log_{10}
+        \\frac{\\sum_f w(f)}{\\sum_f w(f)\\,|H(f)|^2}
+
+    with ``w(f) = |S(f)|²`` the source's power spectrum. This is **the**
+    transmission loss of a transient: the frequency average of the
+    *coherent* ``|H|²``, weighted by the spectrum the signal actually puts
+    on each bin (Ainslie, *Sonar Performance Modeling*, sect. 11.3.3,
+    Eq. 11.46 and its footnote 13 for the coloured-spectrum form). The
+    same quantity appears as Abraham's pulse loss
+    ``∫|U|²df / ∫|H|²|U|²df`` (sect. 3.2.4.2) and as Ainslie's total path
+    loss (sect. 3.3.2.1).
+
+    Do not confuse it with **incoherent** TL (Eq. 11.47), the average of
+    ``|H|²`` over paths rather than over frequency: that one is a cheap
+    stand-in the KRAKEN manual endorses, and Ainslie marks it invalid
+    within a few wavelengths of a boundary.
+
+    Parameters
+    ----------
+    H : array_like
+        Complex transfer function. Any shape; ``axis`` is the frequency
+        axis, and the others are carried through, so a
+        ``(depth, range, frequency)`` grid returns a map.
+    weights : array_like, optional
+        ``w(f) = |S(f)|²`` on the same grid, one per frequency. ``None``
+        weights every bin equally — the flat-spectrum case, which is the
+        band average of ``|H|²``.
+    axis : int, default -1
+        Frequency axis of ``H``.
+    who : str, optional
+        Name to put in the refusals, for a method that delegates here.
+
+    Returns
+    -------
+    ndarray
+        Loss in dB, ``H``'s shape without ``axis``. A cell with a NaN at
+        any weighted frequency stays NaN: a no-data bin must not average
+        away into a finite level.
+
+    Raises
+    ------
+    ConfigurationError
+        A ``weights`` of the wrong length, non-finite, or carrying no
+        energy at all.
+
+    Notes
+    -----
+    Accumulated one frequency at a time rather than as
+    ``sum(w * |H|**2, axis)``: that spelling materialises a temporary the
+    size of the whole broadband grid, on top of the grid itself. Measured
+    on 120 x 400 cells over 401 frequencies (a 0.29 GiB grid), peak extra
+    allocation is 0.001 GiB against 0.287 GiB for the one temporary, and
+    the two agree to 1e-14 dB.
+    """
+    data = np.asarray(H)
+    if data.ndim == 0:
+        raise ConfigurationError(
+            f"{who}: H must have a frequency axis; got a scalar.")
+    try:
+        requested = int(axis)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{who}: axis must be an integer; got {axis!r}.") from exc
+    if not -data.ndim <= requested < data.ndim:
+        raise ConfigurationError(
+            f"{who}: axis={requested} is not an axis of an array with "
+            f"shape {data.shape}.")
+    axis = requested % data.ndim
+    n_f = data.shape[axis]
+    if weights is None:
+        w = np.ones(n_f, dtype=float)
+    else:
+        w = np.asarray(weights, dtype=float)
+        if w.ndim != 1:
+            raise ConfigurationError(
+                f"{who}: weights must be one value per frequency; got "
+                f"shape {w.shape}. It is the source power spectrum ON "
+                f"this frequency axis.")
+        if w.size != n_f:
+            raise ConfigurationError(
+                f"{who}: weights has {w.size} samples but the frequency "
+                f"axis has {n_f}.")
+        if not np.all(np.isfinite(w)):
+            raise ConfigurationError(f"{who}: weights must be finite.")
+        if w.sum() <= 0.0:
+            raise ConfigurationError(
+                f"{who}: weights carry no energy, so the weighted average "
+                f"is undefined.")
+    moved = np.moveaxis(data, axis, 0)
+    power = np.zeros(moved.shape[1:], dtype=float)
+    for i, weight in enumerate(w):
+        if weight:
+            power += weight * np.abs(moved[i]) ** 2
+        else:
+            # A zero-weight bin contributes nothing but must still carry a
+            # no-data cell forward: skipping it silently would let a NaN
+            # column average to a finite level.
+            power += np.where(np.isnan(moved[i]), np.nan, 0.0)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return 10.0 * np.log10(w.sum() / power)
+
+
+def uniform_frequency_step(frequencies, who: str = "uniform_frequency_step"
+                           ) -> float:
+    """The step of a uniformly-spaced ascending frequency axis, or a refusal.
+
+    Bin placement presumes such a grid: off one, frequencies land at the
+    wrong bins and can collide (the later value overwrites). Every routine
+    that turns an ``H(f)`` into a time record asks this first.
+    """
+    freqs = np.asarray(frequencies, dtype=float)
+    df = float(freqs[1] - freqs[0])
+    spacings = np.diff(freqs)
+    if df <= 0 or not np.allclose(spacings, df, rtol=1e-6, atol=0.0):
+        raise ConfigurationError(
+            f"{who}: the frequency axis must be uniformly spaced and "
+            f"ascending; spacing runs from {spacings.min():.6g} Hz to "
+            f"{spacings.max():.6g} Hz against a leading Δf of {df:.6g} Hz. "
+            f"Resample H(f) onto an equispaced grid before synthesising.",
+            remediation="Run the model on an equispaced frequencies= array.",
+        )
+    return df
+
+
+def _warn_if_response_wraps(h, offset, record, who: str) -> None:
+    """Warn when the impulse response is still live where the window is not,
+    at the far side of the circular record.
+
+    The two cases a cut cannot tell apart are an arrival that is genuinely
+    late and one that was later than ``1/df`` and folded back. This measures
+    the only thing visible from inside: how much of the response sits in the
+    half of the record furthest from the window. A decayed response leaves
+    that part empty; a folding one does not, and then the energy the window
+    removed is not the energy the pulse would resolve.
+
+    It is deliberately NOT the whole complement of the window. Energy
+    immediately outside the window is what a cut exists to remove — a
+    genuine late path — so counting it warns on channels that cannot fold:
+    two equal paths 100 ms apart in a 500 ms record read 50 %.
+
+    **It is a heuristic with a blind spot, not a test.** What it detects is
+    a response that has not decayed where a well-sized record would be
+    empty. A fold that lands NEAR the origin — a path just past the
+    record's end, which is the likeliest kind — arrives in the near half
+    and is never counted at all. Size the grid from the arrivals; this only
+    catches the loud, obvious case.
+    """
+    power = np.abs(h) ** 2
+    total = power.sum(axis=-1)
+    # The FAR HALF of the record from the window, not the whole complement.
+    # Energy just outside the window is what a cut is FOR — a genuine late
+    # path being removed — and counting it made this warn on channels that
+    # cannot fold at all: two equal paths 100 ms apart in a 500 ms record
+    # read 50% and were told to refine the grid.
+    #
+    # ``offset`` is the caller's own circular distance from the window
+    # centre, passed in rather than re-derived. Recovering it here as
+    # ``argmax(taper)`` gave a BOXCAR's left edge, not its centre — the mask
+    # came out rotated by the window's half-width, so the same channel and
+    # cut warned under 'boxcar' and stayed quiet under 'hann'.
+    far = offset > record / 4.0
+    live = np.where(total > 0.0,
+                    power.sum(axis=-1, where=far)
+                    / np.where(total > 0.0, total, 1.0), 0.0)
+    worst = float(np.max(live)) if live.size else 0.0
+    # 0.02, chosen from a 48-case sweep rather than inherited. The old 0.33
+    # was calibrated against a DIFFERENT measure (the whole complement of
+    # the window) and was never re-derived when this became the far half:
+    # against the far half it missed 77.8 % of folds. At 0.02 the sweep
+    # missed 11.1 % and false-alarmed on none of 21 clean channels. The
+    # residual 11 % is the blind spot, not a tuning failure.
+    if worst > 0.02:
+        warnings.warn(
+            f"{who}: {100.0 * worst:.0f}% of the response sits in the "
+            f"half of the record furthest from the window. A decayed "
+            f"response leaves that empty, so either a path is arriving "
+            f"that late, or one later than the 1/df record has folded "
+            f"onto it — from H(f) alone these are the same measurement. "
+            f"If the arrivals are known to fit the record, ignore this; "
+            f"otherwise size the grid from them "
+            f"(Arrivals.synthesis_band).",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
+def gate_transfer_function(H, frequencies, duration: float, *,
+                           origin='peak', window: str = 'boxcar',
+                           axis: int = -1,
+                           who: str = "gate_transfer_function"):
+    """Keep only the part of a channel's impulse response within ``duration``
+    of its centre, and return the ``H(f)`` of what is left.
+
+    Transform the band to its own baseband response, gate it, transform
+    back. It answers "what would this channel look like if only the paths
+    arriving within ±``duration`` existed?" — the separability question a
+    pulse of that length asks, since a pulse only interferes with the paths
+    it can overlap.
+
+    The record the gate lives in is ``1/df`` long and wraps, so the window
+    is applied on **circular** distance: one centred near an end reaches
+    round to the other, which is where a path near the record edge actually
+    sits.
+
+    Parameters
+    ----------
+    H : array_like
+        Complex transfer function on a uniform ascending frequency grid.
+    frequencies : array_like
+        That grid (Hz). Its spacing sets the record length ``1/df``.
+    duration : float
+        Half-width of the gate (s). It reaches ``duration`` either side of
+        the centre, so ``2*duration`` must fit inside the record.
+    origin : {'peak'} or float
+        ``'peak'`` centres the gate on each cell's own ``argmax|h|``; a
+        number centres every cell on that fixed time (s) from the start of
+        the record, which is what comparing cells requires.
+    window : {'boxcar', 'hann'}
+        ``'boxcar'`` is the separability criterion stated plainly;
+        ``'hann'`` is the same cut, tapered.
+    axis : int, default -1
+        Frequency axis of ``H``.
+    who : str, optional
+        Name to put in the refusals and the wrap warning.
+
+    Returns
+    -------
+    ndarray
+        Gated ``H(f)``, same shape as ``H``.
+
+    Warns
+    -----
+    UserWarning
+        When the response is still live in the half of the record furthest
+        from the window — either a genuinely late path or a fold, which
+        ``H(f)`` alone cannot distinguish.
+    """
+    data = np.asarray(H)
+    freqs = np.asarray(frequencies, dtype=float).ravel()
+    if freqs.size < 2:
+        raise ConfigurationError(
+            f"{who}: needs at least 2 frequencies to define a record "
+            f"length; got {freqs.size}.")
+    df = uniform_frequency_step(freqs, who)
+    record = 1.0 / df
+    if window not in ('boxcar', 'hann'):
+        raise ConfigurationError(
+            f"{who}: window must be 'boxcar' (the separability criterion "
+            f"stated plainly) or 'hann' (the same cut, tapered); got "
+            f"{window!r}.")
+    duration = float(duration)
+    if not np.isfinite(duration) or duration <= 0.0:
+        raise ConfigurationError(
+            f"{who}: duration must be a positive number of seconds; got "
+            f"{duration!r}.")
+    if 2.0 * duration >= record:
+        raise ConfigurationError(
+            f"{who}: the window reaches {duration:g} s either side of the "
+            f"origin, which is not inside the {record:g} s record the grid "
+            f"defines (1/df, df = {df:g} Hz), so it keeps everything and "
+            f"the call would be a no-op. Refine the grid or shorten the "
+            f"pulse.")
+    try:
+        requested = int(axis)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{who}: axis must be an integer; got {axis!r}.") from exc
+    if not -data.ndim <= requested < data.ndim:
+        raise ConfigurationError(
+            f"{who}: axis={requested} is not an axis of an array with "
+            f"shape {data.shape}.")
+    axis = requested % data.ndim
+    n_f = freqs.size
+    if data.shape[axis] != n_f:
+        raise ConfigurationError(
+            f"{who}: H has {data.shape[axis]} samples along axis {axis} "
+            f"but frequencies has {n_f}.")
+    moved = np.moveaxis(data, axis, -1)
+    flat = moved.reshape(-1, n_f)
+    # The band's own baseband response: one period is 1/df and the step is
+    # 1/(n_f*df), which is the resolution the band itself has.
+    h = np.fft.ifft(flat, axis=-1)
+    times = np.arange(n_f) * (record / n_f)
+    if isinstance(origin, str) and origin == 'peak':
+        centres = times[np.argmax(np.abs(h), axis=-1)]
+    else:
+        try:
+            fixed = float(origin)
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"{who}: origin must be 'peak' or a time in seconds from "
+                f"the start of the record; got {origin!r}.") from exc
+        if not np.isfinite(fixed) or not 0.0 <= fixed < record:
+            raise ConfigurationError(
+                f"{who}: origin {fixed:g} s is outside the "
+                f"[0, {record:g}) s record this grid defines.")
+        centres = np.full(flat.shape[0], fixed)
+    # Circular distance: the record wraps, so a window centred near one end
+    # reaches round to the other, which is where the response of a path near
+    # the record edge actually sits.
+    offset = np.abs(times[None, :] - centres[:, None])
+    offset = np.minimum(offset, record - offset)
+    if window == 'boxcar':
+        taper = (offset <= duration).astype(float)
+    else:
+        taper = np.where(offset <= duration,
+                         0.5 * (1.0 + np.cos(np.pi * offset / duration)),
+                         0.0)
+    _warn_if_response_wraps(h, offset, record, who)
+    out = np.fft.fft(h * taper, axis=-1).reshape(moved.shape)
+    return np.moveaxis(out, -1, axis)
+
+
+# Fewest frequency bins a band-edge taper can act on and still leave an
+# interior. numpy's hann/hamming/blackman are symmetric with (near-)zero
+# endpoints, so at 2 bins the window is [0, 0] and at 3 it is [0, 1, 0] — a
+# taper there does not soften the edges, it deletes the band.
+_MIN_TAPERABLE_BINS = 4
+
+_WINDOWS = ('hann', 'hamming', 'blackman', 'tukey', 'none')
+
+
+def _taper(name: str, n: int, *, who: str) -> np.ndarray:
+    """Edge taper of ``n`` samples, shared by the tone extractor and the IFFT.
+
+    Returns a flat window for ``'none'`` and for a span too short to keep an
+    interior (warning in the latter case).
+
+    The two callers sit at different depths — the tone extractor is one frame
+    below its public method, the synthesis planner three — so the warning
+    below carries no frame count of its own: a count passed in by the caller
+    can only be right for one of the two depths, and points at this helper's
+    own frame from the other."""
+    if name not in _WINDOWS:
+        raise ConfigurationError(
+            f"{who}: unknown window={name!r}; "
+            f"valid: {', '.join(repr(w) for w in _WINDOWS)}"
+        )
+    if name == 'none':
+        return np.ones(n)
+    if n < _MIN_TAPERABLE_BINS:
+        warnings.warn(
+            f"{who}: a {n}-sample span is too narrow to taper (a {name!r} "
+            f"window needs at least {_MIN_TAPERABLE_BINS} samples to leave an "
+            f"interior); continuing untapered. Widen the span for a resolved "
+            f"result.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+        return np.ones(n)
+    if name == 'hann':
+        return np.hanning(n)
+    if name == 'hamming':
+        return np.hamming(n)
+    if name == 'blackman':
+        return np.blackman(n)
+    from scipy.signal import windows
+    return windows.tukey(n, alpha=0.5)
+
+
+def tone_phasor(x, times, frequency, *, window: str = 'hann',
+                axis: int = -1, who: str = "tone_phasor"):
+    """Complex amplitude and phase of one tone in a record.
+
+    .. math::
+        A = \\frac{2}{\\sum w}\\sum_n x_n w_n e^{-2\\pi i f t_n}
+
+    The transform is evaluated **at** ``frequency``, not sampled at the
+    nearest DFT bin. Off a bin, ``X[k]`` is a leakage sample of the window
+    transform — neither the phasor at ``frequency`` nor the one at
+    ``freqs[k]``. A model-produced trace picks its own ``nt`` and ``fs``,
+    so the frequency of interest is essentially never on a bin, and the
+    nearest-bin answer is wrong by a growing amount across the bin:
+    measured against this sum, ``-0.056 dB`` and ``18°`` at a tenth of a
+    bin, ``-1.418 dB`` and ``89.8°`` at half of one. **The phase reaches
+    90° before the level has moved 1.5 dB**, which is why a level check
+    alone does not find it. On a bin the two agree to ~1e-15, differing
+    only in summation order.
+
+    The ``2·X/Σw`` estimator assumes a real record and a non-DC,
+    non-Nyquist tone: the 2 restores the half of the energy sitting in the
+    negative-frequency image, and ``Σw`` undoes both the transform's
+    ``1/N`` and the taper's amplitude loss.
+
+    Parameters
+    ----------
+    x : array_like
+        The record. ``axis`` is time; every other axis is carried through.
+    times : array_like
+        Time of each sample (s), one per sample along ``axis``. Passed
+        rather than derived, so a record that does not start at zero
+        carries its own offset into the phase.
+    frequency : float
+        The tone (Hz).
+    window : {'hann', 'hamming', 'blackman', 'tukey', 'none'}
+        Edge taper. ``'none'`` is the rectangular sum.
+    axis : int, default -1
+        Time axis.
+    who : str, optional
+        Name to put in the refusals, for a method that delegates here.
+
+    Returns
+    -------
+    ndarray or complex
+        The phasor, with ``axis`` removed.
+    """
+    data = np.asarray(x)
+    t = np.asarray(times, dtype=float).ravel()
+    if data.ndim == 0:
+        raise ConfigurationError(f"{who}: x must have a time axis.")
+    try:
+        requested = int(axis)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{who}: axis must be an integer; got {axis!r}.") from exc
+    if not -data.ndim <= requested < data.ndim:
+        raise ConfigurationError(
+            f"{who}: axis={requested} is not an axis of an array with "
+            f"shape {data.shape}.")
+    axis = requested % data.ndim
+    if t.size != data.shape[axis]:
+        raise ConfigurationError(
+            f"{who}: times has {t.size} samples but axis {axis} of x has "
+            f"{data.shape[axis]}.")
+    frequency = float(frequency)
+    if not np.isfinite(frequency):
+        raise ConfigurationError(
+            f"{who}: frequency must be finite (Hz); got {frequency!r}.")
+    win = _taper(window, t.size, who=who)
+    shape = [1] * data.ndim
+    shape[axis] = t.size
+    kernel = (win * np.exp(-2j * np.pi * frequency * t)).reshape(shape)
+    return 2.0 * np.sum(data * kernel, axis=axis) / np.sum(win)
+
+
+def _chirp_step(freqs: np.ndarray, n: int, fs: float) -> Optional[float]:
+    """The step of a uniform ascending ``freqs``, or ``None`` if it has none.
+
+    "Uniform enough" is not a matter of taste here. The chirp-z transform walks
+    the contour ``f[0] + k*df``, so what has to hold is that the walk LANDS on
+    the frequencies asked for: a landing error of ``eps`` Hz costs at most
+    ``2*pi*eps*n/fs`` radians of phase in the DTFT below, which the bound here
+    holds under 1e-9 rad — two decades inside the transform's own agreement
+    with the dense sum. Fewer than 2 in-band frequencies has no step to find
+    (and the dense sum is one row there anyway).
+    """
+    m = freqs.size
+    if m < 2:
+        return None
+    df = float(freqs[-1] - freqs[0]) / (m - 1)
+    if not (df > 0.0):
+        return None
+    drift = float(np.max(np.abs(freqs[0] + df * np.arange(m) - freqs)))
+    return df if drift * max(n, 1) <= 1e-10 * fs else None
+
+
+def waveform_spectrum_at(
+    waveform: np.ndarray, sample_rate: float, freqs: np.ndarray,
+    *, _max_elems: int = 4_000_000,
+) -> np.ndarray:
+    """Spectrum ``S(f)`` of a sampled waveform, at arbitrary frequencies.
+
+    The vector counterpart of :func:`tone_phasor`: that one gives the
+    phasor of a single tone in a record, this one gives the waveform's own
+    spectrum wherever you ask for it. Both evaluate the transform AT the
+    frequency rather than sampling a DFT bin.
+
+    Evaluates the DTFT of the sampled waveform directly::
+
+        S(f) = (1/fs) * sum_n w[n] exp(-2 pi i f n / fs)
+
+    which reproduces ``rfft(w)/fs`` exactly on the waveform's own DFT grid and
+    stays exact off it. Interpolating the rfft samples instead is only correct
+    when the two grids coincide: linear interpolation is a convolution with a
+    triangular kernel in frequency, i.e. a ``sinc^2(pi df_src t)`` taper
+    anchored at ``t = 0`` plus periodisation at ``1/df_src`` in time. On a
+    half-bin-offset grid that is a >100% median error in ``S(f)``.
+
+    Frequencies outside ``[0, fs/2]`` return 0 — a band-limited source carries
+    no out-of-band energy, and the DTFT would alias there.
+    """
+    wf = np.asarray(waveform, dtype=np.float64).ravel()
+    freqs = np.atleast_1d(np.asarray(freqs, dtype=np.float64))
+    fs = float(sample_rate)
+    n = wf.size
+
+    out = np.zeros(freqs.size, dtype=np.complex128)
+    in_band = (freqs >= 0.0) & (freqs <= 0.5 * fs)
+    if not np.any(in_band):
+        return out
+
+    sel = np.flatnonzero(in_band)
+    df = _chirp_step(freqs[sel], n, fs)
+    if df is not None:
+        # A uniform ascending run of frequencies is a chirp-z contour: with
+        # z_k = a*w**-k, a = exp(2i*pi*f[0]/fs) and w = exp(-2i*pi*df/fs),
+        # czt's sum_n x[n]*z_k**-n IS the sum below, evaluated by FFT
+        # convolution in O((n+m) log(n+m)) rather than the O(n*m) of the
+        # outer product — 2281 ms to 49 ms for 120000 frequencies against a
+        # 512-sample waveform. Imported here, like the taper windows: scipy
+        # is not needed to hold a Field, only to synthesise from one.
+        from scipy.signal import czt
+        out[sel] = czt(wf, m=sel.size,
+                       w=np.exp(-2j * np.pi * df / fs),
+                       a=np.exp(2j * np.pi * freqs[sel[0]] / fs))
+        return out / fs
+
+    # No such contour — and the contract above is ARBITRARY freqs, which a
+    # caller does use (a bare in-band/out-of-band pair, say). Evaluate the
+    # sum directly, chunked over frequency so the phase matrix stays bounded
+    # regardless of waveform length x grid size (4e6 complex128 elements
+    # ~ 64 MB per block).
+    idx = np.arange(n, dtype=np.float64)
+    step = max(1, int(_max_elems // max(n, 1)))
+    for a in range(0, sel.size, step):
+        blk = sel[a:a + step]
+        phase = np.exp(-2j * np.pi * np.outer(freqs[blk], idx) / fs)
+        out[blk] = phase @ wf
+    return out / fs
+
+
+_EMPTY_TRACE_SECONDS = 0.1
+
+
+def _echo_window_counts(starts, ends, powers, n_samples: int) -> dict:
+    """Count the placed echoes a ``[0, n_samples)`` record omits or clips.
+
+    ``starts``/``ends`` are each echo's first and one-past-last sample on
+    the record, ``powers`` the received power each carries. An echo with no
+    sample inside the record is omitted outright — a delay-and-sum drops an
+    echo, it does not fold it the way an inverse FFT does — and one that
+    straddles an edge is clipped there: at the start it loses its leading
+    edge, the first samples of the waveform, so a chirp arrives as a
+    different signal; at the end it loses its tail.
+    """
+    starts = np.asarray(starts, dtype=int)
+    ends = np.asarray(ends, dtype=int)
+    powers = np.asarray(powers, dtype=float)
+    omitted = (ends <= 0) | (starts >= n_samples)
+    return {
+        'omitted': int(omitted.sum()),
+        'clipped_start': int((~omitted & (starts < 0)).sum()),
+        'clipped_end': int((~omitted & (ends > n_samples)).sum()),
+        'omitted_power': float(powers[omitted].sum()),
+        'total_power': float(powers.sum()),
+        # First sample of the earliest echo, relative to the record start;
+        # negative when it lands before the window. Merged by ``min``.
+        'earliest_start': int(starts.min()),
+    }
+
+
+def _echo_window_notice(counts: dict, t_start: float, time_window: float,
+                        who: str) -> Optional[str]:
+    """The text for a window that does not hold every echo, or ``None``."""
+    if not (counts.get('omitted') or counts.get('clipped_start')
+            or counts.get('clipped_end')):
+        return None
+    parts = []
+    if counts['omitted']:
+        total = counts['total_power']
+        share = counts['omitted_power'] / total if total > 0.0 else 0.0
+        if share >= 1.0 - 1e-12:
+            level = "all of the received energy"
+        elif share > 0.0:
+            level = f"{10.0 * np.log10(share):.0f} dB of the received energy"
+        else:
+            level = "no measurable energy"
+        parts.append(f"{counts['omitted']} echo(es) fall entirely outside it "
+                     f"and are omitted — a delay-and-sum drops an echo rather "
+                     f"than folding it — carrying {level}")
+    if counts['clipped_start']:
+        parts.append(f"{counts['clipped_start']} echo(es) begin before it and "
+                     f"lose their leading edge, the first samples of the "
+                     f"waveform, so a chirp arrives as a different signal")
+    if counts['clipped_end']:
+        parts.append(f"{counts['clipped_end']} echo(es) run past its end and "
+                     f"lose their tail")
+    if 'earliest_s' in counts:
+        parts.append(
+            f"the earliest echo arrives at {counts['earliest_s']:g} s")
+    return (f"{who}: the [{t_start:g}, {t_start + time_window:g}] s window "
+            f"does not hold every echo: " + "; ".join(parts) + ". Widen "
+            f"time_window= or move t_start= (on run(): output_duration= and "
+            f"t_start=), or leave both unset to size the window from the "
+            f"arrivals.")
+
+
+def simulate_arrival_reception(
+    source_timeseries: np.ndarray,
+    amplitudes,
+    delays_s,
+    sample_rate: float,
+    fc: float,
+    *,
+    delays_imag_s=None,
+    phases_rad=None,
+    time_window: Optional[float] = None,
+    t_start: Optional[float] = None,
+    phase_offset: float = 0.0,
+    fractional: bool = True,
+    report: Optional[dict] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Received waveform from a sparse arrival list, with carrier and absorption.
+
+    Places a phase-shifted, amplitude-scaled copy of the source waveform at
+    each arrival time.  Uses the Hilbert transform (analytic signal) to apply
+    arbitrary phase rotations from caustics and boundary reflections, as
+    described in the Bellhop User Guide (Sec. 9.3).
+
+    Parameters
+    ----------
+    amplitudes, delays_s : array_like
+        Arrival magnitudes and real travel times (s).
+    delays_imag_s : array_like, optional
+        Imaginary travel times (s), carrying the volume absorption as
+        ``exp(omega * Im tau)``. ``None`` is a lossless list.
+    phases_rad : array_like, optional
+        Per-arrival phase (radians) from caustics and boundary reflections.
+        ``None`` is zeros.
+    source_timeseries : ndarray
+        Source waveform (1-D), used as-is.
+    sample_rate : float
+        Sample rate in Hz.
+    fc : float
+        Center frequency in Hz (for volume-attenuation scaling).
+    time_window : float, optional
+        Output time window in seconds.  If *None*, estimated from the
+        latest arrival plus the source waveform duration plus margin.
+    t_start : float, optional
+        Start time for the output.  If *None*, set to just before the
+        earliest arrival.
+    phase_offset : float, optional
+        Constant phase (radians) added to every arrival, applied on the
+        analytic signal. ``0.0`` (default): a :class:`Bellhop` ARRIVALS
+        result already carries the line-source ``exp(-i*pi/4)`` in its
+        ``phases``.
+    fractional : bool, optional
+        Place each echo at its exact delay with a windowed-sinc kernel
+        (default). ``False`` rounds every delay to the nearest sample, which
+        is what this did before: an error up to half a sample, which is tens
+        of degrees of carrier phase at any frequency a modem uses, summed
+        coherently into the interference pattern. Continuous placement is
+        what the formulation asks for — COA eq. 8.30 shifts the waveform by
+        ``t - tau(s)``, not by a whole number of samples.
+    report : dict, optional
+        Collect, instead of warning, what the window omits or clips: the
+        counts from :func:`_echo_window_counts` are ADDED into it, so one
+        dict passed across every receiver cell of a run totals the grid and
+        the run says it once. Left ``None``, this warns itself when an echo
+        falls outside the window or straddles one of its edges — a
+        delay-and-sum drops such an echo silently otherwise, and the record
+        reads as complete.
+
+    Returns
+    -------
+    rts : ndarray
+        Received time series, shape ``(n_samples,)``.
+    time_vector : ndarray
+        Time vector in seconds.
+
+    References
+    ----------
+    Bellhop User Guide, Section 9.3
+    Original MATLAB code: delayandsum.m by M. B. Porter, 8/96
+    """
+    amps = np.atleast_1d(np.asarray(amplitudes, dtype=float)).ravel()
+    delays = np.atleast_1d(np.asarray(delays_s, dtype=float)).ravel()
+    if amps.size != delays.size:
+        raise ConfigurationError(
+            f"simulate_arrival_reception: amplitudes and delays_s must have "
+            f"the same length; got {amps.size} and {delays.size}.")
+    delays_imag = (np.zeros_like(delays) if delays_imag_s is None
+                   else np.atleast_1d(
+                       np.asarray(delays_imag_s, dtype=float)).ravel())
+    phases = (np.zeros_like(delays) if phases_rad is None
+              else np.atleast_1d(np.asarray(phases_rad, dtype=float)).ravel())
+    for name, arr in (('delays_imag_s', delays_imag), ('phases_rad', phases)):
+        if arr.size != delays.size:
+            raise ConfigurationError(
+                f"simulate_arrival_reception: {name} must have one entry per "
+                f"arrival ({delays.size}); got {arr.size}.")
+    n_arr = delays.size
+    if n_arr == 0:
+        if time_window is not None:
+            nrts = int(np.ceil(time_window * sample_rate))
+        else:
+            nrts = int(_EMPTY_TRACE_SECONDS * sample_rate)
+        t0 = 0.0 if t_start is None else float(t_start)
+        return np.zeros(nrts), t0 + np.arange(nrts) / sample_rate
+
+    sts = np.asarray(source_timeseries, dtype=float)
+    nsts = len(sts)
+
+    # Compute analytic signal via Hilbert transform
+    sts_analytic = _sig.hilbert(sts)
+
+    deltat = 1.0 / sample_rate
+    src_duration = nsts * deltat
+
+    # Determine time window
+    min_delay = float(np.min(delays))
+    max_delay = float(np.max(delays))
+
+    # Every arrival places a whole copy of the source waveform starting at its
+    # own delay, so the window must reach ``max_delay + src_duration`` for the
+    # last one to fit; ``2 *`` leaves a further source duration of tail. The
+    # lead-in keeps the earliest arrival's leading edge inside the window, and
+    # the max(0, ...) stops the clock from starting before source emission.
+    if t_start is None:
+        t_start = max(0.0, min_delay - 0.1 * src_duration)
+
+    if time_window is None:
+        time_window = (max_delay - t_start) + 2.0 * src_duration
+
+    nrts = int(np.ceil(time_window * sample_rate))
+    rts = np.zeros(nrts)
+
+    omega_c = 2.0 * np.pi * fc
+    # Where each echo's waveform copy lands on the record — first sample and
+    # one past its last — and the power it carries, for the window report.
+    starts, ends, powers = [], [], []
+    for ia in range(n_arr):
+        phase_rad = phases[ia] + phase_offset
+        phase_factor = np.exp(1j * phase_rad)
+
+        # ``delays_imag`` is Im(tau) in seconds; volume-attenuation factor
+        # is exp(omega * Im(tau)) per delayandsum.m:134.
+        atten = np.exp(omega_c * delays_imag[ia])
+
+        scaled_amp = amps[ia] * atten
+
+        delay_samples = (delays[ia] - t_start) / deltat
+
+        # Add this arrival's shifted, scaled copy of the source signal as a
+        # single clipped slice-add (vectorised over the source samples).
+        contrib = scaled_amp * np.real(sts_analytic * phase_factor)
+        if fractional:
+            # Resolve the sub-sample part of the delay with the same
+            # windowed-sinc kernel channel.impulse_response uses. Convolving
+            # by taps centred on offset 0 delays by (half_len - 1) + frac
+            # samples, so the placement index backs off by that integer part
+            # and the echo lands at delay_samples exactly.
+            i_start = int(np.floor(delay_samples))
+            nominal_start = i_start
+            taps = fractional_delay_taps(delay_samples - i_start)
+            placed = np.convolve(contrib, taps)
+            i_start -= taps.size // 2 - 1
+        else:
+            i_start = int(np.round(delay_samples))
+            nominal_start = i_start
+            placed = contrib
+        lo = max(0, i_start)
+        hi = min(nrts, i_start + placed.size)
+        if lo < hi:
+            rts[lo:hi] += placed[lo - i_start:hi - i_start]
+        # The report reads the WAVEFORM's extent, not the kernel's: the
+        # sinc taps ring a few samples ahead of the echo, and losing that
+        # pre-ring at the window's start is not a cut leading edge.
+        starts.append(nominal_start)
+        ends.append(nominal_start + nsts)
+        powers.append(float(scaled_amp) ** 2)
+
+    counts = _echo_window_counts(starts, ends, powers, nrts)
+    earliest = counts.pop('earliest_start')
+    counts['earliest_s'] = t_start + earliest * deltat
+    if report is not None:
+        for key, value in counts.items():
+            if key == 'earliest_s':
+                report[key] = min(report.get(key, np.inf), value)
+            else:
+                report[key] = report.get(key, 0) + value
+    else:
+        notice = _echo_window_notice(counts, t_start, time_window,
+                                     who="delayandsum")
+        if notice is not None:
+            warnings.warn(notice, UserWarning,
+                          skip_file_prefixes=USER_FRAME_SKIP)
+
+    time_vector = t_start + np.arange(nrts) * deltat
+    return rts, time_vector

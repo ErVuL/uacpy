@@ -9,6 +9,7 @@ from typing import Optional, Sequence, Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.metrics import tl_rmse_on_shared_ranges
 from uacpy.core.results import Field
 from uacpy.visualization.style import (cmap_for_field, reversed_cmap,
                                       PROBABILITY_COLORMAP,
@@ -1390,15 +1391,20 @@ def _rms_between(field, reference, depth):
     physical quantities. The figure masks NaN grey, so a pair that cannot be
     compared reads as "no answer" rather than as a number.
 
-    This deliberately does what :func:`uacpy.metrics.tl_rmse` refuses to —
-    interpolate onto a shared grid — because comparing models run on
-    different range axes is the whole job of this figure. It does not get to
-    skip the *other* refusal: ``metrics._validate_tl_pair_and_window``
-    rejects a kind mismatch because "their
-    difference is not an agreement metric", and a figure that prints a green
-    agreement cell for a reverberation field against a pressure field is that
-    same wrong answer with a colour on it.
+    The resampling this needs — and that :func:`uacpy.metrics.tl_rmse`
+    refuses, because comparing models run on different range axes is the
+    whole job of this figure — is
+    :func:`uacpy.metrics.tl_rmse_on_shared_ranges`, which is public so a
+    reader of the table can obtain the number in it. What stays here is
+    the kind check: a figure that prints a green agreement cell for a
+    reverberation field against a pressure field is a wrong answer with a
+    colour on it, and it belongs blank rather than raised.
     """
+    # The kind policy stays here because it is a FIGURE decision — a cell
+    # left blank and a warning, rather than an exception that would take
+    # the whole table down. The arithmetic below it is
+    # metrics.tl_rmse_on_shared_ranges, which a reader of this figure can
+    # now call to get the number they are looking at.
     if field.kind != reference.kind:
         _plot_warn(
             f"compare_models: a {field.kind!r} field and a "
@@ -1406,23 +1412,7 @@ def _rms_between(field, reference, depth):
             f"their RMS difference is not an agreement metric. That cell is "
             f"left blank rather than scored.")
         return np.nan
-    tl_a = np.asarray(field.at(depth=depth).dB)
-    tl_b = np.asarray(reference.at(depth=depth).dB)
-    r_a = np.asarray(field.ranges, dtype=float)
-    r_b = np.asarray(reference.ranges, dtype=float)
-    # The common grid is the coarser axis clipped to the shared span.
-    # ``np.interp`` reproduces a node exactly, NaN included, so an already
-    # aligned pair is untouched; the clip keeps the flat extrapolation
-    # ``np.interp`` does past the ends of its own domain out of the number.
-    common = r_a if r_a.size <= r_b.size else r_b
-    common = common[(common >= max(r_a[0], r_b[0]))
-                    & (common <= min(r_a[-1], r_b[-1]))]
-    if common.size == 0:
-        return np.nan
-    residual = np.interp(common, r_a, tl_a) - np.interp(common, r_b, tl_b)
-    finite = np.isfinite(residual)
-    return (float(np.sqrt(np.mean(residual[finite] ** 2)))
-            if finite.any() else np.nan)
+    return tl_rmse_on_shared_ranges(field, reference, depth=depth)
 
 
 @typed_plot_error

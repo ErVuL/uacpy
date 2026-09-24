@@ -3,7 +3,8 @@
 Stand-alone helpers used by tests, examples, and end-user comparison
 scripts. Keeps numeric-comparison logic out of plotting and IO modules.
 
-Public helpers: :func:`tl_rmse`, :func:`tl_max_error`, :func:`tl_bias`.
+Public helpers: :func:`tl_rmse`, :func:`tl_max_error`, :func:`tl_bias`,
+:func:`tl_rmse_on_shared_ranges`.
 All accept a pair of 2-D :class:`~uacpy.Field` instances. Read TL via
 ``field.dB`` regardless of whether the field stores complex pressure or
 real dB — :class:`Field` handles the conversion.
@@ -193,4 +194,65 @@ def tl_bias(
     return float(np.mean(diff[finite]))
 
 
-__all__ = ["tl_rmse", "tl_max_error", "tl_bias"]
+def tl_rmse_on_shared_ranges(field, reference, *, depth: float) -> float:
+    """RMS dB difference at one depth, over the ranges both fields reach,
+    **resampling** onto the coarser of the two axes.
+
+    The companion to :func:`tl_rmse`, which requires the two fields to
+    already share a grid and raises otherwise. That refusal is right when
+    the question is "do these two runs agree" — a silent interpolation
+    would hide a grid mismatch that matters. It is the wrong answer when
+    the question is "how far apart are these two models", because models
+    run on different range axes by nature, and that comparison is the
+    whole point of :func:`~uacpy.plot_model_comparison`'s table.
+
+    Two functions rather than a flag on one: the refusal and the
+    resampling answer different questions, and a caller who picks the
+    wrong one should be picking a name, not a keyword.
+
+    The common grid is the **coarser** axis clipped to the shared span.
+    ``np.interp`` reproduces a node exactly, NaN included, so an already
+    aligned pair is untouched; the clip keeps ``np.interp``'s flat
+    extrapolation past the ends of its own domain out of the number.
+
+    Parameters
+    ----------
+    field, reference : Field
+        TL-like fields with ``ranges`` and a ``dB`` view.
+    depth : float
+        The receiver depth to compare at, on both fields.
+
+    Returns
+    -------
+    float
+        RMSE in dB, or ``nan`` when the two share no range at all — which
+        is not the same as agreeing.
+
+    Raises
+    ------
+    ConfigurationError
+        The two fields are different physical quantities (``kind``), so
+        their difference is not an agreement metric.
+    """
+    if field.kind != reference.kind:
+        raise ConfigurationError(
+            f"tl_rmse_on_shared_ranges: a {field.kind!r} field and a "
+            f"{reference.kind!r} field are different physical quantities, "
+            f"so their RMS difference is not an agreement metric.")
+    tl_a = np.asarray(field.at(depth=depth).dB)
+    tl_b = np.asarray(reference.at(depth=depth).dB)
+    r_a = np.asarray(field.ranges, dtype=float)
+    r_b = np.asarray(reference.ranges, dtype=float)
+    common = r_a if r_a.size <= r_b.size else r_b
+    common = common[(common >= max(r_a[0], r_b[0]))
+                    & (common <= min(r_a[-1], r_b[-1]))]
+    if common.size == 0:
+        return float('nan')
+    residual = np.interp(common, r_a, tl_a) - np.interp(common, r_b, tl_b)
+    finite = np.isfinite(residual)
+    return (float(np.sqrt(np.mean(residual[finite] ** 2)))
+            if finite.any() else float('nan'))
+
+
+__all__ = ["tl_rmse", "tl_max_error", "tl_bias",
+           "tl_rmse_on_shared_ranges"]

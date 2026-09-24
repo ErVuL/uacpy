@@ -1377,7 +1377,7 @@ class TestOmpAtomNormalisationIsScaleInvariant:
     On a 40-lag grid whose column norms span 49x, the top three normalised
     projections tie to six decimals; the offset is 2.3e-11 of the smallest norm
     at unit scale (harmless) and 2.3e-5 at 1e-6 scale, where it reorders the
-    tie. The same channel expressed in Pa rather than uPa estimated a different
+    tie. The same channel expressed in Pa rather than µPa estimated a different
     delay.
     """
 
@@ -1673,7 +1673,7 @@ class TestSchmidlCoxEvenSubcarriers:
 class TestCfarFloorIsRelative:
     def test_detection_start_is_invariant_to_recording_amplitude(self):
         # The floor scales with max(stat), so a recording in Pa and the same
-        # recording in uPa (or GPa) cross the CFAR threshold at the same
+        # recording in µPa (or GPa) cross the CFAR threshold at the same
         # column; an absolute floor sent quiet recordings down the argmax
         # fallback and loud ones down the CFAR path.
         bits = comms.JanusPacket(class_id=16).to_bits()

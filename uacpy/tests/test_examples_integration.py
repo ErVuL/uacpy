@@ -51,6 +51,12 @@ _LONG_TIMEOUT_STEMS = {
     "example_17_boundary_conditions_layered",
     "example_22_ram_lytaev_grid",
     "example_37_realworld_environment",
+    # Three Bellhop runs over a 401-bin broadband grid plus two synthesis
+    # passes: measured 178 s standalone on an IDLE machine, so it is over
+    # the 120 s tier before any contention. The tier follows that
+    # measurement, as the note above says — it is not a contended run being
+    # waved through.
+    "example_45_broadband_and_exposure_maps",
 }
 
 # The heaviest examples: GIF encoding across five solvers, and a broadband

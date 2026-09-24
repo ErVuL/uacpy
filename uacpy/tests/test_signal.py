@@ -354,7 +354,7 @@ class TestDecidecadeBands:
     def test_white_noise_band_levels_rise_1db_per_band(self):
         from uacpy.acoustic_signal.estimate import decidecade_band_levels
         f = np.linspace(1, 20000, 40000)
-        psd = np.ones_like(f) * 1e-12               # flat Pa^2/Hz
+        psd = np.ones_like(f) * 1e-12               # flat Pa²/Hz
         c, lv = decidecade_band_levels(psd, f)
         step = np.diff(lv[(c > 200) & (c < 5000)])
         assert np.allclose(step, 1.0, atol=0.05)    # each band 10^0.1 wider -> +1 dB

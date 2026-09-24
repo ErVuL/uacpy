@@ -574,6 +574,16 @@ feeds an `Environment`: they are calculators, not carriers. Note also that
 `bubble_surface_loss` returns a per-bounce amplitude multiplier in `(0, 1]` and
 takes its angle in **radians**, unlike `bottom_loss_curve`.
 
+`uacpy.core.acoustics.critical_angle(c_bottom, c_water=1500.0)` is the
+companion scalar — **seabed speed first** — returning the grazing angle
+`arccos(c_water/c_bottom)` in degrees below which a faster seabed totally
+reflects, and `nan` when the seabed is the slower of the two so there is no
+critical angle to report (`critical_angle(1800, 1500)` is 33.6°;
+`critical_angle(1500, 1800)` is `nan`). It is the same ratio-of-speeds angle as
+`Modes.grazing_angles`, seen from the boundary instead of from a mode — that
+one is vectorised over modes and returns `nan` per mode, which is why the two
+are separate.
+
 ---
 
 ## 6. `Absorption` — volume attenuation

@@ -31,6 +31,7 @@ import numpy as np
 from scipy.special import erf, gamma as _gamma
 
 from uacpy.core.bottom import Bottom, BoundaryProperties, SeabedColumn
+from uacpy.core.sediment import _hamilton_kp
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._warn_frames import USER_FRAME_SKIP
@@ -114,18 +115,18 @@ def _grain_size_speed_ratio(mz: float) -> float:
 
 
 def _grain_size_alpha_over_f(mz: float) -> float:
-    """Eq. 5, dB m^-1 kHz^-1 (Hamilton's parameterisation)."""
-    if mz < 0.0:
-        return 0.4556
-    if mz < 2.6:
-        return 0.4556 + 0.0245 * mz
-    if mz < 4.5:
-        return 0.1978 + 0.1245 * mz
-    if mz < 6.0:
-        return 8.0399 - 2.5228 * mz + 0.20098 * mz ** 2
-    if mz < 9.5:
-        return 0.9431 - 0.2041 * mz + 0.0117 * mz ** 2
-    return 0.0601
+    """Eq. 5, dB m^-1 kHz^-1 — Hamilton's parameterisation, which
+    :func:`~uacpy.core.sediment._hamilton_kp` already is.
+
+    TR 9407 p. IV-8 reproduces Hamilton (1972) rather than refitting it, so
+    the report's Eq. 5 and the sediment model's ``k_p`` are the same four
+    regressions. They were spelled out twice and agreed to 1.78e-15 over
+    every input a caller can reach (-1 to 9 phi, measured on 100 001
+    points). The only divergence was past 9.5 phi, where this copy returned
+    the printed literal ``0.0601`` and the regression gives 0.060075 —
+    0.042 % apart, on a branch both clamps exclude.
+    """
+    return _hamilton_kp(mz)
 
 
 def _grain_size_loss_parameter(mz: float, speed_ratio: float) -> float:

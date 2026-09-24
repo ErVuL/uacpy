@@ -17,6 +17,7 @@ convention) and take ``ref`` for the others — quote the same waveform against
 import numpy as np
 from typing import Optional, Tuple
 
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import PRESSURE_FLOOR, REFERENCE_PRESSURE_WATER
 
 __all__ = [
@@ -92,7 +93,8 @@ def pressure(
     return 1e-6 * x / (nu * G)
 
 
-def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER) -> float:
+def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER,
+        *, axis=None):
     """
     Calculate Sound Pressure Level (SPL) of acoustic pressure signal.
 
@@ -104,11 +106,16 @@ def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER) -> float:
         Reference pressure in the same unit as ``x`` (default:
         ``REFERENCE_PRESSURE_WATER``, one µPa written in Pa). For air in Pa,
         ``20e-6``.
+    axis : int or tuple of int, optional
+        Axes to average over. ``None`` (the default) averages everything and
+        returns a scalar; ``-1`` gives one level per row of a block of
+        records, which is what a gridded result needs.
 
     Returns
     -------
-    float
-        Average SPL in dB re reference pressure
+    float or ndarray
+        SPL in dB re reference pressure — a scalar for ``axis=None``, and
+        ``x``'s shape without ``axis`` otherwise.
 
     Examples
     --------
@@ -128,7 +135,7 @@ def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER) -> float:
     a silent signal at, because both read the same constant against the same
     reference.
     """
-    rmsx = np.sqrt(np.mean(np.abs(x) ** 2))
+    rmsx = np.sqrt(np.mean(np.abs(x) ** 2, axis=axis))
     return 20 * np.log10(np.maximum(rmsx, np.sqrt(PRESSURE_FLOOR)) / ref)
 
 
@@ -168,3 +175,115 @@ def power_to_dB(power, ref: float = REFERENCE_PRESSURE_WATER, *,
     """
     power = np.asarray(power, dtype=float)
     return 10.0 * np.log10(np.maximum(power, floor) / (ref ** 2))
+
+
+def peak_level(x, ref: float = REFERENCE_PRESSURE_WATER, *, axis=None,
+               floor: float = PRESSURE_FLOOR):
+    """Peak pressure level of a record — ``20·log10(max|x| / ref)``.
+
+    The other half of the dual metric: a level that a *peak* sets, where
+    :func:`spl` is set by the rms and :func:`power_to_dB` by an energy.
+    Southall et al. (2019) state injury criteria as a pair, peak SPL beside
+    an exposure, because a short transient can reach a damaging peak while
+    carrying little energy and a long one can do the reverse — neither
+    number implies the other.
+
+    Parameters
+    ----------
+    x : array_like
+        Pressure record (Pa). A complex (analytic) record is read through
+        ``abs``, so it gives the envelope's peak rather than the real
+        record's.
+    ref : float, optional
+        Reference pressure (default 1 µPa in water).
+    axis : int or tuple of int, optional
+        Axes to take the maximum over. ``None`` reduces everything to a
+        scalar; ``-1`` gives one level per record of a block.
+    floor : float, optional
+        Lower bound on the SQUARED peak before the log, read the same way
+        :func:`power_to_dB` reads it, so a silent record returns
+        ``-180`` dB re 1 µPa rather than ``-inf`` — which would poison any
+        mean taken over a map of them.
+
+    Returns
+    -------
+    float or ndarray
+        dB re ``ref``.
+    """
+    peak = np.max(np.abs(np.asarray(x)), axis=axis)
+    return 20 * np.log10(np.maximum(peak, np.sqrt(floor)) / ref)
+
+
+def sound_exposure_level(pressure, dt: float,
+                         ref: float = REFERENCE_PRESSURE_WATER, *,
+                         axis: int = -1, floor: float = PRESSURE_FLOOR):
+    """Sound exposure level of a pressure record —
+    ``10·log10( Σ p² · dt / ref² )``, in dB re ``ref²``·s.
+
+    The energy flux density of the record (Abraham, *Underwater Acoustic
+    Signal Processing*, sect. 3.2.1.5; ISO 18405). Unlike an rms level it
+    does not divide by the duration, so it is the quantity that accumulates
+    over a transient and the one exposure criteria are written in: doubling
+    the duration of a steady signal adds 3 dB here and nothing to
+    :func:`spl`.
+
+    Parameters
+    ----------
+    pressure : array_like
+        Pressure record (Pa). A complex (analytic) record contributes its
+        real part, not its envelope, since the quadrature would double the
+        energy.
+    dt : float
+        Sample interval (s).
+    ref : float, optional
+        Reference pressure (default 1 µPa in water).
+    axis : int, default -1
+        Time axis. Every other axis is carried through, so a
+        ``(depth, range, time)`` block returns a map.
+    floor : float, optional
+        As :func:`power_to_dB`.
+
+    Returns
+    -------
+    float or ndarray
+        dB re ``ref²``·s.
+    """
+    p = np.asarray(pressure)
+    p = p.real if np.iscomplexobj(p) else p
+    dt = float(dt)
+    if not (np.isfinite(dt) and dt > 0.0):
+        raise ConfigurationError(
+            f"sound_exposure_level: dt must be a positive sample interval "
+            f"in seconds; got {dt!r}.")
+    return power_to_dB(np.sum(p ** 2, axis=axis) * dt, ref, floor=floor)
+
+
+def transmission_loss_dB(pressure):
+    """Complex pressure → transmission loss in dB — ``-20·log10(|p|)``.
+
+    The canonical conversion every uacpy result uses for a TL view
+    (:attr:`~uacpy.Field.dB`, :meth:`~uacpy.Field.to_dB`, the metrics in
+    :mod:`uacpy.core.metrics`, and the RAM and ray plotters), exposed so a
+    complex field from anywhere else converts the same way.
+
+    Note the **minus**: this is a loss, so a quiet cell is a LARGE number,
+    the opposite sign to :func:`spl` and :func:`power_to_dB`. It also takes
+    the pressure itself, not its square.
+
+    ``|p|`` is clamped at :data:`~uacpy.core.constants.PRESSURE_FLOOR`
+    first, which caps an exactly-zero sample — a cell no energy reached —
+    at 600 dB rather than ``+inf``, keeping the array finite for plotting
+    and reductions. Shape is preserved; nothing is squeezed.
+
+    Parameters
+    ----------
+    pressure : array_like
+        Complex (or real) pressure, in whatever unit the 1 m reference is
+        expressed in.
+
+    Returns
+    -------
+    ndarray
+        Loss in dB, same shape as ``pressure``.
+    """
+    return -20.0 * np.log10(np.maximum(np.abs(pressure), PRESSURE_FLOOR))

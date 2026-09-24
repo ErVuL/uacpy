@@ -550,6 +550,39 @@ work `Arrivals.channel_regime(symbol_rate)` says which regime you are in
 
 ![Time-series synthesis](figures/results_time_synthesis.png)
 
+**And back again.** `Field.to_transfer_function()` is the way from a
+time-domain `Field` to `H(f)`, as a carrier rather than as raw arrays:
+
+```python
+trace = H.to_time_trace(depth=50.0, range=5e3, window='none')
+back  = trace.to_transfer_function()     # same band, same numbers
+```
+
+The band is **restricted, not extended**. An `rfft` of an `N`-sample record
+returns every bin up to Nyquist, but a trace synthesised from a 100–995 Hz
+field supports nothing outside that — the rest are the synthesis's own edges,
+and returning them would invent data. The band comes from the Field's
+identity, or from `band=`.
+
+The result is a complex `['…', 'frequency']` Field, so
+`plot_transfer_function`, `broadband_loss` and `truncate_response` all take
+it. Note that `window='hann'` (the default of `to_time_trace`) is a real
+modification of the signal: the round trip closes to 7e-16 with
+`window='none'` and differs visibly with the taper on, which is the taper
+working, not the transform failing.
+
+The method is a wrapper: the transform, the `t0` rotation and the band cut are
+[`transfer_function_from_impulse_response`](signal.md#61-going-back-h--h),
+which you can call on your own arrays. What the Field adds is the axis
+bookkeeping, the band read off its identity, the metadata, and the `dt` that
+carries the result into the density convention — see that section for why
+there are two conventions and what mixing them costs.
+
+For the two narrower tools: `get_spectrum` is the raw `rfft` (every bin, no
+rotation, arrays not a Field), and `extract_tone` is the careful
+single-frequency answer, evaluated AT the frequency rather than at the
+nearest bin.
+
 ---
 
 ## 6a. The level a signal with bandwidth or duration reaches
@@ -576,6 +609,7 @@ that (see §6).
 |---|---|---|
 | `.broadband_loss(spectrum=None)` | `Field`, frequency axis gone, `kind='pressure'` `unit='dB'` — so `.tl` and `.plot()` treat it as the TL map it is | how much of the continuous-wave interference does my **bandwidth** survive? |
 | `.sound_exposure_level(waveform, sample_rate)` | `Field`, `kind='sound_exposure'` — a **level**, so it reads upward and never shares a colorbar with TL | how much **energy** does one transmission deliver? |
+| `.peak_sound_pressure_level(waveform, sample_rate)` | `Field`, `kind='peak_pressure'` — a level of its own kind, distinct from `'level'` | how loud is its **single loudest excursion**? |
 
 `broadband_loss` is the frequency average of the **coherent** `|H|²`, weighted
 by `|spectrum|²`:
@@ -651,6 +685,16 @@ the source level added afterwards as an **energy** source level,
 `ESL = SL + 10log10(T)` (Ainslie Eq. 3.155). The two agree exactly: `SL` =
 190 dB at 1 m, a 10 ms burst, 100 m of spherical spreading gives
 190 − 40 + 10log10(0.01) = **130 dB re 1 µPa²s** either way.
+
+The last two are the **dual metric** impulsive-exposure criteria are written
+in — "frequency-weighted SEL and unweighted peak sound pressure level", either
+one exceeding its threshold being sufficient (Southall et al. 2019). Neither
+substitutes for the other, and a peak is a property of the waveform in *time*,
+so no reduction of `|H(f)|` yields it. One asymmetry worth knowing: SEL is
+exactly invariant to the synthesis length (Parseval), while the peak is not —
+a maximum is a sample. Sweeping `nfft` from 320 to 65536 moved the peak
+**0.0615 dB** and the SEL **0.0000 dB**; the peak is converged by
+`nfft ≈ 4096`.
 
 Its band window defaults to `'none'` rather than `synthesize_time_series`'s
 `'hann'`, because a taper removes energy the integral is defined to count: a
@@ -755,6 +799,42 @@ refl = Bounce().run(env_el, source_el, receiver_el, run_mode=RunMode.REFLECTION)
 modes.plot(n_modes=6)
 refl.plot(show_phase=True)
 ```
+
+**The modal physics takes plain arrays.** `Modes.with_attenuation` and
+`Modes.modal_propagation_loss` are wrappers over
+`uacpy.core.acoustics.modal_attenuation` (JKPS Eq. 5.169, the first-order
+perturbation) and `uacpy.core.acoustics.modal_field` (the asymptotic modal
+sum), so a mode set from another solver, a file or an analytic waveguide
+reaches the same code:
+
+```python
+from uacpy.core.acoustics import modal_attenuation, modal_field
+
+alpha_m = modal_attenuation(k, psi, z, 0.01, frequency=100.0)   # Np/m per mode
+p = modal_field(k, psi[z_s_index], psi_at_receivers, ranges_m)  # complex Pa
+```
+
+`modal_field` takes the shapes **already evaluated** at the source and
+receiver depths: how you get there from a tabulation — interpolating,
+refusing to extrapolate, masking what lies outside — is the caller's
+question, and the method answers it one way.
+
+`uacpy.core.acoustics.transmission_loss_dB` is the conversion behind every
+TL view in the package — `-20·log10(max(|p|, floor))`, note the **minus**,
+so a quiet cell is a large number. It takes the pressure, not its square,
+which is what separates it from `power_to_dB`.
+
+Similarly `uacpy.core.acoustics.hankel_transform` turns a wavenumber-domain
+`G(k)` into a range-domain field (the direct trapezoidal DFT of
+`fieldsco.m`, not an FFT), and `wavenumber_taper` builds the `c_min`/`c_max`
+phase-speed window that decides which physics a spectral run keeps. Both
+were private inside the `.grn` reader; they work on any `G(k)`.
+`alias_period(Δk)` gives the range at which such a transform wraps
+(`2π/Δk`), and `ranges_fit_alias_period(Δk, r_max)` answers whether the
+ranges you want sit inside it — necessary, not sufficient, and the one
+question nothing downstream of `G(k)` can answer for you, because folded
+energy is indistinguishable from real energy once it has landed and makes
+the field too **loud**.
 
 `Modes` carries `k` (complex horizontal wavenumbers, shape `(n_modes,)`),
 `phi` (mode shapes, `(n_depths, n_modes)`) and `depths`. `n_modes` is derived

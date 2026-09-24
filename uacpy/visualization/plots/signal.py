@@ -204,7 +204,7 @@ def _fk_colorbar_label(scaling, wavenumber_unit, ref):
 # (plot_radon, plot_taup). A fixed -60..+20 dB window suits a PEAK-RELATIVE
 # scale — which is what docs/figure_scripts/signal.py hand-rolls, at
 # vmin=-40, vmax=0 — but the level here goes through
-# power_to_dB(power, ref), an ABSOLUTE dB re 1 uPa^2. Measured on the
+# power_to_dB(power, ref), an ABSOLUTE dB re 1 µPa². Measured on the
 # fk_transform output this function documents itself as consuming, for a 1 Pa
 # plane-wave gather at fs = 2 kHz, dx = 2 m: the panel spans 107.3 .. 196.9 dB
 # with a median of 122.2, so every pixel would sit above that vmax and the

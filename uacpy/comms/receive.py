@@ -142,7 +142,7 @@ def omp_estimate(rx, tx_pilots, n_taps, sparsity):
     # three normalised projections tied to six decimals: the epsilon is
     # 2.3e-11 of the smallest norm at unit scale (harmless, support [3, 30])
     # and 2.3e-5 at 1e-6 scale, where it reorders the tie and returns
-    # [0, 30]. The same channel in Pa rather than uPa estimated a different
+    # [0, 30]. The same channel in Pa rather than µPa estimated a different
     # delay. A relative floor keeps the guard against an all-zero column —
     # the only thing the offset was needed for — without setting a scale.
     # Same idiom as ``_ZF_REL_FLOOR`` / ``_PILOT_REL_FLOOR`` in comms.modulate.

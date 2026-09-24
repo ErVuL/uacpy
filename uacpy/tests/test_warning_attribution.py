@@ -292,15 +292,21 @@ def test_two_call_sites_of_one_converted_site_keep_separate_dedup_keys():
     assert len(lines) == 2, [(w.filename, w.lineno) for w in record]
 
 
-def test_grn_reader_and_models_base_share_one_skip_prefix_set():
+def test_every_module_that_skips_frames_shares_one_prefix_set():
     """Identity, not equality: two definitions that agree today are what
     produced the bug this pins — ``grn_reader``'s copy had lost the trailing
-    separator and swallowed every sibling path. One object cannot diverge."""
-    from uacpy.models.base import USER_FRAME_SKIP as base_skip
+    separator and swallowed every sibling path. One object cannot diverge.
 
-    assert grn_reader.USER_FRAME_SKIP is USER_FRAME_SKIP
+    The wavenumber warnings moved out of ``grn_reader`` into
+    ``core.acoustics.wavenumber`` so a user could reach the transform they
+    guard; the module holding them is what has to carry the set."""
+    from uacpy.models.base import USER_FRAME_SKIP as base_skip
+    from uacpy.core.acoustics import wavenumber
+
+    assert wavenumber.USER_FRAME_SKIP is USER_FRAME_SKIP
     assert base_skip is USER_FRAME_SKIP
     assert not hasattr(grn_reader, '_UACPY_PACKAGE_ROOT')
+    assert not hasattr(wavenumber, '_UACPY_PACKAGE_ROOT')
 
 
 def test_grn_zero_range_warning_names_the_callers_file():
@@ -368,8 +374,17 @@ CONVERTED_SITES = [
     ('core/results/field.py', '_estimate_t_start', 2),
     ('core/results/field.py', '_warn_unsolved_bins', 1),
     ('core/results/field.py', '_synthesize_time_series', 2),
-    ('core/results/field.py', '_taper', 1),
-    ('core/results/modes.py', 'Modes._warn_if_depth_axis_underresolves', 1),
+    # _taper moved to acoustic_signal/system.py with tone_phasor, which
+    # needs it and which a user can now call directly.
+    ('acoustic_signal/system.py', '_taper', 1),
+    # The perturbation and its depth-resolution notice moved out of
+    # Modes into acoustics/modal.py so a user can run them on plain
+    # k/psi arrays. The move added a call frame under
+    # Modes.with_attenuation, which is exactly what a hand-counted
+    # stacklevel cannot survive: all six notices in the body were
+    # converted with it.
+    ('core/acoustics/modal.py', 'modal_attenuation', 6),
+    ('core/acoustics/modal.py', '_warn_if_depth_axis_underresolves', 1),
     ('core/results/reflection.py', 'ReflectionCoefficient._resolve_axes', 1),
     ('core/sediment.py', 'grain_size_to_geoacoustics', 1),
     ('core/ssp.py', 'generate_sea_surface', 1),
@@ -391,7 +406,9 @@ CONVERTED_SITES = [
     ('io/_fortran_helpers.py', '_warn_non_little_endian', 1),
     ('io/bathy_io.py', 'write_bty_long_format', 1),
     ('io/bellhop_writer.py', 'write_bellhop_env_file', 1),
-    ('io/grn_reader.py', '_warn_zero_ranges', 1),
+    # The wavenumber transform and its two range guards moved to
+    # core/acoustics/wavenumber.py, out of the .grn reader.
+    ('core/acoustics/wavenumber.py', '_warn_zero_ranges', 1),
     ('io/oalib_reader.py', 'read_flp', 1),
     ('io/oalib_reader.py', 'read_shd_bin', 2),
     ('io/oalib_writer.py', 'write_ssp_section', 1),

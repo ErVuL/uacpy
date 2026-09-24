@@ -34,6 +34,7 @@ import warnings
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.sonar.reverberation import total_reverberation
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.results import Field
 
@@ -151,10 +152,11 @@ def active_signal_excess(
                                             array_gain=array_gain))
     if reverberation_level is not None:
         backgrounds.append(np.asarray(reverberation_level, float))
-    bcast = np.broadcast_arrays(*backgrounds)
-    background = 10.0 * np.log10(
-        np.sum([10.0 ** (b / 10.0) for b in bcast], axis=0)
-    )
+    # The incoherent dB sum is total_reverberation's, spelled out here
+    # until now. The two agreed to 0 on every shared input; what they did
+    # NOT share was the guard — with no components at all this returned an
+    # empty array in silence, where the function says so.
+    background = total_reverberation(*backgrounds)
     return (el - background - np.asarray(detection_threshold, float)
             - np.asarray(processing_loss_dB, float))
 

@@ -511,15 +511,28 @@ class TestTheSecondsSuffixIsNotSpentOnMetresPerSecond:
         sweep covers attributes too. ``AmbiguityResult.delays_s`` and the
         ``ChannelTaps`` pair (``delays_s``, ``first_arrival_s``) are both
         passable and readable, so each counts twice. If this count moves
-        the convention has changed and the rule below has to be restated."""
+        the convention has changed and the rule below has to be restated.
+
+        The count is a tripwire, not a budget: every site it admits must
+        mean seconds. It last moved when the generic channel functions
+        were exported — the power-delay-profile group's four ``delays_s``,
+        the two ``ChannelRegime`` fields that became public with the type,
+        ``arrival_transfer_function``'s ``delays_s`` / ``delays_imag_s``,
+        ``pulse_shaped_taps``'s ``delays_s``, and the same pair on
+        ``simulate_arrival_reception``."""
         seconds = [s for s in _sites_with_suffix('_s')
                    if not s.rstrip(')').endswith('_ms')]
-        assert len(seconds) == 15, seconds
+        assert len(seconds) == 26, seconds
         for site in ('uacpy.acoustic_signal.AmbiguityResult.delays_s',
                      'uacpy.comms.ChannelTaps(delays_s)',
                      'uacpy.comms.ChannelTaps.delays_s',
                      'uacpy.comms.ChannelTaps(first_arrival_s)',
-                     'uacpy.comms.ChannelTaps.first_arrival_s'):
+                     'uacpy.comms.ChannelTaps.first_arrival_s',
+                     'uacpy.acoustic_signal.rms_delay_spread(delays_s)',
+                     'uacpy.acoustic_signal.ChannelRegime(symbol_duration_s)',
+                     'uacpy.acoustic_signal.arrival_transfer_function(delays_imag_s)',
+                     'uacpy.comms.pulse_shaped_taps(delays_s)',
+                     'uacpy.acoustic_signal.simulate_arrival_reception(delays_imag_s)'):
             assert site in seconds, site
 
     def test_no_public_surface_spells_metres_per_second_as_ms(self):
@@ -6251,3 +6264,44 @@ class TestArrivalsChannelView:
         lead = int(np.argmin(np.abs(rc_off.delays_s)))
         assert not np.allclose(rc_off.taps[lead:lead + near_off.taps.size],
                                near_off.taps, atol=1e-3)
+
+
+class TestAWindowedFieldReportsTheBandItHolds:
+    """``Field.window`` narrows the identity, not only the axis.
+
+    Selecting a signal's band out of a wider run is how both quantities above
+    are reached, and a field that keeps the run's whole frequency list after
+    that answers ``f0`` and ``n_frequencies`` about samples it no longer has.
+    ``isel`` already narrows the identity when it pins an axis.
+    """
+
+    @staticmethod
+    def wideband():
+        f = np.arange(1000.0, 2001.0, 100.0)
+        return Field(data=np.ones((1, 1, f.size), complex),
+                     coords={'depth': [0.0], 'range': [1.0], 'frequency': f},
+                     frequencies=f)
+
+    def test_the_band_count_matches_the_axis(self):
+        narrowed = self.wideband().window(frequency=(1400.0, 1600.0))
+        assert narrowed.n_frequencies == narrowed.coords['frequency'].size == 3
+
+    def test_the_centre_frequency_is_one_the_field_holds(self):
+        # 1000 Hz is a legal frequency and the wrong answer, which is why
+        # this needs its own assertion rather than a finiteness check.
+        narrowed = self.wideband().window(frequency=(1400.0, 1600.0))
+        assert narrowed.f0 == pytest.approx(1400.0)
+
+    def test_windowing_another_axis_leaves_the_band_alone(self):
+        untouched = self.wideband().window(range=(0.0, 2.0))
+        assert untouched.n_frequencies == 11
+
+    def test_source_depths_narrow_with_their_axis(self):
+        z = np.array([5.0, 10.0, 15.0])
+        f = np.array([100.0, 200.0])
+        field = Field(data=np.ones((z.size, 1, 1, f.size), complex),
+                      coords={'source_depth': z, 'depth': [0.0],
+                              'range': [1.0], 'frequency': f},
+                      frequencies=f, source_depths=z)
+        narrowed = field.window(source_depth=(9.0, 16.0))
+        assert list(np.asarray(narrowed.source_depths)) == [10.0, 15.0]

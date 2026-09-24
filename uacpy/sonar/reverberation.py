@@ -165,7 +165,7 @@ def boundary_reverberation(
     ranges_m : array
         Slant ranges to the scattering cell (m).
     source_level : float
-        Source level (dB re 1 uPa @ 1 m).
+        Source level (dB re 1 µPa @ 1 m).
     scattering_strength_dB : float or array
         Boundary scattering strength ``S_b`` (dB); scalar or per-range (e.g.
         Lambert's law evaluated at the grazing angle of each range).

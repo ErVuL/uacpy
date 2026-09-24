@@ -150,6 +150,7 @@ from uacpy.metrics import tl_rmse, tl_max_error, tl_bias
 | `tl_rmse(a, b, range_window=None, depth_window=None)` | Root-mean-square TL difference, dB |
 | `tl_max_error(a, b, …)` | Largest absolute TL difference, dB |
 | `tl_bias(a, b, …)` | Mean **signed** difference; positive means `a` reports more loss |
+| `tl_rmse_on_shared_ranges(a, b, *, depth)` | RMS dB difference at one depth over the ranges both reach, **resampling** onto the coarser axis |
 
 Both arguments must be 2-D `(depth, range)` [`Field`](results.md) instances.
 TL is pulled from `.dB`, so it does not matter whether a field stores complex
@@ -172,7 +173,17 @@ Resample one field onto the other's grid before comparing.
 ```
 
 That is deliberate. Silently interpolating one field onto the other would bury
-the resampling error inside the number you are about to quote. Call
+the resampling error inside the number you are about to quote.
+
+**When resampling is the question, not a shortcut**, use
+`tl_rmse_on_shared_ranges(a, b, depth=…)`. Comparing *models* means comparing
+runs on different range axes by nature, so the refusal above is the wrong
+answer there — it is the number `plot_model_comparison`'s table prints in
+every cell, and that function is where it comes from. Two functions rather
+than a flag on one: the refusal and the resampling answer different
+questions, and picking the wrong one should mean picking a name.
+
+Call
 `Field.resample_to` yourself, and own it.
 
 `ConfigurationError` also fires when the window selects no finite cells at all
@@ -366,7 +377,9 @@ number consistent with `bottom_loss_curve`, negate the log:
 | Function | For |
 |---|---|
 | `pressure(x, sensitivity, gain, volt_params=None)` | Recorded volts (or ADC bits) → **pascals**, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
-| `spl(x, ref=REFERENCE_PRESSURE_WATER)` | A pressure time series in Pa → mean SPL in dB re `ref` (default 1 µPa, written in Pa as `1e-6`) |
+| `spl(x, ref=REFERENCE_PRESSURE_WATER, *, axis=None)` | A pressure time series in Pa → mean SPL in dB re `ref` (default 1 µPa, written in Pa as `1e-6`). `axis=-1` gives one level per record of a block |
+| `peak_level(x, ref=…, *, axis=None)` | The same record → **peak** SPL, `20·log10(max\|x\|/ref)` |
+| `sound_exposure_level(p, dt, ref=…, *, axis=-1)` | A record → **SEL**, `10·log10(Σp²·dt/ref²)` in dB re 1 µPa²·s |
 | `power_to_dB(power, ref=1e-6, floor=1e-30)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
 
 #### Volts → Pa → spectrum → dB
@@ -401,6 +414,22 @@ sample gives a finite, very negative level instead of `-inf` — which would
 otherwise poison a downstream `mean` or histogram. Use `spl` for a waveform,
 `power_to_dB` for anything already squared. For standards-based band levels and
 weighting, see [noise](noise.md) and [signal processing](signal.md).
+
+**Three levels of the same record, and they answer different questions.** `spl`
+is set by the **rms**, `peak_level` by the **peak**, `sound_exposure_level` by
+the **energy**. A short transient can reach a damaging peak while carrying
+little energy, and a long one can do the reverse — which is why Southall et al.
+(2019) state injury criteria as a peak *and* an exposure, never one alone. SEL
+also accumulates where the other two do not: doubling the duration of a steady
+signal adds 3 dB to SEL and nothing to `spl`.
+
+All three floor a silent record at the same constant (−180 dB re 1 µPa at the
+default reference) rather than returning `-inf`, so one quiet cell cannot
+poison a mean taken over a map of them.
+
+`Field.sound_exposure_level` and `Field.peak_sound_pressure_level` are these
+functions plus a synthesis and the band metadata — the levels themselves are
+the two above, and you can call them on a record from anywhere.
 
 ---
 

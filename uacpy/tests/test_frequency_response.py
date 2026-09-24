@@ -387,7 +387,7 @@ class TestLsFirInfoRcondFloorBoundary:
 
     @pytest.mark.parametrize("scale", [1e-9, 1.0, 1e9])
     def test_the_branch_does_not_move_with_the_amplitude_scale(self, scale):
-        """A record in Pa and the same record in uPa must be fitted the same
+        """A record in Pa and the same record in µPa must be fitted the same
         way: the threshold is on a reciprocal condition number, which both
         norms scale out of."""
         from uacpy.acoustic_signal.system import (

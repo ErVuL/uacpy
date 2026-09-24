@@ -712,6 +712,20 @@ wants. Decide up front whether you are estimating power or filtering.
 | `simulate_reception(transmit, amplitudes, delays_s, sample_rate)` | `(t, received)` | transmit waveform convolved with that IR |
 | `impulse_response_from_transfer_function(H, frequencies, sample_rate, n_samples=None)` | `(t, h)` | one-sided `H(f)` → real IR |
 | `channel_response(h, sample_rate, *, nfft=None)` | `(f, H)` | complex IR → two-sided `H(f)`, complex |
+| `transfer_function_from_impulse_response(h, sample_rate, *, t0=0.0, band=None, axis=-1)` | `(f, H)` | real IR → one-sided `H(f)`; the exact inverse of the row above-but-one |
+| `arrival_transfer_function(f, amplitudes, delays_s, *, delays_imag_s=None, phases_rad=None)` | `H(f)` | a sparse arrival list → its transfer function |
+| `broadband_propagation_loss(H, weights=None, *, axis=-1)` | dB | Ainslie Eq. 11.46 — the loss a signal with bandwidth actually suffers |
+| `gate_transfer_function(H, f, duration, *, origin='peak', window='boxcar')` | `H(f)` | keep only the paths within ±`duration` of the response centre |
+| `rms_delay_spread(delays_s, powers)` | s | energy-weighted spread of a power delay profile |
+| `energy_support(delays_s, powers, fraction=0.999)` | s | delay span holding that share of the energy — what a synthesis window has to cover |
+| `coherence_bandwidth(delays_s, powers, *, convention='inverse_spread')` | Hz | `1/(k·τ_rms)` |
+| `channel_regime(delays_s, powers, symbol_rate, *, rolloff=0)` | `ChannelRegime` | flat or frequency-selective at that symbol rate |
+| `coherence_factor(convention, factor=None)` | `k` | the `k` those two read, from `COHERENCE_BANDWIDTH_FACTORS` |
+| `uniform_frequency_step(frequencies)` | Hz | the `df` of a uniform ascending grid, or a refusal — what every `H(f)` → time route asks first |
+| `tone_phasor(x, times, frequency, *, window='hann', axis=-1)` | complex | amplitude and phase of one tone, evaluated **at** the frequency |
+| `waveform_spectrum_at(waveform, sample_rate, frequencies)` | `S(f)` | the same, for a whole set of frequencies — the vector counterpart of `tone_phasor` |
+| `simulate_arrival_reception(transmit, amplitudes, delays_s, sample_rate, fc, *, delays_imag_s=None, phases_rad=None, …)` | `(received, t)` | a reception from a sparse arrival list **with** the carrier rotation and the `exp(ω·Im τ)` volume absorption |
+| `pulse_shaped_taps(gains, delays_s, symbol_rate, *, pulse='rc', rolloff, sps, span)` | `(taps, times)` | arrivals laid down through the modem's own pulse (`uacpy.comms`) |
 | `fractional_delay_taps(frac, half_len=8, beta=8.0)` | `2·half_len` taps | the sub-sample kernel `impulse_response` places arrivals with (`simulate_reception` through it) |
 
 `fractional=True` places each arrival with a windowed-sinc fractional-delay
@@ -783,6 +797,103 @@ It is the raw-array route; if you are holding a `Field` from a `BROADBAND` run,
 prefer [`Field.to_time_trace()` /
 `Field.synthesize_time_series()`](results.md#6-from-hf-to-pt), which handle bin
 placement, windowing and grid-independent amplitude for you.
+
+### 6.0 These take plain arrays
+
+Everything in the table above is a function over arrays. `Arrivals` and
+`Field` wrap them — `Arrivals.rms_delay_spread()` is
+`rms_delay_spread(self.delays, self._arrival_power())` and nothing more — so a
+power delay profile from a chirp sounding, a `.mat` file or another model
+reaches the same code:
+
+```python
+from uacpy.acoustic_signal import rms_delay_spread, coherence_bandwidth
+
+tau  = np.array([0.0, 3.5e-3, 11e-3, 30e-3])     # measured, from anywhere
+pwr  = np.array([1.0, 0.30, 0.096, 0.005])       # |a|**2
+
+spread = rms_delay_spread(tau, pwr)               # s
+Bc     = coherence_bandwidth(tau, pwr)            # Hz
+```
+
+`powers` is `|a|²`, not the complex amplitudes — a negative entry is refused
+rather than squared behind your back.
+
+`simulate_arrival_reception` is what `Arrivals`-driven Bellhop synthesis
+uses (`delayandsum` unpacks its dict into it). It differs from
+`simulate_reception` above in the two things that matter for a real channel:
+it rotates each arrival by the carrier and applies the volume absorption
+carried in `Im τ`, and it places arrivals with a fractional-delay kernel
+rather than snapping them to samples.
+
+`arrival_transfer_function` is the same story for the sum itself. Note that
+ray codes put volume absorption in the **imaginary travel time**, not in the
+amplitude, so `delays_imag_s` is what gives a band its absorption slope;
+without it the list is lossless. And an amplitude there is a **magnitude** —
+its sign belongs in `phases_rad` as π. Passing a negative amplitude is
+refused, because the package once had two implementations of this sum that
+disagreed on exactly that input by up to 10.7 dB per bin, in silence.
+
+### 6.0b One tone out of a record
+
+`tone_phasor` evaluates the transform **at** the frequency rather than
+sampling the nearest DFT bin. Off a bin, `X[k]` is a leakage sample of the
+window transform — neither the phasor at your frequency nor the one at
+`freqs[k]` — and a record picks its own `nt` and `fs`, so the frequency of
+interest is essentially never on a bin:
+
+| offset from the bin | level error | phase error |
+|---|---|---|
+| 0.10 bin | −0.06 dB | 18° |
+| 0.30 bin | −0.51 dB | 54° |
+| 0.50 bin | −1.42 dB | **90°** |
+
+**The phase reaches 90° before the level has moved 1.5 dB**, which is why a
+level check alone does not find this. `Field.extract_tone` and
+`uacpy.io.rts_to_pressure` both call it, so the two public routes to "the
+tone in this record" now agree to 1e-15 instead of disagreeing by the table
+above.
+
+One place still takes the nearest bin on purpose: `rts_to_pressure`'s
+`pulse_type=` deconvolution branch, which is a **ratio** at the same bin on
+both sides, so the leakage divides out — measured flat at 1e-15 dB across a
+whole bin.
+
+### 6.1 Going back: `h` → `H`
+
+Two calls return a spectrum from an impulse response, and they answer
+different questions.
+
+`channel_response` is the **two-sided** view of a possibly-complex `h`: every
+bin from `-fs/2` to `+fs/2`, no rotation, no band. Use it to look at a
+channel, including the negative frequencies a baseband response has.
+
+`transfer_function_from_impulse_response` is the **inverse** of
+`impulse_response_from_transfer_function`: one-sided, band-restricted, and
+rotated by `t0`. It takes `axis=`, so a `(depth, range, time)` block of
+responses transforms in one call.
+
+```python
+from uacpy.acoustic_signal import (impulse_response_from_transfer_function,
+                                   transfer_function_from_impulse_response)
+
+t, h = impulse_response_from_transfer_function(H, f, fs)
+f_back, H_back = transfer_function_from_impulse_response(h, fs, band=(f[0], f[-1]))
+```
+
+The rotation is what makes it an inverse rather than merely a spectrum. A
+record that starts at `t0` carries that offset in every sample, so a bare
+`rfft` returns `H` multiplied by `exp(+2πi f t0)` — right in modulus, wrong in
+angle, which stays invisible until two of them interfere.
+
+**Two conventions live here, and each is self-consistent.** The pair above is
+**unscaled**: `irfft` one way, `rfft` the other, so `H = 1` is a unit-height
+sample. `Field.to_time_trace` and
+[`Field.to_transfer_function`](results.md#6-from-hf-to-pt) use the **density**
+convention instead (`ifft · fs` out, `rfft · dt` back), because a model's `H`
+is a density. Both pairs round-trip to floating point; mixing one half of one
+with one half of the other is off by `fs`, **with the phase still exact** — so
+a test that checks only angles will not see it.
 
 ---
 

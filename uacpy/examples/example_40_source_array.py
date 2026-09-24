@@ -8,7 +8,7 @@ much quieter than a unit source? And what does the array do to the channel?
 Transmission loss is referenced to ONE unit source at 1 m (JKPS 1.3.4), so a
 map of a multi-source total is a level with the array's gain inside it, not a
 loss — which is why the last panels name a source level and read out dB re
-1 uPa instead.
+1 µPa instead.
 
 The array response has two right answers and this draws both. Free field, the
 product theorem gives the array beam pattern P(theta) = f(theta)*A(theta)
@@ -111,7 +111,7 @@ print(f"median level, incoherent total  : {med(incoherent):6.2f} dB "
 # ── 3. the level, not the loss ──────────────────────────────────────────
 # at_source_level() needs no argument: the Source carried 180 dB, so every
 # result of this run knows it. The colourbar says so too - a level is its own
-# kind, captioned 'Level (dB re 1 uPa)' and read upward.
+# kind, captioned 'Level (dB re 1 µPa)' and read upward.
 fig, axes = plt.subplots(1, 2, figsize=(14, 4.4))
 # source=array draws a marker at every element depth, so the aperture the
 # gain comes from is visible against the field it produced.

@@ -55,6 +55,7 @@ from .link import (
     # channel models
     awgn,
     multipath_channel,
+    pulse_shaped_taps,
     apply_channel,
     fading_taps,
     apply_fading_channel,
@@ -124,7 +125,8 @@ __all__ = [
     # metrics
     "bit_error_rate", "symbol_error_rate", "evm", "ber_theory",
     # channel models
-    "awgn", "multipath_channel", "apply_channel", "fading_taps",
+    "awgn", "multipath_channel", "pulse_shaped_taps",
+    "apply_channel", "fading_taps",
     "apply_fading_channel",
     # equalization
     "DFE", "lms_equalizer", "rls_equalizer", "mmse_equalizer", "slicer",

@@ -76,7 +76,7 @@ QUANTITIES: Mapping[str, Quantity] = {
         # would measure. Its own quantity and NOT a loss, so it reads upward
         # on a 1-D cut and is never captioned "TL (dB)" — the reference is
         # the source's, not the unit source at 1 m a TL is quoted against.
-        Quantity('level', {'dB': 'Level (dB re 1 uPa)'}),
+        Quantity('level', {'dB': 'Level (dB re 1 µPa)'}),
         # A signed RESIDUAL between two dB fields, not a level and not a loss:
         # zero means the two agree, and the sign says which way they differ.
         # It exists so a difference stops inheriting 'pressure', which would
@@ -96,10 +96,17 @@ QUANTITIES: Mapping[str, Quantity] = {
         # Time-integrated squared pressure over one transient — Abraham's
         # energy flux density numerator (sect. 3.2.1.5), ISO 18405's sound
         # exposure. Its own quantity because a pulse's currency is energy,
-        # not pressure: a level in dB re 1 uPa^2 s answers a different
-        # question from a level in dB re 1 uPa, and the two references must
+        # not pressure: a level in dB re 1 µPa²·s answers a different
+        # question from a level in dB re 1 µPa, and the two references must
         # never share a colorbar. A LEVEL, so more of it is more.
-        Quantity('sound_exposure', {'dB': 'SEL (dB re 1 uPa^2 s)'}),
+        Quantity('sound_exposure', {'dB': 'SEL (dB re 1 µPa²·s)'}),
+        # The other half of the impulsive dual metric: "frequency-weighted
+        # SEL and unweighted peak sound pressure level", either exceeding
+        # its criterion being sufficient (Southall et al. 2019). Its own
+        # quantity and not 'level', because a peak map and a mean-square
+        # received-level map are both dB re 1 µPa and are not the same
+        # reading of the same field. A LEVEL, so more of it is more.
+        Quantity('peak_pressure', {'dB': 'Peak SPL (dB re 1 µPa)'}),
     )
 }
 

@@ -16,6 +16,10 @@ from uacpy.core._grid import _nearest_index_on_axis, collapse_axis
 from uacpy.core.environment import Bathymetry, Environment
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
+from uacpy.core.acoustics.levels import (
+    peak_level as _peak_level,
+    sound_exposure_level as _sound_exposure_level,
+)
 from uacpy.core.results import quantities as _quantities
 from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.results._base import PhaseReference, Result, _complex_to_dB
@@ -25,51 +29,6 @@ from uacpy.core.results._base import PhaseReference, Result, _complex_to_dB
 # multi-GB buffer and OOM the process. Cap the *auto* size at 2**26 ≈ 67 M
 # samples (~1 GB complex) and raise instead; an explicit ``nfft=`` bypasses it.
 _MAX_SYNTHESIS_NFFT = 1 << 26
-
-# Fewest frequency bins a band-edge taper can act on and still leave an
-# interior. numpy's hann/hamming/blackman are symmetric with (near-)zero
-# endpoints, so at 2 bins the window is [0, 0] and at 3 it is [0, 1, 0] — a
-# taper there does not soften the edges, it deletes the band.
-_MIN_TAPERABLE_BINS = 4
-
-_WINDOWS = ('hann', 'hamming', 'blackman', 'tukey', 'none')
-
-
-def _taper(name: str, n: int, *, who: str) -> np.ndarray:
-    """Edge taper of ``n`` samples, shared by the tone extractor and the IFFT.
-
-    Returns a flat window for ``'none'`` and for a span too short to keep an
-    interior (warning in the latter case).
-
-    The two callers sit at different depths — the tone extractor is one frame
-    below its public method, the synthesis planner three — so the warning
-    below carries no frame count of its own: a count passed in by the caller
-    can only be right for one of the two depths, and points at this helper's
-    own frame from the other."""
-    if name not in _WINDOWS:
-        raise ConfigurationError(
-            f"{who}: unknown window={name!r}; "
-            f"valid: {', '.join(repr(w) for w in _WINDOWS)}"
-        )
-    if name == 'none':
-        return np.ones(n)
-    if n < _MIN_TAPERABLE_BINS:
-        warnings.warn(
-            f"{who}: a {n}-sample span is too narrow to taper (a {name!r} "
-            f"window needs at least {_MIN_TAPERABLE_BINS} samples to leave an "
-            f"interior); continuing untapered. Widen the span for a resolved "
-            f"result.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        return np.ones(n)
-    if name == 'hann':
-        return np.hanning(n)
-    if name == 'hamming':
-        return np.hamming(n)
-    if name == 'blackman':
-        return np.blackman(n)
-    from scipy.signal import windows
-    return windows.tukey(n, alpha=0.5)
 
 
 class Field(Result):
@@ -1430,6 +1389,8 @@ class Field(Result):
                 raise ConfigurationError(
                     f"{who}: waveform must be the 1-D signal, not a "
                     f"(time, signal) pair — pass lfm_chirp(...)[1].")
+            from uacpy.acoustic_signal.system import (
+                waveform_spectrum_at as _source_spectrum_at)
             source_spectrum = _source_spectrum_at(
                 waveform, sample_rate,
                 np.asarray(self.coords.get('frequency', []), dtype=float))
@@ -1647,71 +1608,18 @@ class Field(Result):
                 f"{who}: needs complex H(f). A dB or TL field has no phase, "
                 f"so it has no impulse response to cut.")
         freqs = np.asarray(self.coords['frequency'], dtype=float)
-        if freqs.size < 2:
-            raise ConfigurationError(
-                f"{who}: needs at least 2 frequencies to define a record "
-                f"length; got {freqs.size}.")
-        _require_uniform_df(freqs, 'truncate_response')
-        if window not in ('boxcar', 'hann'):
-            raise ConfigurationError(
-                f"{who}: window must be 'boxcar' (the separability "
-                f"criterion stated plainly) or 'hann' (the same cut, "
-                f"tapered); got {window!r}.")
-        duration = float(duration)
-        df = float(np.diff(freqs).mean())
-        record = 1.0 / df
-        if not np.isfinite(duration) or duration <= 0.0:
-            raise ConfigurationError(
-                f"{who}: duration must be a positive number of seconds; "
-                f"got {duration!r}.")
-        if 2.0 * duration >= record:
-            raise ConfigurationError(
-                f"{who}: the window reaches {duration:g} s either side of "
-                f"the origin, which is not inside the {record:g} s record "
-                f"the grid defines (1/df, df = {df:g} Hz), so it keeps "
-                f"everything and the call would be a no-op. Refine the grid "
-                f"or shorten the pulse.")
-
         axis = list(self.coords).index('frequency')
-        n_f = freqs.size
-        moved = np.moveaxis(np.asarray(self.data), axis, -1)
-        flat = moved.reshape(-1, n_f)
-        # The band's own baseband response: one period is 1/df and the step
-        # is 1/(n_f*df), which is the resolution the band itself has.
-        h = np.fft.ifft(flat, axis=-1)
-        dt = record / n_f
-        times = np.arange(n_f) * dt
+        # The whole cut — the two transforms, the circular window, the
+        # origin handling and the fold warning — is gate_transfer_function's.
+        # What this method adds is the coord check above and the re-wrap.
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import gate_transfer_function
+        out = gate_transfer_function(
+            self.data, freqs, duration, origin=origin, window=window,
+            axis=axis, who=who)
+        return Field(data=out,
 
-        if origin == 'peak':
-            centres = times[np.argmax(np.abs(h), axis=-1)]
-        else:
-            try:
-                fixed = float(origin)
-            except (TypeError, ValueError) as exc:
-                raise ConfigurationError(
-                    f"{who}: origin must be 'peak' or a time in seconds "
-                    f"from the start of the record; got {origin!r}."
-                ) from exc
-            if not np.isfinite(fixed) or not 0.0 <= fixed < record:
-                raise ConfigurationError(
-                    f"{who}: origin {fixed:g} s is outside the "
-                    f"[0, {record:g}) s record this grid defines.")
-            centres = np.full(flat.shape[0], fixed)
-
-        # Circular distance: the record wraps, so a window centred near one
-        # end reaches round to the other, which is where the response of a
-        # path near the record edge actually sits.
-        offset = np.abs(times[None, :] - centres[:, None])
-        offset = np.minimum(offset, record - offset)
-        if window == 'boxcar':
-            taper = (offset <= duration).astype(float)
-        else:
-            taper = np.where(offset <= duration,
-                             0.5 * (1.0 + np.cos(np.pi * offset / duration)),
-                             0.0)
-        self._warn_if_response_wraps(h, taper, offset, record, who)
-        out = np.fft.fft(h * taper, axis=-1).reshape(moved.shape)
-        return Field(data=np.moveaxis(out, -1, axis),
                      coords=dict(self.coords), pinned=dict(self.pinned),
                      **self.id_kwargs())
 
@@ -1855,6 +1763,8 @@ class Field(Result):
                     f"{who}: waveform must be the 1-D signal, not a "
                     f"(time, signal) pair — pass tone_burst(...)[1] (the "
                     f"generators return both).")
+            from uacpy.acoustic_signal.system import (
+                waveform_spectrum_at as _source_spectrum_at)
             spectrum = _source_spectrum_at(waveform, sample_rate, freqs)
         if spectrum is None:
             weights = np.ones(freqs.size, dtype=float)
@@ -1884,27 +1794,15 @@ class Field(Result):
                 raise ConfigurationError(
                     f"{who}: spectrum carries no energy, so the weighted "
                     f"average is undefined.")
-        # Accumulated one frequency at a time rather than as
-        # ``sum(w * |H|**2, axis)``: that spelling materialises a temporary
-        # the size of the whole broadband grid, on top of the grid itself.
-        # Measured on 120 x 400 cells over 401 frequencies (a 0.29 GiB
-        # grid), peak extra allocation is 0.001 GiB accumulating per map
-        # against 0.287 GiB for the one temporary, and the two agree to
-        # 1e-14 dB. Each slice here is one map. The sum is the ratio's
-        # denominator, not a mean, so a weighted band divides by the weight
-        # it actually applied; for uniform weights the two agree.
-        moved = np.moveaxis(self.data, axis, 0)
-        power = np.zeros(moved.shape[1:], dtype=float)
-        for i, weight in enumerate(weights):
-            if weight:
-                power += weight * np.abs(moved[i]) ** 2
-            else:
-                # A zero-weight bin contributes nothing but must still carry
-                # a no-data cell forward: skipping it silently would let a
-                # NaN column average to a finite level.
-                power += np.where(np.isnan(moved[i]), np.nan, 0.0)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            loss = 10.0 * np.log10(weights.sum() / power)
+        # The weighted average and its dB step are
+        # broadband_propagation_loss's, including the accumulate-per-map
+        # memory behaviour; what this method adds is turning a waveform
+        # into w(f), the weighted centroid pin and the band metadata below.
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import broadband_propagation_loss
+        loss = broadband_propagation_loss(self.data, weights, axis=axis,
+                                          who=who)
         coords = {name: v for name, v in self.coords.items()
                   if name != 'frequency'}
         pinned = dict(self.pinned)
@@ -1931,83 +1829,6 @@ class Field(Result):
         # narrowing exists to prevent.
         id_kwargs['frequencies'] = np.array([pinned['frequency']], dtype=float)
         return Field(data=loss, coords=coords, pinned=pinned, **id_kwargs)
-
-    @staticmethod
-    def _warn_if_response_wraps(h, taper, offset, record,
-                                who: str) -> None:
-        """Warn when the impulse response is still live where the window is
-        not, at the far side of the circular record.
-
-        The two cases a cut cannot tell apart are an arrival that is genuinely
-        late and one that was later than ``1/df`` and folded back. This
-        measures the only thing visible from inside: how much of the response
-        sits in the half of the record furthest from the window. A decayed
-        response leaves that part empty; a folding one does not, and then the
-        energy the window removed is not the energy the pulse would resolve.
-
-        It is deliberately NOT the whole complement of the window. Energy
-        immediately outside the window is what a cut exists to remove — a
-        genuine late path — so counting it warns on channels that cannot
-        fold: two equal paths 100 ms apart in a 500 ms record read 50 %.
-
-        **It is a heuristic with a blind spot, not a test.** What it detects
-        is a response that has not decayed where a well-sized record would
-        be empty. A fold that lands NEAR the origin — a path just past the
-        record's end, which is the likeliest kind — arrives in the near half
-        and is never counted at all. That is the same limit
-        :meth:`sound_exposure_level` records from the other side: a folded
-        arrival sitting on top of the direct one is signature-identical to a
-        clean one, so no measurement of ``H(f)`` can find it. Size the grid
-        from the arrivals; this only catches the loud, obvious case.
-        """
-        power = np.abs(h) ** 2
-        total = power.sum(axis=-1)
-        # The FAR HALF of the record from the window, not the whole
-        # complement. Energy just outside the window is what a cut is FOR —
-        # a genuine late path being removed — and counting it made this
-        # warn on channels that cannot fold at all: two equal paths 100 ms
-        # apart in a 500 ms record read 50% and were told to refine the
-        # grid. Only energy at the record's far side is evidence of a fold,
-        # because that is where a decayed response has nothing.
-        #
-        # ``offset`` is the caller's own circular distance from the window
-        # centre, passed in rather than re-derived. Recovering it here as
-        # ``argmax(taper)`` gave a BOXCAR's left edge, not its centre — the
-        # mask came out rotated by the window's half-width, so the same
-        # channel and cut warned under 'boxcar' and stayed quiet under
-        # 'hann'.
-        far = offset > record / 4.0
-        live = np.where(total > 0.0,
-                        power.sum(axis=-1, where=far)
-                        / np.where(total > 0.0, total, 1.0), 0.0)
-        worst = float(np.max(live)) if live.size else 0.0
-        # 0.02, chosen from a 48-case sweep rather than inherited. The old
-        # 0.33 was calibrated against a DIFFERENT measure (the whole
-        # complement of the window) and was never re-derived when this
-        # became the far half: against the far half it missed 77.8 % of
-        # folds, including every case in a two-path sweep up to equal
-        # amplitudes, and including the R = 0.7 pair this method's own
-        # docstring table uses, whose folded far-half share is 0.3289 —
-        # one part in 300 UNDER the threshold. At 0.02 the sweep missed
-        # 11.1 % and false-alarmed on none of 21 clean channels.
-        #
-        # The residual 11 % is the blind spot, not a tuning failure: a fold
-        # landing near the origin reads like an early arrival at any
-        # threshold. Clean channels topped out at 0.0011 and the quietest
-        # detectable fold sat at 0.0023, so the margin at the boundary is a
-        # factor of two, not orders of magnitude. This flags the obvious
-        # case and nothing more.
-        if worst > 0.02:
-            warnings.warn(
-                f"{who}: {100.0 * worst:.0f}% of the response sits in the "
-                f"half of the record furthest from the window. A decayed "
-                f"response leaves that empty, so either a path is arriving "
-                f"that late, or one later than the 1/df record has folded "
-                f"onto it — from H(f) alone these are the same measurement. "
-                f"If the arrivals are known to fit the record, ignore this; "
-                f"otherwise size the grid from them "
-                f"(Arrivals.synthesis_band).",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     def synthesize_time_series(
         self,
@@ -2161,7 +1982,7 @@ class Field(Result):
         source waveform where ``H`` is unity, so ``source_waveform`` is the
         source's pressure at the range this field's ``H`` is referenced to —
         1 m for a transmission-loss field. Scale it and the map scales with
-        it. For a source level ``SL`` in dB re 1 uPa at 1 m, the waveform's
+        it. For a source level ``SL`` in dB re 1 µPa at 1 m, the waveform's
         rms pressure is ``1e-6 * 10**(SL/20)`` Pa::
 
             unit = waveform / np.sqrt(np.mean(waveform ** 2))
@@ -2171,9 +1992,9 @@ class Field(Result):
         alone, and the source level goes on afterwards as an **energy**
         source level, ``ESL = SL + 10 log10(T)`` for constant power over the
         pulse (Ainslie Eq. 3.155) — the two routes agree exactly. Worked
-        through: ``SL`` = 190 dB re 1 uPa at 1 m, a 10 ms burst, 100 m of
-        spherical spreading. Received level is 190 - 40 = 150 dB re 1 uPa,
-        so the exposure is 150 + 10 log10(0.01) = **130 dB re 1 uPa^2 s**,
+        through: ``SL`` = 190 dB re 1 µPa at 1 m, a 10 ms burst, 100 m of
+        spherical spreading. Received level is 190 - 40 = 150 dB re 1 µPa,
+        so the exposure is 150 + 10 log10(0.01) = **130 dB re 1 µPa²·s**,
         which is what both routes return.
 
         Parameters
@@ -2185,7 +2006,7 @@ class Field(Result):
             Rate (Hz) the waveform is sampled at.
         reference : float, default 1e-6
             Reference pressure (Pa). The exposure reference is its square,
-            so the default gives dB re 1 uPa^2 s.
+            so the default gives dB re 1 µPa²·s.
         window : str, default 'none'
             Band taper, passed to :meth:`synthesize_time_series`, which
             tapers with ``'hann'`` when nothing says otherwise. A flat band
@@ -2246,9 +2067,11 @@ class Field(Result):
         # than an analytic signal's quadrature, which would double the energy.
         pressure = np.asarray(traces.data)
         pressure = pressure.real if np.iscomplexobj(pressure) else pressure
-        energy = np.sum(pressure ** 2, axis=-1) * traces.dt
-        with np.errstate(divide='ignore', invalid='ignore'):
-            sel = 10.0 * np.log10(energy / reference ** 2)
+        # The integral and its dB step are acoustics.sound_exposure_level's;
+        # what this method adds is the synthesis above and the band metadata
+        # below. It floors a silent cell at -180 dB rather than -inf, which
+        # would poison any mean taken over the map.
+        sel = _sound_exposure_level(pressure, traces.dt, reference)
         coords = {name: v for name, v in traces.coords.items()
                   if name != 'time'}
         meta = dict(self.metadata or {})
@@ -2268,6 +2091,8 @@ class Field(Result):
         # sample. The centroid is the waveform's, weighted by its own
         # spectrum on this axis.
         band = np.asarray(self.coords['frequency'], dtype=float)
+        from uacpy.acoustic_signal.system import (
+            waveform_spectrum_at as _source_spectrum_at)
         weights = np.abs(_source_spectrum_at(
             source_waveform, sample_rate, band)) ** 2
         centre = (float(np.sum(weights * band) / weights.sum())
@@ -2276,6 +2101,226 @@ class Field(Result):
         pinned['frequency'] = centre
         id_kwargs['frequencies'] = np.array([centre], dtype=float)
         return Field(data=sel, coords=coords, pinned=pinned, **id_kwargs)
+
+    def peak_sound_pressure_level(
+        self,
+        source_waveform: np.ndarray,
+        sample_rate: float,
+        *,
+        reference: float = REFERENCE_PRESSURE_WATER,
+        window: str = "none",
+        nfft: Optional[int] = None,
+        t_start: Optional[float] = None,
+    ) -> "Field":
+        """Peak sound pressure level of one transmission, cell by cell —
+        the other half of the impulsive dual metric.
+
+        ``20 log10( max|p(t)| / reference )`` on each cell's synthesised
+        trace. Exposure criteria for impulsive sound are stated as a PAIR —
+        "frequency-weighted sound exposure level (SEL) and unweighted peak
+        sound pressure level", with "exceeding either threshold by the
+        specified level ... sufficient to result in the predicted TTS or
+        PTS" (Southall et al., *Marine Mammal Noise Exposure Criteria*,
+        2019). :meth:`sound_exposure_level` is the first half; this is the
+        second, and neither substitutes for the other: SEL integrates the
+        whole transmission while this reads its single loudest excursion.
+
+        **It is not recoverable from any band average.** A peak is a
+        property of the waveform in time, so no reduction of ``|H(f)|``
+        yields it — which is why the criteria name both metrics rather than
+        one, and why this needs the synthesis that
+        :meth:`broadband_loss` does not.
+
+        **Unlike SEL, it depends on the output sample rate.** A maximum is
+        a sample, not an integral, so a coarse grid can miss the true crest
+        between samples. Measured on a two-path channel with a 5-cycle
+        500 Hz burst, sweeping ``nfft`` from 320 to 65536 (8 kHz to 1.6 MHz
+        of output rate): the peak moved **0.0615 dB** and the SEL of the
+        same traces moved **0.0000 dB**, Parseval holding it exactly. The
+        peak is converged by about ``nfft`` = 4096; the automatic size lands
+        within 0.004 dB of that here. Raise ``nfft`` if a fraction of a
+        decibel matters, and note the cost is only in the transform length.
+
+        ``window`` defaults to ``'none'`` for the same reason it does on
+        :meth:`sound_exposure_level`, and more sharply: a band taper
+        reshapes the waveform, and a peak is exactly the part of a waveform
+        a taper moves.
+
+        **The source level rides on the waveform's amplitude**, as it does
+        for SEL — see that method. Scale the waveform; do not call
+        :meth:`at_source_level` first, which this refuses.
+
+        Parameters
+        ----------
+        source_waveform : ndarray
+            The 1-D transmitted waveform; the generators return a
+            ``(time, signal)`` pair, so pass ``tone_burst(...)[1]``.
+        sample_rate : float
+            Rate (Hz) ``source_waveform`` is sampled at.
+        reference : float, default 1e-6
+            Reference pressure (Pa); the default gives dB re 1 µPa.
+        window, nfft, t_start
+            Passed to :meth:`synthesize_time_series`.
+
+        Returns
+        -------
+        Field
+            ``(depth, range)`` in dB, ``kind='peak_pressure'`` — a level,
+            so it reads upward and never shares a colorbar with a TL map,
+            and distinct from ``'level'`` because a peak map and a
+            mean-square received-level map are both dB re 1 µPa and are not
+            the same reading. The band it collapsed is kept in
+            ``metadata['band_hz']``.
+
+        Raises
+        ------
+        ConfigurationError
+            Real data (a dB or TL field), non-canonical coords, or a
+            non-positive ``reference``.
+        """
+        who = "Field.peak_sound_pressure_level"
+        if not self.is_complex:
+            raise ConfigurationError(
+                f"{who}: needs complex H(f). A dB or TL field has no phase, "
+                f"so it has no waveform to take a peak of — synthesising "
+                f"one inverse-transforms the decibels AS pressure. Start "
+                f"from the BROADBAND field and scale the waveform to the "
+                f"source level rather than calling at_source_level().")
+        if not np.isfinite(reference) or reference <= 0.0:
+            raise ConfigurationError(
+                f"{who}: reference must be a positive pressure in Pa; got "
+                f"{reference!r}.")
+        traces = self.synthesize_time_series(
+            source_waveform, sample_rate,
+            window=window, nfft=nfft, t_start=t_start)
+        pressure = np.asarray(traces.data)
+        pressure = pressure.real if np.iscomplexobj(pressure) else pressure
+        # acoustics.peak_level's, floored the same way, so a silent cell
+        # is -180 dB and not -inf.
+        peak = _peak_level(pressure, reference, axis=-1)
+        coords = {name: v for name, v in traces.coords.items()
+                  if name != 'time'}
+        band = np.asarray(self.coords['frequency'], dtype=float)
+        from uacpy.acoustic_signal.system import (
+            waveform_spectrum_at as _source_spectrum_at)
+        weights = np.abs(_source_spectrum_at(
+            source_waveform, sample_rate, band)) ** 2
+        centre = (float(np.sum(weights * band) / weights.sum())
+                  if weights.sum() > 0 else float(np.mean(band)))
+        meta = dict(self.metadata or {})
+        meta.update({'kind': 'peak_pressure', 'unit': 'dB'})
+        meta['band_hz'] = (float(band[0]), float(band[-1]))
+        id_kwargs = self.id_kwargs()
+        id_kwargs['metadata'] = meta
+        id_kwargs['frequencies'] = np.array([centre], dtype=float)
+        pinned = dict(self.pinned)
+        pinned['frequency'] = centre
+        return Field(data=peak, coords=coords, pinned=pinned, **id_kwargs)
+
+    def to_transfer_function(self, *, band=None) -> "Field":
+        """``H(f)`` from a time-domain Field — the inverse of
+        :meth:`to_time_trace`.
+
+        The forward direction has several routes (:meth:`to_time_trace`,
+        :meth:`synthesize_time_series`,
+        :func:`~uacpy.acoustic_signal.impulse_response_from_transfer_function`);
+        this is the way back, as a carrier rather than as raw arrays.
+
+        The transform is::
+
+            H(f) = rfft(h) * dt * exp(-2 pi i f t0)
+
+        The final rotation is what makes it an inverse rather than merely a
+        spectrum. A record starting at ``t0`` carries that offset in every
+        sample, so a bare ``rfft`` returns ``H`` multiplied by
+        ``exp(+2 pi i f t0)`` — correct in magnitude and wrong in phase,
+        which is invisible until something interferes two of them. Verified
+        against a two-path ``H``: with the rotation the round trip
+        reproduces it to ``max|err| = 0.0000``; without it, 3.16.
+
+        **The band is restricted, not extended.** An ``rfft`` of an
+        ``N``-sample record returns bins from 0 to the Nyquist frequency,
+        but a trace synthesised from a 100-995 Hz field supports nothing
+        outside that — the other bins are the synthesis's own edges, and
+        returning them would invent data. The band comes from the Field's
+        identity when it has one (every trace this package synthesises
+        does), or from ``band``.
+
+        **Compared with the two narrower tools.**
+        :meth:`get_spectrum` is the raw ``rfft`` — every bin, no rotation,
+        arrays not a Field — and is right when that is what is wanted.
+        :meth:`extract_tone` is the careful single-frequency answer,
+        evaluated AT the frequency rather than at the nearest bin. This is
+        the broadband carrier-level one.
+
+        Parameters
+        ----------
+        band : (float, float), optional
+            ``(low, high)`` in Hz to keep. ``None`` uses the identity's
+            band, and falls back to every positive bin when the Field
+            carries none — a time-marched result read from a file, say.
+
+        Returns
+        -------
+        Field
+            Complex, with ``time`` replaced by ``frequency`` and the other
+            axes unchanged, so :meth:`plot_transfer_function`,
+            :meth:`broadband_loss` and :meth:`truncate_response` all take
+            it.
+
+        Raises
+        ------
+        ConfigurationError
+            No ``time`` axis, fewer than two samples, a non-uniform one, or
+            a ``band`` that keeps no bin.
+        """
+        who = "Field.to_transfer_function"
+        if 'time' not in self.coords:
+            raise ConfigurationError(
+                f"{who}: needs a time axis to transform; this Field has "
+                f"{list(self.coords)}. A frequency-domain field is already "
+                f"a transfer function.")
+        times = np.asarray(self.coords['time'], dtype=float)
+        if times.size < 2:
+            raise ConfigurationError(
+                f"{who}: needs at least two time samples; got {times.size}.")
+        steps = np.diff(times)
+        dt = float(np.mean(steps))
+        if not np.allclose(steps, dt, rtol=1e-9, atol=0.0):
+            raise ConfigurationError(
+                f"{who}: the time axis is not uniformly spaced, so an FFT "
+                f"of it would place every bin wrongly. Resample first.")
+        axis = list(self.coords).index('time')
+        if band is None:
+            identity = self.frequencies
+            if identity is not None and len(identity) > 1:
+                band = (float(np.min(identity)), float(np.max(identity)))
+        # The transform, the t0 rotation and the band cut are
+        # transfer_function_from_impulse_response's; what a Field adds is
+        # the axis bookkeeping, the identity-derived band above and the
+        # metadata below. A pressure history is real, and that function
+        # drops an analytic signal's quadrature rather than double the
+        # positive-frequency content.
+        from uacpy.acoustic_signal.system import (
+            transfer_function_from_impulse_response)
+        freqs, spectrum = transfer_function_from_impulse_response(
+            self.data, 1.0 / dt, t0=float(times[0]), band=band, axis=axis,
+            who=who)
+        # That function is unscaled, matching the plain irfft of its own
+        # counterpart; a Field's H is a spectral density, the convention
+        # to_time_trace's `ifft * fs` produces, so dt carries it across.
+        spectrum = spectrum * dt
+        spectrum = np.moveaxis(spectrum, axis, -1)
+        coords = {name: v for name, v in self.coords.items() if name != 'time'}
+        coords['frequency'] = freqs
+        meta = dict(self.metadata or {})
+        meta.update({'kind': 'pressure', 'unit': 'Pa'})
+        id_kwargs = self.id_kwargs()
+        id_kwargs['metadata'] = meta
+        id_kwargs['frequencies'] = freqs
+        return Field(
+            data=np.moveaxis(spectrum, -1, list(coords).index('frequency')),
+            coords=coords, pinned=dict(self.pinned), **id_kwargs)
 
     def _reduce_to_spectrum(self, method: str) -> "Field":
         """Reduce a broadband Field to a single ``['frequency']`` spectrum.
@@ -2490,8 +2535,8 @@ class Field(Result):
                 "['depth', 'range', 'time'] coords; got "
                 f"{list(self.coords)}"
             )
-        win = _taper(window, self.n_times, who='Field.extract_tone')
-        windowed = self.data * win
+        # The estimator is tone_phasor's; what this method adds is the
+        # coord check above and the Field re-wrap below.
         # Evaluate the transform AT the requested frequency rather than
         # sampling the nearest rfft bin, exactly as `_source_spectrum_at`
         # does and for the same reason: `2*X[k]/sum(win)` recovers the phasor
@@ -2503,9 +2548,12 @@ class Field(Result):
         # with its phase 89.98 deg out, silently. On a bin the sum below
         # reproduces the rfft bin it replaces to ~1.5e-15 — the two differ
         # only in summation order.
-        t = np.asarray(self.coords['time'], dtype=float)
-        amp = (2.0 * np.sum(windowed * np.exp(-2j * np.pi * frequency * t),
-                            axis=-1) / np.sum(win))
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import tone_phasor
+        amp = tone_phasor(
+            self.data, np.asarray(self.coords['time'], dtype=float),
+            frequency, window=window, who='Field.extract_tone')
         # The recovered tone is the identity of the returned Field, not the
         # time-domain parent's frequency list.
         id_kwargs = self.id_kwargs()
@@ -3076,29 +3124,6 @@ class ResultStack(_DeepCopyMixin):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _require_uniform_df(freqs: np.ndarray, who: str) -> float:
-    """The step of a uniformly-spaced ascending frequency axis, or a refusal.
-
-    Bin placement presumes such a grid: off one, frequencies land at the wrong
-    bins and can collide (the later value overwrites). It lives outside
-    :func:`_synthesis_plan` because the synthesis evaluates the source
-    spectrum on this axis *before* it plans the grid, and that evaluation
-    presumes the same thing — the check has to be reachable from both.
-    """
-    freqs = np.asarray(freqs, dtype=float)
-    df = float(freqs[1] - freqs[0])
-    spacings = np.diff(freqs)
-    if df <= 0 or not np.allclose(spacings, df, rtol=1e-6, atol=0.0):
-        raise ConfigurationError(
-            f"{who}: the frequency axis must be uniformly spaced and "
-            f"ascending; spacing runs from {spacings.min():.6g} Hz to "
-            f"{spacings.max():.6g} Hz against a leading Δf of {df:.6g} Hz. "
-            f"Resample H(f) onto an equispaced grid before synthesising.",
-            remediation="Run the model on an equispaced frequencies= array.",
-        )
-    return df
-
-
 def _synthesis_plan(
     tf: "Field",
     *,
@@ -3141,7 +3166,8 @@ def _synthesis_plan(
     # progressively attenuates arrivals away from the anchor it is centred on.
     # Return the honest extent instead; a longer record needs a finer
     # frequency grid, which means more model runs.
-    df_data = _require_uniform_df(freqs, who)
+    from uacpy.acoustic_signal.system import uniform_frequency_step
+    df_data = uniform_frequency_step(freqs, who)
     df = df_data
 
     # A DFT of spacing df can only carry frequencies at integer multiples of
@@ -3211,6 +3237,7 @@ def _synthesis_plan(
             remediation=f"Pass nfft={2 * max_bin + 2} or larger.",
         )
 
+    from uacpy.acoustic_signal.system import _taper
     win = _taper(window, n_freq, who=who)
 
     return freqs, df, bin_indices, bin_offset_hz, int(nfft), win
@@ -3458,87 +3485,6 @@ def _ifft_to_trace(
     )
 
 
-def _chirp_step(freqs: np.ndarray, n: int, fs: float) -> Optional[float]:
-    """The step of a uniform ascending ``freqs``, or ``None`` if it has none.
-
-    "Uniform enough" is not a matter of taste here. The chirp-z transform walks
-    the contour ``f[0] + k*df``, so what has to hold is that the walk LANDS on
-    the frequencies asked for: a landing error of ``eps`` Hz costs at most
-    ``2*pi*eps*n/fs`` radians of phase in the DTFT below, which the bound here
-    holds under 1e-9 rad — two decades inside the transform's own agreement
-    with the dense sum. Fewer than 2 in-band frequencies has no step to find
-    (and the dense sum is one row there anyway).
-    """
-    m = freqs.size
-    if m < 2:
-        return None
-    df = float(freqs[-1] - freqs[0]) / (m - 1)
-    if not (df > 0.0):
-        return None
-    drift = float(np.max(np.abs(freqs[0] + df * np.arange(m) - freqs)))
-    return df if drift * max(n, 1) <= 1e-10 * fs else None
-
-
-def _source_spectrum_at(
-    waveform: np.ndarray, sample_rate: float, freqs: np.ndarray,
-    *, _max_elems: int = 4_000_000,
-) -> np.ndarray:
-    """Continuous source spectrum ``S(f)`` at arbitrary ``freqs``.
-
-    Evaluates the DTFT of the sampled waveform directly::
-
-        S(f) = (1/fs) * sum_n w[n] exp(-2 pi i f n / fs)
-
-    which reproduces ``rfft(w)/fs`` exactly on the waveform's own DFT grid and
-    stays exact off it. Interpolating the rfft samples instead is only correct
-    when the two grids coincide: linear interpolation is a convolution with a
-    triangular kernel in frequency, i.e. a ``sinc^2(pi df_src t)`` taper
-    anchored at ``t = 0`` plus periodisation at ``1/df_src`` in time. On a
-    half-bin-offset grid that is a >100% median error in ``S(f)``.
-
-    Frequencies outside ``[0, fs/2]`` return 0 — a band-limited source carries
-    no out-of-band energy, and the DTFT would alias there.
-    """
-    wf = np.asarray(waveform, dtype=np.float64).ravel()
-    freqs = np.atleast_1d(np.asarray(freqs, dtype=np.float64))
-    fs = float(sample_rate)
-    n = wf.size
-
-    out = np.zeros(freqs.size, dtype=np.complex128)
-    in_band = (freqs >= 0.0) & (freqs <= 0.5 * fs)
-    if not np.any(in_band):
-        return out
-
-    sel = np.flatnonzero(in_band)
-    df = _chirp_step(freqs[sel], n, fs)
-    if df is not None:
-        # A uniform ascending run of frequencies is a chirp-z contour: with
-        # z_k = a*w**-k, a = exp(2i*pi*f[0]/fs) and w = exp(-2i*pi*df/fs),
-        # czt's sum_n x[n]*z_k**-n IS the sum below, evaluated by FFT
-        # convolution in O((n+m) log(n+m)) rather than the O(n*m) of the
-        # outer product — 2281 ms to 49 ms for 120000 frequencies against a
-        # 512-sample waveform. Imported here, like the taper windows: scipy
-        # is not needed to hold a Field, only to synthesise from one.
-        from scipy.signal import czt
-        out[sel] = czt(wf, m=sel.size,
-                       w=np.exp(-2j * np.pi * df / fs),
-                       a=np.exp(2j * np.pi * freqs[sel[0]] / fs))
-        return out / fs
-
-    # No such contour — and the contract above is ARBITRARY freqs, which a
-    # caller does use (a bare in-band/out-of-band pair, say). Evaluate the
-    # sum directly, chunked over frequency so the phase matrix stays bounded
-    # regardless of waveform length x grid size (4e6 complex128 elements
-    # ~ 64 MB per block).
-    idx = np.arange(n, dtype=np.float64)
-    step = max(1, int(_max_elems // max(n, 1)))
-    for a in range(0, sel.size, step):
-        blk = sel[a:a + step]
-        phase = np.exp(-2j * np.pi * np.outer(freqs[blk], idx) / fs)
-        out[blk] = phase @ wf
-    return out / fs
-
-
 def _synthesize_time_series(
     tf: "Field",
     *,
@@ -3605,9 +3551,12 @@ def _synthesize_time_series(
     # fewer than 2 frequencies there is no spacing to check; the plan raises
     # on the count itself.)
     if tf_freqs.size > 1:
-        _require_uniform_df(tf_freqs, 'synthesize_time_series')
+        from uacpy.acoustic_signal.system import uniform_frequency_step
+        uniform_frequency_step(tf_freqs, 'synthesize_time_series')
 
     freqs = tf.coords['frequency']
+    from uacpy.acoustic_signal.system import (
+        waveform_spectrum_at as _source_spectrum_at)
     source_spectrum = _source_spectrum_at(wf, sample_rate, freqs)
 
     n_d, n_r, n_f = tf.data.shape

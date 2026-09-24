@@ -21,7 +21,7 @@ import warnings
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.core.results.quantities import is_loss
-from uacpy.acoustic_signal import lfm_chirp, tone_burst
+from uacpy.acoustic_signal import tone_burst
 
 SPEED = 1500.0
 RATE = 8000.0
@@ -511,7 +511,7 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
 
     def test_the_source_level_rides_on_the_waveform_amplitude(self):
         # There is no source-level argument, so the recipe that stands in for
-        # one is pinned here: a waveform at SL dB re 1 uPa at 1 m, through
+        # one is pinned here: a waveform at SL dB re 1 µPa at 1 m, through
         # 100 m of spherical spreading, must land on SL - 40 + 10log10(T).
         source_level, speed = 190.0, SPEED
         f = np.arange(25.0, 4000.0, 25.0)
@@ -649,203 +649,100 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
             one_cell.sound_exposure_level(self.burst(), RATE)
 
 
-class TestAWindowedFieldReportsTheBandItHolds:
-    """``Field.window`` narrows the identity, not only the axis.
+class TestThePeakIsTheOtherHalfOfTheDualMetric:
+    """``peak_sound_pressure_level`` — Southall's second metric.
 
-    Selecting a signal's band out of a wider run is how both quantities above
-    are reached, and a field that keeps the run's whole frequency list after
-    that answers ``f0`` and ``n_frequencies`` about samples it no longer has.
-    ``isel`` already narrows the identity when it pins an axis.
+    SEL integrates the whole transmission; this reads its loudest single
+    excursion. Neither substitutes for the other, and a peak is a property
+    of the waveform in TIME, so no reduction of ``|H(f)|`` yields it.
     """
 
     @staticmethod
-    def wideband():
-        f = np.arange(1000.0, 2001.0, 100.0)
-        return Field(data=np.ones((1, 1, f.size), complex),
-                     coords={'depth': [0.0], 'range': [1.0], 'frequency': f},
-                     frequencies=f)
-
-    def test_the_band_count_matches_the_axis(self):
-        narrowed = self.wideband().window(frequency=(1400.0, 1600.0))
-        assert narrowed.n_frequencies == narrowed.coords['frequency'].size == 3
-
-    def test_the_centre_frequency_is_one_the_field_holds(self):
-        # 1000 Hz is a legal frequency and the wrong answer, which is why
-        # this needs its own assertion rather than a finiteness check.
-        narrowed = self.wideband().window(frequency=(1400.0, 1600.0))
-        assert narrowed.f0 == pytest.approx(1400.0)
-
-    def test_windowing_another_axis_leaves_the_band_alone(self):
-        untouched = self.wideband().window(range=(0.0, 2.0))
-        assert untouched.n_frequencies == 11
-
-    def test_source_depths_narrow_with_their_axis(self):
-        z = np.array([5.0, 10.0, 15.0])
-        f = np.array([100.0, 200.0])
-        field = Field(data=np.ones((z.size, 1, 1, f.size), complex),
-                      coords={'source_depth': z, 'depth': [0.0],
-                              'range': [1.0], 'frequency': f},
-                      frequencies=f, source_depths=z)
-        narrowed = field.window(source_depth=(9.0, 16.0))
-        assert list(np.asarray(narrowed.source_depths)) == [10.0, 15.0]
-
-
-class TestAGridThatCannotBePlacedOnADftIsRefused:
-    """A knife edge in the synthesis plan, found by audit.
-
-    The band is placed at ``floor(f/df + 0.5)`` and de-rotated by ONE common
-    offset taken from the first sample. When ``freqs[0]/df`` lands on the .5
-    boundary the first sample rounds one way and the rest the other, so part
-    of the band sits a whole bin out. It is silent: on 25 Hz-4 kHz with
-    ``df`` = 2/3 a two-path SEL read 52.34 dB against a true 54.01, on a
-    1500 ms record where nothing folds. Nudging ``df`` by 0.005 Hz is exact,
-    so no caller would think to check.
-    """
-
-    @staticmethod
-    def two_paths(df):
-        f = np.arange(25.0, 4000.0, df)
-        h = (np.exp(-2j * np.pi * f * 0.100)
-             + 0.6 * np.exp(-2j * np.pi * f * 0.130)) / 100.0
-        return Field(data=h.reshape(1, 1, -1),
-                     coords={'depth': [10.0], 'range': [100.0],
-                             'frequency': f}, frequencies=f)
-
-    def level(self, df):
+    def quiet(field, waveform, **kw):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            return float(self.two_paths(df).sound_exposure_level(
-                tone_burst(500.0, 5, RATE)[1], RATE).dB[0, 0])
-
-    def test_a_grid_on_the_rounding_boundary_is_refused(self):
-        for df in (2.0 / 3.0, 25.0 / 40.5):       # freqs[0]/df = 37.5, 40.5
-            assert (25.0 / df) % 1 == pytest.approx(0.5), df
-            with pytest.raises(ConfigurationError, match="rounding boundary"):
-                self.level(df)
-
-    def test_grids_either_side_of_it_agree_exactly(self):
-        # The refusal is a knife edge, not a broad rejection: a few parts in
-        # 1e3 of df either way is exact, which is why it had to be checked
-        # rather than left to a caller to notice.
-        for df in (0.665, 0.670, 1.0, 5.0, 25.0):
-            assert self.level(df) == pytest.approx(54.0108, abs=1e-3), df
-
-
-class TestOneSignalAtOneReceiver:
-    """``to_time_trace(waveform=...)`` — the received signal at a position.
-
-    ``synthesize_time_series`` convolves every cell; this is the one-receiver
-    form, and it took a ``source_spectrum`` the caller had to sample onto the
-    field's axis, with the same interpolation trap ``broadband_loss`` had.
-    """
-
-    RATE = 8000.0
+            return field.peak_sound_pressure_level(waveform, RATE, **kw)
 
     @staticmethod
-    def spreading_field():
+    def burst():
+        return tone_burst(500.0, 5, RATE)[1]
+
+    def test_it_is_a_level_of_its_own_kind(self):
+        """Not ``'level'``: a peak map and a mean-square received-level map
+        are both dB re 1 µPa and are not the same reading of the field."""
+        out = self.quiet(free_field(ranges=(100.0,)), self.burst())
+        assert (out.kind, out.unit) == ('peak_pressure', 'dB')
+        assert not is_loss(out.kind)
+        assert list(out.coords) == ['depth', 'range']
+
+    def test_doubling_the_range_costs_spherical_spreading(self):
+        out = self.quiet(free_field(ranges=(100.0, 200.0)), self.burst())
+        # Not exact like SEL's: a peak is a sample, so it lands within the
+        # output grid's resolution of the analytic value.
+        assert float(out.dB[0, 0]) - float(out.dB[0, 1]) == pytest.approx(
+            20.0 * np.log10(2.0), abs=0.05)
+
+    def test_the_level_follows_the_waveform_amplitude(self):
+        field = free_field(ranges=(100.0,))
+        x = self.burst()
+        quiet = float(self.quiet(field, x).dB[0, 0])
+        loud = float(self.quiet(field, 3.0 * x).dB[0, 0])
+        assert loud - quiet == pytest.approx(20.0 * np.log10(3.0), abs=1e-6)
+
+    def test_it_is_not_the_exposure_level(self):
+        """The two rank the same cell differently by tens of dB, which is
+        why criteria name both rather than one."""
+        field = free_field(ranges=(100.0,))
+        x = self.burst() * 1e-6 * 10 ** (190.0 / 20.0)
+        peak = float(self.quiet(field, x).dB[0, 0])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            sel = float(field.sound_exposure_level(x, RATE).dB[0, 0])
+        assert abs(peak - sel) > 10.0
+
+    def test_it_depends_on_the_output_rate_where_the_exposure_does_not(self):
+        """The documented asymmetry, and the reason this method warns about
+        ``nfft`` where its sibling does not: a maximum is a sample, an
+        integral is not. Measured spread across nfft: peak 0.0615 dB, SEL
+        0.0000 dB."""
         f = np.arange(25.0, 4000.0, 25.0)
-        d = np.array([10.0, 50.0])
-        r = np.array([100.0, 500.0])
-        rr = r[None, :, None]
-        h = (np.exp(-2j * np.pi * f[None, None, :] * rr / SPEED) / rr)
-        return Field(data=h * np.ones((d.size, 1, 1)),
-                     coords={'depth': d, 'range': r, 'frequency': f},
-                     frequencies=f)
+        h = (1.0 + 0.6 * np.exp(-2j * np.pi * f * 4e-3)) / 100.0
+        field = Field(data=h.reshape(1, 1, -1),
+                      coords={'depth': [10.0], 'range': [100.0],
+                              'frequency': f}, frequencies=f)
+        x = self.burst()
+        peaks, sels = [], []
+        for nfft in (320, 1024, 16384):
+            peaks.append(float(self.quiet(field, x, nfft=nfft).dB[0, 0]))
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                sels.append(float(field.sound_exposure_level(
+                    x, RATE, nfft=nfft).dB[0, 0]))
+        assert max(sels) - min(sels) == pytest.approx(0.0, abs=1e-9)
+        assert 0.0 < max(peaks) - min(peaks) < 0.2
 
-    def trace(self, field, **kw):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            return field.to_time_trace(window='none', **kw)
+    def test_it_records_the_band_it_collapsed(self):
+        f = np.arange(800.0, 1201.0, 5.0)
+        r = np.array([100.0])
+        h = (np.exp(-2j * np.pi * np.outer(r, f) / SPEED) / r[:, None])
+        field = Field(data=h[None, ...],
+                      coords={'depth': [10.0], 'range': r, 'frequency': f},
+                      frequencies=f)
+        out = self.quiet(field, tone_burst(1000.0, 20, RATE)[1])
+        assert out.metadata['band_hz'] == (800.0, 1200.0)
 
-    def test_the_pulse_arrives_at_the_geometric_travel_time(self):
-        field = self.spreading_field()
-        waveform = lfm_chirp(300.0, 900.0, 0.020, self.RATE)[1]
-        out = self.trace(field, depth=50.0, range=500.0,
-                         waveform=waveform, sample_rate=self.RATE)
-        pressure = np.asarray(out.data).real
-        times = np.asarray(out.coords['time'])
-        power = pressure ** 2
-        # The CENTROID, not the peak: an LFM's envelope is flat, so which
-        # sample peaks is arbitrary within the pulse, and a peak test on a
-        # record barely longer than the pulse passes for any placement at
-        # all — including a time-advanced field. The centroid of a T-long
-        # pulse starting at tau sits at tau + T/2.
-        centroid = float(np.sum(times * power) / power.sum())
-        expected = 500.0 / SPEED + 0.5 * waveform.size / self.RATE
-        assert centroid == pytest.approx(expected, abs=3.0e-3)
+    def test_a_field_that_lost_its_phase_is_refused(self):
+        field = free_field(ranges=(100.0,))
+        for lost in (field.to_dB(), field.at_source_level(190.0)):
+            with pytest.raises(ConfigurationError, match="complex"):
+                lost.peak_sound_pressure_level(self.burst(), RATE)
 
-    def test_the_amplitude_follows_one_over_range(self):
-        field = self.spreading_field()
-        waveform = tone_burst(500.0, 5, self.RATE)[1]
-        near = self.trace(field, depth=50.0, range=100.0,
-                          waveform=waveform, sample_rate=self.RATE)
-        far = self.trace(field, depth=50.0, range=500.0,
-                         waveform=waveform, sample_rate=self.RATE)
-        ratio = (np.abs(np.asarray(near.data).real).max()
-                 / np.abs(np.asarray(far.data).real).max())
-        assert ratio == pytest.approx(5.0, rel=0.05)
-
-    def test_the_cell_it_used_is_recorded(self):
-        field = self.spreading_field()
-        out = self.trace(field, depth=50.0, range=500.0,
-                         waveform=tone_burst(500.0, 5, self.RATE)[1],
-                         sample_rate=self.RATE)
-        assert out.pinned['depth'] == 50.0
-        assert out.pinned['range'] == 500.0
-
-    def test_a_receiver_off_the_grid_says_so(self):
-        """The failure this guards is silent, not loud.
-
-        The match is to the nearest stored coordinate, so asking for 5 km on
-        a grid ending at 500 m returns a perfectly ordinary trace — of the
-        wrong place.
-        """
-        field = self.spreading_field()
-        with pytest.warns(UserWarning, match="outside the grid"):
-            out = field.to_time_trace(
-                depth=50.0, range=5000.0, window='none',
-                waveform=tone_burst(500.0, 5, self.RATE)[1],
-                sample_rate=self.RATE)
-        assert out.pinned['range'] == 500.0
-
-    def test_a_receiver_on_the_grid_is_quiet(self):
-        field = self.spreading_field()
-        # Only this warning is asserted on: the synthesis raises its own
-        # unrelated ones (no stamped sound speed on a hand-built Field), and
-        # an 'error' filter over all UserWarnings would pass for the wrong
-        # reason. 300 m is BETWEEN stored ranges, which is a snap and not an
-        # off-grid request.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
-            field.to_time_trace(
-                depth=50.0, range=300.0, window='none',
-                waveform=tone_burst(500.0, 5, self.RATE)[1],
-                sample_rate=self.RATE)
-        assert not [w for w in caught
-                    if 'outside the grid' in str(w.message)]
-
-    def test_a_waveform_and_a_spectrum_together_are_refused(self):
-        field = self.spreading_field()
-        with pytest.raises(ConfigurationError, match="not both"):
-            field.to_time_trace(
-                depth=50.0, range=500.0,
-                waveform=tone_burst(500.0, 5, self.RATE)[1],
-                sample_rate=self.RATE,
-                source_spectrum=np.ones(field.n_frequencies))
-
-    def test_a_waveform_without_a_sample_rate_is_refused(self):
-        field = self.spreading_field()
-        with pytest.raises(ConfigurationError, match="sample_rate"):
-            field.to_time_trace(
-                depth=50.0, range=500.0,
-                waveform=tone_burst(500.0, 5, self.RATE)[1])
-
-    def test_the_generators_time_signal_pair_is_refused(self):
-        field = self.spreading_field()
-        with pytest.raises(ConfigurationError, match="1-D signal"):
-            field.to_time_trace(depth=50.0, range=500.0,
-                                waveform=tone_burst(500.0, 5, self.RATE),
-                                sample_rate=self.RATE)
+    def test_a_non_positive_reference_is_refused(self):
+        field = free_field(ranges=(100.0,))
+        for bad in (0.0, -1e-6, np.nan):
+            with pytest.raises(ConfigurationError, match="positive pressure"):
+                field.peak_sound_pressure_level(self.burst(), RATE,
+                                                reference=bad)
 
 
 class TestTheTwoQuantitiesAnswerDifferentQuestions:

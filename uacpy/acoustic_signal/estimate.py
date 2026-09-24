@@ -64,7 +64,7 @@ def _warn_two_sided(caller: str, data):
         warnings.warn(
             f"{caller}: complex input gives a TWO-SIDED spectrum — "
             f"'frequencies' runs 0..fs/2 then -fs/2..0 and is not sorted, and "
-            f"the density is not the one-sided Pa^2/Hz this function "
+            f"the density is not the one-sided Pa²/Hz this function "
             f"documents. Sort both arrays together (i = np.argsort(f)) or "
             f"np.fft.fftshift them, or pass a real pressure series.",
             UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
@@ -1664,7 +1664,7 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
     bin_band = np.digitize(f, edges) - 1
     bin_band[f == edges[-1]] = len(bands) - 1
     band_bins = [np.where(bin_band == k)[0] for k in range(len(bands))]
-    # A band holding no bin sums to exactly 0 Pa^2*s, which reads as a measured
+    # A band holding no bin sums to exactly 0 Pa²·s, which reads as a measured
     # silence rather than as "not measured" — 'linear' bands are used as given,
     # so a fmax above Nyquist produces whole empty bands (the octave ladders
     # clamp to Nyquist instead, but a band narrower than the bin spacing is
@@ -1677,7 +1677,7 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
         warnings.warn(
             f"{caller}: {len(empty)} of {len(bands)} bands contain no FFT "
             f"bin and "
-            f"are returned as exactly 0 Pa^2*s, which is not a measurement: "
+            f"are returned as exactly 0 Pa²·s, which is not a measurement: "
             f"{named} Hz. A band above Nyquist ({sample_rate / 2:g} Hz) has no "
             f"data at all; a band narrower than the "
             f"{sample_rate / nperseg:g} Hz bin spacing falls between bins. "

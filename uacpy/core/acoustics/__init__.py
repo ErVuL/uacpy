@@ -55,10 +55,23 @@ from uacpy.core.acoustics.bubbles import (
     bubble_surface_loss,
     bubble_sound_speed,
 )
+from uacpy.core.acoustics.wavenumber import (
+    alias_period,
+    hankel_transform,
+    ranges_fit_alias_period,
+    wavenumber_taper,
+)
+from uacpy.core.acoustics.modal import (
+    modal_attenuation,
+    modal_field,
+)
 from uacpy.core.acoustics.levels import (
     pressure,
     spl,
     power_to_dB,
+    peak_level,
+    transmission_loss_dB,
+    sound_exposure_level,
 )
 
 __all__ = [
@@ -77,5 +90,14 @@ __all__ = [
     'pressure',
     'spl',
     'power_to_dB',
+    'peak_level',
+    'transmission_loss_dB',
+    'alias_period',
+    'hankel_transform',
+    'ranges_fit_alias_period',
+    'wavenumber_taper',
+    'modal_attenuation',
+    'modal_field',
+    'sound_exposure_level',
     'pekeris_root',
 ]

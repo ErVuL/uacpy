@@ -27,6 +27,7 @@ from uacpy.acoustic_signal import (
     impulse_response,
     impulse_response_from_transfer_function,
     simulate_reception,
+    transfer_function_from_impulse_response,
 )
 from uacpy.core.exceptions import ConfigurationError
 
@@ -455,3 +456,167 @@ class TestChannelResponseIsObtainableWithoutDrawingIt:
     def test_an_unusable_sample_rate_is_refused(self, rate):
         with pytest.raises(ConfigurationError, match='sample_rate'):
             channel_response(self._taps(), rate)
+
+
+class TestTheTwoDirectionsShareOneConvention:
+    """``h -> H`` must undo ``H -> h`` numerically, not up to a constant.
+
+    ``impulse_response_from_transfer_function`` is a plain ``irfft``: no
+    ``df``, no ``fs``. The first draft of the inverse divided by the sample
+    rate to make ``H`` a spectral density, which is a defensible convention
+    and the wrong one HERE — the pair came back a factor of ``fs`` apart
+    with the phase still exact to 1e-16, so every phase test passed and
+    nothing measured the level. These pin the ratio, which is what that
+    mistake moved.
+    """
+
+    F = np.arange(0.0, 1000.0, 5.0)
+    H = (np.exp(-2j * np.pi * F * 0.010)
+         + 0.6 * np.exp(-2j * np.pi * F * 0.030))
+
+    def test_the_round_trip_returns_the_same_amplitudes(self):
+        _t, h = impulse_response_from_transfer_function(self.H, self.F, FS)
+        f_back, H_back = transfer_function_from_impulse_response(
+            h, FS, band=(self.F[0], self.F[-1]))
+        ref = (np.interp(f_back, self.F, self.H.real)
+               + 1j * np.interp(f_back, self.F, self.H.imag))
+        # A scaling error shows up here and only here: the phases below
+        # stay exact whatever constant multiplies H.
+        assert np.abs(H_back).mean() / np.abs(ref).mean() == pytest.approx(
+            1.0, abs=1e-9)
+        assert np.abs(H_back - ref).max() < 1e-12
+
+    def test_a_started_record_carries_its_offset_out_again(self):
+        """``t0`` rotates the phase back; without it the modulus is right
+        and the angle is not, which nothing but an interference notices."""
+        fs, n = 2000.0, 512
+        t0 = 0.125
+        h = np.zeros(n)
+        h[40] = 1.0
+        f_rot, H_rot = transfer_function_from_impulse_response(h, fs, t0=t0)
+        _f, H_raw = transfer_function_from_impulse_response(h, fs, t0=0.0)
+        assert np.abs(np.abs(H_rot) - np.abs(H_raw)).max() < 1e-12
+        expected = H_raw * np.exp(-2j * np.pi * f_rot * t0)
+        assert np.abs(H_rot - expected).max() < 1e-12
+        # The rotation is not a no-op at this offset.
+        assert np.abs(H_rot - H_raw).max() > 1.0
+
+
+class TestABlockOfResponsesTransformsInOneCall:
+    """``axis=`` exists so a gridded result needs no Python loop — and so
+    ``Field.to_transfer_function`` can delegate rather than carry a second
+    copy of the transform."""
+
+    RNG = np.random.default_rng(20260924)
+
+    def _block(self):
+        return self.RNG.normal(size=(2, 3, 64))
+
+    def test_each_cell_matches_the_same_cell_transformed_alone(self):
+        block = self._block()
+        _f, H = transfer_function_from_impulse_response(block, FS, t0=0.02)
+        for i in range(2):
+            for j in range(3):
+                _f1, H1 = transfer_function_from_impulse_response(
+                    block[i, j], FS, t0=0.02)
+                assert np.array_equal(H[i, j], H1)
+
+    def test_the_time_axis_need_not_be_last(self):
+        block = self._block()
+        _f, last = transfer_function_from_impulse_response(block, FS)
+        _f0, first = transfer_function_from_impulse_response(
+            np.moveaxis(block, -1, 0), FS, axis=0)
+        assert np.array_equal(np.moveaxis(first, 0, -1), last)
+
+    @pytest.mark.parametrize('axis', [3, -4, 't', None])
+    def test_an_axis_the_array_does_not_have_is_refused(self, axis):
+        with pytest.raises(ConfigurationError) as exc:
+            transfer_function_from_impulse_response(
+                self._block(), FS, axis=axis)
+        assert 'axis' in str(exc.value)
+
+    def test_one_sample_along_the_named_axis_is_refused(self):
+        with pytest.raises(ConfigurationError) as exc:
+            transfer_function_from_impulse_response(
+                np.zeros((2, 3, 1)), FS)
+        assert 'two samples' in str(exc.value)
+
+
+class TestTheBandEdgeSurvivesFloatingPointDust:
+    """A band taken from the grid that made ``h`` lands ON a bin, and a
+    bare ``<=`` then keeps or drops that bin depending on the last bit:
+    re-inverting a sample rate moved a 995 Hz edge by 1e-13 Hz and cost a
+    bin, which is a silent off-by-one in the returned spectrum."""
+
+    def test_an_edge_bin_displaced_by_rounding_is_still_kept(self):
+        fs, n = 5120.0, 1024
+        h = np.zeros(n)
+        h[3] = 1.0
+        full, _H = transfer_function_from_impulse_response(h, fs)
+        high = float(full[199])            # 995 Hz, exactly a bin
+        nudged = np.nextafter(high, 0.0)   # the same bin, one ulp low
+        kept, _ = transfer_function_from_impulse_response(
+            h, fs, band=(100.0, nudged))
+        assert kept.size == 180
+        assert kept[-1] == high
+
+    def test_an_edge_genuinely_below_a_bin_still_excludes_it(self):
+        """The other side of the same threshold. Asking for one bin less
+        is not a boundary test — it lands half a bin from the tolerance
+        and passes however wide the tolerance is. This asks for an edge
+        that misses the bin by a millionth of a spacing: a thousand times
+        the tolerance, and still a millionth of the gap to the neighbour,
+        so only a tolerance that has stopped being dust keeps it."""
+        fs, n = 5120.0, 1024
+        h = np.zeros(n)
+        h[3] = 1.0
+        full, _H = transfer_function_from_impulse_response(h, fs)
+        df = float(full[1] - full[0])
+        kept, _ = transfer_function_from_impulse_response(
+            h, fs, band=(100.0, float(full[199]) - 1e-6 * df))
+        assert kept.size == 179
+        assert kept[-1] == pytest.approx(float(full[198]))
+
+
+class TestFieldToTransferFunctionDelegates:
+    """The Field method is the array function plus axis bookkeeping, a
+    band read off the identity, and the ``dt`` that carries the result
+    into the density convention ``to_time_trace`` produces. What it must
+    NOT be is a second implementation of the transform."""
+
+    def test_the_method_carries_no_fft_of_its_own(self):
+        import inspect
+        from uacpy.core.results.field import Field
+        body = inspect.getsource(Field.to_transfer_function)
+        body = body.split('"""')[2]        # past the docstring
+        assert 'transfer_function_from_impulse_response(' in body
+        assert 'np.fft.rfft' not in body
+
+    def test_a_refusal_names_the_method_the_caller_called(self):
+        """Delegation must not surface a function name the user never
+        typed: `who=` carries the caller's name into the message."""
+        from uacpy.core.results.field import Field
+        t = np.arange(256) / FS
+        field = Field(data=np.zeros((1, 1, t.size)),
+                      coords={'depth': np.array([10.0]),
+                              'range': np.array([1000.0]), 'time': t})
+        with pytest.raises(ConfigurationError) as exc:
+            field.to_transfer_function(band=(9e3, 1e4))
+        assert str(exc.value).startswith('Field.to_transfer_function:')
+
+    def test_a_gridded_field_matches_the_array_function_cell_by_cell(self):
+        from uacpy.core.results.field import Field
+        rng = np.random.default_rng(7)
+        t = np.arange(256) / FS
+        data = rng.normal(size=(2, 3, t.size))
+        field = Field(data=data,
+                      coords={'depth': np.array([10.0, 20.0]),
+                              'range': np.array([1e3, 2e3, 3e3]),
+                              'time': t})
+        H = field.to_transfer_function()
+        for i in range(2):
+            for j in range(3):
+                _f, ref = transfer_function_from_impulse_response(
+                    data[i, j], FS)
+                # dt is the one thing the method adds to the transform.
+                assert np.abs(H.data[i, j] - ref / FS).max() < 1e-18

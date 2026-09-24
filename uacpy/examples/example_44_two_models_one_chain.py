@@ -65,7 +65,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 FREQ, C_REF = 200.0, 1500.0
 HALF = 0.5 * C_REF / FREQ
-SL, NL = 120.0, 75.0          # band-integrated, dB re 1 uPa^2
+SL, NL = 120.0, 75.0          # band-integrated, dB re 1 µPa²
 
 # ── the scene ───────────────────────────────────────────────────────────
 # The same shoaling section example 42 uses: a shelf under the array, a

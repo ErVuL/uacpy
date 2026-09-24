@@ -7,20 +7,16 @@ from enum import Enum
 import numpy as np
 from typing import Optional, Dict, Any, Tuple, Union
 
-from uacpy.core.constants import PRESSURE_FLOOR
+from uacpy.core.acoustics.levels import transmission_loss_dB
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import _DeepCopyMixin
 
 
-def _complex_to_dB(data: np.ndarray) -> np.ndarray:
-    """``-20·log10(|data|)`` with ``|data|`` clamped to :data:`PRESSURE_FLOOR`.
-
-    Canonical TL conversion used by :attr:`Field.dB` and the metrics in
-    :mod:`uacpy.core.metrics`. Preserves shape — no squeeze. The clamp caps
-    an exactly-zero sample (a cell no energy reached) at 600 dB rather than
-    ``+inf``, keeping the array finite for plotting and reductions.
-    """
-    return -20.0 * np.log10(np.maximum(np.abs(data), PRESSURE_FLOOR))
+#: The canonical TL conversion, which now lives beside the other level
+#: functions as :func:`~uacpy.core.acoustics.transmission_loss_dB` so a
+#: complex field from outside uacpy converts the same way. This name is the
+#: same object, kept for the four in-package callers.
+_complex_to_dB = transmission_loss_dB
 
 
 class PhaseReference(str, Enum):

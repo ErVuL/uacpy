@@ -2770,6 +2770,11 @@ def _code_text(markdown: str) -> str:
 _PROCESSING_GUIDE_PAGES = {
     "uacpy.acoustic_signal": ("signal.md", "arrays.md"),
     "uacpy.comms": ("comms.md",),
+    # Added because five functions reached the public surface documented
+    # ONLY in DOCUMENTATION.md: the gate could not see these two modules,
+    # so a guide gap in them was invisible rather than absent.
+    "uacpy.core.acoustics": ("utilities.md", "results.md", "environment.md"),
+    "uacpy.metrics": ("utilities.md",),
 }
 
 

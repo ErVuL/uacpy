@@ -9,6 +9,8 @@ from typing import Optional, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.constants import PRESSURE_FLOOR
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.acoustics.wavenumber import (alias_period,
+                                             ranges_fit_alias_period)
 from uacpy.core.results import Arrivals, Rays, Modes, Covariance, Replicas, ReflectionCoefficient
 from uacpy.core.units import m_to_km
 from uacpy.visualization.plots._common import ZORDER_LEGEND, ZORDER_RAYS, ZORDER_SURFACE, _overlay_seafloor, _draw_geometry, _draw_receiver_grid, _draw_result_credit, _plot_warn, fig_ax, typed_plot_error, invert_yaxis_once, _title_or, _fit_rotated_axis_label
@@ -505,7 +507,10 @@ def plot_wavenumber_sampling(
 
     omega = 2.0 * np.pi * float(frequency)
     k_min, k_max = omega / float(c_high), omega / float(c_low)
-    r_wrap = 2.0 * np.pi / float(delta_k)
+    # The period and the verdict are acoustics.alias_period /
+    # ranges_fit_alias_period, which a reader of this figure can call to
+    # get the number the title reports.
+    r_wrap = alias_period(delta_k)
 
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
@@ -538,7 +543,7 @@ def plot_wavenumber_sampling(
     ax.set_xlabel('horizontal wavenumber $k_r$ (rad/m)')
     note = f'alias period $2\\pi/\\Delta k$ = {r_wrap:.0f} m'
     if r_max is not None:
-        safe = float(r_max) < r_wrap
+        safe = ranges_fit_alias_period(delta_k, r_max)
         note += (f'; farthest receiver {float(r_max):.0f} m '
                  + ('is inside it — necessary, not sufficient: refine until '
                     'the field stops moving' if safe

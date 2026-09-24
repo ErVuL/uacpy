@@ -157,7 +157,7 @@ env = uacpy.Environment(
 )
 
 
-SL, NL = 120.0, 75.0          # band-integrated, dB re 1 uPa^2
+SL, NL = 120.0, 75.0          # band-integrated, dB re 1 µPa²
 target = uacpy.Source(depths=60.0, frequencies=FREQ, source_level_dB=SL)
 
 n_el = 24

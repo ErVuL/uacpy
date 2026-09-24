@@ -20,9 +20,10 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
 
-from scipy.signal import hilbert
 
-from uacpy.acoustic_signal.system import fractional_delay_taps
+from uacpy.acoustic_signal.system import (_echo_window_notice,
+                                          arrival_transfer_function,
+                                          simulate_arrival_reception)
 
 from uacpy.models.base import (
     PropagationModel, RunMode, ModelSpec, USER_FRAME_SKIP,
@@ -89,72 +90,6 @@ _WARNED_RAY_VALIDITY: set = set()
 
 # Length (s) of the all-zero trace returned when a receiver has no arrivals and
 # no explicit time_window — just enough to give a usable, non-empty time axis.
-_EMPTY_TRACE_SECONDS = 0.1
-
-
-def _echo_window_counts(starts, ends, powers, n_samples: int) -> dict:
-    """Count the placed echoes a ``[0, n_samples)`` record omits or clips.
-
-    ``starts``/``ends`` are each echo's first and one-past-last sample on
-    the record, ``powers`` the received power each carries. An echo with no
-    sample inside the record is omitted outright — a delay-and-sum drops an
-    echo, it does not fold it the way an inverse FFT does — and one that
-    straddles an edge is clipped there: at the start it loses its leading
-    edge, the first samples of the waveform, so a chirp arrives as a
-    different signal; at the end it loses its tail.
-    """
-    starts = np.asarray(starts, dtype=int)
-    ends = np.asarray(ends, dtype=int)
-    powers = np.asarray(powers, dtype=float)
-    omitted = (ends <= 0) | (starts >= n_samples)
-    return {
-        'omitted': int(omitted.sum()),
-        'clipped_start': int((~omitted & (starts < 0)).sum()),
-        'clipped_end': int((~omitted & (ends > n_samples)).sum()),
-        'omitted_power': float(powers[omitted].sum()),
-        'total_power': float(powers.sum()),
-        # First sample of the earliest echo, relative to the record start;
-        # negative when it lands before the window. Merged by ``min``.
-        'earliest_start': int(starts.min()),
-    }
-
-
-def _echo_window_notice(counts: dict, t_start: float, time_window: float,
-                        who: str) -> Optional[str]:
-    """The text for a window that does not hold every echo, or ``None``."""
-    if not (counts.get('omitted') or counts.get('clipped_start')
-            or counts.get('clipped_end')):
-        return None
-    parts = []
-    if counts['omitted']:
-        total = counts['total_power']
-        share = counts['omitted_power'] / total if total > 0.0 else 0.0
-        if share >= 1.0 - 1e-12:
-            level = "all of the received energy"
-        elif share > 0.0:
-            level = f"{10.0 * np.log10(share):.0f} dB of the received energy"
-        else:
-            level = "no measurable energy"
-        parts.append(f"{counts['omitted']} echo(es) fall entirely outside it "
-                     f"and are omitted — a delay-and-sum drops an echo rather "
-                     f"than folding it — carrying {level}")
-    if counts['clipped_start']:
-        parts.append(f"{counts['clipped_start']} echo(es) begin before it and "
-                     f"lose their leading edge, the first samples of the "
-                     f"waveform, so a chirp arrives as a different signal")
-    if counts['clipped_end']:
-        parts.append(f"{counts['clipped_end']} echo(es) run past its end and "
-                     f"lose their tail")
-    if 'earliest_s' in counts:
-        parts.append(
-            f"the earliest echo arrives at {counts['earliest_s']:g} s")
-    return (f"{who}: the [{t_start:g}, {t_start + time_window:g}] s window "
-            f"does not hold every echo: " + "; ".join(parts) + ". Widen "
-            f"time_window= or move t_start= (on run(): output_duration= and "
-            f"t_start=), or leave both unset to size the window from the "
-            f"arrivals.")
-
-
 def delayandsum(
     rcv_arrivals: dict,
     source_timeseries: np.ndarray,
@@ -166,170 +101,30 @@ def delayandsum(
     fractional: bool = True,
     report: Optional[dict] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
+    """Convolve a source waveform with the channel a Bellhop arrival record
+    describes.
+
+    The reader's per-receiver dict unpacked into
+    :func:`~uacpy.acoustic_signal.simulate_arrival_reception`, which is the
+    same synthesis over plain arrays — use that one for an arrival list from
+    anywhere else.
+
+    ``rcv_arrivals`` carries ``n_arrivals``, ``amplitudes``, ``delays``,
+    ``delays_imag`` and ``phases``; an empty record returns a silent trace
+    of the requested window.
     """
-    Convolve source waveform with channel impulse response from Bellhop arrivals.
-
-    Places a phase-shifted, amplitude-scaled copy of the source waveform at
-    each arrival time.  Uses the Hilbert transform (analytic signal) to apply
-    arbitrary phase rotations from caustics and boundary reflections, as
-    described in the Bellhop User Guide (Sec. 9.3).
-
-    Parameters
-    ----------
-    rcv_arrivals : dict
-        One per-receiver arrival record from
-        ``arrivals_field.by_receiver[isd][ird][irr]`` with keys:
-        amplitudes, phases, delays, delays_imag, n_arrivals.
-    source_timeseries : ndarray
-        Source waveform (1-D), used as-is.
-    sample_rate : float
-        Sample rate in Hz.
-    fc : float
-        Center frequency in Hz (for volume-attenuation scaling).
-    time_window : float, optional
-        Output time window in seconds.  If *None*, estimated from the
-        latest arrival plus the source waveform duration plus margin.
-    t_start : float, optional
-        Start time for the output.  If *None*, set to just before the
-        earliest arrival.
-    phase_offset : float, optional
-        Constant phase (radians) added to every arrival, applied on the
-        analytic signal. ``0.0`` (default): a :class:`Bellhop` ARRIVALS
-        result already carries the line-source ``exp(-i*pi/4)`` in its
-        ``phases``.
-    fractional : bool, optional
-        Place each echo at its exact delay with a windowed-sinc kernel
-        (default). ``False`` rounds every delay to the nearest sample, which
-        is what this did before: an error up to half a sample, which is tens
-        of degrees of carrier phase at any frequency a modem uses, summed
-        coherently into the interference pattern. Continuous placement is
-        what the formulation asks for — COA eq. 8.30 shifts the waveform by
-        ``t - tau(s)``, not by a whole number of samples.
-    report : dict, optional
-        Collect, instead of warning, what the window omits or clips: the
-        counts from :func:`_echo_window_counts` are ADDED into it, so one
-        dict passed across every receiver cell of a run totals the grid and
-        the run says it once. Left ``None``, this warns itself when an echo
-        falls outside the window or straddles one of its edges — a
-        delay-and-sum drops such an echo silently otherwise, and the record
-        reads as complete.
-
-    Returns
-    -------
-    rts : ndarray
-        Received time series, shape ``(n_samples,)``.
-    time_vector : ndarray
-        Time vector in seconds.
-
-    References
-    ----------
-    Bellhop User Guide, Section 9.3
-    Original MATLAB code: delayandsum.m by M. B. Porter, 8/96
-    """
-    n_arr = rcv_arrivals['n_arrivals']
-    if n_arr == 0:
-        if time_window is not None:
-            nrts = int(np.ceil(time_window * sample_rate))
-        else:
-            nrts = int(_EMPTY_TRACE_SECONDS * sample_rate)
-        t0 = 0.0 if t_start is None else float(t_start)
-        return np.zeros(nrts), t0 + np.arange(nrts) / sample_rate
-
-    amps = rcv_arrivals['amplitudes']
-    phases = rcv_arrivals['phases']
-    delays = rcv_arrivals['delays']
-    delays_imag = rcv_arrivals['delays_imag']
-
-    sts = np.asarray(source_timeseries, dtype=float)
-    nsts = len(sts)
-
-    # Compute analytic signal via Hilbert transform
-    sts_analytic = hilbert(sts)
-
-    deltat = 1.0 / sample_rate
-    src_duration = nsts * deltat
-
-    # Determine time window
-    min_delay = float(np.min(delays))
-    max_delay = float(np.max(delays))
-
-    # Every arrival places a whole copy of the source waveform starting at its
-    # own delay, so the window must reach ``max_delay + src_duration`` for the
-    # last one to fit; ``2 *`` leaves a further source duration of tail. The
-    # lead-in keeps the earliest arrival's leading edge inside the window, and
-    # the max(0, ...) stops the clock from starting before source emission.
-    if t_start is None:
-        t_start = max(0.0, min_delay - 0.1 * src_duration)
-
-    if time_window is None:
-        time_window = (max_delay - t_start) + 2.0 * src_duration
-
-    nrts = int(np.ceil(time_window * sample_rate))
-    rts = np.zeros(nrts)
-
-    omega_c = 2.0 * np.pi * fc
-    # Where each echo's waveform copy lands on the record — first sample and
-    # one past its last — and the power it carries, for the window report.
-    starts, ends, powers = [], [], []
-    for ia in range(n_arr):
-        phase_rad = phases[ia] + phase_offset
-        phase_factor = np.exp(1j * phase_rad)
-
-        # ``delays_imag`` is Im(tau) in seconds; volume-attenuation factor
-        # is exp(omega * Im(tau)) per delayandsum.m:134.
-        atten = np.exp(omega_c * delays_imag[ia])
-
-        scaled_amp = amps[ia] * atten
-
-        delay_samples = (delays[ia] - t_start) / deltat
-
-        # Add this arrival's shifted, scaled copy of the source signal as a
-        # single clipped slice-add (vectorised over the source samples).
-        contrib = scaled_amp * np.real(sts_analytic * phase_factor)
-        if fractional:
-            # Resolve the sub-sample part of the delay with the same
-            # windowed-sinc kernel channel.impulse_response uses. Convolving
-            # by taps centred on offset 0 delays by (half_len - 1) + frac
-            # samples, so the placement index backs off by that integer part
-            # and the echo lands at delay_samples exactly.
-            i_start = int(np.floor(delay_samples))
-            nominal_start = i_start
-            taps = fractional_delay_taps(delay_samples - i_start)
-            placed = np.convolve(contrib, taps)
-            i_start -= taps.size // 2 - 1
-        else:
-            i_start = int(np.round(delay_samples))
-            nominal_start = i_start
-            placed = contrib
-        lo = max(0, i_start)
-        hi = min(nrts, i_start + placed.size)
-        if lo < hi:
-            rts[lo:hi] += placed[lo - i_start:hi - i_start]
-        # The report reads the WAVEFORM's extent, not the kernel's: the
-        # sinc taps ring a few samples ahead of the echo, and losing that
-        # pre-ring at the window's start is not a cut leading edge.
-        starts.append(nominal_start)
-        ends.append(nominal_start + nsts)
-        powers.append(float(scaled_amp) ** 2)
-
-    counts = _echo_window_counts(starts, ends, powers, nrts)
-    earliest = counts.pop('earliest_start')
-    counts['earliest_s'] = t_start + earliest * deltat
-    if report is not None:
-        for key, value in counts.items():
-            if key == 'earliest_s':
-                report[key] = min(report.get(key, np.inf), value)
-            else:
-                report[key] = report.get(key, 0) + value
+    if rcv_arrivals['n_arrivals'] == 0:
+        amps = delays = imag = phases = np.zeros(0)
     else:
-        notice = _echo_window_notice(counts, t_start, time_window,
-                                     who="delayandsum")
-        if notice is not None:
-            warnings.warn(notice, UserWarning,
-                          skip_file_prefixes=USER_FRAME_SKIP)
-
-    time_vector = t_start + np.arange(nrts) * deltat
-    return rts, time_vector
+        amps = rcv_arrivals['amplitudes']
+        delays = rcv_arrivals['delays']
+        imag = rcv_arrivals['delays_imag']
+        phases = rcv_arrivals['phases']
+    return simulate_arrival_reception(
+        source_timeseries, amps, delays, sample_rate, fc,
+        delays_imag_s=imag, phases_rad=phases, time_window=time_window,
+        t_start=t_start, phase_offset=phase_offset, fractional=fractional,
+        report=report)
 
 
 #: uacpy run mode -> Bellhop ``RunType(1:1)``. The letters are the manual's
@@ -2978,22 +2773,16 @@ class Bellhop(PropagationModel):
         if n_arr == 0:
             return np.full(len(frequencies), np.nan, dtype=complex)
 
-        amps = rcv_arrivals['amplitudes']
-        phases = rcv_arrivals['phases']
-        delays = rcv_arrivals['delays']
-        delays_imag = rcv_arrivals['delays_imag']
-
-        phases_rad = np.asarray(phases, dtype=float) + phase_offset
-        omega = 2.0 * np.pi * frequencies  # (n_freq,)
-
-        # Vectorised over arrivals. For each arrival, tau = Re(tau)+i*Im(tau)
-        # gives a phase-shift exp(-i*omega*Re(tau)) and an attenuation
-        # exp(omega*Im(tau)); omega is the per-frequency carrier.
-        A_complex = np.asarray(amps) * np.exp(1j * phases_rad)        # (n_arr,)
-        omega_tau = np.outer(delays, omega)                          # (n_arr, n_freq)
-        omega_taui = np.outer(delays_imag, omega)                    # (n_arr, n_freq)
-        contrib = A_complex[:, None] * np.exp(omega_taui - 1j * omega_tau)
-        return contrib.sum(axis=0)
+        # The sum is arrival_transfer_function's; what this method adds
+        # is the empty-cell NaN above and the reader's key names.
+        return arrival_transfer_function(
+            frequencies,
+            rcv_arrivals['amplitudes'],
+            rcv_arrivals['delays'],
+            delays_imag_s=rcv_arrivals['delays_imag'],
+            phases_rad=rcv_arrivals['phases'],
+            phase_offset=phase_offset,
+            who="Bellhop broadband synthesis")
 
     def _warn_if_default_grid_folds(self, arrivals_by_rcv, nrd: int,
                                     nrr: int, frequencies, fc: float) -> None:

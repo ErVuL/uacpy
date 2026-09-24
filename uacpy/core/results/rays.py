@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import warnings
 import numpy as np
-from dataclasses import dataclass
 from typing import (Optional, Dict, Any, List, NamedTuple, Tuple,
                     TYPE_CHECKING, Union)
 
@@ -13,7 +12,8 @@ from uacpy.core._carrier_validate import _require_positive
 
 from uacpy.core.results._base import Result
 
-if TYPE_CHECKING:                      # the runtime import is deferred
+if TYPE_CHECKING:                      # the runtime imports are deferred
+    from uacpy.acoustic_signal.system import ChannelRegime
     from uacpy.core.results.field import Field
 
 
@@ -147,39 +147,13 @@ class ChannelTaps(NamedTuple):
 # Signal Processing*, sect. 8.7 (W < 1/sigma_t = W_c, Fig. 8.34). The two
 # Rappaport factors are the 0.5- and 0.9-correlation rules of *Wireless
 # Communications*, 2nd ed., sect. 5.4.3, eqs 5.39-5.40 — a source outside
-# the corpus, kept as named options.
-_COHERENCE_BANDWIDTH_FACTORS = {'inverse_spread': 1.0,
-                                'rappaport_0.5': 5.0,
-                                'rappaport_0.9': 50.0}
-
-
-@dataclass(frozen=True)
-class ChannelRegime:
-    """Verdict of :meth:`Arrivals.channel_regime` for one symbol rate.
-
-    ``frequency_selective`` is
-    ``signal_bandwidth_hz > coherence_bandwidth_hz``:
-    the symbol band spans more than one fade of the channel, so the symbols
-    overlap their neighbours (``isi_symbols`` of them, the rms delay spread
-    in symbol periods) and a flat gain cannot describe the link.
-    """
-    coherence_bandwidth_hz: float
-    signal_bandwidth_hz: float
-    rms_delay_spread_s: float
-    symbol_duration_s: float
-    frequency_selective: bool
-    isi_symbols: float
-    convention: str
-
-    def __str__(self) -> str:
-        verdict = ("frequency-selective" if self.frequency_selective
-                   else "frequency-flat")
-        sign = ">" if self.frequency_selective else "<="
-        return (f"{verdict}: signal {self.signal_bandwidth_hz:g} Hz {sign} "
-                f"coherence {self.coherence_bandwidth_hz:g} Hz "
-                f"[{self.convention}] (rms delay spread "
-                f"{self.rms_delay_spread_s:g} s = {self.isi_symbols:g} "
-                f"symbols of {self.symbol_duration_s:g} s)")
+# the corpus, kept as named options. Both the table
+# (``COHERENCE_BANDWIDTH_FACTORS``) and the verdict type
+# (``ChannelRegime``) live beside the functions that compute with them, in
+# ``uacpy.acoustic_signal``, and are imported from there. This module does
+# not re-export them: importing that module pulls scipy, and uacpy's
+# public surface loads without it (``test_lazy_imports``), so every use
+# below is a function-local import.
 
 
 class Arrivals(Result):
@@ -573,14 +547,11 @@ class Arrivals(Result):
         correlation-threshold convention rather than a law, so it is left to
         the caller to state.
         """
-        delays = np.asarray(self.delays, dtype=float).ravel()
-        power = self._arrival_power()
-        total = float(power.sum())
-        if delays.size < 2 or total <= 0.0:
-            return 0.0
-        weights = power / total
-        mean = float((weights * delays).sum())
-        return float(np.sqrt((weights * (delays - mean) ** 2).sum()))
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import rms_delay_spread as _rms_delay_spread
+        return _rms_delay_spread(self.delays, self._arrival_power(),
+                                 who="Arrivals.rms_delay_spread")
 
     def energy_support(self, fraction: float = 0.999) -> float:
         """Delay span holding ``fraction`` of the arrival energy, in seconds.
@@ -607,31 +578,12 @@ class Arrivals(Result):
             no energy at all; ``nan`` if a delay or amplitude is non-finite,
             rather than a span computed from whatever else was finite.
         """
-        fraction = float(fraction)
-        if not 0.0 < fraction <= 1.0:
-            raise ConfigurationError(
-                f"Arrivals.energy_support: fraction={fraction:g} is not a "
-                f"share of the energy. Pass 0 < fraction <= 1 (1.0 spans "
-                f"every arrival, i.e. the peak-to-peak delay).")
-        delays = np.asarray(self.delays, dtype=float).ravel()
-        power = self._arrival_power()
-        if delays.size < 2:
-            return 0.0
-        if not (np.all(np.isfinite(delays)) and np.all(np.isfinite(power))):
-            return float('nan')
-        total = float(power.sum())
-        if total <= 0.0:
-            return 0.0
-        order = np.argsort(delays)
-        delays = delays[order]
-        # The cumulative share is monotone, so the first entry at or above
-        # the target is the last arrival that has to fit. Rounding can leave
-        # the final entry a hair under 1.0, which would put the index one
-        # past the end, so clamp it.
-        cumulative = np.cumsum(power[order]) / total
-        cut = min(int(np.searchsorted(cumulative, fraction, side='left')),
-                  delays.size - 1)
-        return float(delays[cut] - delays[0])
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import energy_support as _energy_support
+        return _energy_support(self.delays, self._arrival_power(),
+                               fraction,
+                               who="Arrivals.energy_support")
 
     def _record_fold_notice(self, record: float) -> Optional[str]:
         """What a record shorter than the arrival span costs, or ``None``.
@@ -980,10 +932,16 @@ class Arrivals(Result):
         # once at the result's own: the absorption lives in Im(tau), and
         # freezing it would hand back a band with no absorption slope across
         # it. The phase term is the outer product of delays and frequencies.
-        amps = np.stack([self._received_amplitudes_at(f, records)
-                         for f in freqs], axis=1)
-        H = np.sum(amps * np.exp(-2j * np.pi * np.outer(delays, freqs)),
-                   axis=0)
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import arrival_transfer_function
+        H = arrival_transfer_function(
+            freqs,
+            [a['amplitude'] for a in records],
+            delays,
+            delays_imag_s=[a.get('delay_imag', 0.0) for a in records],
+            phases_rad=[a.get('phase', 0.0) for a in records],
+            who=who)
         depth, rng = self._cell_coordinates(records, receiver)
         # Deferred: ``field`` imports ``core.environment``, and importing it
         # at this module's scope pulls that chain into every ``Arrivals``.
@@ -1163,34 +1121,17 @@ class Arrivals(Result):
         # convention.
         gains = gains * np.exp(-2j * np.pi * carrier * delays)
         fs = sps * symbol_rate
-        from uacpy.comms.link import multipath_channel, rc_pulse, rrc_pulse
+        from uacpy.comms.link import (multipath_channel,
+                                      pulse_shaped_taps)
         if pulse == 'nearest':
             taps = multipath_channel(gains, rel, fs)
             times = np.arange(taps.size) / fs
         else:
-            span = int(span)
-            if span < 1:
-                raise ConfigurationError(
-                    f"{who}: span must be >= 1 symbol; got {span!r}.")
-            half = span * sps / 2.0
-            # The 1e-9 keeps an arrival a rounding error past a sample
-            # instant from adding an empty tap.
-            n_taps = int(np.ceil(rel.max() * fs - 1e-9)) + span * sps + 1
-            times = (np.arange(n_taps) - half) / fs
-            if pulse == 'rc':
-                shape, norm = rc_pulse, 1.0     # unit peak: Nyquist samples
-            else:
-                grid = (np.arange(span * sps + 1) - half) / sps
-                shape = rrc_pulse
-                norm = float(np.sqrt(np.sum(rrc_pulse(grid, rolloff) ** 2)))
-            taps = np.zeros(n_taps, dtype=complex)
-            for gain, tau in zip(gains, rel):
-                arg = (times - tau) * symbol_rate
-                g = shape(arg, rolloff)
-                # The pulse ends at +-span/2 inclusive, as rrc_filter's grid
-                # does; the 1e-9 keeps rounding from dropping an end tap.
-                g[np.abs(arg) > span / 2.0 + 1e-9] = 0.0
-                taps += gain * g / norm
+            # The placement is pulse_shaped_taps'; what this branch adds
+            # is the carrier rotation and absorption already in `gains`.
+            taps, times = pulse_shaped_taps(
+                gains, rel, symbol_rate, pulse=pulse, rolloff=rolloff,
+                sps=sps, span=span, who=who)
         if normalize:
             energy = float(np.sum(np.abs(taps) ** 2))
             if energy <= 0.0:
@@ -1205,22 +1146,9 @@ class Arrivals(Result):
     def _coherence_factor(convention: str, factor, who: str) -> float:
         """The ``k`` of ``1 / (k tau_rms)``: ``factor`` when given (any
         finite ``k > 0``), else the named convention's."""
-        if factor is not None:
-            factor = float(factor)
-            if not (np.isfinite(factor) and factor > 0.0):
-                raise ConfigurationError(
-                    f"{who}: factor must be a finite number > 0 (the k of "
-                    f"1 / (k * tau_rms)); got {factor!r}. Leave it out to "
-                    f"use convention={convention!r}.")
-            return factor
-        try:
-            return _COHERENCE_BANDWIDTH_FACTORS[convention]
-        except KeyError:
-            raise ConfigurationError(
-                f"{who}: convention must be one of "
-                f"{sorted(_COHERENCE_BANDWIDTH_FACTORS)} (1/tau_rms, "
-                f"1/(5 tau_rms), 1/(50 tau_rms)), or pass factor=k for "
-                f"1/(k tau_rms); got {convention!r}.") from None
+        from uacpy.acoustic_signal.system import (
+            coherence_factor as _generic_coherence_factor)
+        return _generic_coherence_factor(convention, factor, who=who)
 
     def coherence_bandwidth(self, *, convention: str = 'inverse_spread',
                             factor: Optional[float] = None) -> float:
@@ -1248,14 +1176,13 @@ class Arrivals(Result):
         factor : float, optional
             Explicit ``k > 0``; overrides ``convention``.
         """
-        k = self._coherence_factor(convention, factor,
-                                   "Arrivals.coherence_bandwidth")
-        spread = self.rms_delay_spread()
-        if not np.isfinite(spread):
-            return float('nan')
-        if spread <= 0.0:
-            return float('inf')
-        return 1.0 / (k * spread)
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import (
+            coherence_bandwidth as _coherence_bandwidth)
+        return _coherence_bandwidth(
+            self.delays, self._arrival_power(), convention=convention,
+            factor=factor, who="Arrivals.coherence_bandwidth")
 
     def channel_regime(self, symbol_rate: float, *,
                        convention: str = 'inverse_spread',
@@ -1283,29 +1210,14 @@ class Arrivals(Result):
             Excess bandwidth of the pulse; ``0`` takes the Nyquist bandwidth
             equal to the symbol rate.
         """
-        symbol_rate = float(symbol_rate)
-        _require_positive(symbol_rate, "Arrivals.channel_regime symbol_rate",
-                          hint="Bd")
-        rolloff = float(rolloff)
-        if not 0.0 <= rolloff <= 1.0:
-            raise ConfigurationError(
-                f"Arrivals.channel_regime: rolloff must be in [0, 1]; got "
-                f"{rolloff!r}.")
-        k = self._coherence_factor(convention, factor,
-                                   "Arrivals.channel_regime")
-        coherence = self.coherence_bandwidth(factor=k)
-        spread = self.rms_delay_spread()
-        signal = (1.0 + rolloff) * symbol_rate
-        return ChannelRegime(
-            coherence_bandwidth_hz=coherence,
-            signal_bandwidth_hz=signal,
-            rms_delay_spread_s=spread,
-            symbol_duration_s=1.0 / symbol_rate,
-            frequency_selective=bool(signal > coherence),
-            isi_symbols=spread * symbol_rate,
-            convention=(str(convention) if factor is None
-                        else f"factor={float(factor):g}"),
-        )
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import (
+            channel_regime as _channel_regime)
+        return _channel_regime(
+            self.delays, self._arrival_power(), symbol_rate,
+            convention=convention, factor=factor, rolloff=rolloff,
+            who="Arrivals.channel_regime")
 
 
 def _axis_index(axis: np.ndarray, value: float, who: str, name: str) -> int:

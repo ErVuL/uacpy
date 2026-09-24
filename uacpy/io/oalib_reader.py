@@ -2026,12 +2026,22 @@ def rts_to_pressure(
     """
     Project SPARC time-series data onto complex pressure at one frequency.
 
-    ``method='fft'`` (the only method) extracts the spectral bin nearest
-    ``frequency`` from a Hanning-windowed FFT and returns
+    ``method='fft'`` (the only method) evaluates the Hanning-windowed
+    transform **at** ``frequency`` — :func:`~uacpy.acoustic_signal.tone_phasor`,
+    the same estimator :meth:`~uacpy.Field.extract_tone` uses — and returns
     ``(p_at_freq, ranges)`` where ``p_at_freq`` is the model-native,
     source-normalised complex pressure suitable for wrapping in a complex
     narrowband :class:`Field` (``coords={'depth', 'range'}``,
     ``phase_reference='travelling_wave'``).
+
+    It used to take the nearest rfft bin instead. A ``.rts`` picks its own
+    ``nt`` and ``dt``, so the frequency of interest is essentially never on
+    a bin, and off one that answer is wrong by a growing amount — measured
+    against this estimator, -0.056 dB and 18 deg at a tenth of a bin,
+    -1.418 dB and 89.8 deg at half of one. The phase passes 90 deg while
+    the level is still inside 1.5 dB, which is why the error went unnoticed.
+    ``pulse_type=`` below still takes the bin, and correctly: see the note
+    there.
 
     A post-processing utility for a ``.rts`` read by :func:`read_rts_file`;
     :class:`uacpy.models.SPARC` returns ``p(t)`` and does not call it. The
@@ -2074,18 +2084,30 @@ def rts_to_pressure(
         # Imported here rather than at module level: sparc_pulse pulls scipy
         # in, and only this deconvolution path needs it.
         from uacpy.acoustic_signal.generate import sparc_pulse
+        from uacpy.acoustic_signal.system import tone_phasor
         t = np.asarray(rts_data["time"], dtype=float)
         s_t, _ = sparc_pulse(t, 2.0 * np.pi * frequency, pulse_type[0])
-        freqs = np.fft.rfftfreq(nt, dt)
-        f_idx = int(np.argmin(np.abs(freqs - frequency)))
-        S_at_f0 = np.fft.rfft(s_t)[f_idx]
+        # Both sides evaluated AT ``frequency``, with NO taper: the
+        # rectangular transform is what the convolution theorem needs (a
+        # window would null the transient source pulse in the first few
+        # samples), and evaluating at the frequency rather than at the
+        # nearest bin makes the ratio exact off-bin.
+        #
+        # Taking the same bin on both sides does NOT cancel the leakage,
+        # although it nearly does and a constant H cannot show the
+        # difference — on a constant H the ratio is exact at every offset
+        # by construction. Against a three-path 60 ms channel the bin
+        # ratio drifts to +0.06 dB and +6.0 deg at half a bin, while the
+        # pair below stays at 0.0000 dB and 0.000 deg.
+        S_at_f0 = tone_phasor(s_t, t, frequency, window='none',
+                              who="rts_to_pressure")
         if S_at_f0 == 0:
             raise ConfigurationError(
                 "rts_to_pressure: source spectrum is zero at "
                 f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
                 "deconvolve (check pulse / frequency).")
-        p_freq = np.fft.rfft(p, axis=0)
-        return p_freq[f_idx, :] / S_at_f0, ranges
+        return (tone_phasor(p, t, frequency, window='none', axis=0,
+                            who="rts_to_pressure") / S_at_f0), ranges
 
     if method == "fft":
         # Steady-tone amplitude from one rfft bin: the 2.0 restores the half of
@@ -2094,11 +2116,18 @@ def rts_to_pressure(
         # 1/N of the unnormalised transform and the taper's amplitude loss. On
         # a pure tone at bin centre the pair returns the tone's own amplitude
         # and phase, whatever nt and whatever window.
-        window = np.hanning(nt)
-        p_freq = np.fft.rfft(p * window[:, np.newaxis], axis=0)
-        freqs = np.fft.rfftfreq(nt, dt)
-        freq_idx = np.argmin(np.abs(freqs - frequency))
-        p_at_freq = 2.0 * p_freq[freq_idx, :] / np.sum(window)
+        # Evaluated AT `frequency`, not at the nearest rfft bin. This
+        # took the bin, which is the defect Field.extract_tone was fixed
+        # for and which never reached here: measured against the sum,
+        # -0.056 dB / 18 deg at a tenth of a bin and -1.418 dB / 89.8 deg
+        # at half of one, and a .rts picks its own nt and dt so the
+        # frequency is essentially never on a bin.
+        # Deferred: acoustic_signal pulls scipy, and uacpy's public
+        # surface is imported without it (test_lazy_imports).
+        from uacpy.acoustic_signal.system import tone_phasor
+        p_at_freq = tone_phasor(p, np.arange(nt) * dt, frequency,
+                                window='hann', axis=0,
+                                who="rts_to_pressure")
     else:
         raise ConfigurationError(
             f"rts_to_pressure: unknown method {method!r}; only 'fft' is "

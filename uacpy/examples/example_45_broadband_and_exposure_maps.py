@@ -30,6 +30,7 @@ wavelengths or less at the center frequency, in which case use of Equation
 
 Uses: RunMode.BROADBAND / COHERENT_TL / INCOHERENT_TL · Field.at ·
 Field.window · Field.broadband_loss(waveform=) · Field.sound_exposure_level ·
+Field.peak_sound_pressure_level ·
 Field.to_time_trace(waveform=) · Field.synthesize_time_series ·
 Arrivals.synthesis_band / energy_support ·
 acoustic_signal.tone_burst / lfm_chirp · plot_field · plot_field_difference ·
@@ -151,7 +152,7 @@ plt.close(fig)
 
 # ── D. What one 20 ms burst at a stated source level delivers ───────────────
 # There is no source-level argument: the level rides on the waveform's
-# amplitude, because a source level of SL dB re 1 uPa at 1 m IS an rms
+# amplitude, because a source level of SL dB re 1 µPa at 1 m IS an rms
 # pressure of 1e-6 * 10**(SL/20) Pa there.
 rate, source_level = 8000.0, 190.0
 _, pulse = tone_burst(tone, 20, rate)                # 20 cycles = 20 ms
@@ -174,11 +175,11 @@ residual = np.abs(exposure.dB - by_equation)
 ok = np.isfinite(residual)
 
 print(f"\n  one {duration * 1e3:.0f} ms burst at SL = {source_level:.0f} dB "
-      f"re 1 uPa @ 1 m")
+      f"re 1 µPa @ 1 m")
 print(f"    its own TPL                 {np.nanmedian(burst_loss.tl):7.2f} dB"
       f"   (median over the panel)")
 print(f"    ESL = SL + 10log10(T)       {energy_source_level:7.1f} dB "
-      f"re 1 uPa^2 s")
+      f"re 1 µPa²·s")
 print(f"    SEL, integrated from p(t)   "
       f"{np.nanmedian(exposure.dB):7.2f} dB")
 print(f"    SEL, as ESL - TPL           {np.nanmedian(by_equation):7.2f} dB")
@@ -205,10 +206,9 @@ print(f"    it is NOT panel A's flat 50 Hz window: those two part by up to "
 # different reduction.
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
-    traces = H.synthesize_time_series(
-        unit * 1e-6 * 10 ** (source_level / 20.0), rate, window='none')
-peak = 20.0 * np.log10(np.max(np.abs(np.asarray(traces.data).real), axis=-1)
-                       / 1e-6)
+    peak_field = H.peak_sound_pressure_level(
+        unit * 1e-6 * 10 ** (source_level / 20.0), rate)
+peak = np.asarray(peak_field.dB)
 # A crest factor is deliberately NOT reported here. It needs the received
 # pulse's own duration, and multipath stretches that well past the 20 ms
 # transmitted — the path gap reaches 18.6 ms across this panel — so dividing
@@ -218,9 +218,9 @@ peak = 20.0 * np.log10(np.max(np.abs(np.asarray(traces.data).real), axis=-1)
 # waveform in time, so it is not recoverable from any band average, which
 # is exactly why the criteria name both metrics.
 good = np.isfinite(peak)
-print(f"\n    peak SPL   {np.nanmedian(peak):7.2f} dB re 1 uPa (median), "
+print(f"\n    peak SPL   {np.nanmedian(peak):7.2f} dB re 1 µPa (median), "
       f"{peak[good].max() - peak[good].min():.1f} dB across the panel")
-print(f"    SEL        {np.nanmedian(exposure.dB):7.2f} dB re 1 uPa^2 s "
+print(f"    SEL        {np.nanmedian(exposure.dB):7.2f} dB re 1 µPa²·s "
       f"(median) — the other half of the pair")
 # Spearman from THIS run's arrays rather than a remembered figure — a
 # caption and the figure it describes have to come from one run. Rank
@@ -369,7 +369,7 @@ fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True, sharey=True)
 uacpy.plot_field(exposure, axes[0], env=env,
                  title=f'Sound exposure level of one '
                        f'{duration * 1e3:.0f} ms burst at '
-                       f'SL = {source_level:.0f} dB re 1 uPa @ 1 m')
+                       f'SL = {source_level:.0f} dB re 1 µPa @ 1 m')
 uacpy.plot_field(
     uacpy.core.results.Field(
         data=peak, coords={'depth': depths, 'range': ranges},

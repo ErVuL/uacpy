@@ -1,6 +1,6 @@
 # Communications — digital modems for the underwater channel
 
-> `uacpy.comms` · 79 public names · modulation, coding, equalisation,
+> `uacpy.comms` · 80 public names · modulation, coding, equalisation,
 > synchronisation, OFDM, DSSS, Doppler, and the NATO JANUS standard
 
 `uacpy.comms` is a digital-communications toolbox built for the one channel
@@ -224,6 +224,7 @@ the stochastic and time-varying parts, and the noise.
 | Call | Channel |
 |---|---|
 | `multipath_channel(gains, delays_s, sample_rate)` | static FIR taps from sparse arrivals |
+| `pulse_shaped_taps(gains, delays_s, symbol_rate, *, pulse='rc', rolloff, sps, span)` | the same arrivals laid down through the modem's **own pulse** (raised cosine or root raised cosine) rather than on the nearest sample — what a symbol-rate equalizer actually sees |
 | `Arrivals.channel_taps(symbol_rate, carrier=…)` | the same taps straight from a propagation result, carrier rotation and pulse included ([§14](#14-driving-the-modem-with-a-modelled-channel)) |
 | `apply_channel(signal, h)` | convolve with a static channel |
 | `fading_taps(n_taps, n_samples, doppler_hz, sample_rate, rician_k=..., rng=...)` | time-varying tap gains, Rayleigh or Rician |

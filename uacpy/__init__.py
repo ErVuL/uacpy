@@ -64,7 +64,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.core import acoustics
 # The two helpers a recording passes through before any model or estimator
-# sees it: volts -> Pa, and a pressure waveform -> dB re 1 uPa. Eager because
+# sees it: volts -> Pa, and a pressure waveform -> dB re 1 µPa. Eager because
 # ``acoustics`` is already imported above, so naming them costs no import.
 from uacpy.core.acoustics import pressure, spl
 from uacpy.core import materials

@@ -602,7 +602,7 @@ class Scooter(PropagationModel):
         the integrand is negligible "will depend on range, and for multiple
         ranges it is not desirable to truncate at different wavenumbers", the
         kernel is "forced to gradually vanish" at one fixed edge. The roll-off
-        is Hanning (:func:`~uacpy.io.grn_reader._hanning_taper`, mirroring
+        is Hanning (:func:`~uacpy.core.acoustics.wavenumber_taper`, mirroring
         ``fieldsco.m:taper``); a rectangular edge's sidelobes fall at
         6 dB/octave against a Hann edge's 18 (Abraham, Sect. 4.10), i.e.
         ``1/x`` against ``1/x^3``.
@@ -705,7 +705,7 @@ class Scooter(PropagationModel):
         """Pick the effective ``rmax_multiplier`` for this run.
 
         ``scooter.exe`` writes only the wavenumber-domain ``.grn``; the k→r
-        step is uacpy's :func:`~uacpy.io.grn_reader._hankel_transform`, a
+        step is uacpy's :func:`~uacpy.core.acoustics.hankel_transform`, a
         direct trapezoidal-rule DFT (``fieldsco.m:5``), not an FFT. What
         ``RMax`` controls is the wavenumber grid the solver samples:
         ``scooter.f90:69`` sets ``Nk = INT(2000·RMax_km·(kMax−kMin)/π)``, so
@@ -887,7 +887,7 @@ class Scooter(PropagationModel):
         of GB with no single knob looking unreasonable.
 
         The cube is not the whole bill, so counting it alone under-reads the
-        peak: :func:`~uacpy.io.grn_reader._hankel_transform` also builds
+        peak: :func:`~uacpy.core.acoustics.hankel_transform` also builds
         ``outer(k, r)`` in double and exponentiates it in place, then casts the
         result down, so the kernel costs another ``nk × nr × 24`` bytes (16 for
         the complex128 phase, 8 for the complex64 copy it becomes) on top of a

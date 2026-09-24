@@ -675,10 +675,22 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
 def _pinned_subtitle(field: Field) -> str:
     if not field.pinned:
         return ''
+    # A reduced map pins one frequency but AVERAGED a band, and the pinned
+    # value is a centroid — so a 50 Hz and a 400 Hz average about the same
+    # centre would caption identically, naming the one frequency the map is
+    # not. ``metadata['band_hz']`` is what the reducers record for exactly
+    # this, so the band wins over the pin when it is there.
+    band = (field.metadata or {}).get('band_hz')
     parts = []
     for name, v in field.pinned.items():
         label, unit = _AXIS_LABELS.get(name, (name, ''))
-        if name == 'range':
+        if name == 'frequency' and band is not None and len(band) == 2:
+            lo, hi = float(band[0]), float(band[1])
+            scale, tag = ((1000.0, 'kHz') if max(abs(lo), abs(hi)) >= 1000.0
+                          else (1.0, 'Hz'))
+            parts.append(f"{label} = {lo / scale:.3g}-{hi / scale:.3g} "
+                         f"{tag} average")
+        elif name == 'range':
             # Range axes are drawn in km everywhere (see _coord_axis), so a
             # range pin reads in km too.
             parts.append(f"{label} = {m_to_km(v):.3g} km")

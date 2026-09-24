@@ -3,6 +3,8 @@
 Gives the documented ``uacpy.metrics`` import path a real module file.
 """
 
-from uacpy.core.metrics import tl_rmse, tl_max_error, tl_bias
+from uacpy.core.metrics import (tl_rmse, tl_max_error, tl_bias,
+                                tl_rmse_on_shared_ranges)
 
-__all__ = ["tl_rmse", "tl_max_error", "tl_bias"]
+__all__ = ["tl_rmse", "tl_max_error", "tl_bias",
+           "tl_rmse_on_shared_ranges"]
