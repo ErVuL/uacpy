@@ -9,28 +9,52 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.visualization.plots._common import (fig_ax, typed_plot_error,
-                                               _require_nonempty, _title_or)
+from uacpy.visualization.plots._common import (
+    fig_ax, typed_plot_error, _carrier_or_arrays, _refuse_spread_carrier,
+    _require_nonempty, _title_or)
 
 
 
 
 @typed_plot_error
-def plot_channel(h, sample_rate, ax=None, *, title=None, freq_title=None,
-                 figsize=(12, 4), **mpl_kw):
+def plot_channel(h, sample_rate=None, ax=None, *, delays_s=None, title=None,
+                 freq_title=None, figsize=(12, 4), **mpl_kw):
     """Two-panel channel view: |h[n]| (delay) and |H(f)| (frequency response).
 
-    ``ax`` may be a 2-tuple ``(ax_delay, ax_freq)``. ``title`` names the
-    delay panel and ``freq_title`` the frequency one; each falls back to its
-    own default. The frequency panel's title used to be hardcoded, so a
-    caller who wanted a different one got a second title drawn over it.
+    Takes a :class:`~uacpy.core.results.ChannelTaps` — ``plot_channel(taps)``,
+    which is the call ``taps.plot()`` makes — or the taps and their sample
+    rate as arrays. From a carrier the rate is ``symbol_rate * sps``, which is
+    not a field of it, and the delay axis is its ``delays_s``.
 
-    One keyword per panel, as :func:`uacpy.visualization.plot_overview`
-    spells it (``map_title`` / ``tl_title`` / ``env_title``), rather than a
-    ``title`` that is sometimes a string and sometimes a pair: the
-    polymorphic form has no way to reject a 3-tuple except by letting the
-    unpacking raise, which names neither the argument nor the fix.
+    **The delay axis is not ``arange(n) / fs``.** ``Arrivals.channel_taps``
+    starts its grid ``span/2`` symbols before the first arrival, on the
+    leading skirt of the transmit pulse, so an axis rebuilt from the index
+    alone puts the first arrival at +80 ms on a span-8, 50 Bd channel instead
+    of at 0 — the whole tap structure drawn one pulse-length late, with
+    nothing on the figure to say so. ``delays_s`` places them; an array call
+    that omits it gets the index axis, which is what taps with no delay
+    reference have.
+
+    ``ax`` may be a 2-tuple ``(ax_delay, ax_freq)``. ``title`` names the
+    delay panel and ``freq_title`` the frequency one, one keyword per panel
+    as :func:`uacpy.visualization.plot_overview` spells it (``map_title`` /
+    ``tl_title`` / ``env_title``); each falls back to its own default. A
+    single ``title`` that is sometimes a string and sometimes a pair has no
+    way to reject a 3-tuple except by letting the unpacking raise, which
+    names neither the argument nor the fix.
     """
+    _unpacked = _carrier_or_arrays(
+        h, (sample_rate,), count=1, who="plot_channel",
+        carrier=(('ChannelTaps',), ('taps',)), fields=('taps',))
+    if _unpacked is not None:
+        carrier, (h,) = h, _unpacked
+        sample_rate = float(carrier.symbol_rate) * int(carrier.sps)
+        if delays_s is None:
+            delays_s = carrier.delays_s
+    elif sample_rate is None:
+        raise ConfigurationError(
+            "plot_channel: pass the ChannelTaps itself, plot_channel(taps), "
+            "or the taps and their sample rate, plot_channel(h, fs).")
     for name, value in (('title', title), ('freq_title', freq_title)):
         if value is not None and not isinstance(value, str):
             # A pair used to be accepted here. Without this it would be
@@ -42,6 +66,13 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, freq_title=None,
                 f"title= for the delay panel and freq_title= for the "
                 f"frequency one."
             )
+    # Outside the carrier branch, because the spread that lands here is
+    # ``plot_channel(taps.taps, taps.delays_s, taps.symbol_rate)``: three
+    # positionals, so the signature accepts it, ``sample_rate`` is not None
+    # so the carrier branch is not taken, and the rate ends up in ``ax``,
+    # where ``ax[0].figure`` raises about a float not being subscriptable.
+    _refuse_spread_carrier(ax, "plot_channel", 'symbol_rate',
+                           also="plot_channel(taps, sample_rate)")
     title_delay, title_freq = title, freq_title
     h = np.asarray(h, dtype=complex)
     fs = float(sample_rate)
@@ -49,7 +80,14 @@ def plot_channel(h, sample_rate, ax=None, *, title=None, freq_title=None,
         fig, ax = plt.subplots(1, 2, figsize=figsize)
     else:
         fig = ax[0].figure
-    t = np.arange(h.size) / fs * 1e3
+    if delays_s is None:
+        t = np.arange(h.size) / fs * 1e3
+    else:
+        t = np.asarray(delays_s, dtype=float) * 1e3
+        if t.size != h.size:
+            raise ConfigurationError(
+                f"plot_channel: delays_s has {t.size} entries for "
+                f"{h.size} taps; one delay per tap.")
     ax[0].stem(t, np.abs(h))
     ax[0].set_xlabel("Delay (ms)")
     ax[0].set_ylabel("|h|")

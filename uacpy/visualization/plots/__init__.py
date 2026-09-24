@@ -42,6 +42,7 @@ from uacpy.visualization.plots.maps import (
 )
 from uacpy.visualization.plots.signal import (
     draw_slowness_line, draw_sound_cone, plot_fk, plot_radon, plot_taup,
+    plot_waveform,
     plot_psd, plot_ppsd, plot_sel,
     plot_spectrogram, plot_cwt, plot_wigner_ville, plot_cepstrum,
     plot_constant_q_transform, plot_constant_q_spectrogram,
@@ -151,6 +152,7 @@ __all__ = [
     'plot_taup',
     'draw_sound_cone',
     'draw_slowness_line',
+    'plot_waveform',
     'plot_psd',
     'plot_ppsd',
     'plot_sel',

@@ -10,6 +10,8 @@ import inspect
 import warnings
 from pathlib import Path
 
+import re
+
 import numpy as np
 import pytest
 import matplotlib.collections as mcoll
@@ -3390,7 +3392,10 @@ def test_arrivals_below_the_dynamic_range_floor_are_declared():
     # The declaration names the floor in the axis's own unit, so the reader
     # can place the missing arrival against the ticks.
     assert f"below {peak - 60.0:.0f} dB" in text, text
-    assert '+1' in text, text
+    # "1 of N", not "+1": the class counts above are every arrival, so the
+    # hidden one is a subset of them and adding it would double-count.
+    assert re.search(r'1 of \d+ below', text), text
+    assert '+1' not in text, text
     plt.close(fig)
 
 
@@ -5536,7 +5541,8 @@ def test_the_dB_legend_names_a_hidden_far_arrival_once():
                    frequencies=10e3)
     fig, ax = arr.plot(dB=True, dynamic_range=60.0)
     texts = [t.get_text() for t in ax.get_legend().get_texts()]
-    qualifiers = [t for t in texts if t.startswith('+')]
+    qualifiers = [t for t in texts
+                  if 'beyond' in t or 'below' in t]
     assert len(qualifiers) == 1, texts
     assert 'below' in qualifiers[0] and 'beyond' in qualifiers[0], texts
     fig.canvas.draw()
@@ -6607,3 +6613,219 @@ def test_plotting_the_seabed_from_the_seabed_says_why_it_needs_the_environment()
         plot_bottom_properties(env.bottom)
     fig = plot_bottom_properties(env)          # the right call is unchanged
     plt.close(fig[0] if isinstance(fig, tuple) else fig)
+
+
+def test_the_arrivals_legend_counts_add_up_to_what_is_drawn():
+    """The class counts are totals; a qualifier is a subset of them.
+
+    ``bottom (27)`` / ``both (255)`` count every arrival the model returned,
+    drawn or not — the tally happens before the dB floor test. A qualifier
+    written ``+41 beyond ...`` therefore read as an addition, inviting
+    282 + 41 = 323 where the truth is 282 - 41 = 241 on screen. It reads
+    ``41 of 282`` so the two halves of the legend can be reconciled.
+    """
+    # 6 arrivals: 4 loud and close, 2 faint and far, so both qualifiers can
+    # fire and the class counts stay larger than the drawn count.
+    cell = {
+        "delays": np.array([1.000, 1.001, 1.002, 1.003, 1.400, 1.600]),
+        "amplitudes": np.array([1.0, 0.9, 0.8, 0.7, 1e-6, 1e-7]),
+        "phases": np.zeros(6),
+        "n_top_bounces": np.zeros(6, int),
+        "n_bot_bounces": np.array([0, 1, 1, 1, 1, 1]),
+        "src_angles": np.zeros(6), "rcv_angles": np.zeros(6),
+        "delays_imag": np.zeros(6),
+    }
+    arr = Arrivals(by_receiver=[[[cell]]], receiver_depths=np.array([100.0]),
+                   receiver_ranges=np.array([1000.0]), model='Bellhop',
+                   frequencies=10e3)
+    total = len(arr.arrivals)
+
+    for kwargs in ({}, {'dB': True, 'dynamic_range': 40.0}):
+        fig, ax = arr.plot(**kwargs)
+        try:
+            texts = [t.get_text() for t in ax.get_legend().get_texts()]
+            classes = [t for t in texts if re.fullmatch(r'\w+ \(\d+\)', t)]
+            counted = sum(int(re.search(r'\((\d+)\)', t).group(1))
+                          for t in classes)
+            # The class counts account for every arrival, not the drawn ones.
+            assert counted == total, (counted, total, texts)
+
+            qualifiers = [t for t in texts
+                          if 'beyond' in t or 'below' in t]
+            assert qualifiers, (kwargs, texts)
+            for line in qualifiers:
+                # Each names the population it is a subset of, and it is the
+                # same population the class counts sum to.
+                match = re.match(r'(\d+) of (\d+) ', line)
+                assert match, line
+                subset, population = int(match.group(1)), int(match.group(2))
+                assert population == counted, (line, counted)
+                assert 0 < subset <= population, line
+                # and never a leading '+', which is what made it read as
+                # an addition to the class counts rather than part of them.
+                assert not line.startswith('+'), line
+
+            # The headline claim, measured off the axes: total minus the
+            # arrivals the qualifiers name is what a reader can count.
+            lo, hi = ax.get_xlim()
+            xs = np.concatenate([np.atleast_1d(ln.get_xdata())
+                                 for ln in ax.lines]) if ax.lines else \
+                np.array([])
+            visible = int(((xs >= lo) & (xs <= hi)).sum())
+            named = sum(int(re.match(r'(\d+) of ', q).group(1))
+                        for q in qualifiers)
+            assert visible == total - named, (
+                f'{visible} visible, {total} total, {named} named as '
+                f'missing: {texts}')
+        finally:
+            plt.close(fig)
+
+
+class TestTheWaveformPlotterDrawsWhatItIsAsked:
+    """``plot_waveform`` is the door for a bare array and its sample rate.
+
+    The elementary time-domain view had none: a gridded result plots itself,
+    but a generator's output, a synthesised burst or a recording had to be
+    wrapped in a ``Field`` or drawn by hand — and a hand-drawn panel carries
+    none of the family's conventions.
+    """
+
+    FS = 48_000.0
+    F0 = 4_000.0
+
+    @classmethod
+    def _burst(cls):
+        from uacpy.acoustic_signal import tone_burst
+        return tone_burst(cls.F0, 80, cls.FS)[1]
+
+    @staticmethod
+    def _drawn(ax):
+        line = ax.lines[0]
+        return (np.asarray(line.get_xdata(), dtype=float),
+                np.asarray(line.get_ydata(), dtype=float))
+
+    def test_the_pressure_view_is_the_waveform_itself(self):
+        """Not the envelope, not a level: a plotter that quietly rectified
+        its input would draw a plausible figure of the wrong thing."""
+        x = self._burst()
+        try:
+            _fig, ax = uacpy.visualization.plot_waveform(x, self.FS)
+            t, y = self._drawn(ax)
+        finally:
+            plt.close('all')
+        assert np.allclose(y, x)
+        assert y.min() < 0.0, 'a waveform swings both ways; this one does not'
+        assert t[-1] == pytest.approx((x.size - 1) / self.FS)
+        assert ax.get_xlabel() == 'Time (s)'
+
+    def test_the_envelope_view_is_the_public_transform(self):
+        """The plotter draws; the transform computes. Reproducing
+        ``acoustic_signal.envelope`` exactly is what says a caller can have
+        these numbers without the figure."""
+        from uacpy.acoustic_signal import envelope
+        x = self._burst()
+        try:
+            _fig, ax = uacpy.visualization.plot_waveform(
+                x, self.FS, value='envelope')
+            _t, y = self._drawn(ax)
+        finally:
+            plt.close('all')
+        assert np.array_equal(y, np.asarray(envelope(x), dtype=float))
+
+    def test_the_decibel_view_is_floored_and_says_its_reference(self):
+        """``20*log10`` of a silence is minus infinity and takes the axis
+        with it, so the floor is the plotter's. Which reference is in force
+        changes whether two traces can be read against each other, so the
+        axis label carries it."""
+        x = self._burst()
+        try:
+            _fig, ax = uacpy.visualization.plot_waveform(
+                x, self.FS, value='envelope_dB', floor_dB=-40.0)
+            _t, own = self._drawn(ax)
+            own_label = ax.get_ylabel()
+            _fig2, ax2 = uacpy.visualization.plot_waveform(
+                x, self.FS, value='envelope_dB', reference=2.0)
+            _t2, fixed = self._drawn(ax2)
+            fixed_label = ax2.get_ylabel()
+        finally:
+            plt.close('all')
+        assert own.min() >= -40.0 - 1e-9 and own.max() == pytest.approx(0.0)
+        assert own_label == 'Envelope (dB re peak)'
+        assert fixed_label == 'Envelope (dB re 2)'
+        # Referenced to 2.0 the same burst sits below 0 dB, so the two views
+        # are not the same picture with a different caption.
+        assert fixed.max() < -5.0
+
+    def test_milliseconds_rescale_the_axis_and_say_so(self):
+        x = self._burst()
+        try:
+            _fig, ax = uacpy.visualization.plot_waveform(
+                x, self.FS, time_units='ms')
+            t_ms, _y = self._drawn(ax)
+            _fig2, ax2 = uacpy.visualization.plot_waveform(x, self.FS)
+            t_s, _y2 = self._drawn(ax2)
+        finally:
+            plt.close('all')
+        assert ax.get_xlabel() == 'Time (ms)'
+        assert np.allclose(t_ms, t_s * 1e3)
+
+    def test_a_second_call_overlays_on_the_axis_it_is_handed(self):
+        """The family's overlay idiom — hand the axis back — so comparing
+        two signals needs no multi-signal API."""
+        x = self._burst()
+        try:
+            _fig, ax = uacpy.visualization.plot_waveform(
+                x, self.FS, label='sent')
+            uacpy.visualization.plot_waveform(
+                0.5 * x, self.FS, ax, label='received')
+            labels = [ln.get_label() for ln in ax.lines]
+        finally:
+            plt.close('all')
+        assert labels == ['sent', 'received'], labels
+
+    def test_t0_places_the_first_sample(self):
+        """A bare array carries no time origin, so a trace that starts after
+        a travel time, or one being lined up on another's peak, needs one
+        stated. Without it every signal is drawn as if it began at zero."""
+        x = self._burst()
+        try:
+            _fig, ax = uacpy.visualization.plot_waveform(
+                x, self.FS, t0=-0.004, time_units='ms')
+            t, _y = self._drawn(ax)
+        finally:
+            plt.close('all')
+        assert t[0] == pytest.approx(-4.0)
+        assert t[-1] == pytest.approx(-4.0 + (x.size - 1) / self.FS * 1e3)
+
+    @pytest.mark.parametrize('kwargs,message', [
+        ({'value': 'rms'}, 'value must be'),
+        ({'time_units': 'us'}, 'time_units must be'),
+        ({'value': 'envelope_dB', 'reference': -1.0}, 'positive, finite'),
+        ({'value': 'envelope_dB', 'floor_dB': np.inf}, 'floor_dB must be'),
+        ({'t0': np.nan}, 't0 must be'),
+    ])
+    def test_it_refuses_what_it_cannot_draw(self, kwargs, message):
+        with pytest.raises(ConfigurationError, match=message):
+            uacpy.visualization.plot_waveform(self._burst(), self.FS,
+                                              **kwargs)
+
+    def test_it_refuses_the_pair_the_generators_return(self):
+        """``tone_burst`` and friends return ``(time, signal)``. Read as a
+        signal the pair draws the TIME VECTOR as the waveform — a rising
+        ramp, which looks like data."""
+        from uacpy.acoustic_signal import tone_burst
+        with pytest.raises(ConfigurationError, match='not a .time, signal.'):
+            uacpy.visualization.plot_waveform(
+                tone_burst(self.F0, 80, self.FS), self.FS)
+
+    def test_it_refuses_a_silence_with_no_reference(self):
+        """An all-zero trace has no peak to refer to, and a floor-flat line
+        would read as silence measured rather than silence handed in."""
+        with pytest.raises(ConfigurationError, match='everywhere zero'):
+            uacpy.visualization.plot_waveform(
+                np.zeros(64), self.FS, value='envelope_dB')
+
+    @pytest.mark.parametrize('rate', [0.0, -1.0, np.nan])
+    def test_it_refuses_a_sample_rate_that_is_not_one(self, rate):
+        with pytest.raises(ConfigurationError, match='positive and finite'):
+            uacpy.visualization.plot_waveform(self._burst(), rate)

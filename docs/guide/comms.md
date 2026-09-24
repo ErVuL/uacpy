@@ -867,7 +867,7 @@ plotters in `uacpy.visualization`. The comms family:
 | `plot_ber_curve(ebn0_dB, ber_measured, ax, scheme=)` | measured BER with the theory overlay |
 | `plot_convergence(mse, ax)` | an equaliser learning curve |
 | `plot_sync_metric(metric, ax, threshold=)` | a synchronisation metric |
-| `plot_channel(h, sample_rate, (ax_h, ax_f))` | `\|h\|` and `\|H(f)\|` side by side |
+| `plot_channel(taps, (ax_h, ax_f))` or `plot_channel(h, sample_rate, …)` | `\|h\|` and `\|H(f)\|` side by side; a `ChannelTaps` carries both the rate (`symbol_rate × sps`) and the delay axis (`delays_s`, which opens `span/2` symbols ahead of the first arrival), while bare arrays get the index axis |
 | `plot_subcarriers(channel, n_subcarriers, ax)` | the OFDM channel response |
 | `plot_doppler_ambiguity(scales, peak_metric, ax)` | the Doppler ambiguity curve |
 

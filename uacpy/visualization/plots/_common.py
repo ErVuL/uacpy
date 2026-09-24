@@ -160,8 +160,8 @@ def _refuse_spread_carrier(ax, who, field, also=None):
             isinstance(ax, (tuple, list, np.ndarray))
             and len(ax) and all(_is_axes(a) for a in np.ravel(ax))):
         return
-    remedy = (f"{who}(*result) spreads the result's {field} into ax= — pass "
-              f"the result itself, {who}(result)")
+    remedy = (f"spreading a result into {who}(...) puts its {field} into "
+              f"ax= — pass the result itself, {who}(result)")
     if also:
         remedy += f"; or you meant {also}"
     raise ConfigurationError(

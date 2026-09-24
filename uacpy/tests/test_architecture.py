@@ -936,14 +936,21 @@ class TestBothSpellingsOfAPlotAgree:
             plt.close('all')
 
 
-class TestChannelTapsDrawsAtTheRateItDerives:
-    """``ChannelTaps.plot()`` computes the rate its plotter needs.
+class TestChannelTapsDrawsOnTheAxesItCarries:
+    """Both of ``plot_channel``'s axes come from the carrier, not the index.
 
-    The carrier holds ``symbol_rate`` and ``sps`` but no sample rate, so
-    ``.plot()`` derives one as ``symbol_rate * sps`` rather than asking for
-    it. That derivation is the whole method and nothing measured it: mutating
-    it to ``symbol_rate`` alone mislabels the frequency axis by a factor of
-    ``sps`` — 4 to 8 in practice — and left every suite green.
+    ``ChannelTaps`` holds ``symbol_rate`` and ``sps`` but no sample rate, so
+    the rate is derived as ``symbol_rate * sps``; mutating that to
+    ``symbol_rate`` alone mislabels the frequency axis by a factor of ``sps``
+    — 4 to 8 in practice — and left every suite green.
+
+    The delay axis is ``delays_s``, and the same class of mistake lives there:
+    ``arange(n) / fs`` starts at zero, while the tap grid starts ``span/2``
+    symbols EARLIER than the first arrival, on the leading skirt of the
+    transmit pulse. On a span-8 channel at 50 Bd that draws the first arrival
+    at +80 ms with nothing on the figure to say so — and a reader who crops
+    to the first few symbols sees an empty axis with the taps climbing off
+    the right-hand edge.
     """
 
     SPS, SYMBOL_RATE = 4, 500.0
@@ -951,11 +958,65 @@ class TestChannelTapsDrawsAtTheRateItDerives:
     def _taps(self):
         import numpy as np
         from uacpy.core.results.rays import ChannelTaps
-        return ChannelTaps(taps=np.array([1.0, 0.4j, -0.2]),
-                           delays_s=np.array([0.0, 1.0, 2.0]) / (
+        # The peak is NOT the first sample and the grid starts negative, so
+        # an index axis and the carried one disagree about where the peak is.
+        return ChannelTaps(taps=np.array([0.4j, 1.0, -0.2]),
+                           delays_s=np.array([-1.0, 0.0, 1.0]) / (
                                self.SYMBOL_RATE * self.SPS),
                            symbol_rate=self.SYMBOL_RATE, carrier=12000.0,
                            sps=self.SPS, first_arrival_s=0.25)
+
+    @staticmethod
+    def _delay_axis(axes):
+        """The delay panel's drawn x, in ms. ``stem`` puts the markers on a
+        Line2D and the stems on a collection, so reading the first line is
+        enough and is what a reader of the figure sees."""
+        import numpy as np
+        return np.asarray(axes[0].lines[0].get_xdata(), dtype=float)
+
+    def test_the_peak_tap_is_drawn_at_the_delay_it_carries(self):
+        """``delays_s`` places the taps. With an index axis the peak here
+        lands at +0.5 ms instead of 0, and every tap with it."""
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import pytest as _pytest
+        taps = self._taps()
+        try:
+            _fig, axes = taps.plot()
+            drawn = self._delay_axis(axes)
+        finally:
+            plt.close('all')
+        peak = int(np.argmax(np.abs(taps.taps)))
+        assert drawn[peak] == _pytest.approx(0.0, abs=1e-9), (
+            f'the loudest tap is drawn at {drawn[peak]:g} ms; delays_s puts '
+            f'it at {taps.delays_s[peak] * 1e3:g} ms')
+        assert drawn[0] == _pytest.approx(taps.delays_s[0] * 1e3), (
+            f'the grid starts at {drawn[0]:g} ms; delays_s starts at '
+            f'{taps.delays_s[0] * 1e3:g} ms')
+
+    def test_the_free_plotter_and_the_method_draw_the_same_axis(self):
+        """``plot_channel(taps)`` is the call ``taps.plot()`` makes, so the
+        two have to place the taps identically. Passing bare arrays keeps the
+        index axis, which is the form for taps with no delay reference."""
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from uacpy import visualization
+        taps = self._taps()
+        try:
+            free = self._delay_axis(visualization.plot_channel(taps)[1])
+            method = self._delay_axis(taps.plot()[1])
+            bare = self._delay_axis(
+                visualization.plot_channel(taps.taps,
+                                           self.SYMBOL_RATE * self.SPS)[1])
+        finally:
+            plt.close('all')
+        assert np.allclose(free, method), (free, method)
+        assert np.allclose(bare, np.arange(taps.taps.size) * 1e3 / (
+            self.SYMBOL_RATE * self.SPS)), bare
 
     def test_the_frequency_axis_spans_the_derived_sample_rate(self):
         """The right-hand panel is two-sided, so its axis runs to ±fs/2 with

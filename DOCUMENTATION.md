@@ -1435,6 +1435,28 @@ t = ts.times                                # seconds
 A `UserWarning` fires if `1/Δf` (the DFT period) is shorter than the waveform
 duration — refine the frequency grid so the late response does not wrap.
 
+**The level a signal with bandwidth or duration reaches** is a different
+question from either, and has two named answers:
+
+```python
+# the transmission loss OF A SIGNAL — hand it the waveform
+# (Ainslie Eq. 11.46 / total path loss; Abraham's pulse L_p)
+loss = H.broadband_loss(waveform=my_chirp, sample_rate=fs)
+
+# or of a plain band, with no particular waveform in mind
+loss = H.window(frequency=(f0 - B / 2, f0 + B / 2)).broadband_loss()
+
+# sound exposure level — the time integral of p(t)² (Abraham sect. 3.2.1.5,
+# ISO 18405). No source-level argument: the level rides on the amplitude.
+sel = H.sound_exposure_level(unit_rms * 1e-6 * 10 ** (SL / 20), fs)
+```
+
+`broadband_loss` is **not** `RunMode.INCOHERENT_TL`, which is Ainslie's
+Eq. 11.47 — the incoherent step drops the arrivals' relative phase, and he
+marks it invalid within a few wavelengths of a boundary. Neither method
+gates: both keep a late path's energy and remove only its interference. See
+[guide/results.md §6a](docs/guide/results.md) and example 45.
+
 To **plot** one cell directly, `H.at(depth=50, range=5000).plot_transfer_function()`
 draws stacked modulus-in-dB (`20·log10|H|`, top) and phase (bottom) panels, and
 `.plot_impulse_response()` the band-limited `p(t)` — both reduce-then-plot, so a
@@ -1683,6 +1705,10 @@ data arrays (`plot_psd(frequencies, psd_linear, ax)` but
 `plot_lsfir_diagnostics(Minfo, Vinfo, g)`, which takes no `ax` at all — it
 builds its own three-panel figure and returns `(fig, [ax1, ax2, ax3])`.
 
+- **Waveforms:** `plot_waveform` — a bare 1-D signal and its sample rate
+  against time; `value='envelope'` / `'envelope_dB'` draw
+  `acoustic_signal.envelope` instead of the carrier, and `t0=` states the
+  first sample's time. A gridded result plots itself: `Field({'time'}).plot()`.
 - **Spectra / levels:** `plot_psd`, `plot_ppsd`, `plot_sel`, `plot_spectrogram`,
   `plot_band_levels`.
 - **Gather transforms:** `plot_fk`, `plot_radon`, `plot_taup` (+ `draw_sound_cone`,
@@ -2176,7 +2202,7 @@ have their own measurements —
 
 ## 17. Examples Index
 
-All 44 runnable scripts live in `uacpy/examples/`. Run them **by script
+All 45 runnable scripts live in `uacpy/examples/`. Run them **by script
 path** from the repo root — `python uacpy/examples/example_01_basic_shallow_water.py`
 — the form `run_all_examples.py` and the test suite use. The module form
 (`python -m uacpy.examples.example_01_…`) also works, from a source checkout;
@@ -2231,6 +2257,7 @@ uacpy calls it demonstrates are named in its own docstring.
 | 42 | Propagation → array processing → detection, end to end — the sonar equation with a measured array gain, and the geometry on every panel |
 | 43 | Which end of the path carries the sources — reciprocity on a range-dependent section, the cost of the mirror geometry against the solver's own residual, and `Source(beam_pattern=)` as per-element receive directivity |
 | 44 | Two propagation models through one detection chain — a symmetric comparison protocol with its own measured noise floor, maps that agree where headline ranges do not, and the beam's broadband reception |
+| 45 | The level a signal with bandwidth or duration reaches, as a map — broadband propagation loss against the continuous-wave answer and against the incoherent stand-in, and the sound exposure level of one burst at a stated source level |
 
 ## 18. Parameter Reference
 

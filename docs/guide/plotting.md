@@ -1,6 +1,6 @@
 # Plotting — one convention, one workhorse
 
-> `uacpy.plot` · 63 public plotters · every result and every drawable carrier
+> `uacpy.plot` · 64 public plotters · every result and every drawable carrier
 > renders itself with `.plot()`
 
 There are two halves to the plotting surface. Anything that is a uacpy object
@@ -615,7 +615,7 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 63 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
+All 64 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
 draw land with — the 8 remaining names in `__all__` are the submodules
 themselves. **ax** marks a single-axes plotter you can
 compose with. Every entry takes `title=` except `plot_result` (it forwards
@@ -734,6 +734,7 @@ Every one consumes the output of the same-named routine in
 
 | Plotter | ax | Consumes |
 |---|---|---|
+| `plot_waveform(signal, sample_rate, ax=None, value='pressure', t0=0.0, time_units='s', …)` | ✓ | a bare 1-D waveform and its rate — the elementary time-domain view. `value='envelope'` draws `acoustic_signal.envelope` (the public transform, not a computation hidden in the plotter) and `'envelope_dB'` the same in decibels, floored by `floor_dB` because `20·log10` of a silence is `-inf`. `t0` states the first sample's time, which a bare array cannot carry and a `Field` over `{'time'}` does. Overlay by handing the axis back. A gridded result plots itself instead — `Field({'time'}).plot()` |
 | `plot_psd(frequencies, psd_linear, ax=None, ref=1e-6, freq_scale='log', …)` | ✓ | a `SpectralEstimate` from `welch` or `constant_q` — the spectrum in dB, labelled from its own scaling (also `.plot()`) |
 | `plot_ppsd(result, ax=None, …)` | ✓ | a `ProbabilisticSpectralEstimate` from `probabilistic_welch` or `probabilistic_sound_exposure` — 2-D histogram of levels (also `.plot()`) |
 | `plot_sel(result, ax=None, band_type='decidecade', …)` | ✓ | a banded `SpectralEstimate`, i.e. `sound_exposure` output — band levels as bars, labelled from its scaling; also `.plot()` |
@@ -764,7 +765,7 @@ Every one consumes the output of the same-named routine in
 
 | Plotter | ax | Draws |
 |---|---|---|
-| `plot_channel(h, sample_rate, ax=None, …)` | 2-tuple | \|h[n]\| and \|H(f)\| side by side |
+| `plot_channel(taps, ax=None, …)` or `plot_channel(h, sample_rate, ax=None, delays_s=None, …)` | 2-tuple | \|h[n]\| and \|H(f)\| side by side. From a `ChannelTaps` the sample rate is `symbol_rate × sps` and the delay axis is its `delays_s`; bare arrays without `delays_s` get `arange(n)/fs`, which is right only for taps referenced to their own first sample |
 | `plot_subcarriers(channel, n_subcarriers, ax=None, …)` | ✓ | channel magnitude across the OFDM subcarriers |
 | `plot_constellation(constellation, ax=None, scheme='', annotate=True, …)` | ✓ | the ideal Gray-labelled constellation |
 | `plot_scatter(symbols, ax=None, ideal=None, …)` | ✓ | received symbols, optionally over the ideal points |

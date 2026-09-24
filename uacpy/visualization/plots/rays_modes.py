@@ -203,6 +203,11 @@ def _plot_arrivals(
     axis they leave no sign of themselves, where an outlier on a colour
     scale at least still paints a pixel.
 
+    The per-class counts are every arrival the model returned, drawn or
+    not, so a qualifier entry reads ``N of M`` and is a **subset** of them:
+    with ``bottom (27)`` and ``both (255)``, ``41 of 282 beyond 3583 ms``
+    leaves 241 on screen, not 323.
+
     ``dB=True`` draws ``20·log10`` of that same received level instead —
     dB re unit source, the negative of the transmission loss along the
     path — and bounds the axis at ``dynamic_range`` dB under the loudest
@@ -323,18 +328,23 @@ def _plot_arrivals(
                       label=f"{kind} ({counts[kind]})")
         for kind, col in color_map.items() if counts[kind] > 0
     ]
+    counted = sum(counts.values())
     if beyond:
-        # In ms, the unit of the delay axis the entry refers to.
+        # "N of M", not "+N": the class counts above are every arrival the
+        # model returned, drawn or not, so these are a SUBSET of them. A
+        # leading + read as an addition, inviting 282 + 41 where the answer
+        # is 282 - 41 = 241 on screen. In ms, the unit of the delay axis the
+        # entry refers to.
         handles.append(mlines.Line2D(
             [], [], linestyle='none', marker='',
-            label=f"+{len(beyond)} beyond {hi:.0f} ms "
+            label=f"{len(beyond)} of {counted} beyond {hi:.0f} ms "
                   f"(to {max(beyond):.0f} ms)"))
     if under:
         # In dB, the unit of the level axis it refers to, as the delay entry
         # above is in the milliseconds of the delay axis. A hidden arrival
         # past the end of the axis is named here, once.
         hidden_beyond = sum(1 for d in delays_ms if d > hi)
-        label = f"+{under} below {floor:.0f} dB"
+        label = f"{under} of {counted} below {floor:.0f} dB"
         if hidden_beyond:
             label += f", of which {hidden_beyond} beyond the axis"
         handles.append(mlines.Line2D(

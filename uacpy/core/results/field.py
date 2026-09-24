@@ -9,7 +9,8 @@ import numpy as np
 from typing import Optional, Dict, Any, List, Tuple, Union
 
 from uacpy.core._carrier_validate import _DeepCopyMixin, _require_finite, _reject_complex
-from uacpy.core.constants import DEFAULT_SOUND_SPEED
+from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
+                                  REFERENCE_PRESSURE_WATER)
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._grid import _nearest_index_on_axis, collapse_axis
 from uacpy.core.environment import Bathymetry, Environment
@@ -316,9 +317,17 @@ class Field(Result):
         bits = [f"kind={self.kind!r}", f"unit={self.unit!r}"]
         if self.model:
             bits.append(f"model={self.model!r}")
-        f0 = self.f0
-        if f0 is not None and 'frequency' not in self.coords:
-            bits.append(f"f={f0:.3g} Hz")
+        # One frequency prints as a frequency, several as a count — the
+        # branch Result.__repr__ makes and this override had dropped, so a
+        # field carrying a whole band in its identity but no frequency axis
+        # (a synthesised time series, say) printed the band's FIRST sample
+        # as though that were the field's frequency.
+        if 'frequency' not in self.coords:
+            band = self.frequencies
+            if band is not None and len(band) > 1:
+                bits.append(f"n_f={len(band)}")
+            elif self.f0 is not None:
+                bits.append(f"f={self.f0:.3g} Hz")
         bits.append(f"axes=({', '.join(self.coords) or 'scalar'})")
         return f"Field({', '.join(bits)})"
 
@@ -662,8 +671,18 @@ class Field(Result):
                                 "axis's own units (metres, seconds, Hz).")
             data = np.compress(keep, data, axis=axis_of[name])
             coords[name] = axis[keep]
+        # Narrowing an identity-bearing axis narrows the identity with it, as
+        # _slice does when it pins one: the lists behind f0 / n_frequencies
+        # are what the field HOLDS, not what the run that produced it swept.
+        # Left alone, a field windowed to 1400-1600 Hz answers f0 = 1000 —
+        # a legal frequency, and the wrong one, with nothing to flag it.
+        id_kwargs = self.id_kwargs()
+        for name, key in (('frequency', 'frequencies'),
+                          ('source_depth', 'source_depths')):
+            if name in bounds and id_kwargs.get(key) is not None:
+                id_kwargs[key] = np.asarray(coords[name], dtype=float)
         return Field(data=data, coords=coords, pinned=dict(self.pinned),
-                     **self.id_kwargs())
+                     **id_kwargs)
 
     def shift(self, **offsets) -> "Field":
         """Translate a coordinate axis by a constant. The data is untouched.
@@ -1328,14 +1347,29 @@ class Field(Result):
         range: Optional[float] = None,
         *,
         source_spectrum: Optional[np.ndarray] = None,
+        waveform: Optional[np.ndarray] = None,
+        sample_rate: Optional[float] = None,
         window: str = "hann",
         nfft: Optional[int] = None,
         t_start: Optional[float] = None,
     ) -> "Field":
-        """Single-trace IFFT of ``H(d, r, :)`` at a chosen ``(depth, range)``.
+        """What one signal looks like at one receiver.
 
+        Single-trace IFFT of ``H(d, r, :)`` at a chosen ``(depth, range)``.
         Requires ``coords == {'depth', 'range', 'frequency'}``. Returns
         a single-point ``Field`` with ``coords={'time': ...}``.
+
+        With ``waveform``, this is the received signal: hand it the
+        transmitted waveform and the receiver's position and it returns
+        ``p(t)`` there::
+
+            trace = H.to_time_trace(depth=50, range=5000,
+                                    waveform=chirp, sample_rate=fs)
+
+        With neither ``waveform`` nor ``source_spectrum`` it is the
+        band-limited impulse response instead.
+        :meth:`synthesize_time_series` does the same convolution for EVERY
+        cell at once; use that for a grid, this for a receiver.
 
         Parameters
         ----------
@@ -1346,9 +1380,23 @@ class Field(Result):
             (``depths[n_d // 2]``) and the first range. A label that is
             given must be a finite scalar, as for :meth:`at`.
         source_spectrum : ndarray, optional
-            Continuous source spectrum ``S(f)`` sampled at
-            ``coords['frequency']``. ``None`` synthesises the band-limited
-            impulse response.
+            Continuous source spectrum ``S(f)`` already sampled at
+            ``coords['frequency']``. ``None``, with no ``waveform``,
+            synthesises the band-limited impulse response.
+        waveform : ndarray, optional
+            The transmitted signal, in place of ``source_spectrum`` — its
+            spectrum is evaluated on this field's axis by
+            :func:`_source_spectrum_at`, the exact DTFT. Prefer this:
+            resampling an ``rfft`` onto the axis by interpolation is a
+            triangular-kernel convolution rather than a resampling. The
+            error runs to tens of per cent in ``S(f)`` for ordinary
+            waveforms — 43-75 % measured — and reaches the 100 % that
+            :func:`_source_spectrum_at` quotes for an unwindowed tone
+            sitting on a bin.
+            Requires ``sample_rate``. Pass the 1-D signal, not the
+            ``(time, signal)`` pair the generators return.
+        sample_rate : float, optional
+            Rate (Hz) ``waveform`` is sampled at.
         window : str
             Band-edge taper applied to ``H(f)`` before the IFFT: ``'hann'``,
             ``'hamming'``, ``'blackman'``, ``'tukey'`` or ``'none'``.
@@ -1358,7 +1406,45 @@ class Field(Result):
             rejected rather than allowed to alias.
         t_start : float, optional
             Time of the first output sample (s). ``None`` estimates it from
-            the range and the fastest sound speed the model reported."""
+            the range and the fastest sound speed the model reported.
+
+        Warns
+        -----
+        UserWarning
+            When ``depth`` or ``range`` falls outside the grid. The match is
+            to the nearest stored coordinate, so a receiver beyond the
+            panel's edge silently becomes the edge cell — a trace of the
+            wrong place that looks like a trace of the right one."""
+        who = "Field.to_time_trace"
+        if waveform is not None:
+            if source_spectrum is not None:
+                raise ConfigurationError(
+                    f"{who}: pass either source_spectrum= (already on this "
+                    f"field's frequency axis) or waveform= (sampled in "
+                    f"time), not both.")
+            if sample_rate is None:
+                raise ConfigurationError(
+                    f"{who}: waveform= needs sample_rate= to have a "
+                    f"spectrum at all.")
+            if isinstance(waveform, tuple):
+                raise ConfigurationError(
+                    f"{who}: waveform must be the 1-D signal, not a "
+                    f"(time, signal) pair — pass lfm_chirp(...)[1].")
+            source_spectrum = _source_spectrum_at(
+                waveform, sample_rate,
+                np.asarray(self.coords.get('frequency', []), dtype=float))
+        for name, label in (('depth', depth), ('range', range)):
+            axis = self.coords.get(name)
+            if label is None or axis is None or np.size(axis) == 0:
+                continue
+            lo, hi = float(np.min(axis)), float(np.max(axis))
+            if not (lo <= float(label) <= hi):
+                warnings.warn(
+                    f"{who}: {name}={float(label):g} is outside the grid "
+                    f"({lo:g} to {hi:g}); the nearest stored "
+                    f"{name} is used instead, so this trace is of a "
+                    f"different place than asked for.",
+                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
         if list(self.coords) != ['depth', 'range', 'frequency']:
             raise ConfigurationError(
                 "Field.to_time_trace: requires canonical "
@@ -1370,6 +1456,558 @@ class Field(Result):
             source_spectrum=source_spectrum,
             window=window, nfft=nfft, t_start=t_start,
         )
+
+    def truncate_response(self, duration: float, *,
+                          origin: Union[str, float] = 'peak',
+                          window: str = 'boxcar') -> "Field":
+        """``H(f)`` with its impulse response cut to ``duration`` — the
+        transfer function a pulse that long actually sees.
+
+        Requires a ``frequency`` axis with a uniform spacing and complex
+        data. Every cell is transformed to its own impulse response over the
+        band, windowed, and transformed back; the coords, the axis order and
+        the identity are unchanged.
+
+        **Why a transfer function has a pulse length in it at all.** ``H(f)``
+        as a model returns it is the continuous-wave answer: every path
+        present at once, interfering. A pulse of duration ``T`` does not meet
+        that channel. Two copies of it interfere only where they overlap, so
+        arrivals further apart than ``T`` land as separate, non-interfering
+        echoes — "we choose individual arrivals and measure their travel
+        times, amplitudes, and waveforms **when the signals are separable in
+        the time domain**. If the multiple arrivals are not separable, both
+        the phases and amplitudes of the components determine how they
+        interfere" (Medwin and Clay, *Fundamentals of Acoustical
+        Oceanography*, sect. 3.4.5, "Sum of multiple arrivals"). Jensen et
+        al. give the test as an operation rather than a rule: "filter these
+        results within a specified bandwidth in order to obtain the pulse
+        structure that indicates whether the arrivals are actually separated
+        in time" (*Computational Ocean Acoustics*, sect. 2.4.4.1, pointing on
+        to sect. 8.3.1). Ainslie names multipath first among the causes of
+        coherence loss and prices two replicas in Table 6.9: the input
+        carries ``a^2 + b^2`` and the matched filter's output only ``a^2``,
+        worst case 3 dB for equal amplitudes (*Sonar Performance Modeling*,
+        sect. 6.2.6).
+
+        **The recipe is not new.** Transforming a *windowed* impulse response
+        is standard practice, and named: "time windows can also be used in
+        separating various components of a transient signal from each other
+        ('gating'), say, separating an impulse that is due to a direct sound
+        wave from other pulses that are due to reflected waves" (Jacobsen and
+        Juhl, *Fundamentals of General Linear Acoustics*, sect. B.3.2 "Time
+        Windows"). Room acoustics does this exact thing and calls the result
+        the **short-term spectrum** — "a Fourier transform of the first
+        64 msec of the impulse response after the direct sound has arrived
+        ... windowed using a quarter period cosine squared window ... The
+        windowing is necessary to prevent the sudden cutoff of the impulse
+        producing spurious effects in the spectrum", with the length set by
+        "the integration time of the ear" (Everest and Pohlmann, *Master
+        Handbook of Acoustics*, "Prediction of room response"). Everything
+        here is that, with the pulse length in place of the ear's
+        integration time, and ``window='hann'`` in place of the cosine
+        squared and for the reason they give.
+
+        The equivalence to smoothing ``H`` is the convolution theorem, and
+        the taper's price is its own main lobe: "applying a window ``w[n]``
+        to a signal ``x[n]`` is the same as convolving the Fourier transform
+        of the window ``W`` with the signal's Fourier transform ``X`` ...
+        de-emphasizing the data near the window edges has the effect of
+        shortening the RMS duration and therefore broadening the RMS
+        bandwidth" (Abraham, sect. 4.10 "Windowing and window functions") —
+        which is why ``'hann'`` removes ``'boxcar'``'s skirt and attenuates a
+        path part-way out instead. And the record must hold the response
+        before any of this means anything: it "must be selected large enough
+        that it contains the entire transient response at each receiver so as
+        to eliminate the aliasing" (Jensen et al., sect. 8.2.1.3 "Time
+        windowing and sampling"), which is what the warning below measures.
+
+        **How this relates to propagation loss.** Abraham defines the
+        propagation loss of a pulse twice over (sect. 3.2.4.2 "Propagation
+        loss and the channel frequency response"), and the two definitions
+        part company exactly here. In time, ``L_p`` is the source's
+        mean-square over the pulse divided by the received mean-square over a
+        window of the SAME duration ``T`` — energy landing outside the window
+        is not counted. In frequency, by Parseval, ``L_p = int |U_o|^2 df /
+        int |H U_o|^2 df``, which runs over ALL time and counts every path.
+        Parseval needs the whole signal, so the two agree only while the
+        received pulse fits in the window.
+
+        Measured on two paths of amplitude 1 and 0.7 with a 20 ms burst, the
+        gap varied (decibels, less is more loss; the ``T``-wide gate is shown
+        anchored both on the onset and on the peak, which changes nothing).
+        **The band, ``df`` and taper of this run were not recorded with it**,
+        so the table is indicative of the ORDERING and the crossover, which
+        are what the prose below draws on, and is not reproducible value by
+        value; no test pins it.
+
+        =======  ==========  ==========  =========  =======  =====
+        gap      freq form   gate@onset  gate@peak  boxcar   hann
+        =======  ==========  ==========  =========  =======  =====
+        5 ms     -3.813      -3.796      -3.808     -3.813   -3.301
+        15 ms    -1.748      -0.152      -0.112     -1.747   -0.035
+        30 ms    -1.715      +0.017      +0.017     +0.017   +0.017
+        =======  ==========  ==========  =========  =======  =====
+
+        ``window='boxcar'`` reproduces the frequency form **exactly** while
+        the copies can overlap, and the gate **exactly** once they cannot —
+        it is the criterion the other two only bracket. The frequency form
+        never discards: at 30 ms it still adds the late path's energy, and
+        ``10*log10(1 + 0.7^2)`` = 1.73 dB is the whole of its -1.715. It
+        cannot tell "interferes" from "arrives separately", because averaging
+        the fringe away under ``|U_o|^2`` leaves the energy behind. The
+        ``T``-wide gate discards from about half a duration out, being ``T``
+        wide where overlap needs ``2T``.
+
+        ``'hann'`` costs 0.5 dB on a path a quarter of the way out and 1.7 dB
+        at three quarters, and nothing at all once a path is beyond. On a
+        channel whose paths sit part-way out, prefer the rectangle and pay
+        its skirt.
+
+        **Which duration.** Ainslie's table is for a separation *small*
+        against the transmitted pulse ``T`` and *large* against the
+        compressed one ``1/B``, so what a receiver resolves is ``1/B`` and
+        not ``T``. For a pulse with ``BT`` near 1 — a plain tone burst, an
+        unshaped symbol — the two coincide and ``duration = T`` is right.
+        For a chirp or any waveform the receiver compresses, ``BT >> 1`` and
+        the separable unit is ``1/B``: pass that instead, or this removes
+        paths the receiver would still have resolved.
+
+        In the frequency domain it is the same statement: a signal of
+        duration ``T`` has ``1/T`` of spectral resolution, so structure in
+        ``H`` finer than ``1/T`` — which is what an arrival ``T`` or more
+        late puts there — is not something it can see. This method removes
+        exactly that structure.
+
+        **What it is not.** With paths in hand the exact receiver-side answer
+        is :meth:`~uacpy.core.results.Arrivals.channel_taps`, which applies
+        the receiver's own pulse at its decision instants and returns the
+        far echoes as separate taps rather than discarding them. This is the
+        version for a model that has no paths — a wave model returns a field,
+        and the only way to ask it which arrivals are separable is to look at
+        its response.
+
+        **Two copies overlap when their delays differ by less than the pulse
+        length**, so the window reaches ``duration`` EITHER SIDE of the
+        origin — it is ``2 * duration`` wide. A path further out than that
+        cannot overlap the one at the origin however they are aligned.
+
+        **The band sets a floor on this.** A band ``B`` wide localises a path
+        no better than ``1/B``, so each arrival appears in the response as a
+        kernel that wide with skirts around it, and a window cannot separate
+        two arrivals closer than that however short it is. That is the
+        temporal resolution cell, not a defect of the cut: refine the band,
+        not the window.
+
+        Parameters
+        ----------
+        duration : float
+            Pulse length in seconds. The window reaches this far either side
+            of the origin, so ``2 * duration`` must fit inside ``1/df``.
+        origin : {'peak'} or float, default 'peak'
+            Where the window is centred. ``'peak'`` puts it on each cell's
+            own ``argmax |h|``, which is the copy a receiver synchronises
+            to. A float is a time in seconds from the start of the ``1/df``
+            record, shared by every cell.
+        window : {'boxcar', 'hann'}, default 'boxcar'
+            ``'boxcar'`` is the separability criterion stated plainly —
+            inside interferes, outside does not — and puts the rectangle's
+            own sinc skirt on ``H``. ``'hann'`` tapers the cut instead,
+            trading a wider effective window for a skirt 31 dB down.
+
+        Returns
+        -------
+        Field
+            Same coords and identity; only ``data`` changes.
+
+        Warns
+        -----
+        UserWarning
+            When the response has not decayed by the ends of the ``1/df``
+            record. The record is one period of a DFT, so an arrival later
+            than ``1/df`` is not absent from it — it has folded back onto the
+            early part, where no window can tell it from an early arrival.
+            Refine the frequency grid until the ends are quiet.
+
+        Raises
+        ------
+        ConfigurationError
+            No ``frequency`` axis, a non-uniform one, fewer than two
+            frequencies, real data, an unknown ``window``, a non-finite or
+            out-of-range ``duration``, or an ``origin`` outside the record.
+        """
+        who = "Field.truncate_response"
+        if 'frequency' not in self.coords:
+            raise ConfigurationError(
+                f"{who}: needs a frequency axis — an impulse response is "
+                f"what a transfer function has, and a time-domain field is "
+                f"already one (use .window(time=...)). Axes: "
+                f"{list(self.coords)}.")
+        if not self.is_complex:
+            raise ConfigurationError(
+                f"{who}: needs complex H(f). A dB or TL field has no phase, "
+                f"so it has no impulse response to cut.")
+        freqs = np.asarray(self.coords['frequency'], dtype=float)
+        if freqs.size < 2:
+            raise ConfigurationError(
+                f"{who}: needs at least 2 frequencies to define a record "
+                f"length; got {freqs.size}.")
+        _require_uniform_df(freqs, 'truncate_response')
+        if window not in ('boxcar', 'hann'):
+            raise ConfigurationError(
+                f"{who}: window must be 'boxcar' (the separability "
+                f"criterion stated plainly) or 'hann' (the same cut, "
+                f"tapered); got {window!r}.")
+        duration = float(duration)
+        df = float(np.diff(freqs).mean())
+        record = 1.0 / df
+        if not np.isfinite(duration) or duration <= 0.0:
+            raise ConfigurationError(
+                f"{who}: duration must be a positive number of seconds; "
+                f"got {duration!r}.")
+        if 2.0 * duration >= record:
+            raise ConfigurationError(
+                f"{who}: the window reaches {duration:g} s either side of "
+                f"the origin, which is not inside the {record:g} s record "
+                f"the grid defines (1/df, df = {df:g} Hz), so it keeps "
+                f"everything and the call would be a no-op. Refine the grid "
+                f"or shorten the pulse.")
+
+        axis = list(self.coords).index('frequency')
+        n_f = freqs.size
+        moved = np.moveaxis(np.asarray(self.data), axis, -1)
+        flat = moved.reshape(-1, n_f)
+        # The band's own baseband response: one period is 1/df and the step
+        # is 1/(n_f*df), which is the resolution the band itself has.
+        h = np.fft.ifft(flat, axis=-1)
+        dt = record / n_f
+        times = np.arange(n_f) * dt
+
+        if origin == 'peak':
+            centres = times[np.argmax(np.abs(h), axis=-1)]
+        else:
+            try:
+                fixed = float(origin)
+            except (TypeError, ValueError) as exc:
+                raise ConfigurationError(
+                    f"{who}: origin must be 'peak' or a time in seconds "
+                    f"from the start of the record; got {origin!r}."
+                ) from exc
+            if not np.isfinite(fixed) or not 0.0 <= fixed < record:
+                raise ConfigurationError(
+                    f"{who}: origin {fixed:g} s is outside the "
+                    f"[0, {record:g}) s record this grid defines.")
+            centres = np.full(flat.shape[0], fixed)
+
+        # Circular distance: the record wraps, so a window centred near one
+        # end reaches round to the other, which is where the response of a
+        # path near the record edge actually sits.
+        offset = np.abs(times[None, :] - centres[:, None])
+        offset = np.minimum(offset, record - offset)
+        if window == 'boxcar':
+            taper = (offset <= duration).astype(float)
+        else:
+            taper = np.where(offset <= duration,
+                             0.5 * (1.0 + np.cos(np.pi * offset / duration)),
+                             0.0)
+        self._warn_if_response_wraps(h, taper, offset, record, who)
+        out = np.fft.fft(h * taper, axis=-1).reshape(moved.shape)
+        return Field(data=np.moveaxis(out, -1, axis),
+                     coords=dict(self.coords), pinned=dict(self.pinned),
+                     **self.id_kwargs())
+
+    def broadband_loss(self, spectrum=None, *, waveform=None,
+                       sample_rate=None) -> "Field":
+        """Propagation loss averaged over this field's band — the level a
+        signal of finite bandwidth reaches, as a map.
+
+        The transmission loss a model returns is the **continuous-wave**
+        answer: one frequency, every path interfering at once. A signal with
+        bandwidth does not see that. It sees the band average, and the
+        quantity has a name — Ainslie defines **broadband propagation loss**
+        for a white source as the frequency average of the coherent
+        propagation factor over the sonar bandwidth ``B`` about its centre
+        ``f_m`` (*Sonar Performance Modeling*, sect. 11.3.3, Eq. 11.46), and
+        gives the coloured-spectrum generalisation in its footnote 13.
+        Abraham writes the same ratio as the propagation loss of a pulse,
+        ``L_p = int |U_o|^2 df / int |H|^2 |U_o|^2 df`` (sect. 3.2.4.2), and
+        Ainslie again as the energy propagation factor behind total path
+        loss (sect. 3.3.2.1). They are one formula, which is what this
+        computes::
+
+            10 log10( sum_f w(f) / sum_f w(f) |H(f)|^2 ),  w = |spectrum|^2
+
+        **Why not just run an incoherent model.** Because that is the
+        approximation, not the quantity. The KRAKEN manual offers it as one
+        — "if one is comparing to measured data which has been taken by
+        averaging over frequency one can often simulate the resulting
+        smoothed result by an incoherent TL" — and Ainslie's Eq. 11.47 is
+        the same step, dropping the relative phase of the ray arrivals. He
+        marks where it fails: the step "neglects coherent interference
+        effects such as cancellation between direct and surface-reflected
+        paths. This coherent effect is not negligible, even for incoherent
+        broadband processing, if the distance between the sonar (or target)
+        and the sea surface is a few wavelengths or less at the center
+        frequency, in which case use of Equation (11.46) is required."
+        A Lloyd mirror is exactly that case. This is Eq. 11.46, so it keeps
+        the interference the band is too narrow to wash out and averages
+        away only what the band can reach — and it runs on any model that
+        returns ``H(f)``, where ``RunMode.INCOHERENT_TL`` is Bellhop's.
+
+        Jensen's **semicoherent** loss (sect. 3.3.5.4) is a third thing
+        again: a shading function applied to an incoherent sum, which he
+        introduces as one of a "variety of techniques" that "all tend to be
+        somewhat informal and partially empirically based". Prefer this
+        where the band is known.
+
+        **What it does not do** is gate. Averaging over the band removes the
+        *interference* between paths further apart than ``1/B``, and leaves
+        their energy in the sum — Ainslie's energy definition takes "time
+        intervals chosen to contain the whole of the transmitted pulse"
+        (sect. 3.3.2.1). Discarding a late path instead is
+        :meth:`truncate_response`, which answers a receiver-side question
+        about one cell, not a propagation quantity over a grid.
+
+        **Where the field comes from.** This needs a complex ``H(f)`` over a
+        ``frequency`` axis, which is what ``RunMode.BROADBAND`` returns —
+        Bellhop, Kraken, Scooter and RAM all offer it, and ``COHERENT_TL``
+        takes a single source frequency by construction::
+
+            f = np.arange(800.0, 1201.0, 20.0)
+            H = model.run(env, Source(depths=20.0, frequencies=f), rcv,
+                          run_mode=RunMode.BROADBAND, frequencies=f)
+
+        Parameters
+        ----------
+        spectrum : array_like, optional
+            The source's spectrum already sampled on this field's
+            ``frequency`` axis, real or complex; only ``|spectrum|^2`` is
+            used, and any overall scale cancels in the ratio. ``None`` with
+            no ``waveform`` weights the band uniformly, which is Eq. 11.46's
+            white source.
+        waveform : array_like, optional
+            A transmitted waveform, in place of ``spectrum`` — the loss for
+            THAT signal, whatever it is. Its spectrum is evaluated on this
+            field's axis by :func:`_source_spectrum_at`, the same DTFT
+            ``synthesize_time_series`` uses, so the answer satisfies
+            ``SEL = ESL - loss`` exactly. Do not pre-interpolate an ``rfft``
+            onto the axis and pass it as ``spectrum`` instead: the two grids
+            rarely coincide, and interpolation is a triangular-kernel
+            convolution rather than a resampling — tens of per cent of error
+            in ``S(f)`` for ordinary waveforms (43-75 % measured), reaching
+            the 100 % :func:`_source_spectrum_at` quotes for an unwindowed
+            tone on a bin. Requires ``sample_rate``.
+        sample_rate : float, optional
+            Rate (Hz) ``waveform`` is sampled at.
+
+        Returns
+        -------
+        Field
+            The loss in dB, ``kind='pressure'`` and ``unit='dB'`` so
+            :attr:`tl` and :meth:`plot` treat it as the transmission-loss
+            map it is. The ``frequency`` axis is gone; the band it averaged
+            is kept in ``metadata['band_hz']`` as ``(first, last)`` — the
+            identity narrows to a single value, so ``.frequencies`` is NOT
+            where to look for it — and :attr:`pinned['frequency']` records
+            the spectrum-weighted centroid of the axis's samples — the
+            signal's own centre for a ``waveform`` (a 500 Hz burst over a
+            25 Hz-4 kHz axis pins 500 Hz, not the axis's 2 kHz midpoint,
+            which is what a plotter would otherwise caption the map with),
+            and the mean of the samples for a white source, which is the
+            band centre on the uniform axes these runs produce.
+            Cells no path reached stay ``NaN``.
+
+        Raises
+        ------
+        ConfigurationError
+            No ``frequency`` axis, real data, a ``spectrum`` whose length is
+            not the frequency axis's, a non-finite or zero-energy
+            ``spectrum``, both ``spectrum`` and ``waveform``, or a
+            ``waveform`` without a ``sample_rate``.
+        """
+        who = "Field.broadband_loss"
+        if 'frequency' not in self.coords:
+            raise ConfigurationError(
+                f"{who}: needs a frequency axis to average over; a "
+                f"single-frequency field is already the continuous-wave "
+                f"answer. Axes: {list(self.coords)}. Run the model with "
+                f"run_mode=RunMode.BROADBAND and a frequencies= grid "
+                f"(Bellhop, Kraken, Scooter and RAM all offer it); "
+                f"COHERENT_TL takes one frequency by construction.")
+        if not self.is_complex:
+            raise ConfigurationError(
+                f"{who}: needs complex H(f). A dB or TL field has lost the "
+                f"phase, so averaging it is an incoherent sum and not "
+                f"Eq. 11.46 — see the note on RunMode.INCOHERENT_TL.")
+        freqs = np.asarray(self.coords['frequency'], dtype=float)
+        axis = list(self.coords).index('frequency')
+        if waveform is not None:
+            if spectrum is not None:
+                raise ConfigurationError(
+                    f"{who}: pass either spectrum= (already on this field's "
+                    f"frequency axis) or waveform= (sampled in time), not "
+                    f"both — they are two spellings of one weight.")
+            if sample_rate is None:
+                raise ConfigurationError(
+                    f"{who}: waveform= needs sample_rate= to have a "
+                    f"spectrum at all.")
+            if isinstance(waveform, tuple):
+                raise ConfigurationError(
+                    f"{who}: waveform must be the 1-D signal, not a "
+                    f"(time, signal) pair — pass tone_burst(...)[1] (the "
+                    f"generators return both).")
+            spectrum = _source_spectrum_at(waveform, sample_rate, freqs)
+        if spectrum is None:
+            weights = np.ones(freqs.size, dtype=float)
+        else:
+            supplied = np.asarray(spectrum)
+            if supplied.ndim > 1:
+                # Checked on SHAPE before ravel(), which otherwise turns a
+                # (3, 4) array into a legal-looking 12-sample weight on a
+                # 12-frequency axis and returns the same number as the
+                # (12,) case — a wrong spectrum that cannot be told from a
+                # right one by its answer.
+                raise ConfigurationError(
+                    f"{who}: spectrum must be 1-D, one weight per frequency; "
+                    f"got shape {supplied.shape}. Flattening it would pair "
+                    f"weights with frequencies in an order you did not "
+                    f"choose.")
+            weights = np.abs(supplied).astype(float).ravel() ** 2
+            if weights.size != freqs.size:
+                raise ConfigurationError(
+                    f"{who}: spectrum has {weights.size} samples but the "
+                    f"frequency axis has {freqs.size}; it is the source "
+                    f"spectrum ON this field's grid.")
+            if not np.all(np.isfinite(weights)):
+                raise ConfigurationError(
+                    f"{who}: spectrum must be finite.")
+            if weights.sum() <= 0.0:
+                raise ConfigurationError(
+                    f"{who}: spectrum carries no energy, so the weighted "
+                    f"average is undefined.")
+        # Accumulated one frequency at a time rather than as
+        # ``sum(w * |H|**2, axis)``: that spelling materialises a temporary
+        # the size of the whole broadband grid, on top of the grid itself.
+        # Measured on 120 x 400 cells over 401 frequencies (a 0.29 GiB
+        # grid), peak extra allocation is 0.001 GiB accumulating per map
+        # against 0.287 GiB for the one temporary, and the two agree to
+        # 1e-14 dB. Each slice here is one map. The sum is the ratio's
+        # denominator, not a mean, so a weighted band divides by the weight
+        # it actually applied; for uniform weights the two agree.
+        moved = np.moveaxis(self.data, axis, 0)
+        power = np.zeros(moved.shape[1:], dtype=float)
+        for i, weight in enumerate(weights):
+            if weight:
+                power += weight * np.abs(moved[i]) ** 2
+            else:
+                # A zero-weight bin contributes nothing but must still carry
+                # a no-data cell forward: skipping it silently would let a
+                # NaN column average to a finite level.
+                power += np.where(np.isnan(moved[i]), np.nan, 0.0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            loss = 10.0 * np.log10(weights.sum() / power)
+        coords = {name: v for name, v in self.coords.items()
+                  if name != 'frequency'}
+        pinned = dict(self.pinned)
+        # The WEIGHTED centroid, not the axis midpoint: a 500 Hz burst
+        # weighted onto a 25 Hz-4 kHz axis is a map of 500 Hz, and labelling
+        # it 2 kHz is the same defect Field.window's identity narrowing
+        # exists to prevent — a legal frequency, and the wrong one. Uniform
+        # weights still give the band centre.
+        pinned['frequency'] = float(np.sum(weights * freqs) / weights.sum())
+        meta = dict(self.metadata or {})
+        meta.update({'kind': 'pressure', 'unit': 'dB'})
+        # What was averaged, kept. The identity narrows to the pinned
+        # centroid below, so without this a 50 Hz average and a 2 kHz one
+        # over the same centre are indistinguishable afterwards — and a
+        # plotter captioning the map has only the single frequency, which
+        # the map is not.
+        meta['band_hz'] = (float(freqs[0]), float(freqs[-1]))
+        id_kwargs = self.id_kwargs()
+        id_kwargs['metadata'] = meta
+        # Collapsing the axis narrows the identity to the value pinned for
+        # it, exactly as _slice does when it pins one. Left alone, a 500 Hz
+        # burst's map pinned at 500 Hz still reprs as "f=25 Hz" — the band's
+        # first sample — which is the disagreement Field.window's own
+        # narrowing exists to prevent.
+        id_kwargs['frequencies'] = np.array([pinned['frequency']], dtype=float)
+        return Field(data=loss, coords=coords, pinned=pinned, **id_kwargs)
+
+    @staticmethod
+    def _warn_if_response_wraps(h, taper, offset, record,
+                                who: str) -> None:
+        """Warn when the impulse response is still live where the window is
+        not, at the far side of the circular record.
+
+        The two cases a cut cannot tell apart are an arrival that is genuinely
+        late and one that was later than ``1/df`` and folded back. This
+        measures the only thing visible from inside: how much of the response
+        sits in the half of the record furthest from the window. A decayed
+        response leaves that part empty; a folding one does not, and then the
+        energy the window removed is not the energy the pulse would resolve.
+
+        It is deliberately NOT the whole complement of the window. Energy
+        immediately outside the window is what a cut exists to remove — a
+        genuine late path — so counting it warns on channels that cannot
+        fold: two equal paths 100 ms apart in a 500 ms record read 50 %.
+
+        **It is a heuristic with a blind spot, not a test.** What it detects
+        is a response that has not decayed where a well-sized record would
+        be empty. A fold that lands NEAR the origin — a path just past the
+        record's end, which is the likeliest kind — arrives in the near half
+        and is never counted at all. That is the same limit
+        :meth:`sound_exposure_level` records from the other side: a folded
+        arrival sitting on top of the direct one is signature-identical to a
+        clean one, so no measurement of ``H(f)`` can find it. Size the grid
+        from the arrivals; this only catches the loud, obvious case.
+        """
+        power = np.abs(h) ** 2
+        total = power.sum(axis=-1)
+        # The FAR HALF of the record from the window, not the whole
+        # complement. Energy just outside the window is what a cut is FOR —
+        # a genuine late path being removed — and counting it made this
+        # warn on channels that cannot fold at all: two equal paths 100 ms
+        # apart in a 500 ms record read 50% and were told to refine the
+        # grid. Only energy at the record's far side is evidence of a fold,
+        # because that is where a decayed response has nothing.
+        #
+        # ``offset`` is the caller's own circular distance from the window
+        # centre, passed in rather than re-derived. Recovering it here as
+        # ``argmax(taper)`` gave a BOXCAR's left edge, not its centre — the
+        # mask came out rotated by the window's half-width, so the same
+        # channel and cut warned under 'boxcar' and stayed quiet under
+        # 'hann'.
+        far = offset > record / 4.0
+        live = np.where(total > 0.0,
+                        power.sum(axis=-1, where=far)
+                        / np.where(total > 0.0, total, 1.0), 0.0)
+        worst = float(np.max(live)) if live.size else 0.0
+        # 0.02, chosen from a 48-case sweep rather than inherited. The old
+        # 0.33 was calibrated against a DIFFERENT measure (the whole
+        # complement of the window) and was never re-derived when this
+        # became the far half: against the far half it missed 77.8 % of
+        # folds, including every case in a two-path sweep up to equal
+        # amplitudes, and including the R = 0.7 pair this method's own
+        # docstring table uses, whose folded far-half share is 0.3289 —
+        # one part in 300 UNDER the threshold. At 0.02 the sweep missed
+        # 11.1 % and false-alarmed on none of 21 clean channels.
+        #
+        # The residual 11 % is the blind spot, not a tuning failure: a fold
+        # landing near the origin reads like an early arrival at any
+        # threshold. Clean channels topped out at 0.0011 and the quietest
+        # detectable fold sat at 0.0023, so the margin at the boundary is a
+        # factor of two, not orders of magnitude. This flags the obvious
+        # case and nothing more.
+        if worst > 0.02:
+            warnings.warn(
+                f"{who}: {100.0 * worst:.0f}% of the response sits in the "
+                f"half of the record furthest from the window. A decayed "
+                f"response leaves that empty, so either a path is arriving "
+                f"that late, or one later than the 1/df record has folded "
+                f"onto it — from H(f) alone these are the same measurement. "
+                f"If the arrivals are known to fit the record, ignore this; "
+                f"otherwise size the grid from them "
+                f"(Arrivals.synthesis_band).",
+                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     def synthesize_time_series(
         self,
@@ -1430,6 +2068,214 @@ class Field(Result):
             sample_rate=sample_rate,
             t_start=t_start, window=window, nfft=nfft,
         )
+
+    def sound_exposure_level(
+        self,
+        source_waveform: np.ndarray,
+        sample_rate: float,
+        *,
+        reference: float = REFERENCE_PRESSURE_WATER,
+        window: str = "none",
+        nfft: Optional[int] = None,
+        t_start: Optional[float] = None,
+    ) -> "Field":
+        """Sound exposure level of one transmission of ``source_waveform``,
+        cell by cell — the energy a transient delivers, as a map.
+
+        A pulse's currency is energy, not mean-square pressure. Abraham
+        introduces it for exactly this population — "many acoustic signals
+        are short duration and have varying amplitudes (e.g., a marine
+        mammal acoustic emissions, an active sonar echo, or a communications
+        packet). In practice such signals are called transient signals;
+        however, in a mathematical sense they are energy signals because
+        their total energy is finite" — and defines the energy flux density
+        as ``(1/rho c) int p^2 dt`` (*Underwater Acoustic Signal
+        Processing*, sect. 3.2.1.5). This returns the time integral itself,
+        in dB, which is **sound exposure level** as ISO 18405 defines it and
+        as the marine-mammal exposure criteria are written in (Southall et
+        al. 2019, where it is the weighted metric paired with peak sound
+        pressure level). Ainslie builds the active sonar equation on the
+        same integral, as the energy propagation factor behind total path
+        loss and energy source level (*Sonar Performance Modeling*,
+        sect. 3.3.2.1).
+
+        Each cell's trace is synthesised by
+        :meth:`synthesize_time_series` and integrated::
+
+            SEL = 10 log10( sum_t p(t)^2 * dt / reference^2 )
+
+        The integral runs over the **whole** record, which is what the
+        definition asks for: Ainslie's time intervals are "chosen to contain
+        the whole of the transmitted pulse". Nothing is gated away, so a
+        late arrival contributes its energy even where it is too late to
+        interfere. Whether it interferes is :meth:`broadband_loss`'s
+        question, and whether a receiver that opens for ``T`` would see it
+        at all is :meth:`truncate_response`'s.
+
+        **A fold corrupts this, and neither method can tell you.**
+        Sampling ``H(f)`` every ``df`` periodises the impulse response at
+        ``1/df``, so an arrival later than that lands back on the early part
+        and adds **coherently** to what is there. Parseval preserves the
+        energy of the *aliased* record, which is not the energy of the true
+        response, and the cross term is signed: measured over 400 wrapped
+        delays on a two-path channel the error ran from **-9.27 dB to
+        +2.75 dB**, exceeding half a decibel in 42.8 % of cases, with no
+        warning in any of them. :meth:`broadband_loss` reads the same
+        undersampled ``H`` and carries the identical bias, so
+        ``SEL = ESL - TPL`` still closes while both sides are wrong
+        together — that identity pins the two routes' consistency, not
+        either one's correctness.
+
+        This is Jensen et al.'s aliasing term: the time window "must be
+        selected large enough that it contains the entire transient response
+        at each receiver so as to eliminate the aliasing", and the duration
+        "is not only controlled by the source signal, but also by the
+        dispersive nature of the waveguide" (*Computational Ocean
+        Acoustics*, sect. 8.2.1.3) — which is why a check against the pulse
+        length cannot stand in for one against the channel.
+
+        It cannot be detected from ``H(f)``: a folded arrival sitting on top
+        of the direct one is signature-identical to a clean single arrival.
+        The grid has to be sized before the run, from the arrivals, which is
+        what :meth:`~uacpy.core.results.Arrivals.synthesis_band` is for.
+
+        **The record must beat twice the delay spread, not once.** Keep
+        ``dtau * df < 0.5`` for a path pair ``dtau`` apart — a record longer
+        than ``2 * dtau`` — not merely long enough to hold the arrivals.
+        Validated on two band configurations: inside the rule the error
+        stayed within 0.034 dB over 25 Hz-4 kHz and 0.111 dB over
+        900-1100 Hz, against 0.81 / 2.86 dB beyond it and -9.29 dB at the
+        worst point found. It bounds the error rather than removing it; on a
+        narrow band a tenth of a decibel survives.
+
+        The size of the error beyond the rule is **not** a function of
+        ``dtau * df`` alone — it also turns on ``frac(f0 * dtau)``, the
+        fringe's phase at the band's first sample. Holding the product at
+        1.5 and moving only the band start gave 0.000002, 0.049917 and
+        0.028191 dB for ``f0`` = 25, 40 and 55 Hz. So no spot check settles
+        it: a single delay on a single axis can land anywhere from a null to
+        the maximum.
+
+        **There is no source-level argument: the level rides on the
+        waveform's amplitude.** ``synthesize_time_series`` reproduces the
+        source waveform where ``H`` is unity, so ``source_waveform`` is the
+        source's pressure at the range this field's ``H`` is referenced to —
+        1 m for a transmission-loss field. Scale it and the map scales with
+        it. For a source level ``SL`` in dB re 1 uPa at 1 m, the waveform's
+        rms pressure is ``1e-6 * 10**(SL/20)`` Pa::
+
+            unit = waveform / np.sqrt(np.mean(waveform ** 2))
+            sel = H.sound_exposure_level(unit * 1e-6 * 10 ** (SL / 20), fs)
+
+        Passing the unit waveform instead returns the propagation term
+        alone, and the source level goes on afterwards as an **energy**
+        source level, ``ESL = SL + 10 log10(T)`` for constant power over the
+        pulse (Ainslie Eq. 3.155) — the two routes agree exactly. Worked
+        through: ``SL`` = 190 dB re 1 uPa at 1 m, a 10 ms burst, 100 m of
+        spherical spreading. Received level is 190 - 40 = 150 dB re 1 uPa,
+        so the exposure is 150 + 10 log10(0.01) = **130 dB re 1 uPa^2 s**,
+        which is what both routes return.
+
+        Parameters
+        ----------
+        source_waveform : ndarray
+            The 1-D transmitted waveform; the generators return a
+            ``(time, signal)`` pair, so pass ``tone_burst(...)[1]``.
+        sample_rate : float
+            Rate (Hz) the waveform is sampled at.
+        reference : float, default 1e-6
+            Reference pressure (Pa). The exposure reference is its square,
+            so the default gives dB re 1 uPa^2 s.
+        window : str, default 'none'
+            Band taper, passed to :meth:`synthesize_time_series`, which
+            tapers with ``'hann'`` when nothing says otherwise. A flat band
+            is what this method asks for, because a taper removes energy
+            the integral is defined to
+            count, and how much it removes depends on where in the band the
+            signal sits rather than on anything physical: a 5-cycle 500 Hz
+            burst synthesised over a 25 Hz-4 kHz band reads 52.675 dB flat
+            — exact against ``10 log10(int u^2 dt / r^2 / ref^2)`` — and
+            35.676 dB under ``'hann'``, 17.0 dB light, because 500 Hz sits
+            an eighth of the way up the band where the taper stands at
+            0.135. A taper shapes a waveform; it must not set an energy.
+        nfft, t_start
+            Passed to :meth:`synthesize_time_series`.
+
+        Returns
+        -------
+        Field
+            ``(depth, range)`` in dB, ``kind='sound_exposure'`` — a level,
+            so it reads upward and never shares a colorbar with a TL map.
+            Cells no path reached stay ``NaN``.
+
+        Raises
+        ------
+        ConfigurationError
+            Real data (a dB or TL field), non-canonical coords
+            (:meth:`synthesize_time_series` requires
+            ``['depth', 'range', 'frequency']``), or a non-positive
+            ``reference``.
+
+        Warns
+        -----
+        UserWarning
+            Through :meth:`synthesize_time_series`, when the ``1/df`` record
+            cannot hold the **pulse**. Nothing warns about the **channel**
+            outlasting it, and that gap is real — see the note above on
+            folds.
+        """
+        who = "Field.sound_exposure_level"
+        if not self.is_complex:
+            raise ConfigurationError(
+                f"{who}: needs complex H(f). A dB or TL field has no phase, "
+                f"so it has no impulse response to integrate — synthesising "
+                f"one inverse-transforms the decibels AS pressure and "
+                f"overstates the level by tens of dB, silently. Start from "
+                f"the BROADBAND field; for an absolute level, scale the "
+                f"waveform to the source level rather than calling "
+                f"at_source_level() first (see above).")
+        if not np.isfinite(reference) or reference <= 0.0:
+            raise ConfigurationError(
+                f"{who}: reference must be a positive pressure in Pa; got "
+                f"{reference!r}.")
+        traces = self.synthesize_time_series(
+            source_waveform, sample_rate,
+            window=window, nfft=nfft, t_start=t_start)
+        # The synthesised trace is a real pressure history; taking .real of a
+        # complex-typed one drops a numerically-zero imaginary part rather
+        # than an analytic signal's quadrature, which would double the energy.
+        pressure = np.asarray(traces.data)
+        pressure = pressure.real if np.iscomplexobj(pressure) else pressure
+        energy = np.sum(pressure ** 2, axis=-1) * traces.dt
+        with np.errstate(divide='ignore', invalid='ignore'):
+            sel = 10.0 * np.log10(energy / reference ** 2)
+        coords = {name: v for name, v in traces.coords.items()
+                  if name != 'time'}
+        meta = dict(self.metadata or {})
+        meta.update({'kind': 'sound_exposure', 'unit': 'dB'})
+        # Recorded here for the same reason as in :meth:`broadband_loss`:
+        # this collapses a band and narrows the identity to one centroid, so
+        # without it two exposure maps over different bands about the same
+        # centre are indistinguishable afterwards.
+        meta['band_hz'] = (float(np.asarray(self.coords['frequency'])[0]),
+                           float(np.asarray(self.coords['frequency'])[-1]))
+        id_kwargs = self.id_kwargs()
+        id_kwargs['metadata'] = meta
+        # The frequency axis collapses here too, so it is pinned and the
+        # identity narrowed the same way :meth:`broadband_loss` does —
+        # otherwise the two reducers disagree on the same input, one
+        # reprising the signal's centre and the other the band's first
+        # sample. The centroid is the waveform's, weighted by its own
+        # spectrum on this axis.
+        band = np.asarray(self.coords['frequency'], dtype=float)
+        weights = np.abs(_source_spectrum_at(
+            source_waveform, sample_rate, band)) ** 2
+        centre = (float(np.sum(weights * band) / weights.sum())
+                  if weights.sum() > 0 else float(np.mean(band)))
+        pinned = dict(self.pinned)
+        pinned['frequency'] = centre
+        id_kwargs['frequencies'] = np.array([centre], dtype=float)
+        return Field(data=sel, coords=coords, pinned=pinned, **id_kwargs)
 
     def _reduce_to_spectrum(self, method: str) -> "Field":
         """Reduce a broadband Field to a single ``['frequency']`` spectrum.
@@ -2306,6 +3152,25 @@ def _synthesis_plan(
     # caller asked for rather than a frequency-shifted copy of it.
     bin_indices = np.floor(freqs / df + 0.5).astype(int)
     bin_offset_hz = float(bin_indices[0] * df - freqs[0])
+    # That the offset is COMMON is an assumption, and it fails on a knife
+    # edge: when freqs[0]/df sits on the .5 boundary that np.floor(x + 0.5)
+    # breaks, the first sample rounds one way and the rest the other, and
+    # part of the band is placed a whole bin from where it belongs. The
+    # result is silently wrong, not obviously broken — on a 25 Hz-4 kHz band
+    # with df = 2/3 (freqs[0]/df = 37.5) a two-path SEL read 52.34 dB
+    # against a true 54.01, on a 1500 ms record where nothing folds. Nudging
+    # df by 0.005 Hz either way is exact, so it cannot be left to the
+    # caller to notice. Checked rather than assumed.
+    residual = np.abs(bin_indices * df - freqs - bin_offset_hz)
+    if residual.size and float(np.max(residual)) > 1e-6 * df:
+        raise ConfigurationError(
+            f"{who}: this frequency grid cannot be placed on a DFT of "
+            f"spacing {df:g} Hz — freqs[0]/df = {freqs[0] / df:g} lands on "
+            f"the rounding boundary, so the band would be split across two "
+            f"bin offsets and the result would be wrong by decibels without "
+            f"looking wrong. Shift the band start or df by a fraction of a "
+            f"bin (a few parts in 1e3 of {df:g} Hz is enough), or build the "
+            f"grid so freqs[0] is a multiple of df.")
     max_bin = int(bin_indices[-1])
     explicit_nfft = nfft is not None
 

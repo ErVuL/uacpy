@@ -93,6 +93,13 @@ QUANTITIES: Mapping[str, Quantity] = {
         # loss (more of it is a better match), which is what ``_LOSS_KINDS``
         # leaving it out already says.
         Quantity('ambiguity', {'dB': 'Normalised power (dB re max)'}),
+        # Time-integrated squared pressure over one transient — Abraham's
+        # energy flux density numerator (sect. 3.2.1.5), ISO 18405's sound
+        # exposure. Its own quantity because a pulse's currency is energy,
+        # not pressure: a level in dB re 1 uPa^2 s answers a different
+        # question from a level in dB re 1 uPa, and the two references must
+        # never share a colorbar. A LEVEL, so more of it is more.
+        Quantity('sound_exposure', {'dB': 'SEL (dB re 1 uPa^2 s)'}),
     )
 }
 

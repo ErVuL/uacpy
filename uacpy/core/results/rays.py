@@ -5,12 +5,16 @@ from __future__ import annotations
 import warnings
 import numpy as np
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, NamedTuple, Tuple, Union
+from typing import (Optional, Dict, Any, List, NamedTuple, Tuple,
+                    TYPE_CHECKING, Union)
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._carrier_validate import _require_positive
 
 from uacpy.core.results._base import Result
+
+if TYPE_CHECKING:                      # the runtime import is deferred
+    from uacpy.core.results.field import Field
 
 
 def _arrival_kind(n_top: int, n_bot: int) -> str:
@@ -117,9 +121,12 @@ class ChannelTaps(NamedTuple):
     def plot(self, **kwargs):
         """Draw these taps through :func:`uacpy.visualization.plot_channel`.
 
-        The sample rate the plotter needs is not a field: taps spaced at
-        ``sps`` samples per symbol at ``symbol_rate`` symbols per second sit
-        at ``symbol_rate * sps`` Hz, so it is derived rather than asked for.
+        The plotter takes this whole carrier, so it reads both the things it
+        needs that are not fields of it: the sample rate, which taps at
+        ``sps`` per symbol at ``symbol_rate`` symbols per second sit at
+        (``symbol_rate * sps`` Hz), and the delay axis, which is
+        :attr:`delays_s` and not ``arange(n)/fs`` — the grid starts on the
+        transmit pulse's leading skirt, ahead of the first arrival.
         ``kwargs`` reach the plotter.
 
         Returns ``(fig, ax)`` where ``ax`` is a **pair** — ``plot_channel``
@@ -130,8 +137,7 @@ class ChannelTaps(NamedTuple):
         # ``uacpy.core`` at module scope, so this at file scope would make
         # ``import uacpy`` raise (docs/DEV.md section 7).
         from uacpy import visualization
-        return visualization.plot_channel(
-            self.taps, float(self.symbol_rate) * int(self.sps), **kwargs)
+        return visualization.plot_channel(self, **kwargs)
 
 
 # Coherence bandwidth = 1 / (factor * rms delay spread), by convention name.
@@ -681,6 +687,22 @@ class Arrivals(Result):
         span holding ``energy_fraction`` of their energy
         (:meth:`energy_support`), times ``margin``.
 
+        **This budgets the ARRIVALS only.** A transmitted pulse has length
+        too, and it is not visible here — a 20 ms waveform through a 2.7 ms
+        channel can be handed a 5 ms record by the default call, which stays
+        silent because the arrivals do fit. Pass ``record`` with the whole
+        budget instead, remembering that ``record`` bypasses ``margin`` so
+        the headroom is the caller's::
+
+            span = arrivals.energy_support(0.999) + len(waveform) / fs
+            f = arrivals.synthesis_band(bandwidth=B, centre=f0,
+                                        record=6.0 * span)
+
+        Several times over rather than a token factor: the pulse has to fit
+        and the band edge's precursor needs somewhere to sit. Measured on
+        one geometry, energy arriving before the first path could ran 21.2 %
+        at 1.5x that span and 0.19 % from 4x onwards.
+
         Parameters
         ----------
         bandwidth : float
@@ -868,6 +890,134 @@ class Arrivals(Result):
                 f"{rng:g} m — the channel of a cell nothing reaches is "
                 f"undefined, not empty.")
         return picked
+
+    def transfer_function(self, frequencies, *, receiver=None) -> "Field":
+        """``H(f)`` of these arrivals, as a single-cell broadband
+        :class:`~uacpy.core.results.Field`.
+
+        The channel frequency response is "the weighted sum over the paths of
+        a complex phase term depending on each path's delay" (Abraham,
+        *Underwater Acoustic Signal Processing*, sect. 3.2.3.2)::
+
+            H(f) = sum_i a_i(f) exp(i phi_i) exp(-i 2 pi f tau_i)
+
+        ``a_i(f)`` is :attr:`received_amplitudes` evaluated at ``f``, so the
+        volume absorption Bellhop keeps in ``Im tau`` is applied per
+        frequency — the same expression ``Bellhop._arrivals_to_tf`` uses, and
+        a ``RunMode.BROADBAND`` run on the same grid reproduces this to
+        floating-point.
+
+        **Why this exists when ``RunMode.BROADBAND`` already does it.** That
+        run mode answers for every path the model found. This answers for the
+        paths left after :meth:`filter`, :meth:`in_delay_window`,
+        :meth:`filter_by_bounces` — and *which paths belong in the sum* is a
+        question about the SIGNAL, not about the channel. Two arrivals
+        interfere only if the transmitted waveform is long enough for their
+        copies to overlap at the receiver: Medwin and Clay put it as
+        "we choose individual arrivals and measure their travel times,
+        amplitudes, and waveforms **when the signals are separable in the
+        time domain**. If the multiple arrivals are not separable, both the
+        phases and amplitudes of the components determine how they interfere"
+        (*Fundamentals of Acoustical Oceanography*, sect. 3.4.5), and Jensen
+        et al. prescribe the test — "filter these results within a specified
+        bandwidth in order to obtain the pulse structure that indicates
+        whether the arrivals are actually separated in time"
+        (*Computational Ocean Acoustics*, sect. 2.4.4.1).
+
+        So for a pulse of duration ``T``, the transfer function that governs
+        what one copy of it becomes is this method on
+        ``arrivals.in_delay_window(t0, t0 + T)``; paths outside that window
+        arrive as separate, non-interfering echoes and belong in a tap list
+        (:meth:`channel_taps`), not in the sum. Summing them anyway is the
+        continuous-wave answer, which is a different measurement.
+
+        Parameters
+        ----------
+        frequencies : array_like
+            Frequency grid (Hz), finite and positive.
+        receiver : (float, float), optional
+            ``(depth_m, range_m)`` of the cell to take, on the result's
+            receiver axes. Required when the arrivals span several cells.
+
+        Returns
+        -------
+        Field
+            Complex ``H`` with canonical ``['depth', 'range', 'frequency']``
+            coords and a single depth and range, so
+            :meth:`~uacpy.core.results.Field.remove_delay`,
+            :meth:`~uacpy.core.results.Field.synthesize_time_series` and
+            :meth:`~uacpy.core.results.Field.plot_transfer_function` all
+            take it. ``metadata['c0']`` is absent — an arrival list carries
+            no sound-speed profile — so the synthesis helpers that anchor a
+            window on ``r/c`` fall back to their default speed.
+
+        Raises
+        ------
+        ConfigurationError
+            An empty, non-finite or non-positive grid; several cells without
+            ``receiver=``; a cell nothing reaches.
+        """
+        who = "Arrivals.transfer_function"
+        freqs = np.atleast_1d(np.asarray(frequencies, dtype=float)).ravel()
+        if freqs.size == 0:
+            raise ConfigurationError(
+                f"{who}: frequencies is empty; H(f) needs a grid to be "
+                f"evaluated on.")
+        if not np.all(np.isfinite(freqs)):
+            raise ConfigurationError(
+                f"{who}: frequencies must all be finite.")
+        if np.any(freqs <= 0.0):
+            raise ConfigurationError(
+                f"{who}: frequencies must be positive (Hz); got a minimum "
+                f"of {freqs.min():g}.")
+        records = self._one_cell(receiver, who)
+        delays = np.asarray([a['delay'] for a in records], dtype=float)
+        if not np.all(np.isfinite(delays)):
+            raise ConfigurationError(
+                f"{who}: an arrival has a non-finite delay, so its phase "
+                f"term is undefined at every frequency.")
+        # The amplitude is re-evaluated at each frequency rather than taken
+        # once at the result's own: the absorption lives in Im(tau), and
+        # freezing it would hand back a band with no absorption slope across
+        # it. The phase term is the outer product of delays and frequencies.
+        amps = np.stack([self._received_amplitudes_at(f, records)
+                         for f in freqs], axis=1)
+        H = np.sum(amps * np.exp(-2j * np.pi * np.outer(delays, freqs)),
+                   axis=0)
+        depth, rng = self._cell_coordinates(records, receiver)
+        # Deferred: ``field`` imports ``core.environment``, and importing it
+        # at this module's scope pulls that chain into every ``Arrivals``.
+        from uacpy.core.results.field import Field
+        from uacpy.core.results._base import PhaseReference
+        return Field(
+            data=H.reshape(1, 1, freqs.size),
+            coords={'depth': np.array([depth]),
+                    'range': np.array([rng]),
+                    'frequency': freqs},
+            phase_reference=PhaseReference.TRAVELLING_WAVE,
+            model=self.model, backend=self.backend, frequencies=freqs,
+            source_depths=self.source_depths, model_source=self.model_source,
+        )
+
+    def _cell_coordinates(self, records, receiver):
+        """``(depth_m, range_m)`` of the cell ``records`` came from.
+
+        The records carry indices into the receiver axes, so the labels come
+        from the axes when they are populated. An ``Arrivals`` assembled by
+        hand may have neither, and a transfer function is still defined for
+        it — the coordinates are then the caller's ``receiver=`` or zero,
+        which is a placement on the Field's axes and not a claim about
+        geometry.
+        """
+        if receiver is not None:
+            return float(receiver[0]), float(receiver[1])
+        d_idx = int(records[0].get('depth_idx', 0))
+        r_idx = int(records[0].get('range_idx', 0))
+        depths = np.atleast_1d(np.asarray(self.receiver_depths, dtype=float))
+        ranges = np.atleast_1d(np.asarray(self.receiver_ranges, dtype=float))
+        depth = float(depths[d_idx]) if d_idx < depths.size else 0.0
+        rng = float(ranges[r_idx]) if r_idx < ranges.size else 0.0
+        return depth, rng
 
     def channel_taps(
         self,

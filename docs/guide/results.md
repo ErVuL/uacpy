@@ -480,11 +480,186 @@ Two methods turn it into time:
 |---|---|---|
 | `.to_time_trace(depth=…, range=…)` | one `(depth, range)` cell | `Field`, `coords={'time'}` — the band-limited impulse response |
 | `.synthesize_time_series(waveform, sample_rate)` | a source waveform | `Field`, `coords={'depth', 'range', 'time'}` — every cell convolved |
+| `.truncate_response(duration, origin='peak', window='boxcar')` | a pulse length | `Field`, same coords — `H(f)` with its impulse response cut to what a pulse that long can overlap. `H(f)` as a model returns it is the **continuous-wave** answer, every path at once; two copies of a `T`-long pulse interfere only where they overlap, so arrivals more than `T` apart arrive separately and do not add. The window reaches `duration` **either side** of the origin. Works on any model's `H`, which is the point — a wave model has no paths to drop, so it has to be found in the response. Warns when the `1/Δf` record has already folded the response, because a fold cannot be told from an early arrival |
 
 Both require the canonical `['depth', 'range', 'frequency']` layout. With no
 arguments, `to_time_trace` takes the middle depth and the first range.
 
+**Channel simulation — one signal, one receiver.** There are two routes and
+the model-level one came first: `RunMode.TIME_SERIES` with `source_waveform=`
+and `sample_rate=` runs the solver straight to `p(t)` on Bellhop, Kraken,
+Scooter, RAM, SPARC and OASP — see
+[example 19](../../uacpy/examples/example_19_broadband_comparison.py), which
+reconstructs a chirp at one receiver across eight solvers.
+
+Use `to_time_trace` when you already hold an `H(f)` — from a `BROADBAND` run
+you made for the level maps above, say — and want a receiver's waveform out
+of it without a second model run:
+
+```python
+trace = H.to_time_trace(depth=60, range=2000, waveform=tx, sample_rate=fs)
+```
+
+Use `synthesize_time_series` when you want every cell; this when you want a
+receiver. A `depth` or `range` outside the grid warns — the match is to the
+nearest stored coordinate, so a receiver past the panel's edge would
+otherwise become the edge cell and return a perfectly ordinary trace of the
+wrong place.
+
+**Size the frequency grid from the arrivals, not by eye.** The record is
+`1/Δf` long and circular, so a channel whose multipath outlasts it folds onto
+its own early part and reads as extra arrivals. `Arrivals.synthesis_band`
+picks Δf for you:
+
+```python
+f = arrivals.synthesis_band(bandwidth=1600.0, centre=3000.0,
+                            energy_fraction=0.999)
+H = model.run(env, Source(depths=30.0, frequencies=f), rcv,
+              run_mode=RunMode.BROADBAND, frequencies=f)
+```
+
+On a 2 km Pekeris path with 41 ms of rms delay spread it chose Δf = 4.35 Hz —
+a 230 ms record for 191 ms of arrival energy. A hand-picked 10 Hz would have
+given 100 ms and wrapped half the channel.
+
+**Add the pulse yourself.** That default budgets the *arrivals* only, so a
+20 ms pulse through a 2.7 ms channel can be handed a 5 ms record and wrap
+completely — `synthesis_band` stays silent because the arrivals do fit. State
+the whole budget with `record=`, which bypasses the helper's own `margin`, so
+supply headroom too:
+
+```python
+span = arrivals.energy_support(0.999) + len(waveform) / fs
+f = arrivals.synthesis_band(bandwidth=B, centre=f0, record=6.0 * span)
+```
+
+Several times over, not a token factor: the pulse has to fit *and* the band
+edge's precursor needs somewhere to sit. Measured on one geometry, energy
+arriving before the first path could ran 21.2 % at 1.5×, 0.19 % at 4×, and
+0.19 % at 60× — so it converges around 4×, and that floor is the band edge,
+not a fold.
+
+**Two routes to a received signal, and they are not identical.** The wave
+route above keeps `H(f)` across the band. The path route —
+`Arrivals.channel_taps` / `acoustic_signal.simulate_reception` — freezes the
+arrival amplitudes at one carrier, which is the tap model's narrowband
+assumption. On the case above the two peak within 2.8 ms of each other out of
+a 1339 ms travel time, with envelopes correlating +0.70 unaligned. For modem
+work `Arrivals.channel_regime(symbol_rate)` says which regime you are in
+(that channel: frequency-selective, 41 ms of spread = 82 symbols at 2 kBd).
+
 ![Time-series synthesis](figures/results_time_synthesis.png)
+
+---
+
+## 6a. The level a signal with bandwidth or duration reaches
+
+A model's TL is the **continuous-wave** answer. Two quantities say what a real
+signal reaches, and they answer different questions:
+
+**Both start from a `RunMode.BROADBAND` run.** They need a complex `H(f)` with
+a `frequency` axis, and that is the only run mode that produces one —
+`COHERENT_TL` refuses more than one source frequency by construction. Bellhop,
+Kraken, Scooter and RAM all offer it:
+
+```python
+f = np.arange(800.0, 1201.0, 20.0)
+H = model.run(env, Source(depths=20.0, frequencies=f), rcv,
+              run_mode=RunMode.BROADBAND, frequencies=f)
+```
+
+`Δf` sets the record length `1/Δf` that the exposure integral and any time
+trace live in, so size it from the channel — `Arrivals.synthesis_band` does
+that (see §6).
+
+| Method | Returns | Question |
+|---|---|---|
+| `.broadband_loss(spectrum=None)` | `Field`, frequency axis gone, `kind='pressure'` `unit='dB'` — so `.tl` and `.plot()` treat it as the TL map it is | how much of the continuous-wave interference does my **bandwidth** survive? |
+| `.sound_exposure_level(waveform, sample_rate)` | `Field`, `kind='sound_exposure'` — a **level**, so it reads upward and never shares a colorbar with TL | how much **energy** does one transmission deliver? |
+
+`broadband_loss` is the frequency average of the **coherent** `|H|²`, weighted
+by `|spectrum|²`:
+
+```python
+# the simplest form: hand it the signal, get that signal's TL map
+loss = H.broadband_loss(waveform=my_chirp, sample_rate=fs)
+loss.plot(env=env)
+
+# or a plain band, when you want the band rather than a specific waveform
+band = H.window(frequency=(40e3 - 25, 40e3 + 25))    # a 20 ms burst's 1/T
+band.broadband_loss().plot(env=env)
+```
+
+`waveform=` evaluates the spectrum on the field's axis with the same DTFT
+`synthesize_time_series` uses, so `SEL = ESL − TPL` closes exactly. Do **not**
+`np.interp` an `rfft` onto the axis and pass it as `spectrum=` — the two grids
+rarely coincide and interpolation is a triangular-kernel convolution, not a
+resampling; measured at 0.13 dB of error on a plain tone burst.
+
+This **is** the transmission loss of a transient signal, in the ordinary
+sense of the word: Ainslie's broadband propagation loss (§11.3.3, Eq. 11.46),
+which is Abraham's pulse propagation loss `L_p = ∫|U|²df / ∫|H|²|U|²df`
+(§3.2.4.2) once a source spectrum weights it, and Ainslie's total path loss
+(§3.3.2.1) in energy form. Received level is `SL − TPL` for mean square and
+`SEL = ESL − TPL` for energy, exactly as a CW TL is used.
+
+Two properties make it a generalisation of TL rather than a lookalike:
+
+* **It converges to the CW loss as the band narrows.** On a two-path channel
+  at a near-cancellation frequency: 12.19 dB of error at B = 200 Hz, 4.12 at
+  50, 0.295 at 10, 0.0166 at 2, and exactly 0 at one bin.
+* **It is a functional of `|S(f)|` on the field's own axis.** Phase does not
+  enter at that point, so passing `spectrum=` and `spectrum=` with any phase
+  gives the same map. It does **not** follow that two waveforms sharing a
+  nominal band share a loss: `waveform=` evaluates the continuous DTFT on the
+  field's axis, and off a waveform's own DFT grid that is not fixed by its
+  `|rfft|`. Whether phase matters at all is decided by **grid alignment**:
+  `|DTFT|` equals `|rfft|` only on the waveform's own DFT bins, spaced
+  `1/T`. When `T·Δf` is an integer the field's axis is a subset of those
+  bins, phase cannot reach the answer, and two same-`|rfft|` waveforms give
+  **exactly** the same loss. Off that alignment it can. On a two-path
+  channel over a 25 Hz axis, 500 Hz bursts of 20 and 40 cycles (`T·Δf` = 1
+  and 2) spread 0.0000 dB, while 19, 21 and 41 cycles (0.95, 1.05, 2.05)
+  spread 0.066, 0.055 and 0.043 — and 21 cycles is *narrower* than 20, so
+  this is not a bandwidth effect. Either way different signals get
+  different losses, which is the point of passing the waveform.
+
+It is **not** `RunMode.INCOHERENT_TL` (Ainslie's Eq. 11.47), which drops the
+arrivals' relative phase — Ainslie marks that approximation invalid within a
+few wavelengths of a boundary, which is every Lloyd mirror. Jensen's
+semicoherent loss (§3.3.5.4) is a third thing again, and he calls that family
+"somewhat informal and partially empirically based".
+
+`sound_exposure_level` integrates `p(t)²` from `synthesize_time_series` —
+Abraham's energy flux density integral (§3.2.1.5), ISO 18405's sound exposure:
+
+```python
+sel = H.sound_exposure_level(tone_burst(40e3, 800, fs)[1], fs)   # dB re 1 µPa²s
+```
+
+There is **no source-level argument** — the level rides on the waveform's
+amplitude, because `synthesize_time_series` reproduces the source waveform
+where `H` is unity. For a source level `SL` in dB re 1 µPa at 1 m:
+
+```python
+unit = waveform / np.sqrt(np.mean(waveform ** 2))
+sel  = H.sound_exposure_level(unit * 1e-6 * 10 ** (SL / 20), fs)
+```
+
+Pass the unit waveform instead and you get the propagation term alone, with
+the source level added afterwards as an **energy** source level,
+`ESL = SL + 10log10(T)` (Ainslie Eq. 3.155). The two agree exactly: `SL` =
+190 dB at 1 m, a 10 ms burst, 100 m of spherical spreading gives
+190 − 40 + 10log10(0.01) = **130 dB re 1 µPa²s** either way.
+
+Its band window defaults to `'none'` rather than `synthesize_time_series`'s
+`'hann'`, because a taper removes energy the integral is defined to count: a
+5-cycle 500 Hz burst over a 25 Hz–4 kHz band reads 52.675 dB flat and
+35.676 dB tapered, 17 dB light, purely because 500 Hz sits low in the band.
+
+**Neither one gates.** Both keep a late path's energy; only its *interference*
+goes. Discarding the path itself is `.truncate_response`, which answers a
+receiver-side question about one cell.
 
 ```python
 from uacpy.acoustic_signal import lfm_chirp
@@ -561,6 +736,7 @@ a single point.
 | `.rms_delay_spread()` | energy-weighted width of the arrival pattern (s) — how much the multipath smears a pulse, and far less tail-driven than `ptp(delays)` |
 | `.energy_support(fraction=0.999)` | delay span holding that share of the energy (s) — the span a synthesis window has to cover, unmoved by a faint straggler the way `ptp(delays)` is |
 | `.synthesis_band(bandwidth=…, record=…)` | frequency grid to synthesise these arrivals on — a record is `1/Δf` long, so the window, not the bandwidth, decides the spacing. State `record` (seconds) or let it come from `energy_support`; anything left outside folds back onto the early trace, and it says so |
+| `.transfer_function(frequencies, receiver=None)` | `H(f) = Σ aᵢ(f)·e^{iφᵢ}·e^{−i2πfτᵢ}` as a single-cell broadband `Field`, with `aᵢ(f)` the received amplitude at each `f` so the absorption in `Im τ` is applied per frequency — the same expression `RunMode.BROADBAND` evaluates, reproduced to floating point. It exists separately because these arrivals can be **filtered first**: `arr.in_delay_window(t0, t0 + T).transfer_function(grid)` is the channel a `T`-long pulse sees, and which paths belong in the sum is a question about the signal, not about the channel |
 | `.channel_taps(symbol_rate, carrier=…, sps=1, pulse=None)` | the arrivals as a modem's baseband channel: `ChannelTaps` whose `.taps[k]` is `Σ aᵢ·e^{iφᵢ}·e^{−i2πf_cτᵢ}·g(kT − τᵢ)` with `aᵢ` the received amplitude at the carrier and `g` the pulse — by default the raised cosine at `sps=1` (transmit pulse times matched filter: the channel at the decision instants) and the root-raised-cosine transmit half above it; `pulse='nearest'` bins to the nearest sample, exactly `comms.multipath_channel`. `comms.simulate_link(..., channel=taps)` takes the `sps=1` set; a multi-cell result needs `receiver=(depth, range)` |
 | `.coherence_bandwidth(convention='inverse_spread', factor=None)`, `.channel_regime(symbol_rate, convention=…, factor=…)` | `1/(k·τ_rms)` with `k = 1` by default — the convention the corpus states (APL-UW TR 9407 §II.7.b: the inverse of the delay spread measures the coherence bandwidth; Abraham §8.7: `W < 1/σ_t`). Rappaport's 0.5- and 0.9-correlation rules are the named options `'rappaport_0.5'` (`k = 5`) and `'rappaport_0.9'` (`k = 50`), and `factor=k` sets any other. The regime is the verdict for one symbol rate: signal bandwidth, coherence bandwidth, ISI in symbols, the convention used and `frequency_selective` — true when the symbol band is wider than the coherence bandwidth |
 | `len(arr)`, `for a in arr:` | count and iterate |

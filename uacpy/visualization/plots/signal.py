@@ -423,6 +423,172 @@ def _histogram_title(result):
     return f"{kind} ({seg}s)" if seg is not None else kind
 
 
+@typed_plot_error
+def plot_waveform(signal, sample_rate, ax=None, *, value='pressure',
+                  t0=0.0, reference=None, floor_dB=-60.0, time_units='s',
+                  label=None, title=None, figsize=(10, 4), **mpl_kw):
+    """Line plot of a signal against time — pressure, or its envelope.
+
+    The elementary time-domain view, for a bare array and its sample rate.
+    A gridded result plots itself (``Field`` over ``{'time'}`` does it through
+    :meth:`~uacpy.core.results.Field.plot`); this is the door for a waveform
+    that is not one — a generator's output, a synthesised burst, a recording.
+
+    Several signals go on one axis the way the rest of the family does it, by
+    handing back the axis::
+
+        _fig, ax = plot_waveform(sent, fs, label='Transmitted')
+        plot_waveform(received, fs, ax, label='Received')
+
+    ``value`` picks the view:
+
+    - ``'pressure'`` — the waveform itself. The default.
+    - ``'envelope'`` — ``|analytic signal|``
+      (:func:`uacpy.acoustic_signal.envelope`), the shape under the carrier.
+      At 40 kHz over 60 ms the waveform alone is 2 400 cycles of solid ink
+      and the envelope is the only thing a reader can take from it.
+    - ``'envelope_dB'`` — the same in decibels, which is where a tail shows.
+      On a linear axis a channel that smears 1 % of a pulse into the next
+      slot draws the same as one that smears none.
+
+    The envelope is computed by the public transform and not here, so a
+    caller can have the numbers without the figure. What IS the plotter's is
+    ``floor_dB``: ``20*log10`` of a silence is minus infinity and takes the
+    axis with it, so the dB view is floored, exactly as
+    :func:`~uacpy.visualization.plot_channel` floors its null.
+
+    Parameters
+    ----------
+    signal : array_like
+        The 1-D waveform. The generators return a ``(time, signal)`` pair, so
+        pass the signal alone — ``tone_burst(...)[1]``.
+    sample_rate : float
+        Hz. Positive and finite.
+    t0 : float, default 0.0
+        Time of the first sample, in seconds. A bare array carries no time
+        origin the way a ``Field`` over ``{'time'}`` does, so an excerpt, a
+        trace that starts after a travel time, or two signals being lined up
+        on a common instant need one stated. Signed.
+    ax : matplotlib.axes.Axes, optional
+        Draw here instead of a new figure.
+    value : {'pressure', 'envelope', 'envelope_dB'}, default 'pressure'
+    reference : float, optional
+        ``'envelope_dB'`` only. ``None`` (default) references each trace to
+        its own peak, which compares SHAPES; a number references them all to
+        it, which compares LEVELS. Two traces normalised separately cannot be
+        read against each other for level, so the axis label says which it is.
+    floor_dB : float, default -60.0
+        Lowest decibel value drawn, relative to the reference.
+    time_units : {'s', 'ms'}, default 's'
+        ``'s'`` is what a ``Field`` over ``{'time'}`` draws; ``'ms'`` is
+        readable for a burst tens of milliseconds long.
+    label, title, figsize, **mpl_kw
+        As elsewhere in the family; ``label`` is for the legend the caller
+        draws.
+
+    Returns
+    -------
+    (fig, ax)
+
+    Raises
+    ------
+    ConfigurationError
+        A ``(time, signal)`` pair, an empty or non-1-D signal, a non-positive
+        sample rate, an unknown ``value`` or ``time_units``, a non-finite
+        ``t0`` or ``floor_dB``, or a non-positive ``reference``.
+    """
+    who = "plot_waveform"
+    if isinstance(signal, tuple) or (
+            np.ndim(signal) == 2 and np.shape(signal)[0] == 2):
+        raise ConfigurationError(
+            f"{who}: signal must be the 1-D waveform, not a (time, signal) "
+            f"pair — the generators return the pair, so pass "
+            f"tone_burst(...)[1]. Reading the pair would draw the time "
+            f"vector as the waveform.")
+    raw = np.asarray(signal)
+    if np.iscomplexobj(raw):
+        # Cast to float would drop the imaginary part behind a bare numpy
+        # ComplexWarning — no uacpy guard, and wrong for the one caller who
+        # would pass complex deliberately: an analytic signal, whose real
+        # part is the waveform and whose modulus is the envelope. Which of
+        # those they want is not ours to guess.
+        raise ConfigurationError(
+            f"{who}: signal is complex. Casting it would silently discard "
+            f"the imaginary part. Pass signal.real for the waveform, or "
+            f"np.abs(signal) for the envelope of an analytic signal.")
+    x = np.asarray(raw, dtype=float)
+    if x.ndim > 1:
+        # The pair guard above catches (2, n) and (n, 2); any other 2-D or
+        # higher shape reached ravel() and was flattened into one long
+        # "waveform" — a (3, 100) array plotted as 300 samples, which is the
+        # same failure the pair guard exists to prevent, one shape over.
+        raise ConfigurationError(
+            f"{who}: signal must be 1-D; got shape {x.shape}. Flattening it "
+            f"would draw {x.size} samples end to end as one waveform. Pick "
+            f"the channel or trace you meant, e.g. signal[0].")
+    x = x.ravel()
+    _require_nonempty(who, signal=x)
+    fs = float(sample_rate)
+    if not np.isfinite(fs) or fs <= 0.0:
+        raise ConfigurationError(
+            f"{who}: sample_rate must be positive and finite (Hz); got "
+            f"{sample_rate!r}.")
+    if value not in ('pressure', 'envelope', 'envelope_dB'):
+        raise ConfigurationError(
+            f"{who}: value must be 'pressure' (the waveform), 'envelope' "
+            f"(|analytic signal|) or 'envelope_dB' (the same in decibels); "
+            f"got {value!r}.")
+    if time_units not in ('s', 'ms'):
+        raise ConfigurationError(
+            f"{who}: time_units must be 's' or 'ms'; got {time_units!r}.")
+
+    if value == 'pressure':
+        y, ylabel = x, "p(t)"
+    else:
+        # Deferred like every compute-side import here: at file scope it
+        # pulls scipy.signal into every ``import uacpy.visualization``.
+        from uacpy.acoustic_signal.estimate import envelope
+        y = np.asarray(envelope(x), dtype=float)
+        if value == 'envelope':
+            ylabel = "|envelope|"
+        else:
+            if reference is None:
+                ref, ylabel = y.max(), "Envelope (dB re peak)"
+            else:
+                ref = float(reference)
+                if not np.isfinite(ref) or ref <= 0.0:
+                    raise ConfigurationError(
+                        f"{who}: reference must be a positive, finite "
+                        f"amplitude; got {reference!r}.")
+                ylabel = f"Envelope (dB re {ref:g})"
+            if not np.isfinite(floor_dB):
+                raise ConfigurationError(
+                    f"{who}: floor_dB must be finite; got {floor_dB!r}.")
+            if ref <= 0.0:
+                # An all-zero trace has no peak to refer to, and dividing by
+                # it would draw a floor-flat line that looks like silence
+                # measured rather than silence handed in.
+                raise ConfigurationError(
+                    f"{who}: the signal is everywhere zero, so it has no "
+                    f"peak to reference; pass reference= to state one.")
+            y = 20.0 * np.log10(np.maximum(y / ref, 10.0 ** (floor_dB / 20.0)))
+
+    start = float(t0)
+    if not np.isfinite(start):
+        raise ConfigurationError(
+            f"{who}: t0 must be a finite time in seconds; got {t0!r}.")
+    scale = 1.0 if time_units == 's' else 1e3
+    t = (start + np.arange(x.size) / fs) * scale
+    fig, ax = fig_ax(ax, figsize)
+    ax.plot(t, y, label=label, **mpl_kw)
+    ax.set_xlabel(f"Time ({time_units})")
+    ax.set_ylabel(ylabel)
+    ax.set_title(_title_or(title, "Waveform"), loc="left")
+    ax.grid(alpha=0.3)
+    if value == 'envelope_dB':
+        ax.set_ylim(floor_dB, None)
+    return fig, ax
+
 
 @typed_plot_error
 def plot_psd(frequencies, psd_linear=None, ax=None, *,
