@@ -765,8 +765,8 @@ def test_get_sound_speed_warns_on_extrapolation():
 
 def test_francois_garrison_accepts_list_pH():
     """pH as a Python list must not raise a bare TypeError (it is coerced)."""
-    from uacpy.core.absorption import francois_garrison_dB_per_km
-    out = francois_garrison_dB_per_km(10000, 10, 35, [8.0, 8.1], 100)
+    from uacpy.core.absorption import _francois_garrison_dB_per_km
+    out = _francois_garrison_dB_per_km(10000, 10, 35, [8.0, 8.1], 100)
     out = np.atleast_1d(np.asarray(out, dtype=float))
     assert out.shape == (2,) and np.all(out > 0)
 

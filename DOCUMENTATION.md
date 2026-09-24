@@ -597,7 +597,7 @@ namespace):
 
 ```python
 from uacpy.core.absorption import (
-    thorp_dB_per_km, francois_garrison_dB_per_km, convert_attenuation_units,
+    absorption_thorp, absorption_francois_garrison, convert_attenuation_units,
 )
 ```
 
@@ -2095,7 +2095,7 @@ to pay for arithmetic that needs none of it.
 | Sound speed | m/s | |
 | Density | g/cm³ | **acoustic inputs** (bottom/sediment). The `core.acoustics` formula-level helpers are the exception — SI `kg/m³` (and radians) — see *Density* below |
 | Attenuation (geoacoustic) | dB per wavelength | models emit the matching `AT` TopOpt letter |
-| Attenuation (volume) | dB/km | `francois_garrison_dB_per_km`, `thorp_dB_per_km` |
+| Attenuation (volume) | dB/km | `absorption_francois_garrison`, `absorption_thorp` |
 | Pressure | Pa (µPa for levels) | a recording enters through `uacpy.pressure` (`core.acoustics.pressure`), which turns volts (or ADC counts) into Pa given the hydrophone sensitivity in dB re 1 V/µPa; `uacpy.spl` takes the waveform from there to dB re 1 µPa |
 | Pressure level / SPL | dB re 1 µPa | air would be dB re 20 µPa |
 | Noise spectral level | dB re 1 µPa²/Hz | |

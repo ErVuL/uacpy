@@ -17,7 +17,7 @@ Uses: sonar.detection_threshold_energy · passive/active_signal_excess ·
 lambert_bottom · boundary_reverberation · detection_range · ts_cylinder ·
 passive/active_signal_excess_field · probability_of_detection_field ·
 detection_range_by_depth · plot_signal_excess · plot_detection_probability ·
-plot_roc · core.absorption.thorp_dB_per_km
+plot_roc · absorption_thorp
 """
 
 import os
@@ -29,7 +29,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy import sonar
-from uacpy.core.absorption import thorp_dB_per_km
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -41,8 +40,12 @@ frequency = 2000.0
 # passive curve crosses near 45 km, so 30 km would stop short of the very
 # quantity this example is about.
 ranges = np.linspace(100.0, 60000.0, 600)
+# units='dB/m' rather than dB/km divided by 1000: the conversion is a value
+# the library applies, not arithmetic to get right here.
+alpha_dB_per_m = float(np.ravel(
+    uacpy.absorption_thorp(frequency, units='dB/m').values)[0])
 tl = (20.0 * np.log10(ranges)
-      + thorp_dB_per_km(frequency) * ranges / 1000.0)
+      + alpha_dB_per_m * ranges)
 
 # Detection threshold for Pd=0.5, Pf=1e-4 over a 100 Hz / 1 s integration.
 threshold = sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100.0,

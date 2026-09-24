@@ -1389,7 +1389,7 @@ class Field(Result):
                 raise ConfigurationError(
                     f"{who}: waveform must be the 1-D signal, not a "
                     f"(time, signal) pair — pass lfm_chirp(...)[1].")
-            from uacpy.acoustic_signal.system import (
+            from uacpy.acoustic_signal.estimate import (
                 waveform_spectrum_at as _source_spectrum_at)
             source_spectrum = _source_spectrum_at(
                 waveform, sample_rate,
@@ -1595,6 +1595,10 @@ class Field(Result):
             No ``frequency`` axis, a non-uniform one, fewer than two
             frequencies, real data, an unknown ``window``, a non-finite or
             out-of-range ``duration``, or an ``origin`` outside the record.
+
+    On plain arrays this is
+    :func:`~uacpy.acoustic_signal.gate_transfer_function`; what the
+    method adds is the coord check and the Field re-wrap.
         """
         who = "Field.truncate_response"
         if 'frequency' not in self.coords:
@@ -1731,6 +1735,11 @@ class Field(Result):
             not the frequency axis's, a non-finite or zero-energy
             ``spectrum``, both ``spectrum`` and ``waveform``, or a
             ``waveform`` without a ``sample_rate``.
+
+    On plain arrays this is
+    :func:`~uacpy.acoustic_signal.broadband_propagation_loss`; what the
+    method adds is turning ``waveform`` into ``w(f)``, the weighted
+    centroid pin and the band metadata.
         """
         who = "Field.broadband_loss"
         if 'frequency' not in self.coords:
@@ -1763,7 +1772,7 @@ class Field(Result):
                     f"{who}: waveform must be the 1-D signal, not a "
                     f"(time, signal) pair — pass tone_burst(...)[1] (the "
                     f"generators return both).")
-            from uacpy.acoustic_signal.system import (
+            from uacpy.acoustic_signal.estimate import (
                 waveform_spectrum_at as _source_spectrum_at)
             spectrum = _source_spectrum_at(waveform, sample_rate, freqs)
         if spectrum is None:
@@ -2044,6 +2053,9 @@ class Field(Result):
             cannot hold the **pulse**. Nothing warns about the **channel**
             outlasting it, and that gap is real — see the note above on
             folds.
+
+    On plain arrays the level itself is
+    :func:`~uacpy.core.acoustics.sound_exposure_level`.
         """
         who = "Field.sound_exposure_level"
         if not self.is_complex:
@@ -2091,7 +2103,7 @@ class Field(Result):
         # sample. The centroid is the waveform's, weighted by its own
         # spectrum on this axis.
         band = np.asarray(self.coords['frequency'], dtype=float)
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         weights = np.abs(_source_spectrum_at(
             source_waveform, sample_rate, band)) ** 2
@@ -2177,6 +2189,9 @@ class Field(Result):
         ConfigurationError
             Real data (a dB or TL field), non-canonical coords, or a
             non-positive ``reference``.
+
+    On plain arrays the level itself is
+    :func:`~uacpy.core.acoustics.peak_level`.
         """
         who = "Field.peak_sound_pressure_level"
         if not self.is_complex:
@@ -2201,7 +2216,7 @@ class Field(Result):
         coords = {name: v for name, v in traces.coords.items()
                   if name != 'time'}
         band = np.asarray(self.coords['frequency'], dtype=float)
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         weights = np.abs(_source_spectrum_at(
             source_waveform, sample_rate, band)) ** 2
@@ -2273,6 +2288,12 @@ class Field(Result):
         ConfigurationError
             No ``time`` axis, fewer than two samples, a non-uniform one, or
             a ``band`` that keeps no bin.
+
+    On plain arrays this is
+    :func:`~uacpy.acoustic_signal.transfer_function_from_impulse_response`;
+    what the method adds is the axis bookkeeping, the band read off its
+    identity, and the ``dt`` that carries the result into the density
+    convention ``to_time_trace`` produces.
         """
         who = "Field.to_transfer_function"
         if 'time' not in self.coords:
@@ -2528,6 +2549,8 @@ class Field(Result):
         ``p(t) = Re{A·e^{+2πift}}`` — the same sign convention the IFFT
         synthesis consumes, so a tone extracted here and an ``H(f)`` bin
         handed to :meth:`to_time_trace` carry phase the same way.
+
+    On plain arrays this is :func:`~uacpy.acoustic_signal.tone_phasor`.
         """
         if list(self.coords) != ['depth', 'range', 'time']:
             raise ConfigurationError(
@@ -2550,7 +2573,7 @@ class Field(Result):
         # only in summation order.
         # Deferred: acoustic_signal pulls scipy, and uacpy's public
         # surface is imported without it (test_lazy_imports).
-        from uacpy.acoustic_signal.system import tone_phasor
+        from uacpy.acoustic_signal.estimate import tone_phasor
         amp = tone_phasor(
             self.data, np.asarray(self.coords['time'], dtype=float),
             frequency, window=window, who='Field.extract_tone')
@@ -3237,7 +3260,7 @@ def _synthesis_plan(
             remediation=f"Pass nfft={2 * max_bin + 2} or larger.",
         )
 
-    from uacpy.acoustic_signal.system import _taper
+    from uacpy.acoustic_signal.estimate import _taper
     win = _taper(window, n_freq, who=who)
 
     return freqs, df, bin_indices, bin_offset_hz, int(nfft), win
@@ -3555,7 +3578,7 @@ def _synthesize_time_series(
         uniform_frequency_step(tf_freqs, 'synthesize_time_series')
 
     freqs = tf.coords['frequency']
-    from uacpy.acoustic_signal.system import (
+    from uacpy.acoustic_signal.estimate import (
         waveform_spectrum_at as _source_spectrum_at)
     source_spectrum = _source_spectrum_at(wf, sample_rate, freqs)
 

@@ -133,16 +133,16 @@ class TestVolumeAttenuation:
             self, shallow_env, shallow_env_thorp):
         """Every RAM backend applies ``env.absorption`` through a water
         block in dB per wavelength (ram.md §3). At 10 kHz Thorp is
-        ``thorp_dB_per_km(f)/1000 · c/f`` per wavelength, the block sits at
+        ``_thorp_dB_per_km(f)/1000 · c/f`` per wavelength, the block sits at
         absolute depths inside the domain, and a lossless env or a zero
         constant writes no block. Deck-level — no binary runs."""
         from uacpy.models import RAM
-        from uacpy.core.absorption import ConstantAbsorption, thorp_dB_per_km
+        from uacpy.core.absorption import ConstantAbsorption, _thorp_dB_per_km
         m = RAM(verbose=False, flat_earth=False)
         seg = m._collins_range_segments(shallow_env_thorp, 'ramgeo', 200.0,
                                         10000.0, dz=0.05)[0]
         block = seg['water_attn']
-        expected = float(thorp_dB_per_km(10000.0)) / 1000.0 * 1500.0 / 10000.0
+        expected = float(_thorp_dB_per_km(10000.0)) / 1000.0 * 1500.0 / 10000.0
         assert block[0][0] == 0.0 and block[-1][0] == 200.0
         assert all(abs(v - expected) < 1e-12 * expected for _, v in block)
         assert 'water_attn' not in m._collins_range_segments(

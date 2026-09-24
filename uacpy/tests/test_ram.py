@@ -25,7 +25,7 @@ from uacpy.core import (Altimetry, Bathymetry,
     Bottom, SeabedColumn, SedimentLayer,
 )
 from uacpy.core.absorption import (
-    ConstantAbsorption, FrancoisGarrison, Thorp, thorp_dB_per_km,
+    ConstantAbsorption, FrancoisGarrison, Thorp, _thorp_dB_per_km,
 )
 from uacpy.io.mpirams_writer import write_inpe, write_water_attenuation_file
 from uacpy.io.ramsurf_writer import write_ramin
@@ -4141,7 +4141,7 @@ class TestWrapperBlock:
                           absorption=Thorp())
         block = self._ram()._water_attenuation_block(
             env, 10000.0, env.ssp.to_pairs(), 150.0)
-        alpha_m = float(thorp_dB_per_km(10000.0)) / 1000.0
+        alpha_m = float(_thorp_dB_per_km(10000.0)) / 1000.0
         by_depth = dict(block)
         assert by_depth[0.0] == pytest.approx(alpha_m * 1500.0 / 10000.0)
         assert by_depth[100.0] == pytest.approx(alpha_m * 1480.0 / 10000.0)
@@ -4185,7 +4185,7 @@ class TestWrapperBlock:
         rows = np.array([[float(v) for v in ln.split()] for ln in lines[2:]])
         assert rows.shape == (nz, nf + 1)
         j = 5
-        expected = (float(thorp_dB_per_km(frq[j])) / 1000.0 * 1500.0 / frq[j])
+        expected = (float(_thorp_dB_per_km(frq[j])) / 1000.0 * 1500.0 / frq[j])
         np.testing.assert_allclose(rows[:, j + 1], expected, rtol=1e-9)
 
 

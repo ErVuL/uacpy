@@ -15,7 +15,7 @@ frequency:
 3. pure-water viscous absorption, above ~500 kHz — proportional to f².
 
 Uses: absorption_thorp · absorption_francois_garrison ·
-core.absorption.thorp_dB_per_km · francois_garrison_dB_per_km ·
+absorption_thorp · absorption_francois_garrison ·
 convert_attenuation_units · core.acoustics.sound_speed_mackenzie ·
 AbsorptionCoefficient.plot (curve, overlay, and the α(f, z) heatmap)
 """
@@ -29,8 +29,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.core.absorption import (convert_attenuation_units,
-                                   francois_garrison_dB_per_km,
-                                   thorp_dB_per_km)
+                                   )
 from uacpy.core.acoustics import sound_speed_mackenzie
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
@@ -88,18 +87,26 @@ plt.close(fig)
 
 # ── One parameter at a time, at 10 kHz ──────────────────────────────────────
 PROBE_HZ = 10000
+
+
+def alpha_fg(**varied):
+    """Francois-Garrison at PROBE_HZ in dB/km, varying one parameter."""
+    env = dict(temperature_c=TEMPERATURE, salinity_psu=SALINITY, pH=PH,
+               z_bar_m=DEPTH)
+    env.update(varied)
+    return float(np.ravel(
+        uacpy.absorption_francois_garrison(PROBE_HZ, **env).values)[0])
+
+
 sweeps = [
     ('Temperature (°C)', np.linspace(0, 30, 31), TEMPERATURE, 'r',
-     lambda v: francois_garrison_dB_per_km(PROBE_HZ, v, SALINITY, PH, DEPTH)),
+     lambda v: alpha_fg(temperature_c=v)),
     ('Salinity (ppt)', np.linspace(0, 40, 41), SALINITY, 'b',
-     lambda v: francois_garrison_dB_per_km(PROBE_HZ, TEMPERATURE, v, PH,
-                                           DEPTH)),
+     lambda v: alpha_fg(salinity_psu=v)),
     ('pH', np.linspace(7.5, 8.5, 21), PH, 'g',
-     lambda v: francois_garrison_dB_per_km(PROBE_HZ, TEMPERATURE, SALINITY, v,
-                                           DEPTH)),
+     lambda v: alpha_fg(pH=v)),
     ('Depth (m)', np.linspace(0, 6000, 61), DEPTH, 'm',
-     lambda v: francois_garrison_dB_per_km(PROBE_HZ, TEMPERATURE, SALINITY, PH,
-                                           v)),
+     lambda v: alpha_fg(z_bar_m=v)),
 ]
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -124,14 +131,14 @@ plt.close(fig)
 
 # The sign is the thing people get wrong, so it is measured rather than
 # asserted: at 10 kHz the MgSO4 term dominates and warming REDUCES attenuation.
-warm = float(francois_garrison_dB_per_km(1e4, 20.0, SALINITY, PH, DEPTH))
-cool = float(francois_garrison_dB_per_km(1e4, 10.0, SALINITY, PH, DEPTH))
+warm = alpha_fg(temperature_c=20.0)
+cool = alpha_fg(temperature_c=10.0)
 print(f"  warming 10 → 20 °C at 10 kHz: {cool:.3f} → {warm:.3f} dB/km "
       f"({100 * (warm / cool - 1):+.0f}%, a decrease)")
 
 # ── The same number in every unit ───────────────────────────────────────────
 sound_speed = sound_speed_mackenzie()
-per_km = float(thorp_dB_per_km(PROBE_HZ))
+per_km = float(np.ravel(uacpy.absorption_thorp(PROBE_HZ).values)[0])
 print(f"  {PROBE_HZ / 1000:.0f} kHz, c={sound_speed:.1f} m/s, "
       f"λ={sound_speed / PROBE_HZ:.4f} m:")
 for unit, digits in (('dB/m', 7), ('dB/wavelength', 7), ('Nepers/m', 10)):

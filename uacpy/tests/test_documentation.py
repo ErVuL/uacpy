@@ -1748,12 +1748,12 @@ def test_c_high_factor_records_which_models_require_the_pad():
 
 
 def test_thorp_docstring_points_at_its_frequency_band():
-    """``help(thorp_dB_per_km)`` gave T/S/pH/depth at length and said nothing
+    """``help(_thorp_dB_per_km)`` gave T/S/pH/depth at length and said nothing
     about frequency, while the guide has it —
     ``docs/guide/environment.md §6 "Two things the curve does not tell you"``.
     """
-    from uacpy.core.absorption import thorp_dB_per_km
-    doc = thorp_dB_per_km.__doc__
+    from uacpy.core.absorption import _thorp_dB_per_km
+    doc = _thorp_dB_per_km.__doc__
     assert 'docs/guide/environment.md §6 "Two things the curve does not tell you"' in doc
     assert '10 Hz' in doc
 

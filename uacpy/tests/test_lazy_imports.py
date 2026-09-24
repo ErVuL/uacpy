@@ -216,17 +216,31 @@ def test_every_model_wrapper_is_reachable_from_the_top_level():
         assert getattr(uacpy, name) is concrete_model_classes()[name], name
 
 
-def test_bare_absorption_formulas_stay_off_the_top_level():
-    """Only the class wrappers (Thorp, FrancoisGarrison, ...) are re-exported
-    at the top level; the bare per-km formula functions stay addressed as
-    ``uacpy.core.absorption.*``. Runs in-process — it inspects the surface,
-    not import order."""
-    assert not hasattr(uacpy, 'thorp_dB_per_km')
-    assert not hasattr(uacpy, 'francois_garrison_dB_per_km')
-    # The class spellings and the fully-qualified functions remain available.
+def test_one_public_way_to_ask_for_an_absorption():
+    """The bare per-km formulas are PRIVATE: ``absorption_thorp`` and
+    ``absorption_francois_garrison`` answer the same question with the unit
+    as a **value** (``units='dB/km'`` / ``'dB/m'`` / ``'dB/wavelength'``)
+    rather than baked into a name, and return a carrier that can convert and
+    plot itself.
+
+    This test used to assert the opposite — that the bare formulas stayed
+    importable from ``uacpy.core.absorption``. It was written 2026-08-18,
+    five weeks before ``absorption_thorp`` existed (2026-09-23), when the
+    formula was the only way to get the number. The harmonisation added the
+    replacement and did not revisit the rule. Runs in-process — it inspects
+    the surface, not import order."""
+    import uacpy.core.absorption as absorption
+    for name in ('thorp_dB_per_km', 'francois_garrison_dB_per_km'):
+        assert not hasattr(uacpy, name), name
+        assert not hasattr(absorption, name), (
+            f"{name} is public again — absorption_* already answers it")
+    # The one public way, in each of its spellings.
     assert hasattr(uacpy, 'Thorp') and hasattr(uacpy, 'FrancoisGarrison')
-    from uacpy.core.absorption import thorp_dB_per_km          # noqa: F401
-    from uacpy.core.absorption import francois_garrison_dB_per_km  # noqa: F401
+    assert hasattr(uacpy, 'absorption_thorp')
+    assert hasattr(uacpy, 'absorption_francois_garrison')
+    # and the formulas still exist, under names that say they are internal
+    assert callable(absorption._thorp_dB_per_km)
+    assert callable(absorption._francois_garrison_dB_per_km)
 
 
 def test_uacpy_plot_is_an_attribute_alias_not_a_module_path():

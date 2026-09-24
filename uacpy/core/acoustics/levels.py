@@ -227,6 +227,10 @@ def sound_exposure_level(pressure, dt: float,
     the duration of a steady signal adds 3 dB here and nothing to
     :func:`spl`.
 
+    For the same energy split into standard bands and left linear (Pa²·s),
+    see :func:`~uacpy.acoustic_signal.sound_exposure`. This one is the
+    total, in dB.
+
     Parameters
     ----------
     pressure : array_like
@@ -258,7 +262,7 @@ def sound_exposure_level(pressure, dt: float,
     return power_to_dB(np.sum(p ** 2, axis=axis) * dt, ref, floor=floor)
 
 
-def transmission_loss_dB(pressure):
+def transmission_loss_dB(pressure, *, floor: float = PRESSURE_FLOOR):
     """Complex pressure → transmission loss in dB — ``-20·log10(|p|)``.
 
     The canonical conversion every uacpy result uses for a TL view
@@ -279,11 +283,16 @@ def transmission_loss_dB(pressure):
     ----------
     pressure : array_like
         Complex (or real) pressure, in whatever unit the 1 m reference is
-        expressed in.
+        expressed in. There is no ``ref``: a loss is a ratio to the 1 m
+        reference the pressure already carries, so there is nothing to
+        divide by.
+    floor : float, optional
+        Lower bound on ``|p|`` before the log, as on :func:`spl` and
+        :func:`power_to_dB`. Pass ``0.0`` for the unclamped ``+inf``.
 
     Returns
     -------
     ndarray
         Loss in dB, same shape as ``pressure``.
     """
-    return -20.0 * np.log10(np.maximum(np.abs(pressure), PRESSURE_FLOOR))
+    return -20.0 * np.log10(np.maximum(np.abs(pressure), floor))

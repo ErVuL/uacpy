@@ -374,9 +374,10 @@ CONVERTED_SITES = [
     ('core/results/field.py', '_estimate_t_start', 2),
     ('core/results/field.py', '_warn_unsolved_bins', 1),
     ('core/results/field.py', '_synthesize_time_series', 2),
-    # _taper moved to acoustic_signal/system.py with tone_phasor, which
-    # needs it and which a user can now call directly.
-    ('acoustic_signal/system.py', '_taper', 1),
+    # _taper travelled with tone_phasor: first out of core/results/field.py
+    # so a user could call the estimator, then on to estimate.py, whose
+    # question ("measure this signal") is the one those two answer.
+    ('acoustic_signal/estimate.py', '_taper', 1),
     # The perturbation and its depth-resolution notice moved out of
     # Modes into acoustics/modal.py so a user can run them on plain
     # k/psi arrays. The move added a call frame under

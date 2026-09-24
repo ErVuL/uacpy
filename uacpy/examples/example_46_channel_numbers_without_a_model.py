@@ -137,7 +137,7 @@ print(f"\nD. H -> h -> H   |ratio| {np.abs(H_back).mean() / np.abs(reference).me
       f"   max|err| {np.abs(H_back - reference).max():.2e}")
 
 # The same arrivals as a modem would see them, through its own pulse.
-taps, tap_times = pulse_shaped_taps(amplitudes, delays_s, 2000.0,
+tap_times, taps = pulse_shaped_taps(amplitudes, delays_s, 2000.0,
                                     pulse='rrc', rolloff=0.25, span=8)
 print(f"   as {taps.size} root-raised-cosine taps at 2000 Bd, "
       f"first at {tap_times[0] * 1e3:.1f} ms")

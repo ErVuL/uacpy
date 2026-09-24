@@ -24,7 +24,7 @@ import pytest
 from uacpy.core.absorption import (
     ph_to_nbs,
     Biological, BiologicalLayer, FrancoisGarrison,
-    convert_attenuation_units, francois_garrison_dB_per_km,
+    convert_attenuation_units, _francois_garrison_dB_per_km,
 )
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, MAX_ATTENUATION_DB_PER_WAVELENGTH,
@@ -173,7 +173,7 @@ def test_the_bare_formula_answers_an_out_of_domain_row_with_nan_only():
     one warning uacpy emits that is not a ``UserWarning``."""
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter('always')
-        alpha = francois_garrison_dB_per_km(
+        alpha = _francois_garrison_dB_per_km(
             1000.0, temperature=-500.0, salinity=-10.0, pH=-3.0, depth=50.0)
     assert np.isnan(alpha)
     assert record == [], [str(w.message) for w in record]
@@ -181,7 +181,7 @@ def test_the_bare_formula_answers_an_out_of_domain_row_with_nan_only():
 
 def test_an_in_domain_row_is_unchanged_by_the_errstate_guard():
     """Silencing the invalid flag must not touch the numbers."""
-    alpha = francois_garrison_dB_per_km(
+    alpha = _francois_garrison_dB_per_km(
         10_000.0, temperature=10.0, salinity=35.0, pH=8.0, depth=1000.0)
     assert 0.0 < float(alpha) < 10.0
 
@@ -381,7 +381,7 @@ class TestTheTwoAbsorptionRoutesDivergeByTheDocumentedAmount:
     def _percent_over_deck(cls, frequency, depth):
         fg = cls._fg()
         python = float(np.ravel(fg.alpha_dB_per_m(frequency, [depth]))[0]) * 1000.0
-        deck = float(francois_garrison_dB_per_km(
+        deck = float(_francois_garrison_dB_per_km(
             frequency, fg.temperature_c, fg.salinity_psu, fg.pH, fg.z_bar_m))
         return 100.0 * (python - deck) / deck
 
@@ -528,7 +528,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
     """alpha(f, z) through one door, in whichever units are asked for.
 
     Before this, the package exposed the same formula twice and the two were
-    transposes of each other: ``francois_garrison_dB_per_km`` vectorised over
+    transposes of each other: ``_francois_garrison_dB_per_km`` vectorised over
     frequency with a scalar depth, ``FrancoisGarrison.alpha_dB_per_m``
     vectorised over depth with a scalar frequency, and an array frequency into
     the second raised ``TypeError: only 0-dimensional arrays can be converted
@@ -558,7 +558,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         every cell must equal what the frequency-vectorised free function and
         the depth-vectorised method each return for that cell."""
         from uacpy.core.absorption import (absorption_francois_garrison,
-                                           francois_garrison_dB_per_km,
+                                           _francois_garrison_dB_per_km,
                                            FrancoisGarrison)
         z = np.array([0.0, 100.0, 250.0])
         grid = absorption_francois_garrison(self.F, depths=z, **self.FG).values
@@ -566,7 +566,7 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
             col = FrancoisGarrison(**self.FG).alpha_dB_per_m(f, z) * 1000.0
             np.testing.assert_allclose(grid[:, j], col, rtol=1e-12)
         for i, zz in enumerate(z):                         # row <- old function
-            row = francois_garrison_dB_per_km(
+            row = _francois_garrison_dB_per_km(
                 self.F, temperature=self.FG['temperature_c'],
                 salinity=self.FG['salinity_psu'], pH=self.FG['pH'], depth=zz)
             np.testing.assert_allclose(grid[i, :], row, rtol=1e-12)

@@ -437,7 +437,7 @@ class TestTheModalComputationsAreReachableWithoutAModes:
 
 class TestThePulseShapedTapsAreReachableWithoutArrivals:
     def test_a_single_arrival_on_a_symbol_instant_is_the_pulse_itself(self):
-        taps, times = pulse_shaped_taps([1.0], [0.0], 1000.0, pulse='rc',
+        times, taps = pulse_shaped_taps([1.0], [0.0], 1000.0, pulse='rc',
                                         rolloff=0.25, span=8)
         # A raised cosine is normalised to unit peak and samples to zero at
         # every other symbol instant, which is what Nyquist means here.
@@ -447,7 +447,7 @@ class TestThePulseShapedTapsAreReachableWithoutArrivals:
         assert np.count_nonzero(np.abs(on_instants) > 1e-6) == 1
 
     def test_the_gains_are_carried_with_their_phase(self):
-        taps, _ = pulse_shaped_taps([1j], [0.0], 1000.0, pulse='rc')
+        _, taps = pulse_shaped_taps([1j], [0.0], 1000.0, pulse='rc')
         assert np.abs(np.angle(taps[np.argmax(np.abs(taps))])
                       - np.pi / 2) < 1e-9
 
@@ -928,9 +928,9 @@ class TestTheCapabilitiesThatWereReachableOnlyThroughAModel:
         fs, fc = 20000.0, 3000.0
         t = np.arange(400) / fs
         src = np.hanning(400) * np.sin(2 * np.pi * fc * t)
-        lossless, _ = simulate_arrival_reception(
+        _, lossless = simulate_arrival_reception(
             src, [1.0, 1.0], [0.010, 0.030], fs, fc)
-        lossy, _ = simulate_arrival_reception(
+        _, lossy = simulate_arrival_reception(
             src, [1.0, 1.0], [0.010, 0.030], fs, fc,
             delays_imag_s=[0.0, -5e-5])
         # the absorbed second arrival is quieter; the first is untouched
@@ -1012,3 +1012,52 @@ class TestTheTwoFunctionLevelDuplicates:
         # printed literal
         assert _grain_size_alpha_over_f(9.5) == pytest.approx(0.060075,
                                                               abs=1e-6)
+
+
+class TestTheAxisComesFirst:
+    """Every ``(axis, data)`` pair in the package returns the axis first.
+    Both elements are real arrays of the same length, so the wrong order is
+    silent — a user writing ``t, y = ...`` gets ``y, t`` and sees nothing
+    wrong until the plot is nonsense. One order, pinned."""
+
+    def test_every_pair_returning_function_puts_the_axis_first(self):
+        import uacpy.acoustic_signal as A
+        from uacpy.comms import pulse_shaped_taps
+        fs = 8000.0
+        probes = {
+            'impulse_response': lambda: A.impulse_response(
+                [1.0, 0.5], [0.0, 0.01], fs),
+            'simulate_reception': lambda: A.simulate_reception(
+                np.ones(32), [1.0], [0.0], fs),
+            'simulate_arrival_reception': lambda: A.simulate_arrival_reception(
+                np.hanning(64) * np.sin(2 * np.pi * 1000
+                                        * np.arange(64) / fs),
+                [1.0], [0.005], fs, 1000.0),
+            'impulse_response_from_transfer_function':
+                lambda: A.impulse_response_from_transfer_function(
+                    np.ones(64, complex), np.linspace(0, 1000, 64), fs),
+            'transfer_function_from_impulse_response':
+                lambda: A.transfer_function_from_impulse_response(
+                    np.zeros(64), fs),
+            'channel_response': lambda: A.channel_response(
+                np.zeros(64) + 0j, fs),
+            'pulse_shaped_taps': lambda: pulse_shaped_taps(
+                [1.0], [0.0], 1000.0),
+        }
+        for name, call in probes.items():
+            first, _second = call()
+            first = np.asarray(first).ravel()
+            assert np.isrealobj(first), name
+            assert np.all(np.diff(first) > 0), f"{name}: first is not an axis"
+
+    def test_the_bellhop_wrapper_keeps_its_own_historical_order(self):
+        """``delayandsum`` predates the rule and returns (signal, time);
+        it swaps on the way out rather than changing under its callers."""
+        from uacpy.models.bellhop import delayandsum
+        fs = 20000.0
+        rec = {'n_arrivals': 1, 'amplitudes': np.array([1.0]),
+               'delays': np.array([0.01]), 'delays_imag': np.array([0.0]),
+               'phases': np.array([0.0])}
+        sig, t = delayandsum(rec, np.ones(64), fs, 3000.0)
+        assert np.all(np.diff(t) > 0)          # the SECOND one is the axis
+        assert not np.all(np.diff(sig) > 0)

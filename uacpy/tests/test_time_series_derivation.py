@@ -808,7 +808,7 @@ class TestSourceSpectrumAtArbitraryFrequencies:
         )).sum(1) / fs
 
     def test_matches_rfft_on_the_native_grid(self):
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         wf, fs = self._wf()
         grid = np.fft.rfftfreq(wf.size, 1.0 / fs)
@@ -818,7 +818,7 @@ class TestSourceSpectrumAtArbitraryFrequencies:
 
     @pytest.mark.parametrize('shift', [0.5, 0.25])
     def test_exact_on_a_half_bin_offset_grid(self, shift):
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         wf, fs = self._wf()
         native = np.fft.rfftfreq(wf.size, 1.0 / fs)
@@ -828,7 +828,7 @@ class TestSourceSpectrumAtArbitraryFrequencies:
             rtol=1e-9, atol=1e-12)
 
     def test_exact_on_a_finer_grid(self):
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         wf, fs = self._wf()
         grid = np.fft.rfftfreq(4 * wf.size, 1.0 / fs)
@@ -838,14 +838,14 @@ class TestSourceSpectrumAtArbitraryFrequencies:
             rtol=1e-9, atol=1e-12)
 
     def test_out_of_band_frequencies_are_zero(self):
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         wf, fs = self._wf()
         out = _source_spectrum_at(wf, fs, np.array([-10.0, fs, 2 * fs]))
         assert np.all(out == 0)
 
     def test_chunking_does_not_change_the_result(self):
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         wf, fs = self._wf()
         grid = np.linspace(10.0, 900.0, 137)
@@ -920,7 +920,7 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
     @pytest.mark.parametrize('label,n_wf,fs,grid', CASES,
                              ids=[c[0] for c in CASES])
     def test_it_matches_the_outer_product(self, label, n_wf, fs, grid):
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         wf = self._waveform(n_wf)
         ref = _outer_product_dtft(wf, fs, grid)
@@ -931,14 +931,14 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
         np.testing.assert_array_equal(got == 0, ref == 0)
 
     def test_an_all_zero_waveform_returns_exact_zeros(self):
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         got = _source_spectrum_at(np.zeros(64), 1000.0,
                                   np.linspace(0.0, 400.0, 11))
         assert np.array_equal(got, np.zeros(11, dtype=np.complex128))
 
     def test_a_non_uniform_grid_keeps_the_dense_sum(self):
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             _chirp_step, waveform_spectrum_at as _source_spectrum_at)
         wf, fs = self._waveform(256), 2000.0
         grid = np.geomspace(20.0, 900.0, 64)          # ascending, not uniform
@@ -952,7 +952,7 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
         # builds one now — so the block arithmetic is exercised on a grid the
         # contour cannot serve rather than on the uniform one above, where
         # both calls would take the chirp-z route and agree vacuously.
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         wf, fs = self._waveform(256), 2000.0
         grid = np.geomspace(20.0, 900.0, 137)
@@ -976,7 +976,7 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
         # The contour has to LAND on the frequencies, not merely resemble
         # them: a drift that a spacing-ratio test would wave through is a
         # phase error growing with waveform length.
-        from uacpy.acoustic_signal.system import _chirp_step
+        from uacpy.acoustic_signal.estimate import _chirp_step
         grid = np.linspace(100.0, 900.0, 401)
         grid[200] += 1e-4                       # 1e-7 of the span
         assert _chirp_step(grid, 4096, 8000.0) is None
@@ -986,7 +986,7 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
     def test_the_synthesised_trace_matches_the_dense_sum(self, monkeypatch):
         # End to end through the public entry point, against the same Field
         # synthesised with the dense sum forced back in.
-        import uacpy.acoustic_signal.system as S
+        import uacpy.acoustic_signal.estimate as S
         from uacpy.core.results import Field, PhaseReference
         rng = np.random.default_rng(4)
         freqs = np.linspace(50.0, 2000.0, 256)
@@ -1037,7 +1037,7 @@ class TestSynthesisChecksTheFrequencyAxisBeforeUsingIt:
             self, monkeypatch):
         # The deferred import resolves the attribute at CALL time, so
         # the patch sits on the module that now owns the function.
-        import uacpy.acoustic_signal.system as S
+        import uacpy.acoustic_signal.estimate as S
         monkeypatch.setattr(S, 'waveform_spectrum_at', _never_called)
         tf = self._tf([100.0, 110.0, 130.0, 140.0])
         with pytest.raises(ConfigurationError, match='uniformly spaced'):
@@ -1047,7 +1047,7 @@ class TestSynthesisChecksTheFrequencyAxisBeforeUsingIt:
     def test_a_descending_axis_is_refused_the_same_way(self, monkeypatch):
         # The deferred import resolves the attribute at CALL time, so
         # the patch sits on the module that now owns the function.
-        import uacpy.acoustic_signal.system as S
+        import uacpy.acoustic_signal.estimate as S
         monkeypatch.setattr(S, 'waveform_spectrum_at', _never_called)
         with pytest.raises(ConfigurationError, match='uniformly spaced'):
             self._tf([300.0, 200.0, 100.0]).synthesize_time_series(
@@ -1412,7 +1412,7 @@ class TestBatchedSynthesisMatchesPerCellTraces:
     def test_grid_equals_per_cell_traces(self):
         from uacpy.core.results import Field, PhaseReference
         from uacpy.core.results.field import _ifft_to_trace
-        from uacpy.acoustic_signal.system import (
+        from uacpy.acoustic_signal.estimate import (
             waveform_spectrum_at as _source_spectrum_at)
         rng = np.random.default_rng(2)
         freqs = np.arange(40.0, 40.0 + 2.0 * 32, 2.0)

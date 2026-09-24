@@ -22,7 +22,7 @@ Concrete subclasses
 
 Module-level numerics
 ---------------------
-:func:`thorp_dB_per_km`, :func:`francois_garrison_dB_per_km`
+:func:`_thorp_dB_per_km`, :func:`_francois_garrison_dB_per_km`
     Bare formulas returning ``α(f)`` in dB/km. Useful for plotting
     attenuation curves without constructing an :class:`Absorption`.
 :func:`convert_attenuation_units`
@@ -56,8 +56,14 @@ _ArrayLike = Union[float, np.ndarray]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def thorp_dB_per_km(frequency: _ArrayLike) -> np.ndarray:
+def _thorp_dB_per_km(frequency: _ArrayLike) -> np.ndarray:
     """Thorp seawater volume attenuation in dB/km.
+
+    Private: :func:`absorption_thorp` answers the same question with the
+    unit as a **value** (``units='dB/km'`` / ``'dB/m'`` /
+    ``'dB/wavelength'``) instead of baked into the name, and returns a
+    carrier that can plot and convert itself. This is the formula it and
+    :class:`Thorp` are written on; it is not a second way to ask.
 
     Uses the JKPS Eq. (1.47) coefficients, which match the AT
     ``AttenMod.f90:93`` formula used internally by the Acoustics-Toolbox
@@ -175,7 +181,7 @@ def ph_to_nbs(pH, scale, *, temperature_c, salinity_psu):
     return float(out) if np.ndim(out) == 0 else out
 
 
-def francois_garrison_dB_per_km(
+def _francois_garrison_dB_per_km(
     frequency: _ArrayLike,
     temperature: _ArrayLike = 10.0,
     salinity: _ArrayLike = 35.0,
@@ -734,7 +740,7 @@ class Thorp(Absorption):
         frequency: float,
         depths: _ArrayLike,
     ) -> np.ndarray:
-        a = float(thorp_dB_per_km(float(frequency))) / 1000.0
+        a = float(_thorp_dB_per_km(float(frequency))) / 1000.0
         z = np.atleast_1d(np.asarray(depths, dtype=float))
         return np.full(z.shape, a)
 
@@ -766,7 +772,7 @@ class FrancoisGarrison(Absorption):
     Notes
     -----
     The four fields are *refused* only where the formula itself has no
-    value there (see :func:`francois_garrison_dB_per_km`): the
+    value there (see :func:`_francois_garrison_dB_per_km`): the
     boric-acid relaxation takes ``sqrt(S/35)``, its temperature factor
     is ``10**(4 - 1245/(T + 273))``, and all three mechanisms divide by
     the sound speed ``c = 1412 + 3.21·T + 1.19·S + 0.0167·z``. Neither
@@ -942,7 +948,7 @@ class FrancoisGarrison(Absorption):
                 f"loss the equation omits can exceed the boric-acid term.",
                 UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
         z = np.atleast_1d(np.asarray(depths, dtype=float))
-        a_km = francois_garrison_dB_per_km(
+        a_km = _francois_garrison_dB_per_km(
             frequency=float(frequency),
             temperature=self.temperature_c,
             salinity=self.salinity_psu,

@@ -12,7 +12,7 @@ an assessment turns on.
 
 Uses: sound_speed_unesco · decidecade_bands · nominal_source_depth ·
 radiated_noise_level · monopole_source_level · apply_weighting ·
-thorp_dB_per_km · plot_source_level · plot_weighting
+absorption_thorp · plot_source_level · plot_weighting
 """
 
 import os
@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.core.absorption import thorp_dB_per_km
 from uacpy.core.acoustics import sound_speed_unesco
 from uacpy.acoustic_signal.estimate import decidecade_bands
 from uacpy.noise import (apply_weighting, monopole_source_level,
@@ -53,7 +52,10 @@ print(f"  draught {draught} m → source depth {source_depth} m; peak MSL "
 
 # Out to 2 km: spherical spreading plus Thorp volume absorption.
 range_m = 2000.0
-tl = 20 * np.log10(range_m) + thorp_dB_per_km(band_centres) * (range_m / 1000)
+# units='dB/m' rather than dB/km divided by 1000: the conversion is a
+# value the library applies, not arithmetic to get right here.
+alpha = uacpy.absorption_thorp(band_centres, units='dB/m').values
+tl = 20 * np.log10(range_m) + np.ravel(alpha) * range_m
 received = monopole - tl
 print(f"  received level at {range_m / 1000:.0f} km: "
       f"{received.max():.1f} dB re 1 µPa (band peak)")

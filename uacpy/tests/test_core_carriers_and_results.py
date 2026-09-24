@@ -247,26 +247,26 @@ class TestAbsorptionFormulaOutputShapes:
 
     def test_one_element_array_stays_indexable(self):
         from uacpy.core.absorption import (
-            thorp_dB_per_km, francois_garrison_dB_per_km,
+            _thorp_dB_per_km, _francois_garrison_dB_per_km,
             convert_attenuation_units)
-        assert thorp_dB_per_km(np.array([100.0])).shape == (1,)
-        assert float(thorp_dB_per_km(np.array([100.0]))[0]) > 0
-        assert francois_garrison_dB_per_km(np.array([100.0])).shape == (1,)
+        assert _thorp_dB_per_km(np.array([100.0])).shape == (1,)
+        assert float(_thorp_dB_per_km(np.array([100.0]))[0]) > 0
+        assert _francois_garrison_dB_per_km(np.array([100.0])).shape == (1,)
         assert convert_attenuation_units(
             np.array([1.0]), 100.0, 'dB/km', 'dB/m').shape == (1,)
 
     def test_scalar_input_yields_0d(self):
         from uacpy.core.absorption import (
-            thorp_dB_per_km, francois_garrison_dB_per_km,
+            _thorp_dB_per_km, _francois_garrison_dB_per_km,
             convert_attenuation_units)
-        assert np.ndim(thorp_dB_per_km(100.0)) == 0
-        assert np.ndim(francois_garrison_dB_per_km(100.0)) == 0
+        assert np.ndim(_thorp_dB_per_km(100.0)) == 0
+        assert np.ndim(_francois_garrison_dB_per_km(100.0)) == 0
         assert np.ndim(
             convert_attenuation_units(1.0, 100.0, 'dB/km', 'dB/m')) == 0
 
     def test_n_element_array_keeps_shape(self):
-        from uacpy.core.absorption import thorp_dB_per_km
-        assert thorp_dB_per_km(np.array([100.0, 200.0, 300.0])).shape == (3,)
+        from uacpy.core.absorption import _thorp_dB_per_km
+        assert _thorp_dB_per_km(np.array([100.0, 200.0, 300.0])).shape == (3,)
 
 
 class TestConvertAttenuationUnitsFromQ:

@@ -492,6 +492,9 @@ class Modes(Result):
         run rather than from ``Im(k)`` of the ``.mod`` file. To get the
         perturbed TL from ``field.exe``, attach an :class:`Absorption`
         to the :class:`Environment` and run :class:`Kraken`.
+
+    On plain ``k`` / ``psi`` arrays this is
+    :func:`~uacpy.core.acoustics.modal_attenuation`.
         """
         # The whole perturbation — the integrals, the seabed tail, the
         # trapped/leaky split and its three warnings — is
@@ -587,6 +590,10 @@ class Modes(Result):
           because a finer grid samples closer to the bottom of the
           cancellation. Read it as "the deepest nulls are worth about a dB and
           their floor is not determined", not as a number.
+
+    On plain arrays the sum itself is
+    :func:`~uacpy.core.acoustics.modal_field`, which takes the mode
+    shapes already evaluated at the source and receiver depths.
         """
         if self.n_modes == 0:
             raise ConfigurationError(

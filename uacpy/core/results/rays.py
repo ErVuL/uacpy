@@ -546,6 +546,9 @@ class Arrivals(Result):
         structure far finer than the band. The constant relating the two is a
         correlation-threshold convention rather than a law, so it is left to
         the caller to state.
+
+    On a power delay profile from anywhere else this is
+    :func:`~uacpy.acoustic_signal.rms_delay_spread(delays, powers)`.
         """
         # Deferred: acoustic_signal pulls scipy, and uacpy's public
         # surface is imported without it (test_lazy_imports).
@@ -577,6 +580,9 @@ class Arrivals(Result):
             Seconds. ``0.0`` for a single arrival and for arrivals carrying
             no energy at all; ``nan`` if a delay or amplitude is non-finite,
             rather than a span computed from whatever else was finite.
+
+    On a power delay profile from anywhere else this is
+    :func:`~uacpy.acoustic_signal.energy_support`.
         """
         # Deferred: acoustic_signal pulls scipy, and uacpy's public
         # surface is imported without it (test_lazy_imports).
@@ -908,6 +914,9 @@ class Arrivals(Result):
         ConfigurationError
             An empty, non-finite or non-positive grid; several cells without
             ``receiver=``; a cell nothing reaches.
+
+    On a plain arrival list this is
+    :func:`~uacpy.acoustic_signal.arrival_transfer_function`.
         """
         who = "Arrivals.transfer_function"
         freqs = np.atleast_1d(np.asarray(frequencies, dtype=float)).ravel()
@@ -1088,6 +1097,10 @@ class Arrivals(Result):
         Proakis, J. G., *Digital Communications*, 4th ed., sect. 14.5 —
         the discrete-time model of a frequency-selective channel as taps
         at the symbol (or fractional-symbol) spacing.
+
+    The pulse-shaped placement on plain arrays is
+    :func:`~uacpy.comms.pulse_shaped_taps`; ``pulse='nearest'`` is
+    :func:`~uacpy.comms.multipath_channel`.
         """
         who = "Arrivals.channel_taps"
         symbol_rate = float(symbol_rate)
@@ -1129,7 +1142,7 @@ class Arrivals(Result):
         else:
             # The placement is pulse_shaped_taps'; what this branch adds
             # is the carrier rotation and absorption already in `gains`.
-            taps, times = pulse_shaped_taps(
+            times, taps = pulse_shaped_taps(
                 gains, rel, symbol_rate, pulse=pulse, rolloff=rolloff,
                 sps=sps, span=span, who=who)
         if normalize:
@@ -1175,6 +1188,9 @@ class Arrivals(Result):
             Which ``k`` to use. Default ``'inverse_spread'``.
         factor : float, optional
             Explicit ``k > 0``; overrides ``convention``.
+
+    On a power delay profile from anywhere else this is
+    :func:`~uacpy.acoustic_signal.coherence_bandwidth`.
         """
         # Deferred: acoustic_signal pulls scipy, and uacpy's public
         # surface is imported without it (test_lazy_imports).
@@ -1209,6 +1225,9 @@ class Arrivals(Result):
         rolloff : float, default 0.0
             Excess bandwidth of the pulse; ``0`` takes the Nyquist bandwidth
             equal to the symbol rate.
+
+    On a power delay profile from anywhere else this is
+    :func:`~uacpy.acoustic_signal.channel_regime`.
         """
         # Deferred: acoustic_signal pulls scipy, and uacpy's public
         # surface is imported without it (test_lazy_imports).

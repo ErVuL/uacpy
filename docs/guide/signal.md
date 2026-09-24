@@ -429,6 +429,38 @@ grid is too coarse at the bottom of the band set — raise `nperseg`.
 
 ---
 
+### 3.1 One tone, and a spectrum where you ask for it
+
+| Call | Returns | Use |
+|---|---|---|
+| `tone_phasor(x, times, frequency, *, window='hann', axis=-1)` | complex | amplitude and phase of **one** tone in a record |
+| `waveform_spectrum_at(waveform, sample_rate, frequencies)` | `S(f)` | the **whole** spectrum, at whatever frequencies you ask for |
+
+
+`tone_phasor` evaluates the transform **at** the frequency rather than
+sampling the nearest DFT bin. Off a bin, `X[k]` is a leakage sample of the
+window transform — neither the phasor at your frequency nor the one at
+`freqs[k]` — and a record picks its own `nt` and `fs`, so the frequency of
+interest is essentially never on a bin:
+
+| offset from the bin | level error | phase error |
+|---|---|---|
+| 0.10 bin | −0.06 dB | 18° |
+| 0.30 bin | −0.51 dB | 54° |
+| 0.50 bin | −1.42 dB | **90°** |
+
+**The phase reaches 90° before the level has moved 1.5 dB**, which is why a
+level check alone does not find this. `Field.extract_tone` and `uacpy.io.rts_to_pressure` both call it, so the two public routes to "the
+tone in this record" now agree to 1e-15 instead of disagreeing by the table
+above.
+
+One place still takes the nearest bin on purpose: `rts_to_pressure`'s
+`pulse_type=` deconvolution branch, which is a **ratio** at the same bin on
+both sides, so the leakage divides out — measured flat at 1e-15 dB across a
+whole bin.
+
+---
+
 ## 4. Time-frequency
 
 | Call | Returns | Invertible? |
@@ -722,10 +754,8 @@ wants. Decide up front whether you are estimating power or filtering.
 | `channel_regime(delays_s, powers, symbol_rate, *, rolloff=0)` | `ChannelRegime` | flat or frequency-selective at that symbol rate |
 | `coherence_factor(convention, factor=None)` | `k` | the `k` those two read, from `COHERENCE_BANDWIDTH_FACTORS` |
 | `uniform_frequency_step(frequencies)` | Hz | the `df` of a uniform ascending grid, or a refusal — what every `H(f)` → time route asks first |
-| `tone_phasor(x, times, frequency, *, window='hann', axis=-1)` | complex | amplitude and phase of one tone, evaluated **at** the frequency |
-| `waveform_spectrum_at(waveform, sample_rate, frequencies)` | `S(f)` | the same, for a whole set of frequencies — the vector counterpart of `tone_phasor` |
 | `simulate_arrival_reception(transmit, amplitudes, delays_s, sample_rate, fc, *, delays_imag_s=None, phases_rad=None, …)` | `(received, t)` | a reception from a sparse arrival list **with** the carrier rotation and the `exp(ω·Im τ)` volume absorption |
-| `pulse_shaped_taps(gains, delays_s, symbol_rate, *, pulse='rc', rolloff, sps, span)` | `(taps, times)` | arrivals laid down through the modem's own pulse (`uacpy.comms`) |
+| `pulse_shaped_taps(gains, delays_s, symbol_rate, *, pulse='rc', rolloff, sps, span)` | `(times, taps)` | arrivals laid down through the modem's own pulse (`uacpy.comms`) |
 | `fractional_delay_taps(frac, half_len=8, beta=8.0)` | `2·half_len` taps | the sub-sample kernel `impulse_response` places arrivals with (`simulate_reception` through it) |
 
 `fractional=True` places each arrival with a windowed-sinc fractional-delay
@@ -833,31 +863,6 @@ without it the list is lossless. And an amplitude there is a **magnitude** —
 its sign belongs in `phases_rad` as π. Passing a negative amplitude is
 refused, because the package once had two implementations of this sum that
 disagreed on exactly that input by up to 10.7 dB per bin, in silence.
-
-### 6.0b One tone out of a record
-
-`tone_phasor` evaluates the transform **at** the frequency rather than
-sampling the nearest DFT bin. Off a bin, `X[k]` is a leakage sample of the
-window transform — neither the phasor at your frequency nor the one at
-`freqs[k]` — and a record picks its own `nt` and `fs`, so the frequency of
-interest is essentially never on a bin:
-
-| offset from the bin | level error | phase error |
-|---|---|---|
-| 0.10 bin | −0.06 dB | 18° |
-| 0.30 bin | −0.51 dB | 54° |
-| 0.50 bin | −1.42 dB | **90°** |
-
-**The phase reaches 90° before the level has moved 1.5 dB**, which is why a
-level check alone does not find this. `Field.extract_tone` and
-`uacpy.io.rts_to_pressure` both call it, so the two public routes to "the
-tone in this record" now agree to 1e-15 instead of disagreeing by the table
-above.
-
-One place still takes the nearest bin on purpose: `rts_to_pressure`'s
-`pulse_type=` deconvolution branch, which is a **ratio** at the same bin on
-both sides, so the leakage divides out — measured flat at 1e-15 dB across a
-whole bin.
 
 ### 6.1 Going back: `h` → `H`
 

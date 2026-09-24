@@ -118,6 +118,7 @@ def _hankel_transform(
     atten: float,
     source_type: str = 'R',
     spectrum: str = 'P',
+    who: str = "hankel_transform",
 ) -> np.ndarray:
     """Wavenumber → range transform for one (source_depth, frequency) slab.
 
@@ -155,9 +156,12 @@ def _hankel_transform(
     """
     if source_type not in ('R', 'X', 'S'):
         raise ConfigurationError(
-            f"source_type must be 'R', 'X', or 'S', got {source_type!r}")
+            f"{who}: source_type must be 'R', 'X', or 'S', got "
+            f"{source_type!r}")
     if spectrum not in ('P', 'N', 'B'):
-        raise ConfigurationError(f"spectrum must be 'P', 'N', or 'B', got {spectrum!r}")
+        raise ConfigurationError(
+            f"{who}: spectrum must be 'P', 'N', or 'B', got "
+            f"{spectrum!r}")
 
     dk = float(k[1] - k[0]) if len(k) > 1 else 1.0
     # fieldsco.m:109-111's own guard: the uniform-dk DFT is periodic in range
@@ -171,7 +175,7 @@ def _hankel_transform(
     # the wrapped tail unusable rather than the wrap itself.
     if r_max * dk > 10.0:
         raise ConfigurationError(
-            f"Hankel transform: max range {r_max:g} m x wavenumber step "
+            f"{who}: max range {r_max:g} m x wavenumber step "
             f"dk = {dk:g} 1/m = {r_max * dk:.3g} > 10 — the range axis "
             f"extends past the transform's alias period 2*pi/dk = "
             f"{alias_period(dk):g} m (fieldsco.m:109-111 stops here too).",

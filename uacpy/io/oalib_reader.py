@@ -2084,7 +2084,7 @@ def rts_to_pressure(
         # Imported here rather than at module level: sparc_pulse pulls scipy
         # in, and only this deconvolution path needs it.
         from uacpy.acoustic_signal.generate import sparc_pulse
-        from uacpy.acoustic_signal.system import tone_phasor
+        from uacpy.acoustic_signal.estimate import tone_phasor
         t = np.asarray(rts_data["time"], dtype=float)
         s_t, _ = sparc_pulse(t, 2.0 * np.pi * frequency, pulse_type[0])
         # Both sides evaluated AT ``frequency``, with NO taper: the
@@ -2124,7 +2124,7 @@ def rts_to_pressure(
         # frequency is essentially never on a bin.
         # Deferred: acoustic_signal pulls scipy, and uacpy's public
         # surface is imported without it (test_lazy_imports).
-        from uacpy.acoustic_signal.system import tone_phasor
+        from uacpy.acoustic_signal.estimate import tone_phasor
         p_at_freq = tone_phasor(p, np.arange(nt) * dt, frequency,
                                 window='hann', axis=0,
                                 who="rts_to_pressure")

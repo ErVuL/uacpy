@@ -595,9 +595,12 @@ def plot_psd(frequencies, psd_linear=None, ax=None, *,
              ref=REFERENCE_PRESSURE_WATER, scaling=None, label=None, ymin=0,
              ymax=150, title=None, figsize=(10, 6), freq_scale="log",
              **mpl_kw):
-    """Line plot of a Welch estimate (dB). Consumes
+    """Line plot of a power spectral density (dB). Consumes
     :func:`uacpy.acoustic_signal.welch` or
     :func:`uacpy.acoustic_signal.constant_q` output.
+
+    Named for the quantity, not the estimator that produced it — it draws
+    either, and a third estimator would need no new plotter.
 
     Handed the result itself — ``plot_psd(welch(x, fs, scaling='spectrum'))`` — the axis
     follows the estimator: Pa² and "Power spectrum" for band power, Pa²/Hz and

@@ -120,11 +120,14 @@ def delayandsum(
         delays = rcv_arrivals['delays']
         imag = rcv_arrivals['delays_imag']
         phases = rcv_arrivals['phases']
-    return simulate_arrival_reception(
+    # This function's own contract is (signal, time); the shared one puts
+    # the axis first, as the rest of the package does.
+    times, rts = simulate_arrival_reception(
         source_timeseries, amps, delays, sample_rate, fc,
         delays_imag_s=imag, phases_rad=phases, time_window=time_window,
         t_start=t_start, phase_offset=phase_offset, fractional=fractional,
         report=report)
+    return rts, times
 
 
 #: uacpy run mode -> Bellhop ``RunType(1:1)``. The letters are the manual's

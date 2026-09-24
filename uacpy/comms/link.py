@@ -138,8 +138,10 @@ def pulse_shaped_taps(gains, delays_s, symbol_rate, *, pulse='rc',
     Returns
     -------
     (ndarray, ndarray)
-        ``(taps, times_s)`` — the complex taps and the time of each,
-        which starts at ``-span/(2*symbol_rate)`` by construction.
+        ``(times_s, taps)`` — the time of each tap and the complex tap,
+        in that order, as every other ``(axis, data)`` pair in the
+        package returns. ``times_s`` starts at ``-span/(2*symbol_rate)``
+        by construction.
     """
     gains = np.asarray(gains)
     rel = np.asarray(delays_s, dtype=float).ravel()
@@ -183,7 +185,7 @@ def pulse_shaped_taps(gains, delays_s, symbol_rate, *, pulse='rc',
         # the 1e-9 keeps rounding from dropping an end tap.
         g[np.abs(arg) > span / 2.0 + 1e-9] = 0.0
         taps += gain * g / norm
-    return taps, times
+    return times, taps
 
 
 def multipath_channel(gains, delays_s, sample_rate, *, fractional=False):

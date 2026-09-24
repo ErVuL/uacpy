@@ -15,6 +15,15 @@ constant-Q transform is how :func:`constant_q` resolves frequency, and
 :func:`sound_exposure` is written on the same ladder
 :func:`decidecade_bands` defines. Keeping them apart meant each side
 importing the other.
+
+Two narrower measurements sit alongside them: :func:`tone_phasor` returns
+the amplitude and phase of ONE tone in a record, and
+:func:`waveform_spectrum_at` returns a whole spectrum at whatever
+frequencies you ask for. Both evaluate the transform **at** the frequency
+rather than sampling the nearest DFT bin, which is what makes them exact
+off the record's own grid — and they moved here from
+:mod:`uacpy.acoustic_signal.system`, whose question they were never
+answering.
 """
 
 from __future__ import annotations
@@ -22,6 +31,7 @@ from __future__ import annotations
 import math
 import warnings
 from collections import namedtuple
+from typing import Optional
 import numpy as np
 import scipy.signal as _sig
 from scipy.signal import get_window
@@ -2567,3 +2577,221 @@ def spectrogram(data, sample_rate, *, window="hann", nperseg=8192,
                                  nperseg=nperseg, noverlap=noverlap, nfft=nfft,
                                  scaling=scaling, mode=mode)
     return SpectrogramResult(f, t, Sxx)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# One tone, and a spectrum where you ask for it
+#
+# The edge taper every estimator below shares, the phasor of a single
+# tone in a record, and a whole spectrum evaluated AT the frequencies
+# asked for rather than at DFT bins. The last two moved here from
+# system.py: they answer this module's question — measure this signal —
+# not that one's.
+# ──────────────────────────────────────────────────────────────────────
+
+
+# Fewest frequency bins a band-edge taper can act on and still leave an
+# interior. numpy's hann/hamming/blackman are symmetric with (near-)zero
+# endpoints, so at 2 bins the window is [0, 0] and at 3 it is [0, 1, 0] — a
+# taper there does not soften the edges, it deletes the band.
+_MIN_TAPERABLE_BINS = 4
+
+_WINDOWS = ('hann', 'hamming', 'blackman', 'tukey', 'none')
+
+
+def _taper(name: str, n: int, *, who: str) -> np.ndarray:
+    """Edge taper of ``n`` samples, shared by the tone extractor and the IFFT.
+
+    Returns a flat window for ``'none'`` and for a span too short to keep an
+    interior (warning in the latter case).
+
+    The two callers sit at different depths — the tone extractor is one frame
+    below its public method, the synthesis planner three — so the warning
+    below carries no frame count of its own: a count passed in by the caller
+    can only be right for one of the two depths, and points at this helper's
+    own frame from the other."""
+    if name not in _WINDOWS:
+        raise ConfigurationError(
+            f"{who}: unknown window={name!r}; "
+            f"valid: {', '.join(repr(w) for w in _WINDOWS)}"
+        )
+    if name == 'none':
+        return np.ones(n)
+    if n < _MIN_TAPERABLE_BINS:
+        warnings.warn(
+            f"{who}: a {n}-sample span is too narrow to taper (a {name!r} "
+            f"window needs at least {_MIN_TAPERABLE_BINS} samples to leave an "
+            f"interior); continuing untapered. Widen the span for a resolved "
+            f"result.",
+            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+        return np.ones(n)
+    if name == 'hann':
+        return np.hanning(n)
+    if name == 'hamming':
+        return np.hamming(n)
+    if name == 'blackman':
+        return np.blackman(n)
+    from scipy.signal import windows
+    return windows.tukey(n, alpha=0.5)
+
+
+def tone_phasor(x, times, frequency, *, window: str = 'hann',
+                axis: int = -1, who: str = "tone_phasor"):
+    """Complex amplitude and phase of one tone in a record.
+
+    .. math::
+        A = \\frac{2}{\\sum w}\\sum_n x_n w_n e^{-2\\pi i f t_n}
+
+    The transform is evaluated **at** ``frequency``, not sampled at the
+    nearest DFT bin. Off a bin, ``X[k]`` is a leakage sample of the window
+    transform — neither the phasor at ``frequency`` nor the one at
+    ``freqs[k]``. A model-produced trace picks its own ``nt`` and ``fs``,
+    so the frequency of interest is essentially never on a bin, and the
+    nearest-bin answer is wrong by a growing amount across the bin:
+    measured against this sum, ``-0.056 dB`` and ``18°`` at a tenth of a
+    bin, ``-1.418 dB`` and ``89.8°`` at half of one. **The phase reaches
+    90° before the level has moved 1.5 dB**, which is why a level check
+    alone does not find it. On a bin the two agree to ~1e-15, differing
+    only in summation order.
+
+    The ``2·X/Σw`` estimator assumes a real record and a non-DC,
+    non-Nyquist tone: the 2 restores the half of the energy sitting in the
+    negative-frequency image, and ``Σw`` undoes both the transform's
+    ``1/N`` and the taper's amplitude loss.
+
+    Parameters
+    ----------
+    x : array_like
+        The record. ``axis`` is time; every other axis is carried through.
+    times : array_like
+        Time of each sample (s), one per sample along ``axis``. Passed
+        rather than derived, so a record that does not start at zero
+        carries its own offset into the phase.
+    frequency : float
+        The tone (Hz).
+    window : {'hann', 'hamming', 'blackman', 'tukey', 'none'}
+        Edge taper. ``'none'`` is the rectangular sum.
+    axis : int, default -1
+        Time axis.
+    who : str, optional
+        Name to put in the refusals, for a method that delegates here.
+
+    Returns
+    -------
+    ndarray or complex
+        The phasor, with ``axis`` removed.
+    """
+    data = np.asarray(x)
+    t = np.asarray(times, dtype=float).ravel()
+    if data.ndim == 0:
+        raise ConfigurationError(f"{who}: x must have a time axis.")
+    try:
+        requested = int(axis)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{who}: axis must be an integer; got {axis!r}.") from exc
+    if not -data.ndim <= requested < data.ndim:
+        raise ConfigurationError(
+            f"{who}: axis={requested} is not an axis of an array with "
+            f"shape {data.shape}.")
+    axis = requested % data.ndim
+    if t.size != data.shape[axis]:
+        raise ConfigurationError(
+            f"{who}: times has {t.size} samples but axis {axis} of x has "
+            f"{data.shape[axis]}.")
+    frequency = float(frequency)
+    if not np.isfinite(frequency):
+        raise ConfigurationError(
+            f"{who}: frequency must be finite (Hz); got {frequency!r}.")
+    win = _taper(window, t.size, who=who)
+    shape = [1] * data.ndim
+    shape[axis] = t.size
+    kernel = (win * np.exp(-2j * np.pi * frequency * t)).reshape(shape)
+    return 2.0 * np.sum(data * kernel, axis=axis) / np.sum(win)
+
+
+def _chirp_step(freqs: np.ndarray, n: int, fs: float) -> Optional[float]:
+    """The step of a uniform ascending ``freqs``, or ``None`` if it has none.
+
+    "Uniform enough" is not a matter of taste here. The chirp-z transform walks
+    the contour ``f[0] + k*df``, so what has to hold is that the walk LANDS on
+    the frequencies asked for: a landing error of ``eps`` Hz costs at most
+    ``2*pi*eps*n/fs`` radians of phase in the DTFT below, which the bound here
+    holds under 1e-9 rad — two decades inside the transform's own agreement
+    with the dense sum. Fewer than 2 in-band frequencies has no step to find
+    (and the dense sum is one row there anyway).
+    """
+    m = freqs.size
+    if m < 2:
+        return None
+    df = float(freqs[-1] - freqs[0]) / (m - 1)
+    if not (df > 0.0):
+        return None
+    drift = float(np.max(np.abs(freqs[0] + df * np.arange(m) - freqs)))
+    return df if drift * max(n, 1) <= 1e-10 * fs else None
+
+
+def waveform_spectrum_at(
+    waveform: np.ndarray, sample_rate: float, freqs: np.ndarray,
+    *, _max_elems: int = 4_000_000,
+) -> np.ndarray:
+    """Spectrum ``S(f)`` of a sampled waveform, at arbitrary frequencies.
+
+    The vector counterpart of :func:`tone_phasor`: that one gives the
+    phasor of a single tone in a record, this one gives the waveform's own
+    spectrum wherever you ask for it. Both evaluate the transform AT the
+    frequency rather than sampling a DFT bin.
+
+    Evaluates the DTFT of the sampled waveform directly::
+
+        S(f) = (1/fs) * sum_n w[n] exp(-2 pi i f n / fs)
+
+    which reproduces ``rfft(w)/fs`` exactly on the waveform's own DFT grid and
+    stays exact off it. Interpolating the rfft samples instead is only correct
+    when the two grids coincide: linear interpolation is a convolution with a
+    triangular kernel in frequency, i.e. a ``sinc^2(pi df_src t)`` taper
+    anchored at ``t = 0`` plus periodisation at ``1/df_src`` in time. On a
+    half-bin-offset grid that is a >100% median error in ``S(f)``.
+
+    Frequencies outside ``[0, fs/2]`` return 0 — a band-limited source carries
+    no out-of-band energy, and the DTFT would alias there.
+    """
+    wf = np.asarray(waveform, dtype=np.float64).ravel()
+    freqs = np.atleast_1d(np.asarray(freqs, dtype=np.float64))
+    fs = float(sample_rate)
+    n = wf.size
+
+    out = np.zeros(freqs.size, dtype=np.complex128)
+    in_band = (freqs >= 0.0) & (freqs <= 0.5 * fs)
+    if not np.any(in_band):
+        return out
+
+    sel = np.flatnonzero(in_band)
+    df = _chirp_step(freqs[sel], n, fs)
+    if df is not None:
+        # A uniform ascending run of frequencies is a chirp-z contour: with
+        # z_k = a*w**-k, a = exp(2i*pi*f[0]/fs) and w = exp(-2i*pi*df/fs),
+        # czt's sum_n x[n]*z_k**-n IS the sum below, evaluated by FFT
+        # convolution in O((n+m) log(n+m)) rather than the O(n*m) of the
+        # outer product — 2281 ms to 49 ms for 120000 frequencies against a
+        # 512-sample waveform. Imported here, like the taper windows: scipy
+        # is not needed to hold a Field, only to synthesise from one.
+        from scipy.signal import czt
+        out[sel] = czt(wf, m=sel.size,
+                       w=np.exp(-2j * np.pi * df / fs),
+                       a=np.exp(2j * np.pi * freqs[sel[0]] / fs))
+        return out / fs
+
+    # No such contour — and the contract above is ARBITRARY freqs, which a
+    # caller does use (a bare in-band/out-of-band pair, say). Evaluate the
+    # sum directly, chunked over frequency so the phase matrix stays bounded
+    # regardless of waveform length x grid size (4e6 complex128 elements
+    # ~ 64 MB per block).
+    idx = np.arange(n, dtype=np.float64)
+    step = max(1, int(_max_elems // max(n, 1)))
+    for a in range(0, sel.size, step):
+        blk = sel[a:a + step]
+        phase = np.exp(-2j * np.pi * np.outer(freqs[blk], idx) / fs)
+        out[blk] = phase @ wf
+    return out / fs
