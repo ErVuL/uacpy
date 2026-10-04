@@ -12,8 +12,9 @@ from uacpy.core.results import Field, ResultStack
 
 xr = pytest.importorskip('xarray')
 
-ENGINES = [e for e, module in (('netcdf4', 'netCDF4'), ('h5netcdf', 'h5netcdf'))
-           if importlib.util.find_spec(module) is not None]
+ENGINES = [e for e, modules in (('netcdf4', ('netCDF4',)),
+                                ('h5netcdf', ('h5netcdf', 'h5py')))
+           if all(importlib.util.find_spec(m) is not None for m in modules)]
 
 
 def _field(dtype=np.complex128):
@@ -101,3 +102,24 @@ def test_a_real_object_passes_through_unchanged():
     da = _field().to_xarray().real
     assert split_complex(da) is da
     assert join_complex(da) is da
+
+
+@pytest.mark.parametrize('installed, expected', [
+    ({'h5netcdf', 'h5py', 'netCDF4'}, 'h5netcdf'),
+    ({'h5netcdf', 'netCDF4'}, 'netcdf4'),       # h5netcdf without its h5py
+    ({'h5netcdf'}, None),
+])
+def test_the_complex_backend_needs_h5py_beside_h5netcdf(monkeypatch,
+                                                         installed, expected):
+    """Recent h5netcdf no longer installs h5py, and without it h5netcdf
+    cannot open a file, so h5netcdf is chosen only when both are present."""
+    import importlib.metadata
+    from uacpy.core import _export
+    real = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util, 'find_spec',
+        lambda name, *a: (real(name, *a)
+                          if name in installed and real(name, *a) is not None
+                          else (object() if name in installed else None)))
+    monkeypatch.setattr(importlib.metadata, 'version', lambda name: '1.7.2')
+    assert _export.complex_netcdf_backend() == expected

@@ -98,6 +98,7 @@ class TestAResultStackRoundTrips:
     def test_the_netcdf_round_trip_is_the_stack(self, tmp_path, complex_data):
         xr = pytest.importorskip('xarray')
         pytest.importorskip('h5netcdf')
+        pytest.importorskip('h5py')
         stack = _field_stack(complex_data=complex_data)
         stack.to_netcdf(tmp_path / 's.nc')
         with xr.open_dataarray(tmp_path / 's.nc', engine='h5netcdf') as da:
@@ -126,6 +127,7 @@ def test_a_real_field_writes_to_netcdf_and_reads_back(tmp_path):
     as it does for complex values."""
     xr = pytest.importorskip('xarray')
     pytest.importorskip('h5netcdf')
+    pytest.importorskip('h5py')
     field = _field(5.0, complex_data=False)
     field.to_netcdf(tmp_path / 'f.nc')
     with xr.open_dataarray(tmp_path / 'f.nc', engine='h5netcdf') as da:
@@ -183,6 +185,7 @@ class TestReceiverDiagnosticsIsAnExportRecord:
     def test_the_netcdf_round_trip_is_the_record(self, tmp_path):
         xr = pytest.importorskip('xarray')
         pytest.importorskip('h5netcdf')
+        pytest.importorskip('h5py')
         d = _diagnostics()
         d.to_netcdf(tmp_path / 'd.nc')
         with xr.open_dataset(tmp_path / 'd.nc', engine='h5netcdf') as ds:
@@ -240,6 +243,7 @@ class TestJanusPacketIsACarrier:
     def test_the_netcdf_round_trip_is_the_packet(self, tmp_path):
         xr = pytest.importorskip('xarray')
         pytest.importorskip('h5netcdf')
+        pytest.importorskip('h5py')
         p = _packet()
         p.to_netcdf(tmp_path / 'p.nc')
         with xr.open_dataset(tmp_path / 'p.nc', engine='h5netcdf') as ds:

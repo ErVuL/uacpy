@@ -127,8 +127,10 @@ test = [
     # The second NetCDF backend the export path picks when it is installed
     # (`uacpy.core._export`: h5netcdf first, else netCDF4). Its round-trip
     # tests sit behind an importorskip, so without it they skip and the
-    # h5netcdf branch is never run.
+    # h5netcdf branch is never run. h5py is its HDF5 backend, which recent
+    # h5netcdf no longer installs by itself.
     "h5netcdf>=1.3",
+    "h5py>=3.8",
 ]
 
 dev = [

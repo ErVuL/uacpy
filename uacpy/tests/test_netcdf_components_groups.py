@@ -13,6 +13,7 @@ from uacpy.tests._synthetic_fields import _arrivals, _bounce, _broadband
 
 xr = pytest.importorskip('xarray')
 pytest.importorskip('h5netcdf')
+pytest.importorskip('h5py')
 
 
 def _same(a, b):

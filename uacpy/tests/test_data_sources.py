@@ -364,6 +364,7 @@ def test_every_record_survives_the_dict_and_netcdf_round_trips(tmp_path):
     assert back.data_sources == env.data_sources
     pytest.importorskip('xarray')
     pytest.importorskip('h5netcdf')
+    pytest.importorskip('h5py')
     env.to_netcdf(tmp_path / 'env.nc', engine='h5netcdf')
     loaded = uacpy.Environment.from_netcdf(tmp_path / 'env.nc',
                                            engine='h5netcdf')

@@ -123,6 +123,7 @@ class TestEveryResultRoundTrips:
     def test_the_netcdf_round_trip_is_the_result(self, name, tmp_path):
         xr = pytest.importorskip('xarray')
         pytest.importorskip('h5netcdf')
+        pytest.importorskip('h5py')
         x = MAKERS[name]()
         x.to_netcdf(tmp_path / 'x.nc')
         opener = (xr.open_dataarray if isinstance(x, Field)
@@ -366,6 +367,7 @@ class TestAnEnvironmentSavesAndLoads:
     def test_the_netcdf_holds_one_group_per_carrier(self, tmp_path):
         xr = pytest.importorskip('xarray')
         pytest.importorskip('h5netcdf')
+        pytest.importorskip('h5py')
         import uacpy
         env = _environment()
         env.to_netcdf(tmp_path / 'env.nc', engine='h5netcdf')

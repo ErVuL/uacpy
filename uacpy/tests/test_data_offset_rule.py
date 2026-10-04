@@ -429,6 +429,7 @@ def test_the_date_fields_survive_the_dict_and_netcdf_round_trips(tmp_path):
         env.data_sources
     pytest.importorskip('xarray')
     pytest.importorskip('h5netcdf')
+    pytest.importorskip('h5py')
     env.to_netcdf(tmp_path / 'env.nc', engine='h5netcdf')
     back = uacpy.Environment.from_netcdf(tmp_path / 'env.nc',
                                          engine='h5netcdf')

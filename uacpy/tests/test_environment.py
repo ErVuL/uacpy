@@ -1268,6 +1268,7 @@ class TestAnAbsorptionLawSurvivesExport:
     def test_netcdf(self, tmp_path):
         pytest.importorskip('xarray')
         pytest.importorskip('h5netcdf')
+        pytest.importorskip('h5py')
         for env in self._envs():
             path = tmp_path / f'{env.name}.nc'
             env.to_netcdf(path, engine='h5netcdf')

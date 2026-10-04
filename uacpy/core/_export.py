@@ -331,12 +331,14 @@ def write_netcdf_groups(parts, path, *, who: str = "write_netcdf",
 def complex_netcdf_backend():
     """The NetCDF backend that reads a file holding complex values
     natively (h5netcdf's ``invalid_netcdf``, netCDF4's compound type):
-    ``'h5netcdf'`` when it is installed, else ``'netcdf4'`` when netCDF4
-    1.7.1 or later is, else ``None``. A file this package writes needs
-    none (:func:`split_complex`)."""
+    ``'h5netcdf'`` when it can write (h5netcdf and its h5py backend are
+    both installed; recent h5netcdf no longer pulls h5py in), else
+    ``'netcdf4'`` when netCDF4 1.7.1 or later is, else ``None``. A file
+    this package writes needs none (:func:`split_complex`)."""
     import importlib.metadata
     import importlib.util
-    if importlib.util.find_spec('h5netcdf') is not None:
+    if (importlib.util.find_spec('h5netcdf') is not None
+            and importlib.util.find_spec('h5py') is not None):
         return 'h5netcdf'
     if importlib.util.find_spec('netCDF4') is not None:
         try:
@@ -358,7 +360,7 @@ def refuse_complex_without_backend(who: str, name: str) -> None:
         f"{who}: {name!r} holds complex values, and neither h5netcdf nor "
         f"netCDF4 1.7.1 or later, the backends that read them as stored, "
         f"is installed.",
-        remediation="pip install h5netcdf — or install netCDF4 1.7.1 or "
+        remediation="pip install h5netcdf h5py — or install netCDF4 1.7.1 or "
                     "later, whose compound type holds complex values.")
 
 

@@ -1287,7 +1287,10 @@ def test_pairs_are_the_values_interpolated_onto_the_coordinate(name):
             np.size(call(10.0, 35.0, 100.0)) == 1
 
 
-@pytest.mark.parametrize('name', sorted(_entry_points()))
+# sound_speed_at_depth takes depth as a required argument, so there is no
+# call without the coordinate to refuse; the other entry points are checked.
+@pytest.mark.parametrize(
+    'name', sorted(set(_entry_points()) - {'sound_speed_at_depth'}))
 def test_pairs_without_the_coordinate_are_refused(name):
     from uacpy.core.acoustics import attenuation as att, seawater as sw
     calls = {
@@ -1295,12 +1298,9 @@ def test_pairs_without_the_coordinate_are_refused(name):
         'sound_speed_unesco': lambda: sw.sound_speed_unesco(_T_PAIRS),
         'sound_speed_delgrosso': lambda: sw.sound_speed_delgrosso(_T_PAIRS),
         'sound_speed_teos10': lambda: sw.sound_speed_teos10(_T_PAIRS),
-        'sound_speed_at_depth': None,
         'absorption_francois_garrison':
             lambda: att.absorption_francois_garrison(1e4, _T_PAIRS),
     }
-    if calls[name] is None:
-        pytest.skip('depth is a required argument of sound_speed_at_depth')
     with pytest.raises(ConfigurationError, match=r'pairs.*pass (depth|pressure)='):
         calls[name]()
 
@@ -1420,3 +1420,12 @@ def test_a_pressure_equation_refuses_ambiguous_coordinates(name):
         eq(_T_PAIRS, 35.0, pressure_dbar=100.0)
     with pytest.raises(TypeError, match='positional'):  # keyword-only
         eq(10.0, 35.0, 100.0)
+
+
+def test_sound_speed_at_depth_requires_its_depth():
+    """Its depth is a required argument, so a call without it cannot reach
+    the pairs rule: Python refuses it first."""
+    from uacpy.core.acoustics import seawater as sw
+    import inspect
+    depth = inspect.signature(sw.sound_speed_at_depth).parameters['depth']
+    assert depth.default is inspect.Parameter.empty
