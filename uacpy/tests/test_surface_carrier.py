@@ -1,15 +1,16 @@
 """Unit tests for the Surface / Bathymetry / Altimetry shape & property carriers."""
 
-import warnings
 
 import numpy as np
 import pytest
 
-from uacpy.core.bottom import BoundaryProperties
+from uacpy.core.boundary import BoundaryProperties
 from uacpy.core.surface import Surface
 from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.altimetry import Altimetry
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.models.kraken import _checks, _window
+from uacpy.tests.conftest import recorded_warnings
 
 
 def _ice():
@@ -43,13 +44,14 @@ class TestSurfaceCarrier:
                             BoundaryProperties(acoustic_type='half-space',
                                                sound_speed=3700.0, density=0.92,
                                                shear_speed=2000.0))])
-        assert s.collapse('r0').sound_speed == 3500.0
-        assert s.collapse('rmax').sound_speed == 3700.0
-        assert s.collapse('mean').sound_speed == pytest.approx(3600.0)
+        assert s.collapse_range('r0').sound_speed == 3500.0
+        assert s.collapse_range('rmax').sound_speed == 3700.0
+        assert s.collapse_range('mean').sound_speed == pytest.approx(3600.0)
 
     def test_mismatched_ranges_raises(self):
-        with pytest.raises(ConfigurationError):
-            Surface(properties=[_ice(), _ice()], ranges=[0.0])
+        with pytest.raises(ConfigurationError,
+                           match='must have the same length'):
+            Surface(nodes=[_ice(), _ice()], ranges=[0.0])
 
     def test_isel_out_of_range_is_typed(self):
         s = Surface.coerce([(0.0, _ice()), (5000.0, _ice())])
@@ -63,9 +65,9 @@ class TestSurfaceCarrier:
                                density=0.9, shear_speed=1800.0, roughness=1.5)
         b = BoundaryProperties(acoustic_type='half-space', sound_speed=3500.0,
                                density=0.9, shear_speed=1800.0, roughness=2.5)
-        s = Surface(properties=[a, b], ranges=[0.0, 5000.0])
-        assert s.collapse('mean').properties[0].roughness == pytest.approx(2.0)
-        assert s.collapse('median').properties[0].roughness == pytest.approx(2.0)
+        s = Surface(nodes=[a, b], ranges=[0.0, 5000.0])
+        assert s.collapse_range('mean').nodes[0].roughness == pytest.approx(2.0)
+        assert s.collapse_range('median').nodes[0].roughness == pytest.approx(2.0)
 
 
 class TestAltimetryCarrier:
@@ -78,7 +80,7 @@ class TestAltimetryCarrier:
         assert a.eval(range=5000) == pytest.approx(-4.0)       # linear
         assert a.at(range=4000) == 0.0                         # nearest node 0
         assert a.isel(range=1) == -8.0
-        assert a.is_range_dependent
+        assert a.is_range_dependent and a.varies_with_range
 
     def test_heights_any_sign(self):
         a = Altimetry(ranges=[0.0, 5000.0], heights=[2.0, -3.0])  # crest + trough
@@ -96,10 +98,22 @@ class TestBathymetryCarrier:
         assert b.eval(range=4000) == pytest.approx(80.0)
         assert b.at(range=1000) == 100.0
         assert b.isel(range=1) == 60.0
-        assert b.depth == 100.0 and b.is_range_dependent
+        assert b.depth == 100.0 and b.is_range_dependent and b.varies_with_range
+
+    def test_node_count_and_value_change_are_two_questions(self):
+        from uacpy.core.environment import Environment
+        flat = Bathymetry(ranges=[0.0, 8000.0], depths=[100.0, 100.0])
+        assert flat.is_range_dependent and not flat.varies_with_range
+        calm = Altimetry(ranges=[0.0, 8000.0], heights=[0.0, 0.0])
+        assert calm.is_range_dependent and not calm.varies_with_range
+        one = Bathymetry(ranges=[0.0], depths=[100.0])
+        assert not one.is_range_dependent and not one.varies_with_range
+        # the environment asks the bathymetry whether its depths change
+        assert not Environment(bathymetry=flat, ssp=1500.0).is_range_dependent
 
     def test_positive_depth_enforced(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='Bathymetry depths must be positive'):
             Bathymetry(ranges=[0.0], depths=[-5.0])
 
     def test_isel_out_of_range_is_typed(self):
@@ -126,7 +140,7 @@ class TestSurfaceModelBehaviour:
                                     (5000.0, self._ice())]))
         # surface-only range-dependence must register (else it is silently dropped)
         assert env.is_range_dependent
-        assert env.max_range == 5000.0
+        assert env.range_max == 5000.0
 
     @pytest.mark.requires_binary
     def test_kraken_runs_under_an_ice_canopy(self):
@@ -136,10 +150,11 @@ class TestSurfaceModelBehaviour:
         symmetrically with the bottom at ``:210-212``, so an ice canopy sets
         ``ElasticFlag`` and drags the automatic search floor to 0.84x the ice
         shear speed; the solver then chases the ice/water Scholte mode and
-        fails at 1 kHz and 2 kHz. ``_c_low_for`` pins the floor at the minimum
-        compressional speed instead, and the band runs: measured 64.82 dB at
-        50 Hz, 65.03 at 120, 56.70 at 400, 58.17 at 1 kHz and 60.24 at 2 kHz
-        on a 300 m column under a 3500/1800 m/s canopy.
+        fails at 1 kHz and 2 kHz. ``kraken._window.c_low_for`` pins the floor
+        at the minimum compressional speed instead, and the band runs:
+        measured 64.82 dB at 50 Hz, 65.03 at 120, 56.70 at 400, 58.17 at
+        1 kHz and 60.24 at 2 kHz on a 300 m column under a 3500/1800 m/s
+        canopy.
         """
         import numpy as np
         import uacpy
@@ -150,6 +165,7 @@ class TestSurfaceModelBehaviour:
                         dtype=float)
         assert np.isfinite(tl).all()
 
+    @pytest.mark.requires_binary
     def test_an_ice_canopy_pins_the_phase_speed_floor(self):
         """The floor is the minimum compressional speed, not KRAKEN's own
         automatic choice — which an elastic surface would drag below the
@@ -158,10 +174,16 @@ class TestSurfaceModelBehaviour:
         from uacpy.models.kraken import Kraken
         iced = uacpy.Environment(bathymetry=300.0, ssp=1500.0, surface=self._ice())
         fluid = uacpy.Environment(bathymetry=300.0, ssp=1500.0)
-        assert Kraken(verbose=False)._c_low_for(iced) == pytest.approx(1500.0)
+        model = Kraken(verbose=False)
+        assert _window.c_low_for(
+            iced, collapse=model._collapse,
+            pinned_c_low=model.c_low) == pytest.approx(1500.0)
         # A wholly fluid environment still hands the choice to KRAKEN.
-        assert Kraken(verbose=False)._c_low_for(fluid) == 0.0
+        model = Kraken(verbose=False)
+        assert _window.c_low_for(fluid, collapse=model._collapse,
+                                 pinned_c_low=model.c_low) == 0.0
 
+    @pytest.mark.requires_binary
     def test_the_phase_speed_floor_reads_the_collapsed_surface(self):
         import uacpy
         # Kraken carries a single global top, so a range-dependent surface is
@@ -173,8 +195,10 @@ class TestSurfaceModelBehaviour:
                                     (5000.0, self._ice())]))
         from uacpy.models.kraken import Kraken
         model = Kraken(verbose=False)
-        assert model._has_elastic_surface(model._project_environment(env)) is False
+        assert _checks.has_elastic_surface(model._project_environment(env),
+                                           collapse=model._collapse) is False
 
+    @pytest.mark.requires_binary
     def test_compute_modes_rejects_receiver_arg(self):
         # A mode solve has no receiver grid, so ``compute_modes`` takes none:
         # its third positional is ``n_modes`` (``PropagationModel.compute_modes``).
@@ -198,7 +222,7 @@ class TestSurfaceValidation:
                                                         sound_speed=3500.0,
                                                         density=0.9, shear_speed=1800.0))])
         with pytest.raises(ConfigurationError, match="single boundary type"):
-            s.collapse('mean')
+            s.collapse_range('mean')
 
 
 class TestRangeAxisFiniteness:
@@ -209,12 +233,12 @@ class TestRangeAxisFiniteness:
     @pytest.mark.parametrize('bad', [np.inf, np.nan])
     def test_surface_ranges_reject_non_finite(self, bad):
         with pytest.raises(ConfigurationError, match='finite'):
-            Surface(properties=[BoundaryProperties(), BoundaryProperties()],
+            Surface(nodes=[BoundaryProperties(), BoundaryProperties()],
                     ranges=[0.0, bad])
 
     def test_surface_ranges_reject_negative(self):
         with pytest.raises(ConfigurationError, match='non-negative'):
-            Surface(properties=[BoundaryProperties(), BoundaryProperties()],
+            Surface(nodes=[BoundaryProperties(), BoundaryProperties()],
                     ranges=[-1.0, 5.0])
 
 
@@ -268,12 +292,16 @@ class TestDelegatedWritesAreValidated:
     def _halfspace_surface():
         return Surface.coerce(BoundaryProperties(sound_speed=1700.0))
 
-    def test_type_fields_are_not_assignable(self):
+    def test_a_type_field_write_rebuilds_every_node(self):
+        """A type write goes through the ``BoundaryProperties`` constructor:
+        a rigid type drops the half-space parameters, and a reflection file
+        on a rigid node is the conflict the constructor refuses."""
         s = self._halfspace_surface()
-        for name, value in (('acoustic_type', 'rigid'),
-                            ('reflection_file', 'top.trc')):
-            with pytest.raises(ConfigurationError, match='cannot be assigned'):
-                setattr(s, name, value)
+        s.acoustic_type = 'rigid'
+        assert repr(s.nodes[0]) == 'BoundaryProperties(rigid)'
+        with pytest.raises(ConfigurationError, match='ignores half-space'):
+            s.reflection_file = 'top.trc'
+        assert s.nodes[0].reflection_file is None
 
     def test_numeric_rules_mirror_the_constructor(self):
         s = self._halfspace_surface()
@@ -291,12 +319,12 @@ class TestDelegatedWritesAreValidated:
         with pytest.raises(ConfigurationError, match='vacuum'):
             s.sound_speed = 1700.0
         s.roughness = 0.5
-        assert s.properties[0].roughness == 0.5
+        assert s.nodes[0].roughness == 0.5
 
     def test_valid_writes_reach_every_node(self):
         s = Surface.coerce([(0.0, _ice()), (5000.0, _ice())])
         s.attenuation = 0.7
-        assert [p.attenuation for p in s.properties] == [0.7, 0.7]
+        assert [p.attenuation for p in s.nodes] == [0.7, 0.7]
         assert s.attenuation == 0.7
 
 
@@ -313,8 +341,8 @@ class TestCollapseFileNodes:
     def test_shared_table_collapses_to_it_with_reduced_roughness(self):
         s = Surface.coerce([(0.0, self._file_node(0.1)),
                             (5000.0, self._file_node(0.3))])
-        c = s.collapse('mean')
-        node = c.properties[0]
+        c = s.collapse_range('mean')
+        node = c.nodes[0]
         assert node.acoustic_type == 'file'
         assert node.reflection_file == 'top.trc'
         assert node.roughness == pytest.approx(0.2)
@@ -325,7 +353,17 @@ class TestCollapseFileNodes:
                                reflection_file='other.trc')
         s = Surface.coerce([(0.0, a), (5000.0, b)])
         with pytest.raises(ConfigurationError, match='different reflection'):
-            s.collapse('median')
+            s.collapse_range('median')
+
+
+def _two_node_vacuum_surface():
+    """Vacuum surface nodes at 0 and 5 km with roughness 1 m and 2 m."""
+    return Surface(
+        nodes=[
+            BoundaryProperties(acoustic_type='vacuum', roughness=1.0),
+            BoundaryProperties(acoustic_type='vacuum', roughness=2.0),
+        ],
+        ranges=np.array([0.0, 5000.0]))
 
 
 class TestSurfaceAccessorsReturnCopies:
@@ -334,86 +372,68 @@ class TestSurfaceAccessorsReturnCopies:
     and a copy from another left a caller no way to tell which results were
     safe to mutate. The delegated attributes (``surface.roughness`` …) stay
     the in-place route: reads come from the r = 0 node, writes broadcast to
-    every node, and ``.properties[i]`` addresses one node."""
-
-    def _surface(self):
-        return Surface(
-            properties=[
-                BoundaryProperties(acoustic_type='vacuum', roughness=1.0),
-                BoundaryProperties(acoustic_type='vacuum', roughness=2.0),
-            ],
-            ranges=np.array([0.0, 5000.0]))
+    every node, and ``.nodes[i]`` addresses one node."""
 
     def test_at_result_is_not_the_stored_node(self):
-        s = self._surface()
+        s = _two_node_vacuum_surface()
         got = s.at(range=0.0)
         got.roughness = 99.0
-        assert s.properties[0].roughness == pytest.approx(1.0)
+        assert s.nodes[0].roughness == pytest.approx(1.0)
 
     def test_isel_result_is_not_the_stored_node(self):
-        s = self._surface()
+        s = _two_node_vacuum_surface()
         got = s.isel(range=1)
         got.roughness = 99.0
-        assert s.properties[1].roughness == pytest.approx(2.0)
+        assert s.nodes[1].roughness == pytest.approx(2.0)
 
     def test_the_copies_carry_the_stored_values(self):
-        s = self._surface()
+        s = _two_node_vacuum_surface()
         assert s.at(range=100.0).roughness == pytest.approx(1.0)
         assert s.at(range=4900.0).roughness == pytest.approx(2.0)
         assert s.isel(range=-1).acoustic_type == 'vacuum'
 
     def test_delegated_attribute_writes_reach_the_node(self):
-        s = self._surface()
+        s = _two_node_vacuum_surface()
         s.roughness = 3.0
-        assert s.properties[0].roughness == pytest.approx(3.0)
+        assert s.nodes[0].roughness == pytest.approx(3.0)
         assert s.at(range=0.0).roughness == pytest.approx(3.0)
 
 
 class TestSurfaceDelegatedWriteBroadcasts:
     """A delegated write (``surface.roughness = …``) propagates to every
     range node — a uniform broadcast. On a multi-node surface it warns,
-    because it flattens any range dependence; ``.properties[i]`` is the
+    because it flattens any range dependence; ``.nodes[i]`` is the
     single-node route. On a single-node surface the broadcast and the one
     node are the same thing, so it is silent."""
 
-    def _multi_node(self):
-        return Surface(
-            properties=[
-                BoundaryProperties(acoustic_type='vacuum', roughness=1.0),
-                BoundaryProperties(acoustic_type='vacuum', roughness=2.0),
-            ],
-            ranges=np.array([0.0, 5000.0]))
-
     def test_a_multi_node_write_warns_and_reaches_every_node(self):
-        s = self._multi_node()
+        s = _two_node_vacuum_surface()
         with pytest.warns(UserWarning, match=r"sets all 2 range nodes"):
             s.roughness = 3.0
-        assert all(p.roughness == pytest.approx(3.0) for p in s.properties)
+        assert all(p.roughness == pytest.approx(3.0) for p in s.nodes)
 
     def test_the_multi_node_warning_names_the_callers_file(self):
         """The write is delegated through the helper the seabed carriers
         share, so the warning walks out of the package to the assigning
         line rather than counting frames to it."""
-        s = self._multi_node()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        s = _two_node_vacuum_surface()
+        with recorded_warnings() as caught:
             s.roughness = 3.0
         (w,) = [w for w in caught if 'sets all 2 range' in str(w.message)]
         assert w.filename == __file__
 
     def test_the_multi_node_warning_points_at_properties(self):
-        s = self._multi_node()
-        with pytest.warns(UserWarning, match=r"\.properties\[i\]"):
+        s = _two_node_vacuum_surface()
+        with pytest.warns(UserWarning, match=r"\.nodes\[i\]"):
             s.roughness = 3.0
 
     def test_a_single_node_write_is_silent_and_writes_through(self):
-        s = Surface(properties=[
+        s = Surface(nodes=[
             BoundaryProperties(acoustic_type='vacuum', roughness=1.0)])
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with recorded_warnings() as caught:
             s.roughness = 5.0
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
-        assert s.properties[0].roughness == pytest.approx(5.0)
+        assert s.nodes[0].roughness == pytest.approx(5.0)
         assert s.roughness == pytest.approx(5.0)
 
 
@@ -429,7 +449,7 @@ class TestSurfaceValidatesGrainSizePhi:
 
     @staticmethod
     def _surface():
-        return Surface(properties=[BoundaryProperties(
+        return Surface(nodes=[BoundaryProperties(
             acoustic_type='half-space', sound_speed=1600.0, density=1.8,
             attenuation=0.5)])
 
@@ -442,36 +462,37 @@ class TestSurfaceValidatesGrainSizePhi:
     def test_the_node_keeps_its_previous_value_after_a_refusal(self):
         s = self._surface()
         s.grain_size_phi = 3.5
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='grain_size_phi must be finite'):
             s.grain_size_phi = float('nan')
-        assert s.properties[0].grain_size_phi == pytest.approx(3.5)
+        assert s.nodes[0].grain_size_phi == pytest.approx(3.5)
 
     @pytest.mark.parametrize('phi', [3.5, 0.0, -2.0])
     def test_a_signed_finite_phi_is_stored(self, phi):
         s = self._surface()
         s.grain_size_phi = phi
         assert s.grain_size_phi == pytest.approx(phi)
-        assert s.properties[0].grain_size_phi == pytest.approx(phi)
+        assert s.nodes[0].grain_size_phi == pytest.approx(phi)
 
     def test_none_clears_it(self):
         s = self._surface()
         s.grain_size_phi = 3.5
         s.grain_size_phi = None
         assert s.grain_size_phi is None
-        assert s.properties[0].grain_size_phi is None
+        assert s.nodes[0].grain_size_phi is None
 
     def test_the_write_reaches_every_node(self):
-        s = Surface(properties=[
+        s = Surface(nodes=[
             BoundaryProperties(acoustic_type='half-space', sound_speed=1600.0,
                                density=1.8, attenuation=0.5),
             BoundaryProperties(acoustic_type='half-space', sound_speed=1700.0,
                                density=1.9, attenuation=0.5)],
             ranges=np.array([0.0, 1000.0]))
         s.grain_size_phi = 4.0
-        assert [p.grain_size_phi for p in s.properties] == [4.0, 4.0]
+        assert [p.grain_size_phi for p in s.nodes] == [4.0, 4.0]
 
     def test_a_parameter_free_node_refuses_it_first(self):
-        s = Surface(properties=[BoundaryProperties(acoustic_type='vacuum')])
+        s = Surface(nodes=[BoundaryProperties(acoustic_type='vacuum')])
         with pytest.raises(ConfigurationError, match='vacuum'):
             s.grain_size_phi = 3.5
 
@@ -479,5 +500,6 @@ class TestSurfaceValidatesGrainSizePhi:
         ('density', -1.0), ('sound_speed', 0.0), ('roughness', -1.0),
         ('attenuation', -1.0), ('shear_speed', -1.0)])
     def test_every_sibling_field_refuses_its_own_bad_value(self, field, bad):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='must be (non-negative|positive)'):
             setattr(self._surface(), field, bad)

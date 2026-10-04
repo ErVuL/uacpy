@@ -15,10 +15,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from uacpy.acoustic_signal import (
-    bartlett_spectrum,
+    bartlett,
     beamform,
     music_spectrum,
-    mvdr_spectrum,
+    mvdr,
     sample_covariance,
     shading_taper,
     steering_vectors,
@@ -43,9 +43,13 @@ def line_array(n_elements: int, spacing: float) -> np.ndarray:
 
 
 def norm_dB(power) -> np.ndarray:
-    """Power spectrum in dB, normalised to its peak, floored at -120 dB."""
+    """Power spectrum in dB, normalised to its peak, floored at -120 dB. An
+    angle the processor leaves undefined (NaN: MVDR of a covariance it
+    cannot invert) stays NaN, so the curve has a gap there."""
     p = np.asarray(power, dtype=float)
-    return 10.0 * np.log10(np.maximum(p, p.max() * 1e-12) / p.max())
+    peak = np.nanmax(p)
+    with np.errstate(invalid='ignore'):
+        return 10.0 * np.log10(np.maximum(p, peak * 1e-12) / peak)
 
 
 def beampattern(positions, angles, *, steer_deg=0.0, weights=None):
@@ -60,7 +64,7 @@ def beampattern(positions, angles, *, steer_deg=0.0, weights=None):
     e = steering_vectors(positions, angles, FREQ, C)
     if weights is not None:
         e = e * weights
-    return norm_dB(bartlett_spectrum(R, e))
+    return norm_dB(bartlett(R, e))
 
 
 def width_3db(angles, pattern_dB, *, steer_deg=0.0) -> float:
@@ -386,8 +390,8 @@ def resolution():
                                  n_snapshots=200, rng=rng, powers_dB=powers)
         R = sample_covariance(x)
         for label, spectrum in (
-                ('Bartlett', bartlett_spectrum(R, steering)),
-                ('MVDR', mvdr_spectrum(R, steering)),
+                ('Bartlett', bartlett(R, steering)),
+                ('MVDR', mvdr(R, steering)),
                 ('MUSIC (n_sources=2)', music_spectrum(R, steering, 2))):
             ax.plot(angles, norm_dB(spectrum), lw=1.4, label=label)
         for bearing in bearings:
@@ -425,7 +429,7 @@ def snapshots():
         rng = np.random.default_rng(0)
         R = sample_covariance(plane_wave_snapshots(
             positions, bearings, snr_dB=10.0, n_snapshots=k, rng=rng))
-        ax_spec.plot(angles, norm_dB(mvdr_spectrum(R, steering)), lw=1.4,
+        ax_spec.plot(angles, norm_dB(mvdr(R, steering)), lw=1.4,
                      label=f'K = {k:3d}  (K/N = {k / n:g})')
     for bearing in bearings:
         ax_spec.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
@@ -476,7 +480,7 @@ def snapshots():
         R = sample_covariance(plane_wave_snapshots(
             positions, bearings, snr_dB=10.0, n_snapshots=12, rng=rng))
         spectrum = norm_dB(
-            mvdr_spectrum(R, wide_steering, diagonal_loading=loading))
+            mvdr(R, wide_steering, diagonal_loading=loading))
         ax_load.plot(wide, spectrum, lw=1.4, label=f'loading = {loading:g}')
     for bearing in bearings:
         ax_load.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
@@ -525,7 +529,7 @@ def music_order():
         label = {1: '1 — too few', 2: '2 — correct', 4: '4 — too many'}[n_sources]
         ax_s.plot(angles, norm_dB(music_spectrum(R, steering, n_sources)),
                   lw=1.6, ls=style, label=f'n_sources = {label}')
-    ax_s.plot(angles, norm_dB(bartlett_spectrum(R, steering)), lw=1.0,
+    ax_s.plot(angles, norm_dB(bartlett(R, steering)), lw=1.0,
               ls='--', color='0.45', label='Bartlett, for reference')
     for bearing in bearings:
         ax_s.axvline(bearing, color='k', ls='--', lw=0.9, alpha=0.45)
@@ -560,11 +564,12 @@ def bearing_time():
             positions, [bearing, 8.0], snr_dB=0.0, n_snapshots=n_snapshots,
             rng=rng, powers_dB=[0.0, 20.0])
         # beamform returns dB per snapshot; averaging in power over the block
-        # is exactly bartlett_spectrum of the block's covariance.
-        snr = beamform(block, positions, FREQ, angles=scan, SL=0.0, NL=0.0).snr
+        # is exactly bartlett of the block's covariance.
+        snr = beamform(block, positions, scan, FREQ, source_level_dB=0.0,
+                       noise_level_dB=0.0).snr
         conventional[:, t] = 10.0 * np.log10(np.mean(10.0 ** (snr / 10.0), axis=1))
         adaptive[:, t] = 10.0 * np.log10(
-            mvdr_spectrum(sample_covariance(block), steering))
+            mvdr(sample_covariance(block), steering))
 
     fig, axes = plt.subplots(1, 2, figsize=(9.4, 4.8), sharey=True,
                              layout='constrained')

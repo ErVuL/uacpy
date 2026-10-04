@@ -22,7 +22,7 @@ enough to need filtering), and the arrival structure behind them.
 
 Uses: RunMode.COHERENT_TL / INCOHERENT_TL / SEMICOHERENT_TL / RAYS / EIGENRAYS
 / ARRIVALS · Bellhop.compute_eigenrays · Rays.filter_by_miss_distance /
-top_n_by_miss / truncate_at_receiver · Rays.plot · Arrivals.plot · plot.compare
+top_n_by_miss / truncate_at_receiver · Rays.plot · Arrivals.plot · Arrivals.delays · plot.compare
 """
 
 import os
@@ -49,7 +49,7 @@ receiver = uacpy.Receiver(depths=np.linspace(100, 4900, 40),
 
 # The first Bellhop call in a process pays binary and library load — about
 # 1.8 s here — which would be charged entirely to whichever mode ran first.
-uacpy.Bellhop().run(munk, source, receiver,
+uacpy.Bellhop(backend='fortran').run(munk, source, receiver,
                     run_mode=uacpy.RunMode.COHERENT_TL)
 
 fields, elapsed = {}, {}
@@ -57,7 +57,7 @@ for mode in (uacpy.RunMode.COHERENT_TL, uacpy.RunMode.INCOHERENT_TL,
              uacpy.RunMode.SEMICOHERENT_TL):
     label = mode.name.split('_')[0].capitalize()
     started = time.perf_counter()
-    fields[label] = uacpy.Bellhop().run(munk, source, receiver, run_mode=mode)
+    fields[label] = uacpy.Bellhop(backend='fortran').run(munk, source, receiver, run_mode=mode)
     elapsed[label] = time.perf_counter() - started
 
 # Whole-grid spread is the fair smoothness measure — one depth slice is too
@@ -72,7 +72,7 @@ print(f"  max |Incoherent − Semicoherent| = "
 fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 for ax, (label, field) in zip(axes.flat, fields.items()):
     # The default 20-120 dB TL scale, narrowed to where this deep field lives.
-    uacpy.plot_field(field, ax, env=munk, source=source, vmin=60, vmax=120,
+    uacpy.plot.plot_field(field, ax, env=munk, source=source, vmin=60, vmax=120,
                      title=f'{label} TL')
 cuts = {label: field.at(depth=1000) for label, field in fields.items()}
 uacpy.plot.compare(list(cuts.values()), list(cuts), ax=axes[1, 1],
@@ -83,13 +83,13 @@ fig.savefig(OUT / 'example_11a_tl_modes.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 # ── B. Ray paths through the channel ────────────────────────────────────────
-ray_model = uacpy.Bellhop(alpha=(-15.0, 15.0), n_beams=31)
+ray_model = uacpy.Bellhop(backend='fortran', launch_angles=(-15.0, 15.0), n_beams=31)
 rays = ray_model.run(munk, source,
                      uacpy.Receiver(depths=np.array([1000]),
                                     ranges=np.linspace(0, 100000, 100)),
                      run_mode=uacpy.RunMode.RAYS)
 print(f"  {ray_model.n_beams} rays over "
-      f"{ray_model.alpha[0]:.0f}° to {ray_model.alpha[1]:.0f}°, out to 100 km")
+      f"{ray_model.launch_angles[0]:.0f}° to {ray_model.launch_angles[1]:.0f}°, out to 100 km")
 
 fig, axes = plt.subplots(2, 1, figsize=(14, 10))
 rays.plot(env=munk, ax=axes[0],
@@ -120,19 +120,19 @@ target = uacpy.Receiver(depths=[30.0], ranges=[2000.0])
 # coarse fan the per-angle vertical spacing at 2 km already exceeds the miss
 # tolerance.
 wavelength = 1500.0 / float(shelf_source.frequencies[0])
-eigenrays = uacpy.Bellhop(alpha=(-20.0, 20.0), n_beams=2001).compute_eigenrays(
+eigenrays = uacpy.Bellhop(backend='fortran', launch_angles=(-20.0, 20.0), n_beams=2001).compute_eigenrays(
     shelf, shelf_source, target).filter_by_miss_distance(
     wavelength / 4).top_n_by_miss(12).truncate_at_receiver()
-context = uacpy.Bellhop(alpha=(-20.0, 20.0), n_beams=21).run(
+context = uacpy.Bellhop(backend='fortran', launch_angles=(-20.0, 20.0), n_beams=21).run(
     shelf, shelf_source,
     uacpy.Receiver(depths=np.array([30.0]),
-                   ranges=np.linspace(0, 2200.0, 50)),
+                   ranges=np.linspace(100.0, 2200.0, 50)),
     run_mode=uacpy.RunMode.RAYS)
-arrivals = uacpy.Bellhop(alpha=(-20.0, 20.0), n_beams=201).run(
+arrivals = uacpy.Bellhop(backend='fortran', launch_angles=(-20.0, 20.0), n_beams=201).run(
     shelf, shelf_source, uacpy.Receiver(depths=np.array([30.0]),
                                         ranges=np.array([2000.0])),
     run_mode=uacpy.RunMode.ARRIVALS)
-delays = [record['delay'] for record in arrivals.arrivals]
+delays = arrivals.delays
 print(f"  at 2 km / 30 m: {len(eigenrays.rays)} eigenrays within λ/4 "
       f"({wavelength / 4:.1f} m), {len(delays)} arrivals spread over "
       f"{max(delays) - min(delays):.4f} s")
@@ -158,7 +158,7 @@ pekeris = uacpy.Environment(
                                     attenuation=0.5))
 pekeris_source = uacpy.Source(depths=20.0, frequencies=200.0)
 target_range, target_depth = 3000.0, 80.0
-paths = uacpy.Bellhop(alpha=(-30, 30), n_beams=2001).compute_eigenrays(
+paths = uacpy.Bellhop(backend='fortran', launch_angles=(-30, 30), n_beams=2001).compute_eigenrays(
     pekeris, pekeris_source,
     uacpy.Receiver(depths=[target_depth], ranges=[target_range])
 ).top_n_by_miss(8).truncate_at_receiver()
@@ -168,7 +168,7 @@ paths = uacpy.Bellhop(alpha=(-30, 30), n_beams=2001).compute_eigenrays(
 print(f"  Pekeris guide, {len(paths.rays)} eigenrays at 3 km / 80 m:")
 print(f"    {'α (deg)':>10s} {'miss (m)':>9s} {'top':>4s} {'bot':>4s}")
 for ray in paths.rays:
-    print(f"    {ray['alpha']:>10.3f} {ray['miss_distance_m']:>9.3f} "
+    print(f"    {ray['launch_angle']:>10.3f} {ray['miss_distance_m']:>9.3f} "
           f"{ray['n_top_bounces']:>4d} {ray['n_bot_bounces']:>4d}")
 
 fig, ax = paths.plot(env=pekeris)

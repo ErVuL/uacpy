@@ -1,6 +1,6 @@
 # Plotting — one convention, one workhorse
 
-> `uacpy.plot` · 64 public plotters · every result and every drawable carrier
+> `uacpy.plot` · 70 public plotters · every result and every drawable carrier
 > renders itself with `.plot()`
 
 There are two halves to the plotting surface. Anything that is a uacpy object
@@ -23,20 +23,20 @@ helpers are the exceptions: `animate_field` returns a `FuncAnimation` and
 import uacpy
 ```
 
-`uacpy.plot` is the whole surface. It is an attribute alias for
-`uacpy.visualization.plots`, so use `uacpy.plot.plot_field(...)` after
-`import uacpy`, or import the name directly from
-`uacpy.visualization` — `from uacpy.plot import plot_field` raises
-`ModuleNotFoundError`, because `uacpy.plot` is not a module path. Four names are
-also re-exported at the top level for convenience: `uacpy.plot_result`,
-`uacpy.plot_field`, `uacpy.plot_overview`, `uacpy.compare_models`.
+`uacpy.plot` is the whole surface: a module re-exporting every plotter
+`uacpy.visualization.plots` defines, so `uacpy.plot.plot_field(...)` after
+`import uacpy` and `from uacpy.plot import plot_field` both work, and give the
+same object. `import uacpy` does not load it (it pulls in matplotlib); the first
+`uacpy.plot` access or an explicit import does. `uacpy.plot` is every
+plotter's one public path: none is re-exported at the top level or on
+`uacpy.visualization`.
 
 ![Carriers and results both plot themselves](figures/plot_dispatch.png)
 
 ```python
 env, source, receiver = shallow_water()
 tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
-rays = Bellhop(n_beams=25, alpha=(-12.0, 12.0)).run(
+rays = Bellhop(n_beams=25, launch_angles=(-12.0, 12.0)).run(
     env, source, receiver, run_mode=RunMode.RAYS)
 
 fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.4))
@@ -56,7 +56,7 @@ spectral estimators and every transform:
 ```
 sig.welch(x, fs).plot()                       # SpectralEstimate
 sig.spectrogram(x, fs).plot()                 # SpectrogramResult
-sig.cwt(x, fs).plot(sample_rate=fs)           # CWTResult
+sig.cwt(x, fs).plot()                         # CWTResult
 sig.wigner_ville(x, fs).plot()                # WignerVilleResult
 sig.complex_cepstrum(x).plot()                # ComplexCepstrum
 sig.constant_q_transform(x, fs).plot()        # CQTResult
@@ -64,7 +64,7 @@ sig.ambiguity_function(x, fs).plot()          # AmbiguityResult
 sig.fk_transform(panel, fs, dx).plot()        # FKResult
 sig.taup_transform(panel, fs, dx).plot()      # TauPResult
 sig.radon_transform(panel, fs, dx, p).plot()  # RadonResult
-uacpy.absorption_thorp(f).plot()              # AbsorptionCoefficient
+uacpy.Thorp().table(f).plot()                 # AbsorptionCoefficient
 WenzNoise(f, wind_speed_kn=15).plot()         # WenzNoise
 arrivals.channel_taps(...).plot()             # ChannelTaps
 env.ssp.plot()                                # SoundSpeedProfile
@@ -102,10 +102,6 @@ not see rides as an attribute beside the tuple (`SpectralEstimate.scaling`,
 `Pa²` without being told. A result you would *ask something* is a full class —
 `Field.at()`, `Rays.filter_by_bounces()`, `Modes.excitation()`.
 
-`CWTResult.plot` is the single exception that asks for an argument. A
-scalogram's time axis is drawn from the sample rate and the carrier does not
-hold one, so it cannot be defaulted without inventing the axis.
-
 A carrier that carries everything its plotter needs derives the rest rather
 than asking: `ChannelTaps.plot()` works out its sample rate as
 `symbol_rate * sps`.
@@ -123,11 +119,11 @@ and forwards the rest of your keywords to the plotter it picked:
 | `Field` | heatmap / line cut / stacked traces | `plot_field` (public) |
 | `ResultStack[Field]` | one titled panel per slab | `_plot_field_stack` |
 | `Rays` | the ray fan, coloured by boundary interaction | `_plot_rays` |
-| `Arrivals` | amplitude-vs-delay stems; `dB=True` draws the level axis instead, bounded `dynamic_range` dB (default 60) under the loudest arrival | `_plot_arrivals` |
+| `Arrivals` | amplitude-vs-delay stems; `dB=True` draws the level axis instead, bounded `dynamic_range_dB` dB (default 60) under the loudest arrival | `_plot_arrivals` |
 | `Modes` | the depth eigenfunctions ψ(z) | `_plot_mode_functions` |
-| `ReflectionCoefficient` | \|R(θ)\| (and phase with `show_phase=True`); broadband draws \|R(θ,f)\| as a heatmap, with `angle_on_x=True` to share an angle axis with a narrowband panel, `frequency_unit='Hz'`, `vmin`/`vmax`, `cmap` and `show_colorbar` | `_plot_reflection_coefficient` |
+| `ReflectionCoefficient` | \|R(θ)\| (and phase with `show_phase=True`); broadband draws \|R(θ,f)\| as a heatmap, with `angle_on_x=True` to share an angle axis with a narrowband panel, `frequency_unit='Hz'`, `vmin`/`vmax`, `cmap` and `show_colorbar`. A knob of the other branch is refused, not ignored | `_plot_reflection_coefficient` |
 | `Covariance` | the CSDM as an image | `_plot_covariance` |
-| `Replicas` | the replica field | `_plot_replicas` |
+| `Replicas` | one element's \|R\| over the candidate `(depth, range)` or `(depth, x)` grid, range in km and depth in m as `plot_matched_field` draws the surface; `frequency_index=`, `sensor_index=`, `y_index=` (all 0 by default) pick the frequency, element and, on an OASN grid, the y plane the title names | `_plot_replicas` |
 
 Only `plot_field` is public in that list. The other seven are single-view
 renderers with exactly one caller each, so they live behind the `.plot()` they
@@ -145,7 +141,7 @@ Carriers are not results, but the drawable ones follow the same convention:
 | `SoundSpeedProfile` | c(z), one line per range column |
 | `Bathymetry` | seafloor depth vs range (axis pointing down) |
 | `Altimetry` | sea-surface height vs range (axis pointing up) |
-| `Absorption` | α(f) in dB/km, log-log — **takes `frequencies` as a required argument**, because absorption *is* a function of frequency |
+| `AbsorptionCoefficient` | α(f) in dB/km, log-log — the carrier a law's `.table(f)` returns (`Thorp().table(f)`); it holds its own frequencies, so `.plot()` takes none. The laws themselves (`Thorp`, `FrancoisGarrison`, …) have no `.plot()`: a plotter draws data, so evaluate the law first. `plot_absorption(alpha, frequencies=f, depths=z)` also draws a bare dB/km array |
 
 `Bottom.plot()` and `Surface.plot()` deliberately **do not exist**. A seabed
 cross-section needs to know where the seafloor is, and that lives in
@@ -198,14 +194,21 @@ So the way to control the picture is to slice the field first —
 def _time_series():
     """``p(depth, range, time)`` — the field every render branch is drawn from."""
     env, _, _ = shallow_water()
+    # A Hann-shaded chirp, as a projector transmits it: the abrupt ends of an
+    # unshaded one leave sinc skirts that stay above -40 dB out to 1.5 kHz.
+    # Shaded, it is 40 dB down by 87 and 511 Hz, inside the 80-520 Hz band
+    # H is computed over, so the band's edges cut nothing.
+    _, chirp = lfm_chirp(150.0, 450.0, 0.04, sample_rate=4000.0)
+    waveform = chirp * np.hanning(chirp.size)
     source = uacpy.Source(depths=25.0,
-                          frequencies=np.arange(150.0, 450.1, 0.5))
+                          frequencies=np.arange(80.0, 520.1, 0.5))
     receiver = uacpy.Receiver(depths=CUT_DEPTH,
                               ranges=np.linspace(1000.0, 3000.0, 9))
     H = Bellhop(n_beams=3000).run(env, source, receiver,
                                   run_mode=RunMode.BROADBAND)
-    _, waveform = lfm_chirp(150.0, 450.0, 0.04, 4000.0)
-    return H.synthesize_time_series(waveform, 4000.0)
+    # Δf = 0.5 Hz makes the record 1/Δf = 2 s long; opened at 0.5 s it holds
+    # every arrival, from the first at 1 km (0.67 s) to the 3 km tail (2.29 s).
+    return H.synthesize_time_series(waveform, 4000.0, t_start=0.5)
 
 series = _time_series()
 panel = series.isel(depth=0)     # coords {range, time}
@@ -274,8 +277,8 @@ otherwise.
 | `value` | Draws | Auto colour treatment (heatmap) |
 |---|---|---|
 | `'dB'` | the dB view (TL for a pressure field) | depends on the quantity: fixed 20–120 dB (§4) for pressure, symmetric about 0 dB for signal excess, autoscaled for reverberation |
-| `'mag_dB'` | 20·log10\|H\| = −TL, dB | the TL colormap REVERSED (`jet`), autoscaled |
-| `'mag'` | \|p\|, linear (complex fields only) | linear colormap (`seismic`), anchored at zero |
+| `'level'` | 20·log10\|H\| = −TL, dB | the TL colormap REVERSED (`jet`), autoscaled |
+| `'magnitude'` | \|p\|, linear (complex fields only) | the ordered map `'level'` takes (`jet` for pressure: quiet blue, loud red), anchored at zero |
 | `'phase'` | arg(p), radians (complex fields only) | `twilight`, fixed ±π |
 | `'real'`, `'imag'` | Re(p) / Im(p) (`'imag'` complex only) | linear colormap (`seismic`), symmetric about zero; real time-domain data is clipped to ±RMS |
 
@@ -380,18 +383,24 @@ plain:
   environment does not stretch a short plot.
 - **`source=` / `receiver=`** — the run geometry. The receiver lattice is
   decimated (≤ 20 range dots × 10 depth dots) so a dense grid does not paint the
-  panel solid. The source is drawn at **r = 0** by the package convention that
+  panel solid; with `env=`, a lattice point deeper than the seafloor at its
+  range is left out, since it sits in the seabed. The source is drawn at **r = 0** by the package convention that
   range is measured from it, and the x axis widens by the marker's own half
   width to keep it whole on screen — which is why the last panel starts just
   left of 0 km while the data starts at 50 m.
 
 All three apply to a `(depth, range)` cross-section only (§2.2). `env=` is
 accepted by every view that has one — `plot_field`, `plot_signal_excess`,
-`plot_detection_probability`, `compare_models`, `animate_field`,
-`plot_time_snapshots` and the ray plotter behind `rays.plot()`. `source=` /
-`receiver=` are `plot_field`'s, `env.plot()`'s, `compare_models`'s and
+`plot_detection_probability`, `compare_models`, `plot_field_difference`,
+`plot_overview`, `animate_field`, `plot_time_snapshots`, the ray plotter
+behind `rays.plot()`, and `plot_result`, which forwards it. `source=` /
+`receiver=` are `plot_field`'s, `plot_signal_excess`'s,
+`plot_detection_probability`'s, `plot_environment`'s (`env.plot()`),
+`compare_models`'s and
 `plot_overview`'s — `compare_models` draws the same markers on **every**
-panel, so two models of one scene carry one geometry. The ray plotter draws
+panel, so two models of one scene carry one geometry, while `plot_overview`
+marks the receivers on its environment panel only: its TL heatmap's cells are
+the receiver grid already. The ray plotter draws
 both by default instead, and turns them off with `show_source=False` /
 `show_receivers=False`. Ask for an overlay anywhere else —
 `arrivals.plot(env=env)`, a `(range, time)` heatmap — and you get a
@@ -542,6 +551,8 @@ reduce-then-plot view of one receiver cell:
 
 Both squeeze singleton axes and require the field to reduce to a single
 `(depth, range)` cell — `H.at(depth=…, range=…).plot_transfer_function()`.
+`plot_transfer_function(H)` and `plot_impulse_response(H)` are the
+function forms (§7).
 
 ---
 
@@ -561,15 +572,19 @@ trace = _time_series().isel(depth=0).at(range=1000.0)
 # 170 dB re 1 µPa @ 1 m projector so the dB axes read physically.
 p_t = 316.0 * np.asarray(trace.data, dtype=float)
 
-f_s, t_s, S = spectrogram(p_t, sample_rate, nperseg=256)
-f_p, P = welch(p_t, sample_rate, nperseg=1024)
+# detrend=False on both: the synthesised pressure has no DC to remove,
+# and taking each segment's mean off a segment holding part of the
+# pulse leaves a Hann-shaped residue in the lowest bins.
+f_s, t_s, S = spectrogram(p_t, sample_rate, nperseg=256, detrend=False)
+t_s = t_s + float(trace.coords['time'][0])   # from the record's own start
+f_p, P = welch(p_t, sample_rate, nperseg=1024, detrend=False)
 
 mod = Modulator('16qam')
 bits = rng.integers(0, 2, size=4 * 600)
 symbols = awgn(mod.modulate(bits), 18.0, rng=rng)
 
 uacpy.plot.plot_spectrogram(f_s, t_s, S, ax=axes[0][0], vmin=30, vmax=85,
-                            ymax=800.0,
+                            freq_max=800.0,
                             title='plot_spectrogram — chirp at 1 km')
 uacpy.plot.plot_psd(f_p, P, ax=axes[0][1], ymin=0, ymax=80,
                     title='plot_psd — same trace')
@@ -615,12 +630,13 @@ detection probability and the ROC.
 
 ## 7. Reference — every public plotter
 
-All 64 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
+All 70 plotters in `uacpy.plot.__all__`, plus the two coastline calls they
 draw land with — the 8 remaining names in `__all__` are the submodules
 themselves. **ax** marks a single-axes plotter you can
-compose with. Every entry takes `title=` except `plot_result` (it forwards
-yours), `shared_colorbar` (a colorbar on an existing figure) and the two
-`draw_*` overlays; every entry takes `figsize=` except `plot_result`,
+compose with. Every entry takes `title=` except `plot_result` and
+`plot_carrier` (they forward yours), `shared_colorbar` (a colorbar on an
+existing figure) and the two `draw_*` overlays; every entry takes
+`figsize=` except `plot_result`, `plot_carrier`,
 `shared_colorbar`, `animate_field`, the two `draw_*` overlays and
 `plot_time_snapshots`, which sizes itself from `figsize_per_panel=` instead.
 
@@ -629,17 +645,20 @@ yours), `shared_colorbar` (a colorbar on an existing figure) and the two
 | Plotter | ax | Draws |
 |---|---|---|
 | `plot_result(result, env=None, **kw)` | — | type-dispatcher behind every `Result.plot()` |
+| `plot_carrier(carrier, **kw)` | — | type-dispatcher behind every carrier's `.plot()`: `plot_environment`, `plot_ssp`, `plot_range_profile` or `plot_absorption` |
+| `plot_transfer_function(field, axes=None, ax=None, title=None, figsize=(8, 6))` | — | a broadband field at one receiver cell: 20·log10\|H\| over arg(H), two stacked panels (`ax=` takes the pair); `field.plot_transfer_function()` is the object form |
+| `plot_impulse_response(field, ax=None, window='hann', nfft=None, t_start=None, figsize=(8, 4))` | ✓ | the band-limited `p(t)` that one cell's `H` inverts to; `field.plot_impulse_response()` is the object form |
 | `plot_field(field, ax=None, …)` | ✓ | the workhorse — §2 |
-| `compare(fields, labels=None, ax=None, value=None)` | ✓ | overlay several 1-D sliced fields on one axes |
-| `compare_models(fields, labels=None, env=None, ncols=None, contours=None)` | — | side-by-side heatmap grid, one shared colourbar |
-| `plot_field_difference(field, reference, ax=None, env=None, diff_vmax=None)` | ✓ | `field - reference` in dB on a diverging map, symmetric about zero; positive means `field` is the quieter one |
-| `plot_field_statistics(fields, labels=None, *, depth)` | — | mean ± std per field at one depth, plus the pairwise RMS-difference matrix |
+| `compare(fields, labels=None, ax=None, value=None)` | ✓ | overlay several 1-D sliced fields on one axes; `fields` is a list or a `{label: field}` dict, as for `compare_models` and `plot_field_statistics`, and all three drop `None` entries (a model that did not run) |
+| `compare_models(fields, labels=None, env=None, ncols=None, contours=None, fig=None, **mpl_kw)` | — | side-by-side heatmap grid, one shared colourbar; every field must be 2-D once its length-1 axes drop (1-D cuts go to `compare`); `fig=` draws into a `Figure`/`SubFigure` you lay out, `**mpl_kw` reaches every panel's `pcolormesh` |
+| `plot_field_difference(field, reference, ax=None, env=None, diff_vmax=None, cmap=None)` | ✓ | `field - reference` in dB on a diverging map (`RdBu_r` unless `cmap=` is given), symmetric about zero; positive means `field` is the quieter one. The window is `diff_vmax=` or `vmin=`/`vmax=` (default ±10 dB), not both |
+| `plot_field_statistics(fields, labels=None, *, depth, fig=None)` | — | two bars per field at one depth — its mean and, beside it, its standard deviation (separate bars, not error bars) — plus the pairwise RMS-difference matrix |
 | `shared_colorbar(fig, axes, *, label=None, **kw)` | — | one colorbar for a row or grid of panels drawn with `show_colorbar=False`, taken from their own mappable. Refuses panels that are not on one colour scale — a single bar over two scales describes one and mislabels the rest |
 | `plot_signal_excess(field, ax=None, env=None, …)` | ✓ | diverging SE heatmap + the SE = 0 detection boundary → [sonar](sonar.md) |
 | `plot_detection_probability(field, ax=None, env=None, …)` | ✓ | `P_D` on a fixed [0, 1] scale with labelled contours → [sonar](sonar.md) |
 | `animate_field(field, env=None, fps=30, …)` | ✓ | a `FuncAnimation` sweeping the time axis |
 | `save_animation(field, path, fps=20, …)` | — | render that animation to GIF/MP4 (writer from the suffix) |
-| `plot_time_snapshots(fields, times_s, env=None, …)` | — | per-model rows × per-time columns of `p(d, r, t)` |
+| `plot_time_snapshots(fields, times_s, env=None, fig=None, …)` | — | per-model rows × per-time columns of `p(d, r, t)`, each cell at its own coordinates on any receiver grid |
 
 ### Rays and modes
 
@@ -649,8 +668,8 @@ yours), `shared_colorbar` (a colorbar on an existing figure) and the two
 | `plot_modes_heatmap(modes, n_modes=None, ax=None, …)` | ✓ | ψ_m(z) as a (depth, mode index) image |
 | `plot_mode_speeds(modes, ax=None, c_bottom=None, …)` | ✓ | phase speed per mode index, plus group speed when the result carries it |
 | `plot_dispersion(modes_by_frequency, ax=None, n_modes=3, …)` | ✓ | phase and group speed vs frequency — the dispersion diagram |
-| `plot_greens_function(grn, ax=None, frequency_index=0, depth=None, modes=None, vmin_dB=-60, …)` | ✓ | \|G(k_r, z)\| from a Scooter `.grn`; `modes=` marks the trapped eigenvalues on it |
-| `plot_wavenumber_sampling(frequency, c_low, c_high, delta_k, ax=None, r_max=None, …)` | ✓ | the k_r axis a Hankel transform is sampled on, with the wrap-around limit `r_max` implies |
+| `plot_greens_function(grn, ax=None, frequency_index=0, depth=None, modes=None, dynamic_range_dB=60, …)` | ✓ | \|G(k_r, z)\| from a Scooter `.grn`; `modes=` marks the trapped eigenvalues on it |
+| `plot_wavenumber_sampling(frequency, c_low, c_high, delta_k, ax=None, rmax_m=None, …)` | ✓ | the k_r axis a Hankel transform is sampled on, with the wrap-around limit `rmax_m` implies |
 
 Ray fans, arrival stems, mode functions, covariance, replicas and reflection
 coefficients have no public free plotter — they are reached through
@@ -666,13 +685,13 @@ drawn where the backend filled it — `krakenc` does, `kraken` prints zeros
 | Plotter | ax | Draws |
 |---|---|---|
 | `plot_detection_probability(field, env=None, source=None, receiver=None, contour_levels=(0.1,0.5,0.9))` / `plot_signal_excess(...)` | ✓ | the two sonar-equation panels. Both take `source=`/`receiver=` like `plot_field`: a detection map answers "would this array hear that target", so the two things it is about belong on it |
-| `plot_result_stack(stack, env=None, ncols=None)` | ✓ | one TL panel per slab. A grid stacked over `source_depth` marks **each panel's own source**, since that is what one panel shows; pass `source=` to override |
-| `plot_mode_excitation(modes, source, ax=None, sound_speed=1500.0, show_array_factor=True, floor_dB=-40.0)` | ✓ | what a source array drives, both ways on one angle axis: a stem per mode at its grazing angle, height `|Σₙ wₙ·φₘ(zₙ)|` (the waveguide's answer — Medwin & Clay §11.3.1, *mode filters*), over the free-field pattern of the same array — its **array beam pattern** `P(θ)=f(θ)·A(θ)` when the elements are directional, the bare array factor `A(θ)` when not (Butler & Sherman §7.1.1). They agree while the pattern is symmetric in ±θ and part company once steering breaks it, which is why both are drawn |
+| `plot_result(stack, env=None, ncols=None)` | — | `stack.plot()` for a `ResultStack` of fields: one TL panel per slab, on a grid it builds itself. A grid stacked over `source_depth` marks **each panel's own source**, since that is what one panel shows; pass `source=` to override |
+| `plot_mode_excitation(modes, source, ax=None, *, sound_speed=None, env=None, show_array_factor=True, dynamic_range_dB=40.0)` | ✓ | one of `sound_speed=` or `env=` is required: the angle axis is measured against that speed, so the call refuses to default it. What a source array drives, both ways on one angle axis: a stem per mode at its grazing angle, height `|Σₙ wₙ·φₘ(zₙ)|` (the waveguide's answer — Medwin & Clay §11.3.1, *mode filters*), over the free-field pattern of the same array — its **array beam pattern** `P(θ)=f(θ)·A(θ)` when the elements are directional, the bare array factor `A(θ)` when not (Butler & Sherman §7.1.1). They agree while the pattern is symmetric in ±θ and part company once steering breaks it, which is why both are drawn |
 | `plot_beam_pattern(pattern=None, ax=None, polar=True, mirror=False, fill=True, rmin=None)` | ✓ | the `.sbp` directivity table, on polar axes oriented like the field: 0° along increasing range, positive angles downward. `source.plot_beam_pattern()` is the object form; `None` draws the flat 0 dB circle Bellhop substitutes for an omni source |
-| `plot_beam_power(beams, ax=None, at=None, normalise=True)` | ✓ | a scanned beam's power against **look** angle, from the `BeamformedField` that `beamform_field` returns; `beams.plot()` is the object form. The receive dual of `plot_beam_pattern` — that one is a *launch* fan and labels itself so. `at=` picks the point when the beamformer ran over a grid, or the bin when it ran over a band |
+| `plot_beam_power(beams, ax=None, at=None, normalize=True)` | ✓ | a scanned beam's power against **look** angle, from the `BeamformedField` that `beamform_field` returns; `beams.plot()` is the object form. The receive dual of `plot_beam_pattern` — that one is a *launch* fan and labels itself so. `at=` picks the point when the beamformer ran over a grid, or the bin when it ran over a band — an index, or coordinates such as `at={'range': 4000.0}` read off its `grid_coords`; the title names the point |
 
 The polar orientation is not cosmetic. The `.sbp` angle axis *is* Bellhop's
-launch declination `alpha` — `Bellhop._check_beam_pattern_spans_the_fan`
+launch declination `alpha` — Bellhop's `check_beam_pattern_spans_the_fan`
 compares the two directly — and `ray2D(1)%t = [COS(alpha), SIN(alpha)]/c`
 (`Bellhop/bellhop.f90:453`) over a depth axis that is positive downward sends
 `alpha > 0` deeper. A lobe drawn below the horizontal is therefore a lobe that
@@ -704,25 +723,30 @@ against an omni one.
 
 | Plotter | ax | Draws |
 |---|---|---|
-| `plot_bottom_properties(env, properties=None, n_range=240, n_depth=200)` | — | small-multiples seabed cross-sections, one panel per property → [environment](environment.md) |
-| `plot_bottom_loss(materials, ax=None, water_speed=1500.0, mark_critical=False)` | ✓ | plane-wave bottom loss vs grazing angle, one curve per seabed — a preset name, a property dict, a sequence, or a `{label: material}` mapping. Draws what `core.acoustics.bottom_loss_curve` computes; `mark_critical=True` rules each **faster-than-water** seabed's critical angle (a slower one has none) |
-| `plot_absorption(coefficient, ax=None, label=None)` | ✓ | draws an `AbsorptionCoefficient`: α(f) log-log, or α(f, z) as a heatmap. `absorption_thorp(f).plot()` is the object form |
+| `plot_environment(env, *, source=None, receiver=None, ax=None, show_bottom_colorbar=True, …)` | ✓ | the water column (coloured by sound speed) over the seabed cross-section, with `source=`/`receiver=` markers; `env.plot()` is the object form |
+| `plot_ssp(env_or_ssp, *, depths=None, ranges=None, ax=None, figsize=(5, 6), label=None, color=None, show_legend=None, …)` | ✓ | the sound-speed profile `c(z)`, one line per range column, from an `Environment`, a `SoundSpeedProfile`, or bare speeds (m/s) on `depths=` (and `ranges=` for a 2-D array); `ssp.plot()` is the object form |
+| `plot_range_profile(profile, *, ax=None, figsize=(10, 4), …)` | ✓ | a `Bathymetry` (axis down) or an `Altimetry` (axis up) against range; `bathymetry.plot()` is the object form |
+| `plot_bottom_properties(env, properties=None, n_ranges=240, n_depths=200, fig=None)` | — | small-multiples seabed cross-sections, one panel per property → [environment](environment.md) |
+| `plot_bottom_loss(materials, ax=None, water_sound_speed=1500.0, mark_critical=False)` | ✓ | plane-wave bottom loss vs grazing angle, one curve per seabed — a preset name, a property dict, a seabed carrier (`BoundaryProperties`, or an unlayered range-independent `Bottom` such as `env.bottom`), a sequence, or a `{label: material}` mapping. Draws what `core.acoustics.bottom_loss_curve` computes; `mark_critical=True` rules each **faster-than-water** seabed's critical angle (a slower one has none) |
+| `plot_absorption(coefficient, ax=None, *, frequencies=None, depths=None, label=None, title=None, …)` | ✓ | draws an `AbsorptionCoefficient`, or a bare dB/km array on `frequencies=` (and `depths=`): α(f) log-log, or α(f, z) as a heatmap. A law is refused — evaluate it first. `Thorp().table(f).plot()` is the object form |
 
 ### Maps
 
 | Plotter | ax | Draws |
 |---|---|---|
 | `plot_bathymetry_map(lats, lons, depth, transect=None, relief=True, …)` | ✓ | a fetched bathymetry grid as a geographic map → [external data](data.md) |
-| `plot_overview(env, map_args, tl=None, source=None, receiver=None, …)` | — | one-call composite: map + TL + environment cross-section |
+| `plot_overview(env, map_data, tl=None, source=None, receiver=None, sea_ice=None, fig=None, …)` | — | one-call composite: map + TL + environment cross-section; `sea_ice=(ranges_m, concentration)` in metres, as `fetch_sea_ice_concentration_transect` returns it |
 | `plot_sea_ice_map(grid, hemi='N', transect=None, …)` | ✓ | sea-ice concentration on a polar map |
 
 Every map above draws land from the same source, and the two calls behind it
-are public so a map of your own can use it:
+are public so a map of your own can use it. They live on `uacpy.visualization`
+(`from uacpy.visualization import land_polygons`), not on the `uacpy.plot`
+alias:
 
 | Call | Returns |
 |---|---|
 | `land_polygons(resolution='50m', *, url=None, …)` | Natural Earth land rings as `(N, 2)` `(lon, lat)` arrays — the backdrop the map plotters draw, or `None` when no source is reachable (the map then renders sea only) |
-| `download_coastline(cache_dir=None, *, url=None, resolutions=…)` | Caches those rings for offline use and returns the written paths — the coastline's counterpart to `uacpy.data`'s `download_*_db` fetchers, and it takes the same `url=` mirror override |
+| `download_coastline(cache_dir=None, *, url=None, resolutions=…)` | Caches those rings for offline use and returns the written paths — the coastline's counterpart to `uacpy.data`'s `download_*_db` fetchers, and it takes the same `url=` mirror override. The maps read only `<cache root>/coastline/`; to keep the cache elsewhere set `UACPY_DATA_CACHE=<root>` rather than `cache_dir=`, which (as for those fetchers) names the dataset directory itself. A resolution other than `'110m'`, `'50m'`, `'10m'` is refused before any download |
 
 Natural Earth is public domain, so neither call carries an attribution
 requirement. `./install.sh --data coastline` runs `download_coastline` for you.
@@ -734,30 +758,30 @@ Every one consumes the output of the same-named routine in
 
 | Plotter | ax | Consumes |
 |---|---|---|
-| `plot_waveform(signal, sample_rate, ax=None, value='pressure', t0=0.0, time_units='s', …)` | ✓ | a bare 1-D waveform and its rate — the elementary time-domain view. `value='envelope'` draws `acoustic_signal.envelope` (the public transform, not a computation hidden in the plotter) and `'envelope_dB'` the same in decibels, floored by `floor_dB` because `20·log10` of a silence is `-inf`. `t0` states the first sample's time, which a bare array cannot carry and a `Field` over `{'time'}` does. Overlay by handing the axis back. A gridded result plots itself instead — `Field({'time'}).plot()` |
+| `plot_waveform(signal, sample_rate, ax=None, value='pressure', t0=0.0, time_units='s', …)` | ✓ | a bare 1-D waveform and its rate — the elementary time-domain view. `value='envelope'` draws `acoustic_signal.envelope` (the public transform, not a computation hidden in the plotter) and `'envelope_dB'` the same in decibels, floored `dynamic_range_dB` (default 60) below its reference because `20·log10` of a silence is `-inf`. `t0` states the first sample's time, which a bare array cannot carry and a `Field` over `{'time'}` does. Overlay by handing the axis back. A gridded result plots itself instead — `Field({'time'}).plot()` |
 | `plot_psd(frequencies, psd_linear, ax=None, ref=1e-6, freq_scale='log', …)` | ✓ | a `SpectralEstimate` from `welch` or `constant_q` — the spectrum in dB, labelled from its own scaling (also `.plot()`) |
 | `plot_ppsd(result, ax=None, …)` | ✓ | a `ProbabilisticSpectralEstimate` from `probabilistic_welch` or `probabilistic_sound_exposure` — 2-D histogram of levels (also `.plot()`) |
 | `plot_sel(result, ax=None, band_type='decidecade', …)` | ✓ | a banded `SpectralEstimate`, i.e. `sound_exposure` output — band levels as bars, labelled from its scaling; also `.plot()` |
-| `plot_band_levels(centers, levels, ax=None, …)` | ✓ | `decidecade_band_levels` — bar plot |
-| `plot_spectrogram(frequencies, times, Sxx, ax=None, ymin=1, vmin=0, vmax=200, …)` | ✓ | `spectrogram` |
+| `plot_band_levels(centers, levels, ax=None, ref=1e-6, …)` | ✓ | `decidecade_band_levels` — bar plot of levels already in dB re `ref`² (pass the `ref=` the levels were computed with); band power still in Pa² goes to `plot_sel` |
+| `plot_spectrogram(frequencies, times, Sxx, ax=None, *, freq_min=1, vmin=None, vmax=None, dynamic_range_dB=60.0, cmap='viridis', …)` | ✓ | `spectrogram`; `freq_min`/`freq_max` bound the frequency axis, `vmin`/`vmax` the level (colour) window, by default the panel's peak and 60 dB below it |
 | `plot_constant_q_transform(frequencies, coefficients, ax=None, label=None, …)` | ✓ | `constant_q_transform` — one frame's \|X_cq\|, linear |
-| `plot_constant_q_spectrogram(frequencies, times, power, ax=None, scaling='spectrum', …)` | ✓ | `constant_q_spectrogram` (log frequency) |
+| `plot_constant_q_spectrogram(frequencies, times, power, ax=None, scaling=None, …)` | ✓ | `constant_q_spectrogram` (log frequency) |
 | `plot_constant_q_psd(frequencies, power, ax=None, scaling='spectrum', …)` | ✓ | `constant_q(...)` |
 | `plot_constant_q_ppsd(result, ax=None, scaling='spectrum', …)` | ✓ | a `probabilistic_constant_q` estimate — the same histogram on geometric bins (also `.plot()`) |
-| `plot_cwt(frequencies, W, sample_rate, ax=None, …)` | ✓ | `cwt` — scalogram \|W\| |
+| `plot_cwt(result, ax=None, …)` or `plot_cwt(frequencies, W, sample_rate, ax=None, …)` | ✓ | `cwt` — scalogram \|W\| on the result's own `times` |
 | `plot_wigner_ville(frequencies, times, W, ax=None, …)` | ✓ | `wigner_ville` |
-| `plot_cepstrum(c, ax=None, sample_rate=None, …)` | ✓ | `cepstrum` vs quefrency |
-| `plot_fk(frequencies, wavenumbers, power, ax=None, scaling=None, wavenumber_unit='rad/m', sound_speed=None, …)` | ✓ | `fk_transform` — f-k panel in dB, labelled from the result's scaling: `plot_fk(result)` draws a density (`normalize=True`) as PSD in Pa²·m/(Hz·rad), or Pa²·m/Hz with `wavenumber_unit='cycles/m'` (axis `ν = k/2π`, panel ×2π), and the raw `|FK|²` as unnormalised power; bare arrays need `scaling='density'` or `'power'`, and a `scaling=` that contradicts the result raises |
+| `plot_cepstrum(c, ax=None, sample_rate=None, …)` | ✓ | a `Cepstrum` on its own quefrencies, a `ComplexCepstrum`, or a bare cepstrum array vs quefrency |
+| `plot_fk(frequencies, wavenumbers, power, ax=None, scaling=None, wavenumber_unit='rad/m', sound_speed=None, …)` | ✓ | `fk_transform` — f-k panel in dB, labelled from the result's scaling: `plot_fk(result)` draws a density (`scaling='density'`) as PSD in Pa²·m/(Hz·rad), or Pa²·m/Hz with `wavenumber_unit='cycles/m'` (axis `ν = k/2π`, panel ×2π), and the raw `|FK|²` as unnormalised power; bare arrays need `scaling='density'` or `'power'`, and a `scaling=` that contradicts the result raises |
 | `plot_taup(slownesses, taus, taup, ax=None, sound_speed=None, …)` | ✓ | `taup_transform` |
-| `plot_radon(moveout, taus, R, ax=None, kind='linear', …)` | ✓ | `radon_transform` |
-| `draw_sound_cone(ax, f_max, k_max, sound_speed, wavenumber_unit='rad/m', …)` | overlay | the `f = c·k/2π` cone on an f-k axis (`f = c·ν` over cycles/m) |
+| `plot_radon(moveout, taus, R, ax=None, kind=None, …)` | ✓ | `radon_transform`; `kind` (`'linear'`/`'parabolic'`/`'hyperbolic'`) names and scales the moveout axis, read from a `RadonResult`, `'linear'` for bare arrays, anything else refused |
+| `draw_sound_cone(ax, freq_max, k_max, sound_speed, wavenumber_unit='rad/m', …)` | overlay | the `f = c·k/2π` cone on an f-k axis (`f = c·ν` over cycles/m) |
 | `draw_slowness_line(ax, tau_max, sound_speed, …)` | overlay | `p = ±1/c` on a τ-p axis |
-| `plot_ambiguity(delays_s, doppler_hz, chi, ax=None, dB=False, dynamic_range=40, …)` | ✓ | `ambiguity_function` — range-Doppler surface; `dB=True` shows it re its peak, where the sidelobes are |
-| `plot_matched_field(x_m, z_m, surface, ax=None, dynamic_range=20, true_position=None, …)` | ✓ | a matched-field ambiguity surface over a replica grid (`Covariance.bartlett` / `.mvdr`). Draws one (z, x) plane: those return `(n_frequencies, n_zr, n_xr, n_yr)`, so index the frequency and y axes yourself when either is longer than 1 |
+| `plot_ambiguity(delays_s, doppler_hz, chi, ax=None, dB=False, dynamic_range_dB=None, …)` | ✓ | `ambiguity_function` — range-Doppler surface; `dB=True` shows it re its peak, where the sidelobes are, down to `dynamic_range_dB` (40 when unset) |
+| `plot_matched_field(field, ax=None, dynamic_range_dB=20, true_position=None, …)` | ✓ | the ambiguity `Field` a matched-field processor returns (`sonar.bartlett` / `sonar.mvdr` over a `replica_bank`, `Covariance.bartlett` / `.mvdr`, or `ambiguity_field`), already in dB re its peak. Draws one (depth, range) or (depth, x) plane: select a frequency or `y` plane with `field.at(...)` when either axis holds more than one value |
 | `plot_angular_spectrum(angles_deg, spectrum, ax=None, dB=True, …)` | ✓ | a Bartlett / MVDR / MUSIC spectrum → [arrays](arrays.md) |
-| `plot_frf(frequencies, tf, ax=None, tag='', …)` | 2-tuple | `FRF` — magnitude (dB) over phase (deg) |
-| `plot_coherence(frequencies, coh, ax=None, …)` | ✓ | `FRF` coherence vs frequency |
-| `plot_lsfir_diagnostics(Minfo, Vinfo, g)` | — | LS-FIR diagnostics: information matrix, vector, impulse response |
+| `plot_frf(frequencies, tf, ax=None, tag='', …)` | 2-tuple | an `FRFResult` (`.plot()` draws through it) — magnitude (dB) over phase (deg) |
+| `plot_coherence(frequencies, coh, ax=None, …)` | ✓ | a `frf_welch` result's `.coherence` vs frequency |
+| `plot_lsfir_diagnostics(Minfo, Vinfo, g)` | — | an `lsfir` result's `.information_matrix`, `.information_vector`, `.impulse_response` |
 
 ### Communications
 
@@ -773,7 +797,7 @@ Every one consumes the output of the same-named routine in
 | `plot_convergence(mse, ax=None, label=None, …)` | ✓ | equaliser learning curve (MSE vs symbol, dB) |
 | `plot_sync_metric(metric, ax=None, threshold=None, …)` | ✓ | synchronisation metric vs sample index |
 | `plot_doppler_ambiguity(scales, peak_metric, ax=None, …)` | ✓ | peak correlation vs Doppler scale |
-| `plot_ber_curve(ebn0_dB, ber_measured, ax=None, scheme=None, …)` | ✓ | measured BER vs Eb/N0, with the theory curve when `scheme=` is given |
+| `plot_ber_curve(ebn0_dB, ber_measured, ax=None, scheme=None, n_bits=None, …)` | ✓ | measured BER vs Eb/N0, with the theory curve when `scheme=` is given. A zero-error point measured no BER and is not drawn on the line; with `n_bits=` it is a hollow ▽ at `1/n_bits`, the smallest rate that run resolves |
 
 ### Noise and sonar
 
@@ -788,10 +812,11 @@ Every one consumes the output of the same-named routine in
 
 ## 8. Gotchas
 
-**`from uacpy.plot import …` does not work.** `uacpy.plot` is an attribute
-alias for `uacpy.visualization.plots`, not an importable path. Use
-`import uacpy` then `uacpy.plot.plot_field(...)`, or
-`from uacpy.visualization import plot_field`.
+**`uacpy.plot` is a module.** It re-exports every plotter of
+`uacpy.visualization.plots` unchanged, so `uacpy.plot.plot_field(...)` after
+`import uacpy`, `from uacpy.plot import plot_field` and
+`import uacpy.plot as up` all reach the same function. `import uacpy` alone
+does not load matplotlib; the first `uacpy.plot` access does.
 
 **Slice, then plot.** There is no `depth=`/`range=` selection keyword on
 `plot_field`. The field decides its own picture from `coords`, so the way to ask

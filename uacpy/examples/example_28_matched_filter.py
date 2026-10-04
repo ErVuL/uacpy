@@ -7,7 +7,7 @@ processing gain is 10·log10(B·T). The ambiguity function then shows what the
 waveform can and cannot separate in delay and Doppler together.
 
 Uses: acoustic_signal.lfm_chirp · simulate_reception · pulse_compression ·
-processing_gain · ambiguity_function · plot_ambiguity
+processing_gain_dB · ambiguity_function · plot_ambiguity
 """
 
 import os
@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import uacpy
 from uacpy.acoustic_signal import (ambiguity_function, lfm_chirp,
-                                   processing_gain, pulse_compression,
+                                   processing_gain_dB, pulse_compression,
                                    simulate_reception)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
@@ -29,9 +29,9 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 rng = np.random.default_rng(0xACED)
 fs = 20000.0
-f_min, f_max, pulse_length = 1000.0, 5000.0, 0.02
-t_tx, transmitted = lfm_chirp(f_min, f_max, pulse_length, fs)
-bandwidth = f_max - f_min
+freq_start, freq_end, pulse_length = 1000.0, 5000.0, 0.02
+t_tx, transmitted = lfm_chirp(freq_start, freq_end, pulse_length, sample_rate=fs)
+bandwidth = freq_end - freq_start
 
 # Two echoes, the second weaker and 25 ms later. The noise is drawn from the
 # seeded generator above, so the figure is identical run to run.
@@ -40,12 +40,12 @@ t_rx, received = simulate_reception(transmitted, [1.0, 0.5], delays, fs)
 received = received + 0.1 * rng.standard_normal(received.size)
 
 lags, compressed = pulse_compression(received, transmitted, fs)
-gain = processing_gain(bandwidth, pulse_length)
-peaks = lags[np.argsort(np.abs(compressed))[-1]]
+gain = processing_gain_dB(bandwidth, pulse_length)
+strongest_lag = lags[np.argmax(np.abs(compressed))]
 print(f"  B·T = {bandwidth * pulse_length:.0f} → processing gain "
       f"{gain:.1f} dB")
 print(f"  echoes at {delays[0] * 1e3:.0f} and {delays[1] * 1e3:.0f} ms; "
-      f"strongest compressed peak at {peaks * 1e3:.1f} ms")
+      f"strongest compressed peak at {strongest_lag * 1e3:.1f} ms")
 
 lag_axis, doppler_axis, ambiguity = ambiguity_function(
     transmitted.astype(complex), fs, n_doppler=121)

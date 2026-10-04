@@ -10,13 +10,13 @@ from typing import Optional, Sequence, Tuple
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field, ResultStack
-from uacpy.visualization.plots._common import ZORDER_SOURCE, _draw_geometry, _imshow_extent, _overlay_seafloor, typed_plot_error
+from uacpy.visualization.plots._common import DEPTH_AXIS_HEADROOM, ZORDER_SOURCE, _depth_range_heatmap, _draw_geometry, _grid_figure, _overlay_seafloor, _painted_x_span, _time_trace_label, typed_plot_error
 
 
 _TIME_AXES = ('depth', 'range', 'time')
 
 
-def _time_layout(field, caller: str, what: str = 'field'):
+def _time_layout(field, who: str, what: str = 'field'):
     """``(data, depths, ranges, times)`` of a time-series field in the
     canonical (depth, range, time) layout, whatever storage order
     ``field.coords`` declares. Refuses a field missing any of the three axes
@@ -25,7 +25,7 @@ def _time_layout(field, caller: str, what: str = 'field'):
     missing = set(_TIME_AXES) - set(coords)
     if missing:
         raise ConfigurationError(
-            f"{caller}: {what} is missing coord axes {sorted(missing)}. "
+            f"{who}: {what} is missing coord axes {sorted(missing)}. "
             f"Need depth, range, and time — got {list(coords)}.")
     order = list(coords)
     data = np.moveaxis(np.asarray(field.data),
@@ -61,6 +61,7 @@ def animate_field(
     show_time: bool = True,
     title: Optional[str] = None,
     aspect: str = 'auto',
+    show_colorbar: bool = True,
 ):
     """Animate a time-series :class:`Field` as a (depth, range) heatmap
     that evolves along the time axis.
@@ -102,11 +103,18 @@ def animate_field(
     title : str, optional
         Custom title prefix. ``None`` uses ``f"{field.model} — p(d, r, t)"``.
     aspect : str or float, optional
-        Passed to :meth:`matplotlib.axes.Axes.imshow`. ``'auto'`` (default)
+        The axes aspect. ``'auto'`` (default)
         stretches the heatmap to fill the axes — fine for wide-aspect
         domains. Use ``'equal'`` when the range and depth extents are
         comparable (small-domain visualisations) so isotropic wavefronts
         stay round instead of being stretched into ellipses.
+    show_colorbar : bool, optional
+        Draw the pressure colorbar, labelled from the field's own kind and
+        unit as :func:`plot_field` labels it. Default True.
+
+    Each cell is drawn at its own coordinates: an evenly spaced grid as an
+    image, any other grid (a receiver fan dense near the surface) as a mesh
+    centred on each sample.
 
     Returns
     -------
@@ -148,19 +156,18 @@ def animate_field(
     else:
         fig = ax.figure
 
-    # ``imshow`` is dramatically faster than ``pcolormesh`` for animation —
-    # one set_array per frame vs full mesh re-tesselation.
-    im = ax.imshow(
-        data[:, :, frame_idx[0]],
-        extent=_imshow_extent(ranges, depths),
+    # An image on an even grid (one set_array per frame), a mesh elsewhere;
+    # both take set_array in _update below.
+    im = _depth_range_heatmap(
+        ax, ranges, depths, data[:, :, frame_idx[0]],
         aspect=aspect,
         cmap=cmap,
         vmin=-p_max, vmax=p_max,
-        origin='upper',
         zorder=1,
     )
-    cbar = fig.colorbar(im, ax=ax, pad=0.02)
-    cbar.set_label('Pressure (source-normalised)')
+    if show_colorbar:
+        cbar = fig.colorbar(im, ax=ax, pad=0.02)
+        cbar.set_label(_time_trace_label(field))
 
     ax.set_xlabel('Range (km)')
     ax.set_ylabel('Depth (m)')
@@ -266,8 +273,9 @@ def plot_time_snapshots(
     cmap: str = 'RdBu_r',
     aspect=None,
     p_max=None,
-    figsize_per_panel: Tuple[float, float] = (3.2, 2.8),
+    figsize_per_panel: Optional[Tuple[float, float]] = None,
     title: Optional[str] = None,
+    fig=None,
 ):
     """Snapshot grid: per-model rows × per-time columns of ``p(d, r, t)``.
 
@@ -292,7 +300,7 @@ def plot_time_snapshots(
     cmap : str, optional
         Diverging colormap for ±pressure. Default ``'RdBu_r'``.
     aspect : str or float, optional
-        Passed to ``ax.imshow``. ``None`` (default) stretches a panel whose
+        The panels' axes aspect. ``None`` (default) stretches a panel whose
         range axis spans more than ten times its depth axis to a 4:1 floor —
         at least a quarter as tall as it is wide — since drawn isotropically
         (``1/1000.0``, 1 m of depth as long as 1 m of range, wavefronts round
@@ -304,12 +312,25 @@ def plot_time_snapshots(
         picks a per-row 99.5th-percentile of ``|data|`` so each model's
         absolute amplitude normalisation doesn't wash out the others.
         Pass a scalar for a global scale, or a sequence of length
-        ``n_models`` for explicit per-row scales.
+        ``n_models`` for explicit per-row scales. Each row carries its own
+        colour bar, labelled from the field's kind and unit as
+        :func:`plot_field` labels it (``'p(t) (Pa)'``), with ``', row
+        scale'`` appended unless a scalar ``p_max`` puts every row on one
+        scale.
     figsize_per_panel : tuple, optional
-        ``(width, height)`` inches per snapshot panel. Default ``(3.2,
-        2.8)``.
+        ``(width, height)`` inches per snapshot panel of a new figure.
+        Default ``(3.2, 2.8)``.
     title : str, optional
         ``fig.suptitle`` text.
+    fig : Figure or SubFigure, optional
+        Draw the grid into this (a panel of a larger figure) instead of a new
+        figure. Its size and layout are then the caller's — give the parent
+        ``layout='constrained'`` — so each row's colorbar takes its space
+        from that row's panels, and ``figsize_per_panel=`` is refused.
+
+    Each cell is drawn at its own coordinates: an evenly spaced grid as an
+    image, any other grid (a receiver fan dense near the surface) as a mesh
+    centred on each sample.
 
     Returns
     -------
@@ -343,14 +364,16 @@ def plot_time_snapshots(
                             f"field {(name or type(field).__name__)!r}")
                for name, field in rows]
 
-    fig, axes = plt.subplots(
-        n_models, n_times,
-        figsize=(figsize_per_panel[0] * n_times,
-                 figsize_per_panel[1] * n_models),
-        squeeze=False,
-    )
+    per_panel = (3.2, 2.8) if figsize_per_panel is None else figsize_per_panel
+    fig, axes, owns_fig = _grid_figure(
+        fig, n_models, n_times,
+        None if figsize_per_panel is None else (
+            per_panel[0] * n_times, per_panel[1] * n_models),
+        (per_panel[0] * n_times, per_panel[1] * n_models),
+        who='plot_time_snapshots')
 
     # Per-row pmax derivation (default).
+    row_mappables = [None] * n_models
     if p_max is None:
         p_max_per_row = [_pmax_percentile(data) for data, *_ in layouts]
     elif np.isscalar(p_max):
@@ -365,8 +388,8 @@ def plot_time_snapshots(
 
     for i, ((name, field), (data3, depths, ranges, times)) in enumerate(
             zip(rows, layouts)):
-        # Decide aspect ratio once per row from the data extent. The imshow
-        # extent is km in x and m in y, so aspect = 1/1000 displays 1 m of
+        # Decide aspect ratio once per row from the data extent. The panel
+        # is km in x and m in y, so aspect = 1/1000 displays 1 m of
         # depth as long as 1 m of range — isotropic, wavefronts stay round.
         row_aspect: 'float | str'
         if aspect is None:
@@ -379,9 +402,9 @@ def plot_time_snapshots(
             # would be a sliver at most 1:10. Every panel the gate admits is
             # therefore stretched to a 4:1 floor: a quarter as tall as it is
             # wide. Isotropic is not offered inside the gate for exactly that
-            # reason — the former ``and ratio >= 0.25`` conjunct contradicted
-            # the gate and so selected nothing — but a caller who wants it can
-            # still pass ``aspect=1/1000`` explicitly.
+            # reason (a ``ratio >= 0.25`` condition would contradict the gate
+            # and select nothing); a caller who wants it passes
+            # ``aspect=1/1000`` explicitly.
             # A single receiver depth has depth_span == 0 and so no ratio to
             # scale by; it falls to 'auto' rather than dividing by zero.
             ratio = depth_span / range_span if range_span > 0 else 1.0
@@ -397,19 +420,19 @@ def plot_time_snapshots(
             k = int(np.argmin(np.abs(times - t_target)))
             slab = data3[:, :, k]
             ax = axes[i, j]
-            extent = _imshow_extent(ranges, depths)
-            im = ax.imshow(
-                slab, extent=extent,
+            im = _depth_range_heatmap(
+                ax, ranges, depths, slab,
                 aspect=row_aspect, cmap=cmap,
-                vmin=-pm, vmax=pm, origin='upper',
+                vmin=-pm, vmax=pm,
             )
+            row_mappables[i] = im
             if env is not None:
                 _overlay_seafloor(ax, env, ranges, painted=im)
-                ax.set_ylim(float(env.depth) * 1.05, 0)
+                ax.set_ylim(float(env.depth) * DEPTH_AXIS_HEADROOM, 0)
             else:
                 ax.set_ylim(depths[-1], depths[0])
             # From the source out to the far edge of the last painted cell.
-            ax.set_xlim(0, max(extent[:2]))
+            ax.set_xlim(0, _painted_x_span(im)[1])
             if i == 0:
                 ax.set_title(f"t = {times[k] * 1000:.0f} ms", fontsize='medium')
             if j == 0:
@@ -421,7 +444,26 @@ def plot_time_snapshots(
 
     if title is not None:
         fig.suptitle(title, fontsize='large', fontweight='bold')
-    fig.tight_layout()
+    # Rows on their own scales are labelled so, since equal colours in two
+    # rows are then not equal pressures.
+    shared = p_max is not None and np.isscalar(p_max)
+    if owns_fig:
+        fig.tight_layout()
+        # One bar per row, inset beside the row's last panel so it takes that
+        # panel's drawn height (the aspect shrinks a panel inside its slot)
+        # and no width from any panel; the right margin is reserved for it.
+        fig.subplots_adjust(right=1.0 - 0.9 / fig.get_figwidth())
+    for (_, field), row, mappable in zip(rows, axes, row_mappables):
+        # A caller's figure is laid out by its own engine, which places a
+        # bar that takes its space from the row rather than an inset that
+        # would print over whatever the caller put to the right.
+        bar = (fig.colorbar(mappable,
+                            cax=row[-1].inset_axes([1.04, 0.0, 0.05, 1.0]))
+               if owns_fig else fig.colorbar(mappable, ax=list(row)))
+        label = _time_trace_label(field)
+        bar.set_label(label if shared else f"{label}, row scale",
+                      fontsize='small')
+        bar.ax.tick_params(labelsize='small')
     # The source star sits on the left limit and widens it by its own half
     # width, measured in the panel's pixels — so it is drawn once the layout
     # has fixed the panel size.

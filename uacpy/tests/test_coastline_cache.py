@@ -42,6 +42,44 @@ def test_download_coastline_then_offline_read(tmp_path, monkeypatch):
     assert basemap.land_polygons('110m') is not None
 
 
+@pytest.mark.parametrize('call', [
+    lambda: basemap.land_polygons('5m'),
+    lambda: basemap.download_coastline(resolutions=('50m', '5m')),
+])
+def test_an_unpublished_resolution_is_refused_before_any_io(
+        tmp_path, monkeypatch, call):
+    """A typo built a 404 URL that the fallback reported as a network failure
+    after its retries, naming the install flag as the remedy."""
+    from uacpy.core.exceptions import ConfigurationError
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    monkeypatch.setattr(basemap, 'http_get', _no_network)
+    with pytest.raises(ConfigurationError, match="'110m', '50m', '10m'"):
+        call()
+    assert not (tmp_path / 'coastline').exists()
+
+
+@pytest.mark.parametrize('resolution', basemap.COASTLINE_RESOLUTIONS)
+def test_every_published_resolution_is_accepted(tmp_path, monkeypatch,
+                                                resolution):
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    monkeypatch.setattr(basemap, 'http_get',
+                        lambda url, **kw: json.dumps(_LAND).encode())
+    assert basemap.land_polygons(resolution) is not None
+
+
+def test_the_cache_root_variable_is_where_the_map_reads_a_download(
+        tmp_path, monkeypatch):
+    """``cache_dir`` names the dataset directory, as every uacpy.data
+    downloader's does, so a download into ``<root>/coastline`` is read back
+    offline once ``UACPY_DATA_CACHE=<root>``."""
+    monkeypatch.setattr(basemap, 'http_get',
+                        lambda url, **kw: json.dumps(_LAND).encode())
+    basemap.download_coastline(tmp_path / 'coastline', resolutions=('50m',))
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    monkeypatch.setattr(basemap, 'http_get', _no_network)
+    assert basemap.land_polygons('50m') is not None
+
+
 def test_unreachable_returns_none(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
     monkeypatch.setattr(basemap, 'http_get',
@@ -117,7 +155,7 @@ def test_an_interrupted_download_leaves_no_truncated_cache_file(tmp_path,
         raise OSError('no space left on device')
 
     monkeypatch.setattr(Path, 'write_bytes', dies_half_way)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match='no space left on device'):
         basemap.download_coastline(resolutions=('110m',))
     dest = tmp_path / 'coastline'
     assert not (dest / 'ne_110m_land.geojson').exists()

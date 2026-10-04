@@ -78,7 +78,7 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 - **Signal processing** (`uacpy.acoustic_signal`) — waveforms, matched filtering, beamforming, time‑frequency transforms, channel simulation.
 - **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range, and matched-field source localization (KRAKEN replicas, Bartlett/MVDR).
 - **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
-- **Modelled channels for modems** — `Arrivals.channel_taps(symbol_rate, carrier=…)` turns a Bellhop arrivals result into symbol-spaced baseband taps (`ChannelTaps`) that `comms.simulate_link(channel=…)` runs directly, with `Arrivals.coherence_bandwidth` and `Arrivals.channel_regime` to say whether the link is flat or frequency-selective.
+- **Modelled channels for modems** — `Arrivals.channel_taps(symbol_rate, fc=…)` turns a Bellhop arrivals result into symbol-spaced baseband taps (`ChannelTaps`) that `comms.simulate_link(channel=…)` runs directly, with `Arrivals.coherence_bandwidth` and `Arrivals.channel_regime` to say whether the link is flat or frequency-selective.
 - **Multi-source superposition** — a `Source(depths=[…], weights=[…])` runs on every field model and returns a `ResultStack`, one slab per depth; `ResultStack.superpose()` sums them as Σ wᵢ·pᵢ with complex weights, so a phased vertical array is one run and one call.
 - **Ambient noise** (`uacpy.noise`) — Wenz spectra (wind / shipping / rain / thermal).
 - **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
@@ -115,7 +115,10 @@ Three carriers in, one result out, and the result plots itself — every model i
 the package has that shape. The values are one accessor away: `tl.tl` (or the
 general `tl.dB`) is the transmission-loss array in dB, positive loss, no sign
 juggling. Walk it line by line in the
-[documentation](./docs/README.md).
+[documentation](./docs/README.md). The water is lossless unless you pass
+`absorption=` (`uacpy.Thorp()`, or `uacpy.FrancoisGarrison(...)` for a given
+temperature, salinity, pH and depth); a run where that leaves out a decibel or
+more says so.
 
 <div align="center">
   <img src="./docs/readme_realworld.png" alt="Real-world environment fetched from GPS, modelled, and plotted" width="820">
@@ -126,7 +129,9 @@ figure above.** This one is a showcase rather than a starting point: the
 `data.fetch_*` calls reach out to public ocean databases, so it needs **network
 access**, or a local cache populated in advance with `./install.sh --data all`
 (the `--data` flag is in [Installation](#-installation)). It is also a 374 km
-transect at 800 Hz — minutes of Bellhop, not seconds.
+transect at 800 Hz: about two minutes of the Fortran Bellhop on one core, about
+30 s of the multithreaded C++ build on eight and under 10 s of the CUDA one;
+`Bellhop()` takes the fastest build installed.
 
 ``` python
 import numpy as np, matplotlib.pyplot as plt
@@ -135,16 +140,22 @@ from uacpy import data
 from uacpy.models import Bellhop, RunMode
 
 # 1. Fetch a real range-dependent environment from GPS + date — GEBCO bathymetry,
-#    WOA23 sound speed and NCEI seabed — across the North Sea shelf down into the
-#    Norwegian Trench.
+#    WOA23 sound speed, NCEI seabed and the site's own Francois-Garrison water
+#    absorption — across the North Sea shelf down into the Norwegian Trench.
 A, B = (61.0, 2.0), (58.0, 5.0)           # (lat, lon): North Sea shelf → Norwegian Trench
-env  = data.fetch_environment(A, transect_to=B, date='2026-01-15', bottom_sources='auto')
-grid = data.fetch_bathy_grid((56.5, 62.0), (-2.0, 9.0))      # (lats, lons, depth)
+env  = data.fetch_environment(A, transect_to=B, date='2026-01-15', bottom_sources='auto',
+                              with_absorption=True)
+# The 400×400 map grid reads the installed GEBCO grid (./install.sh --data gebco);
+# over the public API it is past the per-call request cap, so fetch it coarser.
+grid = data.fetch_bathy_grid((56.5, 62.0), (-2.0, 9.0), n_lat=400, n_lon=400)
 
 # 2. Model transmission loss with Bellhop at 800 Hz, out to the transect length.
 src = uacpy.Source(depths=100, frequencies=800)
 rcv = uacpy.Receiver(depths=np.linspace(1, env.depth, 150),
-                     ranges=np.linspace(100, env.max_range, 350))  # env range extent
+                     ranges=np.linspace(100, env.range_max, 350))  # env range extent
+# Bellhop takes the absorption from the range-0 column of a range-dependent
+# profile and says so in a FallbackWarning ('Q'); here that moves the loss by
+# under 1 %, and the fetched depth-varying absorption is kept as the real water.
 tl  = Bellhop().run(env, src, rcv, run_mode=RunMode.COHERENT_TL)
 
 # 3. One call → the figure above: map · transmission loss · environment.
@@ -153,11 +164,17 @@ uacpy.plot.plot_overview(env, grid, transect=(A, B), tl=tl, source=src, receiver
                          map_title="North Sea — Norwegian Trench (GEBCO)",
                          tl_title="Transmission loss (Bellhop, 800 Hz)",
                          env_title="Range-dependent environment A→B",
-                         map_kwargs=dict(contours=True, aspect=1))
+                         title="uacpy — real-world environment from GPS, modelled & plotted",
+                         map_kwargs=dict(contours=True, aspect=1, coastline_resolution='50m',
+                                         graticule=2.0, graticule_minor=1.0))
 plt.show()
 ```
 
 ## 📦 Installation
+
+uacpy v0.5.0 is distributed from this GitHub repository only — there is no
+PyPI package, because the propagation models are compiled on your machine by
+`./install.sh`, which no wheel can carry. Install by cloning, as below.
 
 **Linux is the primary supported platform.** macOS works with Homebrew.
 Windows is supported **via WSL2** (Windows Subsystem for Linux) — see the
@@ -227,6 +244,12 @@ pip install -e .
 | `--data LIST`             | Download public datasets for the `uacpy.data` offline backend into `./data_cache` (gitignored). `LIST` is a comma list (`gebco`, `woa23`, `sediment`, `emodnet`, `coastline`, `globsed`, `crust1`, `diesing`, `seaice`, `glodap`, `wind`, `graw`) or `all`. See `./install.sh --help` for sizes/licences. |
 | `--no-models` / `--data-only` | Skip **all** native model builds (no compilers needed) — pure-Python install; pair with `--data` for an offline data-only setup |
 | `--force`                 | Skip incremental builds; do a full clean rebuild of every selected component |
+
+The Fortran models are compiled for the CPU that builds them (`-march=native`,
+or `-mcpu=native` on ARM).
+To use one build on several machines — a shared filesystem, a container image,
+a cluster — build for a CPU family instead:
+`UACPY_FORTRAN_ARCH_FLAGS="-march=x86-64-v3" ./install.sh --force`.
 
 ---
 
@@ -331,10 +354,12 @@ rm -rf uacpy
 
 Three entry points, depending on what you need:
 
-- **[`docs/`](./docs/README.md) — the guided documentation.** 20 pages (22
+- **[`docs/`](./docs/README.md) — the guided documentation.** 21 pages (23
   counting the two index READMEs) with 128
   generated figures: one per model (Bellhop, Kraken, RAM, Scooter, SPARC,
-  Bounce, OASES), plus guides to environments, sources and receivers, results,
+  Bounce, OASES), a [validation page](./docs/models/validation.md) with each
+  engine's measured agreement with the published benchmarks, plus guides to
+  environments, sources and receivers, results,
   plotting, signal processing, arrays, communications, noise, sonar, external
   data, I/O, utilities and reproducibility. Each page covers the physics, when
   to reach for the model, its limits, and a worked example whose code is the
@@ -345,11 +370,12 @@ Three entry points, depending on what you need:
 - **[`docs/DEV.md`](./docs/DEV.md) — internals**, for extending the package or
   adding a model wrapper.
 
-Inside `uacpy/examples/` you will find 39 example scripts numbered
-sequentially (`example_01_*.py` through `example_39_*.py`) — from a first TL
+Inside `uacpy/examples/` you will find numbered example scripts
+(`example_01_*.py` onwards; the list is in DOCUMENTATION §17) — from a first TL
 field to communications modems, a standards-based noise-impact assessment, a
-GPS-to-modelled-field real-world pipeline, and matched-field source
-localization. Run them **by script path** (the form
+GPS-to-modelled-field real-world pipeline, matched-field source
+localization, and end-to-end chains from a source array to a detection map.
+Run them **by script path** (the form
 `uacpy/examples/run_all_examples.py` and the test suite use):
 
 ```bash
@@ -393,9 +419,12 @@ Tests use custom markers to allow selective execution:
 
 - `slow` -- Long-running tests (broadband, large grids, slow examples)
 - `requires_binary` -- Tests that need compiled native binaries (Fortran/C)
-- `requires_oases` -- Tests that need compiled OASES binaries
+- `requires_oases` -- Tests that need the OASES binaries or sources (`./install.sh --oases yes`)
 - `requires_network` -- Tests that hit a live external service (the `uacpy.data`
-  fetchers); **deselected by default** by `addopts` in `pyproject.toml`
+  fetchers); **deselected by default** by `addopts` in `pyproject.toml`.
+  A command-line `-m` replaces that default rather than adding to it, so
+  every `-m` expression below ends in `and not requires_network`; drop it
+  and the live-service tests run.
 - `benchmark` -- Tests that validate model output against a closed-form
   analytic solution, a canonical published reference, or an independent
   reference solution
@@ -406,29 +435,29 @@ Tests use custom markers to allow selective execution:
 ``` bash
 
 # Skip slow tests
-pytest uacpy/tests/ -m "not slow"
+pytest uacpy/tests/ -m "not slow and not requires_network"
 
 # Run only tests that don't need compiled binaries
-pytest uacpy/tests/ -m "not requires_binary"
+pytest uacpy/tests/ -m "not requires_binary and not requires_network"
 
 # Fast pure-Python dev tier: no binaries and no slow tests
-pytest uacpy/tests/ -m "not requires_binary and not slow"
+pytest uacpy/tests/ -m "not requires_binary and not slow and not requires_network"
 
 # Skip OASES tests (if OASES is not installed)
-pytest uacpy/tests/ -m "not requires_oases"
+pytest uacpy/tests/ -m "not requires_oases and not requires_network"
 
 # Run the live-service tests (deselected by default)
 pytest uacpy/tests/ -m requires_network
 
 ```
 
-The composed dev tier `-m "not requires_binary and not slow"` is the fast
+The composed dev tier `-m "not requires_binary and not slow and not requires_network"` is the fast
 development loop (the conftest attaches `requires_binary` to every
 `requires_oases` test automatically). The count it selects moves with every
 change; ask pytest rather than this page:
 
 ``` bash
-pytest uacpy/tests/ -m "not requires_binary and not slow" --collect-only -q | tail -1
+pytest uacpy/tests/ -m "not requires_binary and not slow and not requires_network" --collect-only -q | tail -1
 ```
 
 The full suite (default `pytest` invocation) must still pass before a change
@@ -475,7 +504,7 @@ modified sources live in
 
 Michael B. Porter --- http://oalib.hlsresearch.com/AcousticsToolbox/
 - Porter, *The BELLHOP Manual and User's Guide*, 2011
-- Porter, *The KRAKEN Normal Mode Program*, 1992
+- Porter, *The KRAKEN Normal Mode Program*, SACLANTCEN SM-245, 1991
 
 ### BellhopCUDA
 
@@ -565,6 +594,7 @@ redistributed by UACPY); all are permissive and GPL-3.0-compatible.
 | **tifffile** | NSIDC sea-ice / lithology raster reads | BSD-3-Clause |
 | **pillow** | image encode/decode behind the map and animation writers | HPND (MIT-style) |
 | **copernicusmarine** | Copernicus operational sound speed — the optional `[copernicus]` extra, not installed by default | EUPL-1.2 (lists GPL-3.0 as compatible) |
+| **xarray** | `Field.to_xarray` / `Field.from_xarray` (and NetCDF through them) — the optional `[xarray]` extra, not installed by default | Apache-2.0 |
 
 Test/development tooling (`pytest`, `pytest-xdist`, `setuptools`, `xarray`
 — the `[test]` extra — plus `pytest-cov`, `black`, `flake8`, `mypy` in
@@ -579,8 +609,14 @@ The `uacpy.data` layer builds an `Environment` (and, for
 These datasets are **fetched on demand - not redistributed** with UACPY.
 Their licences (CC-BY, CC-BY-NC, public domain, …) impose: whoever fetches 
 the data is its licensee and is responsible for honouring the licence and 
-citing the source. UACPY exposes a `base_url=` on each fetcher so heavy 
-users can point at their own mirror.
+citing the source. Heavy users can point at their own mirror through the
+`base_url=` of the bathymetry, WOA, Argo, EMODnet-substrate and MARS
+fetchers, and through the `url=`/`base_url=` of every `download_*_db`
+installer (which feeds the fetchers that read an installed dataset). The
+live ERDDAP requests of `fetch_wind` (NOAA NBS) and `fetch_waves`
+(PacIOOS WaveWatch III) take no URL, and the Copernicus fetchers
+(`*_operational`, `fetch_waves`' WAVERYS source) go through the
+`copernicusmarine` client.
 
 | Source | Used for | License | Required attribution / citation |
 |--------|----------|---------|---------------------------------|
@@ -595,14 +631,14 @@ users can point at their own mirror.
 | **EMODnet Geology** --- seabed substrate (`bottom_sources='emodnet'`) | sediment (European seas) | **CC-BY 4.0** | "EMODnet Geology seabed substrate (emodnet.ec.europa.eu), CC-BY 4.0" |
 | **AusSeabed MARS** database (`bottom_sources='mars'`) | sediment (Australian margin, point samples) | **CC-BY 4.0** | Geoscience Australia (2020). *Marine Sediments (MARS) Database.* AusSeabed data portal |
 | **NCEI Seafloor Sediment Grain-Size Database** (NOAA, G00127; `bottom_sources='grainsize'`) | sediment (global, public-domain samples) | U.S. Government work --- public domain | National Geophysical Data Center (1976), *The NGDC Seafloor Sediment Grain Size Database*, NOAA NCEI, doi:[10.7289/V5G44N6W](https://doi.org/10.7289/V5G44N6W) |
-| **DECK41** Surficial Seafloor Sediment Descriptions (NOAA NCEI, G02094; a hand-placed `deck41.csv` read by `bottom_sources='grainsize'`, never downloaded) | sediment (global, dominant-lithology descriptions) | U.S. Government work --- public domain | Jenkins, C. (2011). *Dominant Bottom Types and Habitats In World Ocean Circulation Experiment.* NOAA NCEI, doi:[10.7289/V5VD6WCT](https://doi.org/10.7289/V5VD6WCT) |
+| **DECK41** Surficial Seafloor Sediment Descriptions (NOAA NCEI, G02094; a hand-placed `deck41.csv` read by `bottom_sources='grainsize'`, never downloaded) | sediment (global, dominant-lithology descriptions) | U.S. Government work --- public domain | Bershad, S. & Weiss, M. (1976). *Deck41 Surficial Seafloor Sediment Description Database.* NOAA NCEI (G02094), doi:[10.7289/V5VD6WCZ](https://doi.org/10.7289/V5VD6WCZ) |
 | **Diesing 2020** global deep-sea seafloor lithology (`bottom_sources='diesing'`) | sediment (global deep-sea, >500 m) | **CC-BY 4.0** | Diesing, M. (2020). *Deep-sea sediments of the global ocean.* Earth Syst. Sci. Data 12, 3367--3381. doi:[10.5194/essd-12-3367-2020](https://doi.org/10.5194/essd-12-3367-2020); data: PANGAEA doi:[10.1594/PANGAEA.911692](https://doi.org/10.1594/PANGAEA.911692) |
 | **Pelagic model** (`bottom_sources='pelagic'`, depth/latitude classifier) | sediment (global open-ocean fallback, modelled) | **Public domain** (first-principles model) | after Diesing (2020) & Berger, W.H. (1974), *Deep-sea sedimentation* |
 | **GlobSed** total sediment thickness (NOAA NCEI) | sediment thickness (low-frequency seabed) | U.S. Government work --- public domain | Straume, E.O., *et al.* (2019). *GlobSed: Updated total sediment thickness in the world's oceans.* Geochem. Geophys. Geosyst. 20, 1756--1772. doi:[10.1029/2018GC008115](https://doi.org/10.1029/2018GC008115) |
 | **CRUST1.0** global crustal model (`bottom_sources='crust1'`) | layered seabed Vp/Vs/density (low-frequency) | **No formal licence** --- verify before commercial use | Laske, G., Masters, G., Ma, Z. & Pasyanos, M. (2013). *Update on CRUST1.0 --- a 1-degree global model of Earth's crust.* Geophys. Res. Abstr. 15, EGU2013-2658 |
 | **Graw 2021** predicted seabed bulk density (`bottom_sources='graw'`, `--data graw`) | seabed density (measured-density half-space) | **CC-BY 4.0** | Graw, J.H., Wood, W.T. & Phrampus, B.J. (2021). *Predicting global marine sediment density using the random forest regressor machine learning algorithm.* J. Geophys. Res. Solid Earth 126; data: Zenodo doi:[10.5281/zenodo.3762390](https://doi.org/10.5281/zenodo.3762390) |
-| **NSIDC Sea Ice Index** (`surface_sources='seaice'`) | sea-ice concentration → elastic ice surface (monthly climatology) | U.S. Government work --- public domain | Fetterer, F., *et al.* (2017, updated). *Sea Ice Index* (G02135), NSIDC, doi:[10.7265/N5K072F8](https://doi.org/10.7265/N5K072F8) |
-| **NOAA/NCEI Blended Seawinds** (`data.fetch_wind`; `--data wind` climatology) | 10 m wind → ambient noise + sea surface | U.S. Government work --- public domain | Zhang, H.-M., *et al.* (2006). *Assessment of composite global sampling: Sea surface wind speed.* Geophys. Res. Lett. 33, L17714 |
+| **NSIDC Sea Ice Index** (`surface_sources='seaice'`) | sea-ice concentration → elastic ice surface (monthly climatology) | U.S. Government work --- public domain | Fetterer, F., Knowles, K., Meier, W.N., Savoie, M., Windnagel, A.K. & Stafford, T. (2025). *Sea Ice Index*, Version 4 (G02135), NSIDC, doi:[10.7265/a98x-0f50](https://doi.org/10.7265/a98x-0f50) |
+| **NOAA/NCEI Blended Seawinds** (`data.fetch_wind`; `--data wind` climatology) | 10 m wind → ambient noise + sea surface | U.S. Government work --- public domain | Saha, K. & Zhang, H.-M. (2022). *Hurricane and typhoon storm wind resolving NOAA NCEI Blended Sea Surface Wind (NBS) product.* Front. Mar. Sci. 9, 935549, doi:[10.3389/fmars.2022.935549](https://doi.org/10.3389/fmars.2022.935549) (NBS v2); method: Zhang, H.-M., *et al.* (2006), Geophys. Res. Lett. 33, L17714 |
 | **NOAA WaveWatch III** (`data.fetch_waves`, `altimetry_sources='waves'`) | significant wave height → sea surface (recent) | U.S. Government work --- public domain | Tolman, H.L. (2009). *User manual and system documentation of WAVEWATCH III.* NOAA/NWS/NCEP Tech. Note 276 |
 | **Copernicus WAVERYS** (`data.fetch_waves`, needs login) | significant wave height → sea surface (reanalysis, 1980→) | [Copernicus Marine License](https://marine.copernicus.eu/user-corner/service-commitments-and-licence) (free; **commercial use allowed**) | "E.U. Copernicus Marine Service Information (WAVERYS); *&lt;product DOI&gt;*"; GLOBAL_MULTIYEAR_WAV_001_032 |
 | **Natural Earth** land polygons (`uacpy.plot.plot_bathymetry_map` coastline) | map backdrop | **Public domain** | none required |

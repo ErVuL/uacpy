@@ -23,6 +23,7 @@ Writer- and parser-level tests are binary-free; classes that construct
 ``RAM`` (which resolves its binary) carry ``requires_binary``.
 """
 
+import os
 import re
 from pathlib import Path
 
@@ -39,16 +40,14 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.source import Source
 from uacpy.io.mpirams_writer import write_inpe
 from uacpy.io.ramsurf_writer import write_ramin
+from uacpy.models.ram import mpirams as ram_mpirams, collins as ram_collins
+from uacpy.tests.conftest import make_pekeris
 
 THIRD_PARTY = Path(__file__).resolve().parents[1] / 'third_party'
 
 
 def _fluid_env():
-    return Environment(
-        name='manual', bathymetry=100.0, ssp=1500.0,
-        bottom=BoundaryProperties(acoustic_type='half-space',
-                                  sound_speed=1600.0, density=1.5,
-                                  attenuation=0.5))
+    return make_pekeris(name='manual', sound_speed=1600.0, density=1.5)
 
 
 # ─── in.pe record order: writer vs the peramx.f90 this build reads ─────────
@@ -66,8 +65,8 @@ class TestInPeRecordOrderMatchesPeramx:
     wrong variable and still march."""
 
     # Scalar-record read order of peramx.f90's in.pe block, in the variable
-    # names the source uses. isedrd=0 appends three nzs-value array records;
-    # isedrd=1 appends the sediment filename instead.
+    # names the source uses. range_dependent_sediment=0 appends three nzs-value array records;
+    # range_dependent_sediment=1 appends the sediment filename instead.
     EXPECTED_READS = [
         'dum', 'fc, Q', 'T', 'zsrc(1)', 'deltaz', 'deltar', 'np, nss',
         'rs', 'dzm', 'c0_user', 'name1', 'iflat', 'ihorz', 'ibot',
@@ -88,13 +87,13 @@ class TestInPeRecordOrderMatchesPeramx:
     @staticmethod
     def _deck(tmp_path, **overrides):
         kwargs = dict(
-            fc=111.0, Q=22.0, T=33.0, zsrc=44.0, deltaz=0.55, deltar=66.0,
-            np_pade=7, nss=2, rs=88.0, dzm=9, ssp_filename='S.ssp',
-            iflat=1, ihorz=0, ibot=1, bth_filename='B.bth',
-            sedlayer=123.0, nzs=5,
+            fc=111.0, q_factor=22.0, record_duration=33.0, zsrc=44.0, dz=0.55, dr=66.0,
+            n_pade=7, n_stability=2, stability_range_m=88.0, depth_decimation=9, ssp_filename='S.ssp',
+            earth_curvature=1, horizontal_interpolation=0, bathymetry_from_file=1, bth_filename='B.bth',
+            sedlayer=123.0, n_sediment_points=5,
             cs=np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
             rho=np.full(5, 1.5), attn=np.full(5, 0.25),
-            c0_user=1234.0,
+            c0=1234.0,
         )
         kwargs.update(overrides)
         path = tmp_path / 'in.pe'
@@ -129,7 +128,7 @@ class TestInPeRecordOrderMatchesPeramx:
 
     def test_range_dependent_sediment_swaps_arrays_for_the_filename(
             self, tmp_path):
-        lines = self._deck(tmp_path, isedrd=1, sed_filename='sed.dat')
+        lines = self._deck(tmp_path, range_dependent_sediment=1, sed_filename='sed.dat')
         assert int(lines[18]) == 1
         assert lines[19] == 'sed.dat'
         assert len(lines) == 20
@@ -141,10 +140,10 @@ class TestInPeRecordOrderMatchesPeramx:
 class TestCollinsDeckFilenamesMatchTheVendoredOpens:
     """Each Collins binary hardcodes its own input filename (``ramgeo``
     README: "Reads ``ramgeo.in``"; ``readme.orig``: "ram.in (the input to
-    RAM)", "rams.in (the input to RAMS)"). ``_collins_in_name`` carries the
-    mapping; parse the ``open(unit=1,...)`` out of each vendored source so a
-    vendor refresh that renames a deck fails here, not as a hung binary
-    waiting on a file that was never written."""
+    RAM)", "rams.in (the input to RAMS)"). ``ram.collins.collins_in_name``
+    carries the mapping; parse the ``open(unit=1,...)`` out of each vendored
+    source so a vendor refresh that renames a deck fails here, not as a hung
+    binary waiting on a file that was never written."""
 
     SOURCES = {
         'ramgeo': ('ramgeo', 'ramgeo1.5.f'),
@@ -154,7 +153,6 @@ class TestCollinsDeckFilenamesMatchTheVendoredOpens:
 
     @pytest.mark.parametrize('kind', sorted(SOURCES))
     def test_in_name_matches_the_sources_open_statement(self, kind):
-        from uacpy.models.ram import RAM
         subdir, fname = self.SOURCES[kind]
         path = THIRD_PARTY / subdir / fname
         if not path.exists():
@@ -162,7 +160,7 @@ class TestCollinsDeckFilenamesMatchTheVendoredOpens:
         m = re.search(r"open\(unit=1,status='old',file='([^']+)'\)",
                       path.read_text(errors='ignore'))
         assert m, f"no input-deck OPEN in {fname}"
-        assert RAM._collins_in_name(kind) == m.group(1)
+        assert ram_collins.collins_in_name(kind) == m.group(1)
 
 
 # ─── Stability constraints: default decks keep them on all the way ─────────
@@ -180,14 +178,15 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
     deck families."""
 
     def _capture(self, monkeypatch, writer_name, backend, run):
-        from uacpy.models import ram as ram_mod
         captured = {}
 
         def fake(*args, **kwargs):
             captured.update(kwargs)
             raise RuntimeError('deck captured')
 
-        monkeypatch.setattr(ram_mod, writer_name, fake)
+        writer_module = {'write_inpe': ram_mpirams,
+                         'write_ramin': ram_collins}[writer_name]
+        monkeypatch.setattr(writer_module, writer_name, fake)
         from uacpy.models.ram import RAM
         model = RAM(verbose=False, dr=20.0, dz=2.0, backend=backend)
         with pytest.raises(RuntimeError, match='deck captured'):
@@ -201,8 +200,8 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
         captured = self._capture(
             monkeypatch, 'write_inpe', None,
             lambda m: m.compute_tl(env=env, source=src, receiver=rcv))
-        assert captured['rs'] == pytest.approx(3000.0)
-        assert captured['nss'] in (1, 2)
+        assert captured['stability_range_m'] == pytest.approx(3000.0)
+        assert captured['n_stability'] in (1, 2)
 
     def test_collins_default_row5_is_ns1_rs0(self, monkeypatch):
         env = _fluid_env()
@@ -211,8 +210,8 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
         captured = self._capture(
             monkeypatch, 'write_ramin', 'ramgeo',
             lambda m: m.compute_tl(env=env, source=src, receiver=rcv))
-        assert captured['ns_stab'] == 1
-        assert captured['rs_stab'] == 0.0
+        assert captured['n_stability'] == 1
+        assert captured['stability_range_m'] == 0.0
 
 
 # ─── README.OMP: thread count and stack limit ──────────────────────────────
@@ -221,10 +220,12 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
 @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
 class TestOmpThreadContract:
     """``README.OMP``: "The openmp standard is that the variable
-    OMP_NUM_THREADS sets the number of parallel threads." The wrapper must
-    pass an explicit user setting through to the mpiramS child and otherwise
-    pin one thread, so a ``run_parallel`` process pool does not multiply
-    into cpu_count² threads."""
+    OMP_NUM_THREADS sets the number of parallel threads." The wrapper passes
+    an explicit user setting through to the mpiramS child as given; inside a
+    ``run_parallel`` worker it pins one thread, so the pool does not
+    multiply into cpu_count² threads; otherwise it leaves the variable
+    unset and the child uses the cores (the rule Bellhop's ``-1`` follows,
+    ``_launch.openmp_thread_env``)."""
 
     def _spawn_env(self, monkeypatch, tmp_path):
         from uacpy.models.ram import RAM
@@ -241,22 +242,38 @@ class TestOmpThreadContract:
             model._run_binary(tmp_path)
         return seen['env']
 
-    def test_unset_defaults_to_one_thread(self, monkeypatch, tmp_path):
+    @staticmethod
+    def _in_pool(monkeypatch, in_pool):
+        from uacpy.models import _launch
+        monkeypatch.setattr(_launch, '_single_threaded_launches', in_pool)
+
+    def test_unset_outside_a_pool_leaves_the_cores_to_the_child(
+            self, monkeypatch, tmp_path):
         monkeypatch.delenv('OMP_NUM_THREADS', raising=False)
+        self._in_pool(monkeypatch, False)
+        assert 'OMP_NUM_THREADS' not in self._spawn_env(monkeypatch, tmp_path)
+
+    def test_unset_in_a_pool_worker_is_one_thread(self, monkeypatch,
+                                                  tmp_path):
+        monkeypatch.delenv('OMP_NUM_THREADS', raising=False)
+        self._in_pool(monkeypatch, True)
         assert self._spawn_env(monkeypatch, tmp_path)['OMP_NUM_THREADS'] == '1'
 
+    @pytest.mark.parametrize('in_pool', [False, True])
     def test_a_user_setting_is_inherited_verbatim(self, monkeypatch,
-                                                  tmp_path):
+                                                  tmp_path, in_pool):
         monkeypatch.setenv('OMP_NUM_THREADS', '7')
+        self._in_pool(monkeypatch, in_pool)
         assert self._spawn_env(monkeypatch, tmp_path)['OMP_NUM_THREADS'] == '7'
 
 
 class TestStackLimitIsRaisedForTheFortranChildren:
     """``README.OMP``: "gfortran and ifort seem to need the ulimit to be set
     larger, otherwise eigenray just segfaults" (its ``ulimit -s unlimited``
-    line). ``uacpy._stack.raise_stack_limit`` is that contract for every
-    spawned binary: soft RLIMIT_STACK goes to the hard limit at import, so
-    children inherit it; ``UACPY_NO_STACK_RAISE`` opts out."""
+    line). Every spawned binary runs with its soft RLIMIT_STACK at the hard
+    limit, raised inside the child by ``uacpy._stack.stack_limit_prefix``;
+    the importing process keeps its own limit, and ``UACPY_NO_STACK_RAISE``
+    opts out."""
 
     @staticmethod
     def _lowered_soft(hard):
@@ -266,32 +283,62 @@ class TestStackLimitIsRaisedForTheFortranChildren:
             low = min(low, hard)
         return low
 
-    def test_soft_limit_is_raised_to_the_hard_limit(self, monkeypatch):
+    @staticmethod
+    def _expected_kib(hard):
+        import resource
+        return ('unlimited' if hard == resource.RLIM_INFINITY
+                else str(hard // 1024))
+
+    def _child_ulimit(self, tmp_path):
+        from uacpy.models import RAM
+        out = RAM(verbose=False, timeout=30.0)._run_subprocess(
+            ['/bin/sh', '-c', 'ulimit -s'], cwd=tmp_path)
+        return out.stdout.strip()
+
+    def test_importing_the_models_leaves_the_process_limit_alone(self):
         resource = pytest.importorskip('resource')
-        from uacpy._stack import raise_stack_limit
+        import subprocess
+        import sys
+        code = ('import resource; a = resource.getrlimit(resource.RLIMIT_STACK);'
+                ' import uacpy.models, uacpy;  uacpy.Bellhop;'
+                ' b = resource.getrlimit(resource.RLIMIT_STACK);'
+                ' print(a == b)')
+        _soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        low = self._lowered_soft(hard)
+        out = subprocess.run(
+            ['/bin/sh', '-c', f'ulimit -S -s {low // 1024}; exec "$0" "$@"',
+             sys.executable, '-c', code],
+            capture_output=True, text=True, check=True,
+            env={k: v for k, v in os.environ.items()
+                 if k != 'UACPY_NO_STACK_RAISE'})
+        assert out.stdout.strip().splitlines()[-1] == 'True'
+
+    @pytest.mark.requires_binary
+    def test_a_spawned_binary_runs_at_the_hard_limit(self, monkeypatch,
+                                                      tmp_path):
+        resource = pytest.importorskip('resource')
         soft0, hard = resource.getrlimit(resource.RLIMIT_STACK)
         monkeypatch.delenv('UACPY_NO_STACK_RAISE', raising=False)
+        low = self._lowered_soft(hard)
+        if low == hard:
+            pytest.skip('hard stack limit is already the 8 MiB default')
         try:
-            resource.setrlimit(resource.RLIMIT_STACK,
-                               (self._lowered_soft(hard), hard))
-            raise_stack_limit()
-            soft, _ = resource.getrlimit(resource.RLIMIT_STACK)
-            assert soft == (resource.RLIM_INFINITY
-                            if hard == resource.RLIM_INFINITY else hard)
+            resource.setrlimit(resource.RLIMIT_STACK, (low, hard))
+            assert self._child_ulimit(tmp_path) == self._expected_kib(hard)
+            assert resource.getrlimit(resource.RLIMIT_STACK)[0] == low
         finally:
             resource.setrlimit(resource.RLIMIT_STACK, (soft0, hard))
 
-    def test_opt_out_leaves_the_limit_alone(self, monkeypatch):
+    @pytest.mark.requires_binary
+    def test_opt_out_leaves_the_child_at_the_inherited_limit(
+            self, monkeypatch, tmp_path):
         resource = pytest.importorskip('resource')
-        from uacpy._stack import raise_stack_limit
         soft0, hard = resource.getrlimit(resource.RLIMIT_STACK)
         monkeypatch.setenv('UACPY_NO_STACK_RAISE', '1')
         low = self._lowered_soft(hard)
         try:
             resource.setrlimit(resource.RLIMIT_STACK, (low, hard))
-            raise_stack_limit()
-            soft, _ = resource.getrlimit(resource.RLIMIT_STACK)
-            assert soft == low
+            assert self._child_ulimit(tmp_path) == str(low // 1024)
         finally:
             resource.setrlimit(resource.RLIMIT_STACK, (soft0, hard))
 
@@ -305,7 +352,7 @@ class TestRamInBlockOrderIsTheDocumentedOne:
     bare range line starting each later section; ``README.rst`` places the
     ramsurf surface block between row 5 and the bathymetry; for RAMS the
     shear-speed block follows the compressional speed and shear attenuation
-    follows compressional attenuation (``rams0.5.f:199-204``'s six ``zread``
+    follows compressional attenuation (``rams0.5.f:191-196``'s six ``zread``
     calls). Existing writer tests count ``-1 -1`` terminators, which cannot
     see a block swap — these read the deck back with per-block sentinel
     values."""
@@ -328,9 +375,9 @@ class TestRamInBlockOrderIsTheDocumentedOne:
     def test_ramsurf_surface_sits_between_row5_and_bathymetry(self, tmp_path):
         out = tmp_path / 'ram.in'
         write_ramin(
-            str(out), kind='ramsurf', fc=100.0, zs=50.0, zr_line=60.0,
-            rmax=5000.0, dr=10.0, ndr=2, zmax=400.0, dz=1.0, ndz=2,
-            zmplt=200.0, c0=1500.0, np_pade=4,
+            str(out), kind='ramsurf', frequency=100.0, zs=50.0, zr_line=60.0,
+            rmax_march=5000.0, dr=10.0, ndr=2, zmax=400.0, dz=1.0, depth_decimation=2,
+            zmplt=200.0, c0=1500.0, n_pade=4,
             surface=[(0.0, 1.25)],
             bathymetry=[(0.0, 101.0)],
             range_segments=[
@@ -356,9 +403,9 @@ class TestRamInBlockOrderIsTheDocumentedOne:
     def test_rams_shear_blocks_interleave_after_cb_and_attn(self, tmp_path):
         out = tmp_path / 'rams.in'
         write_ramin(
-            str(out), kind='rams', fc=100.0, zs=50.0, zr_line=60.0,
-            rmax=5000.0, dr=10.0, ndr=2, zmax=400.0, dz=1.0, ndz=2,
-            zmplt=200.0, c0=1500.0, np_pade=4, irot=1, theta=60.0,
+            str(out), kind='rams', frequency=100.0, zs=50.0, zr_line=60.0,
+            rmax_march=5000.0, dr=10.0, ndr=2, zmax=400.0, dz=1.0, depth_decimation=2,
+            zmplt=200.0, c0=1500.0, n_pade=4, rams_rotation=1, rams_rotation_angle=60.0,
             bathymetry=[(0.0, 101.0)],
             range_segments=[dict(
                 range=0.0, water_ssp=[(0.0, 1501.0)],
@@ -396,8 +443,10 @@ class TestCollinsAttnIsPerWavelength:
                 halfspace=BoundaryProperties(acoustic_type='half-space',
                                              sound_speed=1900, density=1.9,
                                              attenuation=0.2)))
-        seg = RAM(verbose=False)._collins_range_segments(
-            env, 'ramgeo', zmax=400.0, freq=freq)[0]
+        model = RAM(verbose=False)
+        seg = ram_collins.collins_range_segments(
+            env, 'ramgeo', zmax=400.0, freq=freq, knobs=model._knob_record(),
+            speed_bounds=model._speed_bounds)[0]
         return seg['bottom_attn'][:2]
 
     def test_deck_attenuation_does_not_scale_with_frequency(self):
@@ -415,7 +464,7 @@ class TestBellhopcudaDivergenceFixtures:
     Fortran and records which cases are expected to diverge; the
     ``*_match.txt`` / ``*_nomatch.txt`` lists are that record. uacpy's
     Bellhop treats cxx/cuda/Fortran as interchangeable 2D backends
-    (``models/bellhop.py``) and refuses 3D outright, which is sound exactly
+    (``models/bellhop/``) and refuses 3D outright, which is sound exactly
     while the vendored suite shows 2D TL fully matching and confines the
     expected divergences to 3D/Nx2D plus one broadband-arrivals case. A
     vendor refresh that grows those lists must fail here so the wrapper's

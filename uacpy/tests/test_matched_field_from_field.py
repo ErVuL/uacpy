@@ -3,7 +3,8 @@
 
 The contract tests are binary-free: they build :class:`Field` / :class:`ResultStack`
 objects from known complex arrays and check the adapter reshapes them into the
-exact ``(N, *candidate_grid)`` bank that :func:`bartlett` / :func:`mvdr` consume.
+exact :class:`Replicas` bank (one frequency, the candidate grid, the element axis
+last) that :func:`bartlett` / :func:`mvdr` consume.
 A single ``requires_binary`` test closes the physical loop: a KRAKEN ``field.exe``
 pressure run, routed through the adapter, must localize a planted source — and
 must agree with the modal-sum bank from :func:`replica_bank`.
@@ -13,7 +14,8 @@ import numpy as np
 import pytest
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results.field import Field, ResultStack
+from uacpy.core.results.field import Field
+from uacpy.core.results.stack import ResultStack
 from uacpy.core.results.array_products import Covariance, Replicas
 from uacpy.sonar.matched_field import (
     replica_bank,
@@ -54,8 +56,13 @@ def test_resultstack_reproduces_bank_exactly():
     stack = ResultStack(slabs, cand_z, coordinate_name="source_depth")
 
     bank = replica_bank_from_field(stack, array_depths=z_arr)
-    assert bank.shape == (z_arr.size, cand_z.size, cand_r.size)
-    assert np.array_equal(bank, P)
+    assert isinstance(bank, Replicas)
+    assert bank.replicas.shape == (1, cand_z.size, cand_r.size, z_arr.size)
+    assert np.array_equal(bank.replicas[0], np.moveaxis(P, 0, -1))
+    assert list(bank.candidates) == ['depth', 'range']
+    assert np.array_equal(bank.candidates['depth'], cand_z)
+    assert np.array_equal(bank.candidates['range'], cand_r)
+    assert np.array_equal(bank.receiver_positions[:, 2], z_arr)
 
 
 def test_resultstack_rejects_mismatched_range_axis():
@@ -95,8 +102,8 @@ def test_single_slab_stack_is_one_candidate_depth():
     stack = ResultStack([_pressure_field(data, depth=z_arr, range=cand_r)],
                         np.array([30.0]), coordinate_name="source_depth")
     bank = replica_bank_from_field(stack, array_depths=z_arr)
-    assert bank.shape == (5, 1, 7)
-    assert np.array_equal(bank[:, 0, :], data)
+    assert bank.replicas.shape == (1, 1, 7, 5)
+    assert np.array_equal(bank.replicas[0, 0], data.T)
 
 
 def test_bank_is_writeable_and_independent_of_field():
@@ -107,14 +114,14 @@ def test_bank_is_writeable_and_independent_of_field():
     data = _random_bank(4, 1, 5)[:, 0, :]
     field = _pressure_field(data, depth=z_arr, range=cand_r)
     bank = replica_bank_from_field(field, array_depths=z_arr)
-    assert bank.flags.writeable
-    bank[0, 0] = 12345.0 + 0j
+    assert bank.replicas.flags.writeable
+    bank.replicas[0, 0, 0] = 12345.0 + 0j
     assert np.array_equal(field.p, data)          # source untouched
 
 
 def test_noncanonical_axis_order_depth_last():
     # A {source_depth, range, depth} field (depth last) must still produce the
-    # canonical (N, n_cand_depth, n_cand_range) bank.
+    # canonical (1, n_cand_depth, n_cand_range, N) bank.
     z_arr = np.linspace(5, 95, 6)
     cand_z = np.linspace(10, 90, 4)
     cand_r = np.linspace(500, 4000, 7)
@@ -123,9 +130,10 @@ def test_noncanonical_axis_order_depth_last():
     field = Field(data=data,
                   coords={"source_depth": cand_z, "range": cand_r, "depth": z_arr})
     bank = replica_bank_from_field(field, array_depths=z_arr)
-    assert bank.shape == (z_arr.size, cand_z.size, cand_r.size)
-    # bank[n, i, j] must equal data[i, j, n]
-    assert np.array_equal(bank, np.moveaxis(data, 2, 0))
+    assert bank.replicas.shape == (1, cand_z.size, cand_r.size, z_arr.size)
+    # bank[0, i, j, n] must equal data[i, j, n]
+    assert np.array_equal(bank.replicas[0], data)
+    assert list(bank.candidates) == ['depth', 'range']
 
 
 def test_resultstack_rejects_non_source_depth_axis():
@@ -143,7 +151,7 @@ def test_resultstack_rejects_non_source_depth_axis():
 
 # ── single-Field paths ───────────────────────────────────────────────────
 
-def test_single_multisource_field_moves_depth_to_front():
+def test_single_multisource_field_moves_depth_to_the_element_axis():
     z_arr = np.linspace(5, 95, 7)
     cand_z = np.linspace(10, 90, 5)
     cand_r = np.linspace(500, 4000, 9)
@@ -154,9 +162,11 @@ def test_single_multisource_field_moves_depth_to_front():
         coords={"source_depth": cand_z, "depth": z_arr, "range": cand_r},
     )
     bank = replica_bank_from_field(field, array_depths=z_arr)
-    # depth axis (was position 1) → position 0
-    assert bank.shape == (z_arr.size, cand_z.size, cand_r.size)
-    assert np.array_equal(bank, np.moveaxis(data, 1, 0))
+    # depth axis (was position 1) → the element axis, last
+    assert bank.replicas.shape == (1, cand_z.size, cand_r.size, z_arr.size)
+    assert np.array_equal(bank.replicas[0], np.moveaxis(data, 1, -1))
+    # The field's source_depth is the candidate depth.
+    assert np.array_equal(bank.candidates['depth'], cand_z)
 
 
 def test_single_depth_range_field_is_range_only_bank():
@@ -165,8 +175,9 @@ def test_single_depth_range_field_is_range_only_bank():
     data = _random_bank(z_arr.size, 1, cand_r.size)[:, 0, :]  # (N, R)
     field = _pressure_field(data, depth=z_arr, range=cand_r)
     bank = replica_bank_from_field(field, array_depths=z_arr)
-    assert bank.shape == (z_arr.size, cand_r.size)
-    assert np.array_equal(bank, data)
+    assert bank.replicas.shape == (1, cand_r.size, z_arr.size)
+    assert np.array_equal(bank.replicas[0], data.T)
+    assert list(bank.candidates) == ['range']
 
 
 # ── feeds the processors and localizes ───────────────────────────────────
@@ -186,12 +197,12 @@ def test_adapter_bank_localizes_planted_source(processor):
     bank = replica_bank_from_field(stack, array_depths=z_arr)
 
     iz, ir = 9, 13
-    d = bank[:, iz, ir]                       # noise-free data = that replica
+    d = bank.replicas[0, iz, ir]              # noise-free data = that replica
     K = csdm(d[:, None])
     surf = (bartlett(K, bank) if processor == "bartlett"
             else mvdr(K, bank, diagonal_loading=1e-2))
     assert surf.shape == (cand_z.size, cand_r.size)
-    assert np.unravel_index(np.argmax(surf), surf.shape) == (iz, ir)
+    assert np.unravel_index(np.nanargmax(surf.data), surf.shape) == (iz, ir)
 
 
 # ── error contracts ──────────────────────────────────────────────────────
@@ -212,7 +223,8 @@ def test_rejects_frequency_axis():
     data = (np.random.default_rng(0).standard_normal((4, 6, 3))
             + 1j * np.random.default_rng(1).standard_normal((4, 6, 3)))
     tf = Field(data=data, coords={"depth": z_arr, "range": cand_r, "frequency": freqs})
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError,
+                       match=r"unsupported axes \['frequency'\]"):
         replica_bank_from_field(tf)
 
 
@@ -244,9 +256,17 @@ def test_rejects_field_without_depth_axis():
 # cross-model physics mismatch — given identical Green's functions, the two MFP
 # pipelines must agree. Conventions differ by exactly one scalar: OASN Bartlett
 # is wᴴCw, ours divides by tr(K); OASN MVDR is unnormalised, ours scales max→1.
+# Both return the surface in dB re its peak, and ``reference`` recovers the
+# linear surface from each.
+
+
+def _linear(field):
+    """The linear surface an ambiguity Field is relative to its peak of."""
+    return field.reference * 10 ** (np.asarray(field.data) / 10)
 
 def _replicas_to_stack(rep, *, freq_idx=0):
-    """Repackage an OASN ``Replicas`` (n_f, nz, nx, ny=1, N) as a ResultStack of
+    """Repackage an OASN ``Replicas`` (n_f, nz, nx, ny=1, N), candidates
+    ``{'depth', 'x', 'y'}``, as a ResultStack of
     ``{depth, range}`` pressure Fields over ``source_depth`` — the adapter input.
     Depth-range MFP only (requires the horizontal ``y`` axis to be a singleton).
     """
@@ -255,13 +275,15 @@ def _replicas_to_stack(rep, *, freq_idx=0):
         raise ConfigurationError("cross-check is depth-range only (n_yr == 1)")
     z_arr = (rep.receiver_positions[:, 2] if rep.receiver_positions is not None
              else np.arange(R.shape[4], dtype=float))
-    cand_r = rep.replica_x
+    cand_r = rep.candidates['x']
     slabs = [
         Field(data=R[freq_idx, iz, :, 0, :].T,            # (N, nx)
-              coords={"depth": z_arr, "range": cand_r})
+              coords={"depth": z_arr, "range": cand_r},
+              frequencies=rep.frequencies)
         for iz in range(R.shape[1])
     ]
-    return ResultStack(slabs, rep.replica_z, coordinate_name="source_depth")
+    return ResultStack(slabs, rep.candidates['depth'],
+                       coordinate_name="source_depth")
 
 
 def _assert_adapter_matches_oasn_processor(rep, *, rtol=1e-9, atol=1e-12):
@@ -276,15 +298,15 @@ def _assert_adapter_matches_oasn_processor(rep, *, rtol=1e-9, atol=1e-12):
     R = np.asarray(rep.replicas)
     N = R.shape[4]
 
-    # 1. reshaping fidelity: our bank IS the OASN replica tensor, reordered.
-    our_bank = replica_bank_from_field(_replicas_to_stack(rep))   # (N, nz, nx)
-    oasn_bank = np.moveaxis(R[0, :, :, 0, :], -1, 0)
-    assert our_bank.shape == (N, R.shape[1], R.shape[2])
-    assert np.array_equal(our_bank, oasn_bank)
+    # 1. reshaping fidelity: our bank IS the OASN replica tensor, y dropped.
+    our_bank = replica_bank_from_field(_replicas_to_stack(rep))
+    oasn_bank = R[0, :, :, 0, :]                               # (nz, nx, N)
+    assert our_bank.replicas.shape == (1, R.shape[1], R.shape[2], N)
+    assert np.array_equal(our_bank.replicas[0], oasn_bank)
 
-    # 2. plant a rank-1 + white-noise CSDM from one OASN replica column.
+    # 2. plant a rank-1 + white-noise CSDM from one OASN replica.
     iz0, ix0 = R.shape[1] // 3, R.shape[2] // 2
-    w = oasn_bank[:, iz0, ix0]
+    w = oasn_bank[iz0, ix0]
     sig = np.outer(w, w.conj())
     # A bare rank-1 outer product is singular, so MVDR would depend entirely on
     # its diagonal loading. The 5 %-of-mean-eigenvalue white floor makes K
@@ -294,16 +316,16 @@ def _assert_adapter_matches_oasn_processor(rep, *, rtol=1e-9, atol=1e-12):
     cov = Covariance(covariance=K[None])
 
     # 3. Bartlett: peaks coincide; ref == ours · tr(K).
-    ref_b = cov.bartlett(rep)[0, :, :, 0]
-    our_b = bartlett(K, our_bank)
+    ref_b = _linear(cov.bartlett(rep))[0, :, :, 0]
+    our_b = _linear(bartlett(K, our_bank))
     assert np.unravel_index(np.argmax(our_b), our_b.shape) == (iz0, ix0)
     assert np.unravel_index(np.argmax(ref_b), ref_b.shape) == (iz0, ix0)
     np.testing.assert_allclose(our_b * np.trace(K).real, ref_b, rtol=rtol, atol=atol)
 
     # 4. MVDR (same loading): peaks coincide; ours == ref normalised to max 1.
     L = 1e-2
-    ref_m = cov.mvdr(rep, diagonal_loading=L)[0, :, :, 0]
-    our_m = mvdr(K, our_bank, diagonal_loading=L)
+    ref_m = _linear(cov.mvdr(rep, diagonal_loading=L))[0, :, :, 0]
+    our_m = _linear(mvdr(K, our_bank, diagonal_loading=L))
     assert np.unravel_index(np.argmax(our_m), our_m.shape) == (iz0, ix0)
     np.testing.assert_allclose(
         our_m, ref_m / np.nanmax(ref_m), rtol=max(rtol, 1e-6), atol=max(atol, 1e-9))
@@ -320,10 +342,10 @@ def test_adapter_equivalent_to_oasn_processor_synthetic():
     rcv_pos[:, 2] = np.linspace(5, 95, N)
     rep = Replicas(
         replicas=R,
-        replica_z=np.linspace(10, 90, nz),
-        replica_x=np.linspace(200, 4000, nx),
-        replica_y=np.array([0.0]),
+        candidates={'depth': np.linspace(10, 90, nz),
+                    'x': np.linspace(200, 4000, nx), 'y': np.array([0.0])},
         receiver_positions=rcv_pos,
+        frequencies=[150.0],
     )
     _assert_adapter_matches_oasn_processor(rep)
 
@@ -351,8 +373,8 @@ def test_adapter_equivalent_to_oasn_processor_real():
     src = uacpy.Source(depths=20.0, frequencies=150.0)
     rcv = uacpy.Receiver(depths=np.linspace(10, 90, 16), ranges=0.0)
     oasn = OASN(
-        zmin=10.0, zmax=90.0, nz=12,
-        xmin=0.2, xmax=4.0, nx=18, ny=1,   # km on the OASN constructor
+        replica_zmin=10.0, replica_zmax=90.0, replica_nz=12,
+        replica_xmin=200.0, replica_xmax=4000.0, replica_nx=18, replica_ny=1,   # metres, as the constructor takes
         verbose=False,
     )
     rep = oasn.compute_replicas(env, src, rcv)
@@ -400,13 +422,14 @@ def test_adapter_matches_modal_bank_and_localizes():
     stack = ResultStack(slabs, cand_z, coordinate_name="source_depth")
 
     bank_field = replica_bank_from_field(stack, array_depths=z_arr)
-    bank_modal = replica_bank(modes, z_arr, cand_z, cand_r)
-    assert bank_field.shape == bank_modal.shape
+    bank_modal = replica_bank(modes, array_depths=z_arr, candidate_depths=cand_z,
+                              candidate_ranges=cand_r)
+    assert bank_field.replicas.shape == bank_modal.replicas.shape
 
     # Per-replica agreement up to the single global complex scalar both share:
     # unit-normalised columns must be collinear (|<a,b>| ≈ 1).
-    Ef = bank_field.reshape(z_arr.size, -1)
-    Em = bank_modal.reshape(z_arr.size, -1)
+    Ef = bank_field.replicas[0].reshape(-1, z_arr.size).T
+    Em = bank_modal.replicas[0].reshape(-1, z_arr.size).T
     Ef /= np.linalg.norm(Ef, axis=0, keepdims=True)
     Em /= np.linalg.norm(Em, axis=0, keepdims=True)
     coll = np.abs(np.sum(Ef.conj() * Em, axis=0))
@@ -414,6 +437,6 @@ def test_adapter_matches_modal_bank_and_localizes():
 
     # And the field.exe bank localizes a planted source.
     iz, ir = 5, 22
-    d = bank_field[:, iz, ir]
+    d = bank_field.replicas[0, iz, ir]
     surf = bartlett(csdm(d[:, None]), bank_field)
-    assert np.unravel_index(np.argmax(surf), surf.shape) == (iz, ir)
+    assert np.unravel_index(np.nanargmax(surf.data), surf.shape) == (iz, ir)

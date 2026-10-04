@@ -14,7 +14,7 @@ lambda/2 folds a grating lobe back into the fan, and aperture sets how finely
 two arrivals can be separated.
 
 Uses: Receiver as a vertical array · acoustic_signal.steering_vectors ·
-shading_taper · beamform · Modes.compute_phase_speeds (the angles the peaks
+shading_taper · beamform · Modes.grazing_angles (the angles the peaks
 should land on) · Kraken
 """
 
@@ -56,8 +56,8 @@ print(f"array: {n_el} elements, {HALF:.2f} m apart, "
 # The angles the waveguide can deliver: each trapped mode is a plane-wave pair
 # at +/- arccos(c / v_p). Anything the beamformer finds should sit on one.
 modes = kraken.compute_modes(env, source)
-v_p = np.asarray(modes.compute_phase_speeds(), dtype=float)
-mode_angles = np.degrees(np.arccos(np.clip(C_REF / v_p[v_p >= C_REF], -1, 1)))
+grazing = modes.grazing_angles(C_REF)        # nan for a mode slower than C_REF
+mode_angles = grazing[np.isfinite(grazing)]
 print(f"{mode_angles.size} trapped modes span "
       f"{mode_angles.min():.1f}-{mode_angles.max():.1f} deg grazing")
 
@@ -68,7 +68,7 @@ fig, axes = plt.subplots(1, 3, figsize=(16, 4.4))
 
 # ── 1. what the array hears, against what the waveguide can send ────────
 ax = axes[0]
-scan = beamform_field(p[:, 0], elements, angles, FREQ, c=C_REF,
+scan = beamform_field(p[:, 0], elements, angles, FREQ, sound_speed=C_REF,
                       weights=shading_taper(n_el, 'boxcar'))
 beam = 10.0 * np.log10(scan.power / scan.power.max())   # for the arithmetic
 theta_max = float(mode_angles.max())
@@ -92,7 +92,7 @@ ax.grid(alpha=0.3)
 # ── 2. shading: beamwidth against sidelobes ─────────────────────────────
 ax = axes[1]
 for name, style in (('boxcar', 'C0-'), ('hann', 'C1-'), ('hamming', 'C2--')):
-    shaded = beamform_field(p[:, 0], elements, angles, FREQ, c=C_REF,
+    shaded = beamform_field(p[:, 0], elements, angles, FREQ, sound_speed=C_REF,
                             weights=shading_taper(n_el, name))
     b = 10.0 * np.log10(shaded.power / shaded.power.max())
     # The highest sidelobe is the largest local maximum OUTSIDE the fan the
@@ -113,7 +113,7 @@ ax.grid(alpha=0.3)
 ax = axes[2]
 coarse = elements[::2]
 p_coarse = p[::2]
-aliased = beamform_field(p_coarse[:, 0], coarse, angles, FREQ, c=C_REF,
+aliased = beamform_field(p_coarse[:, 0], coarse, angles, FREQ, sound_speed=C_REF,
                          weights=shading_taper(len(coarse), 'boxcar'))
 scan.plot(ax=ax, color='C0', lw=1.3, label=f'{HALF:.2f} m spacing (λ/2)')
 aliased.plot(ax=ax, color='C3', lw=1.3, alpha=0.85,
@@ -131,8 +131,8 @@ plt.close(fig)
 # ── 4. the levelled answer: SNR per look angle ──────────────────────────
 # beamform() takes the same (n_phones, n_ranges) a run on this Receiver
 # returns, and folds in a source level and a per-element noise level.
-res = beamform(p, elements, FREQ, angles=angles, SL=180.0, NL=60.0,
-               c=C_REF)
+res = beamform(p, elements, angles, FREQ, source_level_dB=180.0,
+               noise_level_dB=60.0, sound_speed=C_REF)
 snr = np.asarray(res.snr).ravel()               # (n_angles,) - one range here
 look = np.asarray(res.angles).ravel()
 print(f"peak beam at {look[int(np.nanargmax(snr))]:+.1f} deg, "

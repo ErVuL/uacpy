@@ -779,7 +779,7 @@ def test_ram_stepped_waveguide_matches_coupled_mode_reference():
     one cell to 1.899 dB while its median stays at 0.076 dB.
 
     The grid is pinned rather than left to the Lytaev optimizer, which relaxes
-    ``theta_max`` to 20 deg on this problem and lands at 2.74 dB median — the
+    ``angle_max`` to 20 deg on this problem and lands at 2.74 dB median — the
     47 deg mode carrying a third of the transmitted energy is outside a 20 deg
     aperture.
 
@@ -789,7 +789,7 @@ def test_ram_stepped_waveguide_matches_coupled_mode_reference():
     physics and not merely that a PE produces a plausible waveguide field.
     """
     src, rcv = _src_rcv()
-    ram = RAM(backend='mpiramS', dr=5.0, dz=0.25, np_pade=6, timeout=900)
+    ram = RAM(backend='mpirams', dr=5.0, dz=0.25, n_pade=6, timeout=900)
     ref = _reference(D2_WEAK)
 
     med, p90, mx = _abs_dtl(ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, ref)
@@ -827,7 +827,7 @@ def test_ramgeo_stepped_waveguide_matches_coupled_mode_reference():
     p90 against the stepped reference.
     """
     src, rcv = _src_rcv()
-    ram = RAM(backend='ramgeo', dr=5.0, dz=0.25, np_pade=6, timeout=900)
+    ram = RAM(backend='ramgeo', dr=5.0, dz=0.25, n_pade=6, timeout=900)
     ref = _reference(D2_WEAK)
 
     med, p90, mx = _abs_dtl(ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, ref)
@@ -847,15 +847,17 @@ def test_bellhop_stepped_waveguide_matches_coupled_mode_reference():
     reference — and over a true ``'vacuum'`` bottom, which a ray model can
     spell and RAM cannot, so this leg carries no near-massless surrogate.
 
-    Measured: median 0.832 dB, p90 2.910 dB, max 6.150 dB. That is a ray/beam
+    Measured with the default hat beams: median 1.233 dB, p90 3.098 dB, max
+    6.307 dB (Gaussian beams read 0.832 / 2.910 / 6.150). That is a ray/beam
     model at 25 Hz in a 200 m guide (6 modes), so ~1 dB is the genuine method
     error — the same order as the 1.5 dB the ideal-wedge benchmark allows it in
-    ``test_benchmarks_analytic``. Stable in beam count: median 0.829-0.892 and
-    p90 2.63-2.95 over 2000-16000 beams, so the bounds below sit 1.35x and
-    1.22x above the worst measurement.
+    ``test_benchmarks_analytic``. Stable in beam count: median 1.131-1.233 and
+    p90 2.986-3.262 over 2000-16000 beams (max 5.07-10.68, unbounded), so the
+    bounds below sit 1.18x and 1.20x above the worst measurement.
 
-    NULL CONTROL, asserted below: step removed, 2.615 dB median / 10.254 dB
-    p90 — 2.18x and 2.85x outside the bounds. Bellhop's is the thinnest margin
+    NULL CONTROL, asserted below: step removed, 2.607-2.773 dB median /
+    9.981-10.122 dB p90 over the same beam counts (2.633 / 10.119 at 8000) —
+    1.80x and 2.56x outside the bounds at their nearest. Bellhop's is the thinnest margin
     in this module on both sides at once, which is a statement about a ray
     model at 25 Hz and not about the reference: the bound cannot be loosened
     far before the null run would pass it, and it cannot be tightened far
@@ -866,11 +868,11 @@ def test_bellhop_stepped_waveguide_matches_coupled_mode_reference():
     ref = _reference(D2_WEAK)
 
     med, p90, mx = _abs_dtl(bh.compute_tl(_stepped_env(D2_WEAK, _VACUUM), src, rcv).dB, ref)
-    assert med < 1.2, f"median |dTL|={med:.3f} dB"
-    assert p90 < 3.6, f"p90 |dTL|={p90:.3f} dB"
+    assert med < 1.45, f"median |dTL|={med:.3f} dB"
+    assert p90 < 3.9, f"p90 |dTL|={p90:.3f} dB"
 
     n_med, n_p90, _ = _abs_dtl(bh.compute_tl(_stepped_env(D1, _VACUUM), src, rcv).dB, ref)
-    assert n_med > 1.2 and n_p90 > 3.6, (
+    assert n_med > 1.45 and n_p90 > 3.9, (
         f"step-removed run is only {n_med:.3f} dB median / {n_p90:.3f} dB p90 "
         f"from the stepped reference: this benchmark cannot tell the step's "
         f"physics from its absence")
@@ -896,7 +898,7 @@ def test_a_one_way_pe_loses_the_stepped_field_once_the_step_reflects():
     reflected plus axis-refocused field is worth at this step.
     """
     src, rcv = _src_rcv()
-    ram = RAM(backend='mpiramS', dr=5.0, dz=0.25, np_pade=6, timeout=900)
+    ram = RAM(backend='mpirams', dr=5.0, dz=0.25, n_pade=6, timeout=900)
     weak, _, _ = _abs_dtl(
         ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, _reference(D2_WEAK))
     strong, _, _ = _abs_dtl(

@@ -16,7 +16,7 @@ import pytest
 
 import uacpy
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
-from uacpy.io.modes_reader import read_modes, read_modes_bin
+from uacpy.io.modes_reader import _read_modes_payload, read_modes
 
 _AT_BIN = Path(uacpy.__file__).parent / 'bin' / 'oalib'
 
@@ -118,7 +118,7 @@ class TestFoldedEigenvalueRecords:
 
     def test_wavenumbers_match_the_print_file(self, run):
         mod_file, printed = run
-        k = read_modes_bin(str(mod_file))['k']
+        k = _read_modes_payload(str(mod_file))['k']
         assert len(k) == max(printed)
         for mode, expected in printed.items():
             got = k[mode - 1]
@@ -132,7 +132,7 @@ class TestFoldedEigenvalueRecords:
     def test_mode_subset_picks_the_same_wavenumber(self, run):
         mod_file, printed = run
         wanted = _record_length_words(mod_file) // 2 + 1   # second record
-        subset = read_modes_bin(str(mod_file), modes=[wanted])
+        subset = _read_modes_payload(str(mod_file), modes=[wanted])
         assert subset['M'] == 1
         assert np.real(subset['k'][0]) == pytest.approx(
             printed[wanted].real, rel=1e-6)
@@ -156,7 +156,7 @@ def test_fold_that_cannot_hold_every_mode_is_rejected(tmp_path):
     assert n_records * (lrecl_words // 2) < max(printed)
 
     with pytest.raises(FileFormatError, match='eigenvalue records hold only'):
-        read_modes_bin(str(mod_file))
+        _read_modes_payload(str(mod_file))
 
 
 @pytest.mark.requires_binary
@@ -184,43 +184,44 @@ class TestProfileSequence:
     @pytest.mark.parametrize('index', [0, 1, 2])
     def test_each_profile_returns_its_own_mode_set(self, run, index):
         mod_file, first_mode = run
-        data = read_modes_bin(str(mod_file), profile=index + 1)
+        data = _read_modes_payload(str(mod_file), profile=index + 1)
         assert data['title'].endswith(f'P{index + 1}')
         assert np.real(data['k'][0]) == pytest.approx(
             first_mode[index].real, rel=1e-6)
 
     def test_default_profile_is_the_first(self, run):
         mod_file, _ = run
-        assert (read_modes_bin(str(mod_file))['k'][0]
-                == read_modes_bin(str(mod_file), profile=1)['k'][0])
+        assert (_read_modes_payload(str(mod_file))['k'][0]
+                == _read_modes_payload(str(mod_file), profile=1)['k'][0])
 
     def test_profile_past_the_end_raises(self, run):
         mod_file, _ = run
         with pytest.raises(FileFormatError, match='profile header'):
-            read_modes_bin(str(mod_file), profile=len(self.SPEEDS) + 1)
+            _read_modes_payload(str(mod_file), profile=len(self.SPEEDS) + 1)
 
     def test_profile_below_one_raises(self, run):
         mod_file, _ = run
         with pytest.raises(ConfigurationError, match='profile must be'):
-            read_modes_bin(str(mod_file), profile=0)
+            _read_modes_payload(str(mod_file), profile=0)
 
     def test_dispatcher_forwards_the_profile(self, run):
         mod_file, first_mode = run
         data = read_modes(str(mod_file), frequency=100.0, profile=3)
-        assert data['title'].endswith('P3')
-        assert np.real(data['k'][0]) == pytest.approx(
+        assert data.metadata['title'].endswith('P3')
+        assert np.real(data.k[0]) == pytest.approx(
             first_mode[2].real, rel=1e-6)
 
 
-def test_non_mod_extension_is_a_typed_format_error(tmp_path):
-    moa = tmp_path / 'x.moa'
-    moa.write_text('32\ntitle\n100.0 1 1 1 0\n')
+def test_an_extension_other_than_mod_or_moa_is_a_typed_format_error(
+        tmp_path):
+    other = tmp_path / 'x.txt'
+    other.write_text('32\ntitle\n100.0 1 1 1 0\n')
     with pytest.raises(FileFormatError, match=r'\.mod'):
-        read_modes(str(moa))
+        read_modes(str(other))
 
 
 @pytest.mark.requires_binary
-def test_read_modes_bin_M_counts_the_modes_returned(tmp_path):
+def test_the_payload_M_counts_the_modes_returned(tmp_path):
     """``M`` means the same thing in both readers: ``len(k)``. Reporting the
     file's total instead would leave a ``modes=`` subset disagreeing with the
     ``k`` / ``phi`` it is handed back with."""
@@ -237,10 +238,10 @@ def test_read_modes_bin_M_counts_the_modes_returned(tmp_path):
     assert modes.n_modes > 1
 
     mod_file = str(tmp_path / 'modes.mod')
-    full = read_modes_bin(mod_file)
+    full = _read_modes_payload(mod_file)
     assert full['M'] == len(full['k']) == modes.n_modes
 
-    subset = read_modes_bin(mod_file, modes=[1])
+    subset = _read_modes_payload(mod_file, modes=[1])
     assert subset['M'] == 1 == len(subset['k']) == subset['phi'].shape[1]
 
 
@@ -254,7 +255,7 @@ def test_zero_mode_file_keeps_the_documented_phi_shape(tmp_path):
     _run_kraken(tmp_path, 'zm',
                 _isovelocity_deck('zero modes', freq=20.0,
                                   c_low=1790.0, c_high=1799.0, n_rd=5))
-    data = read_modes_bin(str(tmp_path / 'zm.mod'))
+    data = _read_modes_payload(str(tmp_path / 'zm.mod'))
     assert data['M'] == 0
     assert data['k'].shape == (0,)
     assert data['phi'].shape == (len(data['z']), 0)
@@ -281,7 +282,7 @@ def test_mode_count_is_bounded_by_the_file_size(tmp_path):
     mod_file.write_bytes(bytes(raw))
 
     with pytest.raises(FileFormatError, match='mode count M='):
-        read_modes_bin(str(mod_file))
+        _read_modes_payload(str(mod_file))
 
 
 @pytest.mark.requires_binary
@@ -299,27 +300,37 @@ class TestHalfspaceVerticalWavenumber:
 
     def test_kraken_uses_the_real_part_only(self, tmp_path):
         data = self._gamma(tmp_path, 'kraken.exe', 'gk')
-        assert data['title'][:7] == 'KRAKEN-'
-        expected = np.sqrt(np.real(data['k']) ** 2 - data['Bot']['k2'])
-        assert np.allclose(np.abs(data['Bot']['gamma']), np.abs(expected))
+        bot = data.metadata['bottom_halfspace']
+        assert data.metadata['title'][:7] == 'KRAKEN-'
+        assert data.backend == 'kraken'
+        expected = np.sqrt(np.real(data.k) ** 2 - bot['k2'])
+        assert np.allclose(np.abs(bot['gamma']), np.abs(expected))
         # The imaginary part is non-negligible, so the two branches differ.
-        full = np.sqrt(data['k'] ** 2 - data['Bot']['k2'])
-        assert not np.allclose(np.abs(data['Bot']['gamma']), np.abs(full))
+        full = np.sqrt(data.k ** 2 - bot['k2'])
+        assert not np.allclose(np.abs(bot['gamma']), np.abs(full))
 
     def test_krakenc_uses_the_full_complex_eigenvalue(self, tmp_path):
         data = self._gamma(tmp_path, 'krakenc.exe', 'gc')
-        assert data['title'][:7] == 'KRAKENC'
-        expected = np.sqrt(data['k'] ** 2 - data['Bot']['k2'])
-        assert np.allclose(np.abs(data['Bot']['gamma']), np.abs(expected))
+        bot = data.metadata['bottom_halfspace']
+        assert data.metadata['title'][:7] == 'KRAKENC'
+        assert data.backend == 'krakenc'
+        expected = np.sqrt(data.k ** 2 - bot['k2'])
+        assert np.allclose(np.abs(bot['gamma']), np.abs(expected))
 
 
 def test_a_missing_mod_file_is_named_with_its_resolved_extension(tmp_path):
     """The ``.mod`` extension is appended before the file is looked for, so
     the typed error names the path that was actually opened."""
     with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
-        read_modes_bin(str(tmp_path / 'absent'))
+        _read_modes_payload(str(tmp_path / 'absent'))
     with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
-        read_modes_bin(str(tmp_path / 'absent.mod'))
+        _read_modes_payload(str(tmp_path / 'absent.mod'))
+    # A suffix-less Path resolves the same way as its string, through the
+    # public reader too.
+    with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
+        _read_modes_payload(tmp_path / 'absent')
+    with pytest.raises(FileFormatError, match=r'not found.*absent\.mod'):
+        read_modes(tmp_path / 'absent')
 
 
 def test_a_truncated_mod_file_is_a_typed_parse_error(tmp_path):
@@ -328,5 +339,64 @@ def test_a_truncated_mod_file_is_a_typed_parse_error(tmp_path):
     or ``IndexError``."""
     path = tmp_path / 'short.mod'
     path.write_bytes(struct.pack('<i', 32) + b'\x00' * 20)
-    with pytest.raises(FileFormatError):
-        read_modes_bin(str(path))
+    with pytest.raises(FileFormatError, match='Invalid mode file'):
+        _read_modes_payload(str(path))
+
+
+@pytest.mark.requires_binary
+class TestAMultiFrequencyModeFileNeedsAFrequency:
+    """``read_modes`` with ``frequency=None`` reads a single-frequency file
+    and refuses to pick a frequency of a broadband one (TopOpt(6) = 'B',
+    ``Kraken/kraken.f90:52``), naming what it holds."""
+
+    @staticmethod
+    def _broadband(tmp_path):
+        deck = _isovelocity_deck('BB').replace("'NVW'", "'NVW  B'")
+        _run_kraken(tmp_path, 'bb', deck + '3\n  50.0 100.0 150.0 /\n')
+        return tmp_path / 'bb.mod'
+
+    def test_none_on_a_broadband_file_names_its_frequencies(self, tmp_path):
+        mod = self._broadband(tmp_path)
+        with pytest.raises(ConfigurationError, match='50, 100, 150 Hz'):
+            read_modes(str(mod))
+        assert read_modes(str(mod), frequency=100.0).frequencies.tolist() == [
+            pytest.approx(100.0)]
+
+    def test_none_on_a_single_frequency_file_reads_it(self, tmp_path):
+        _run_kraken(tmp_path, 'nb', _isovelocity_deck('NB'))
+        data = read_modes(str(tmp_path / 'nb.mod'))
+        assert data.frequencies.tolist() == [pytest.approx(100.0)]
+        assert data.n_modes > 0
+
+
+@pytest.mark.requires_binary
+class TestAModeFileReadsAsTheModesCarrier:
+    """``read_modes`` returns the ``Modes`` carrier ``Kraken`` returns, so a
+    ``.mod`` from any run reads into the package's mode tools directly."""
+
+    def test_the_carrier_holds_the_files_modes(self, tmp_path):
+        from uacpy.core.results import Modes
+        _run_kraken(tmp_path, 'nb', _isovelocity_deck('NB'))
+        raw = _read_modes_payload(str(tmp_path / 'nb.mod'))
+        modes = read_modes(str(tmp_path / 'nb.mod'), water_density=1.0)
+        assert isinstance(modes, Modes)
+        np.testing.assert_array_equal(modes.k, raw['k'])
+        np.testing.assert_array_equal(modes.phi, raw['phi'])
+        np.testing.assert_array_equal(modes.depths, raw['z'])
+        assert modes.frequencies.tolist() == [100.0]
+        assert modes.backend == 'kraken' and modes.model == ''
+        assert modes.media.water_density == 1.0
+        assert modes.first_n(2).n_modes == 2
+
+    def test_kraken_run_and_a_re_read_of_its_file_agree(self, tmp_path):
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0,
+                                bottom=uacpy.BoundaryProperties(
+                                    acoustic_type='half-space',
+                                    sound_speed=1800.0, density=1.8,
+                                    attenuation=0.5))
+        kraken = uacpy.Kraken(work_dir=tmp_path, cleanup=False)
+        run = kraken.compute_modes(env, uacpy.Source(depths=50.0,
+                                                     frequencies=100.0))
+        again = read_modes(run.metadata['mod_file'])
+        np.testing.assert_array_equal(again.k, run.k)
+        np.testing.assert_array_equal(again.phi, run.phi)

@@ -22,6 +22,7 @@ import uacpy
 from uacpy.models import Bellhop, Bounce, Kraken, RAM, SPARC
 from uacpy.io.ramsurf_reader import read_tl_line
 from uacpy.core import BoundaryProperties
+from uacpy.tests.conftest import make_pekeris
 
 
 def _basic_setup():
@@ -44,7 +45,7 @@ def _rough_setup():
     from uacpy.tests.conftest import make_pekeris
     env = make_pekeris(
         bathymetry=128.0,
-        ssp=uacpy.SoundSpeedProfile(depths=[0, 128], data=[1500, 1500]),
+        ssp=uacpy.SoundSpeedProfile(depths=[0, 128], sound_speed=[1500, 1500]),
         sound_speed=2300.0, density=2.65, roughness=0.5)
     src = uacpy.Source(depths=100.0, frequencies=500.0)
     rcv = uacpy.Receiver(depths=np.linspace(60.0, 127.0, 2),
@@ -53,14 +54,8 @@ def _rough_setup():
 
 
 def _elastic_env():
-    return uacpy.Environment(
-        name='elastic', bathymetry=100.0, ssp=1500.0,
-        bottom=BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1600.0, density=1.8, attenuation=0.2,
-            shear_speed=400.0, shear_attenuation=0.5,
-        ),
-    )
+    return make_pekeris(name='elastic', sound_speed=1600.0, attenuation=0.2,
+                        shear_speed=400.0, shear_attenuation=0.5)
 
 
 # ----------------------------------------------------------------------
@@ -76,6 +71,9 @@ def test_bellhop_paths_present_when_cleanup_false(tmp_path):
     assert 'prt_file' in field.metadata
     assert os.path.exists(field.metadata['shd_file'])
     assert os.path.exists(field.metadata['prt_file'])
+    # run_parallel names a kept RAM-backed dir from this key.
+    assert field.metadata['work_dir'] == str(tmp_path)
+    assert Path(field.metadata['shd_file']).parent == tmp_path
 
 
 @pytest.mark.requires_binary
@@ -85,6 +83,7 @@ def test_bellhop_paths_absent_when_cleanup_true():
     field = bh.run(env, src, rcv)
     assert 'shd_file' not in field.metadata
     assert 'prt_file' not in field.metadata
+    assert 'work_dir' not in field.metadata
 
 
 # ----------------------------------------------------------------------
@@ -117,7 +116,7 @@ def test_bounce_paths_present_when_work_dir_pinned(tmp_path):
     env = _elastic_env()
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
-    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,
+    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0,
                 work_dir=tmp_path)
     res = bn.run(env, src, rcv)
     assert 'brc_file' in res.metadata
@@ -129,9 +128,9 @@ def test_bounce_paths_absent_when_no_work_dir():
     env = _elastic_env()
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
-    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0)
+    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0)
     res = bn.run(env, src, rcv)
-    assert res.theta is not None and len(res.theta) > 0
+    assert res.angles is not None and len(res.angles) > 0
     assert 'brc_file' not in res.metadata
 
 
@@ -160,10 +159,8 @@ def test_kraken_shd_paths_absent_when_cleanup_true():
 
 # ----------------------------------------------------------------------
 # SPARC (time-domain PE) — slow because each receiver depth spawns a
-# binary call. Pass a rigid bottom up front so SPARC's
-# 'auto-converting halfspace to rigid' warning doesn't pollute the
-# pytest log; the helper's behaviour is what we're testing, not the
-# halfspace handling.
+# binary call. SPARC refuses a half-space bottom, so these runs take a
+# rigid one.
 # ----------------------------------------------------------------------
 
 def _sparc_env():
@@ -215,7 +212,7 @@ def test_sparc_paths_absent_when_cleanup_true():
 def test_ram_mpirams_paths_present_when_cleanup_false(tmp_path):
     env, src, rcv = _basic_setup()
     ram = RAM(verbose=False, dr=20.0, dz=2.0, work_dir=tmp_path)
-    assert ram.select_backend(env) == 'mpiramS'
+    assert ram.select_backend(env) == 'mpirams'
     field = ram.run(env, src, rcv)
     assert 'psif_file' in field.metadata, (
         f"Expected RAM mpiramS psif_file; got keys: {list(field.metadata)}"
@@ -270,7 +267,7 @@ def test_tl_line_is_written_every_march_step_not_every_output_step(tmp_path):
     assert float(dr_deck) == pytest.approx(dr)
     assert ndr > 1, "this case is only discriminating while ndr > 1"
 
-    ranges, _tl = read_tl_line(field.metadata['tl_line_file'])
+    ranges = read_tl_line(field.metadata['tl_line_file']).ranges
     assert ranges.size > 1
     step = float(ranges[1] - ranges[0])
     assert step == pytest.approx(dr), (
@@ -305,10 +302,10 @@ def test_bounce_pinned_work_dir_with_cleanup_true_is_wiped(tmp_path):
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
     work = tmp_path / 'bounce_pinned'
-    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0,
+    bn = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0,
                 work_dir=work, cleanup=True)
     res = bn.run(env, src, rcv)
-    assert res.theta is not None and len(res.theta) > 0
+    assert res.angles is not None and len(res.angles) > 0
     assert 'brc_file' not in res.metadata
     assert not work.exists()
 
@@ -384,22 +381,20 @@ def _registered_keys_for(model_name: str) -> set:
 # (model_cls, run_kwargs) — keep small fast runs; covers the path that
 # actually attaches metadata keys. ``work_dir`` is pinned so the
 # ``_attach_output_paths`` branch fires (cleanup=True suppresses it).
-_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP', 'OASSP'}
-
-
 def _drift_cases():
+    from uacpy.tests.conftest import engine_entry
     from uacpy.models import (
         Bellhop, Bounce, Kraken, RAM, Scooter, SPARC,
         OAST, OASN, OASR, OASP, OASSP,
     )
     raw = [
         ('Bellhop', Bellhop, {}, {}),
-        ('Bounce',  Bounce,  dict(c_low=1400.0, c_high=10000.0, rmax=10000.0), {}),
+        ('Bounce',  Bounce,  dict(c_low=1400.0, c_high=10000.0, rmax_m=10000.0), {}),
         ('Kraken',  Kraken,  {}, dict(run_mode=uacpy.RunMode.MODES)),
         ('Kraken', Kraken, {}, {}),
         ('RAM',     RAM,     {}, {}),
         ('Scooter', Scooter, {}, {}),
-        ('SPARC',   SPARC,   dict(n_t_out=256), {}),
+        ('SPARC',   SPARC,   dict(n_time_samples=256), {}),
         ('OAST',    OAST,    {}, {}),
         ('OASN',    OASN,    dict(surface_noise_level=70.0),
          dict(run_mode=uacpy.RunMode.COVARIANCE)),
@@ -411,12 +406,14 @@ def _drift_cases():
                                   freq_min=400.0, freq_max=600.0),
          dict(run_mode=uacpy.RunMode.BROADBAND)),
     ]
-    # OASES models need their separately-licensed binaries; tag those params
-    # so ``pytest -m 'not requires_oases'`` deselects them at collection.
+    # Each case carries the markers of the installs its registry entry
+    # declares, so ``pytest -m 'not requires_oases'`` deselects the OASES
+    # ones at collection.
     return [
         pytest.param(
             name, cls, ce, re, id=name,
-            marks=([pytest.mark.requires_oases] if name in _OASES_MODELS else []),
+            marks=[getattr(pytest.mark, f'requires_{install}')
+                   for install in engine_entry(name).requires],
         )
         for name, cls, ce, re in raw
     ]
@@ -433,18 +430,18 @@ def test_every_wrapper_has_a_metadata_drift_gate():
     """``_DOCUMENTED_METADATA`` is hand-maintained, so a wrapper with no case
     here can attach any key it likes and nothing says so.
 
-    The model set is derived from ``uacpy.models.__all__`` rather than listed
-    again, because a list is exactly what a thirteenth wrapper walks past.
-    This runs without a binary: it compares names, not results."""
-    from uacpy.tests.conftest import concrete_model_classes
+    The model set is read from the engine registry rather than listed again,
+    because a list is exactly what a thirteenth wrapper walks past. This
+    runs without a binary: it compares names, not results."""
+    from uacpy.tests.conftest import engine_names
 
     gated = {case.values[0] for case in _drift_cases()} | _DRIFT_GATED_ELSEWHERE
-    missing = sorted(set(concrete_model_classes()) - gated)
+    missing = sorted(engine_names() - gated)
     assert not missing, (
         f"wrapper(s) {missing} attach result.metadata with no drift gate; add "
         f"a case to _drift_cases() (or to _DRIFT_GATED_ELSEWHERE with the "
         f"test that covers it)")
-    stale = sorted(gated - set(concrete_model_classes()))
+    stale = sorted(gated - engine_names())
     assert not stale, f"gate names a model uacpy.models no longer exports: {stale}"
 
 
@@ -469,6 +466,9 @@ def test_metadata_keys_are_all_documented(
     if name == 'OASR':
         # OASR needs an elastic bottom for a meaningful reflection result.
         env = _elastic_env()
+    if name == 'SPARC':
+        # SPARC refuses a half-space bottom; its deck takes vacuum / rigid.
+        env = _sparc_env()
     if name == 'OASSP':
         # OASSP scatters off a rough interface; a smooth seabed leaves it
         # nothing to scatter from, and the source has to sit in the
@@ -484,7 +484,7 @@ def test_metadata_keys_are_all_documented(
     assert not undocumented, (
         f"{result.model}: result.metadata has key(s) {sorted(undocumented)} "
         f"that are not registered in _DOCUMENTED_METADATA. "
-        f"Add an entry per (model, key) in uacpy/core/results.py or fix the "
+        f"Add an entry per (model, key) in uacpy/core/results/_base.py or fix the "
         f"wrapper to drop the unregistered key."
     )
 
@@ -503,6 +503,8 @@ def test_documented_metadata_has_no_dead_rows():
     """
     from uacpy.core.results import _DOCUMENTED_METADATA, _UNIVERSAL_METADATA
 
+    import ast
+
     root = Path(uacpy.__file__).parent
     registry = root / 'core' / 'results' / '_base.py'
     sources = [
@@ -511,6 +513,21 @@ def test_documented_metadata_has_no_dead_rows():
         if p != registry
     ]
     blob = '\n'.join(p.read_text(encoding='utf-8') for p in sources)
+    # The registry module also holds code that writes keys (the export of a
+    # result's identity); only the two registry tables are left out, so a
+    # row does not count as its own writer.
+    text = registry.read_text(encoding='utf-8')
+    lines = text.splitlines()
+    for node in ast.parse(text).body:
+        targets = [t.id for t in getattr(node, 'targets', [])
+                   if isinstance(t, ast.Name)]
+        target = getattr(node, 'target', None)
+        if isinstance(target, ast.Name):
+            targets.append(target.id)
+        if {'_DOCUMENTED_METADATA', '_UNIVERSAL_METADATA'} & set(targets):
+            for i in range(node.lineno - 1, node.end_lineno):
+                lines[i] = ''
+    blob += '\n' + '\n'.join(lines)
 
     def _written(key: str) -> bool:
         k = re.escape(key)

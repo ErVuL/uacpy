@@ -15,43 +15,115 @@ Output records:
         zg1(ii), re(psi(ii,1,ir)), im(psi(ii,1,ir)), …,
                  re(psi(ii,nf,ir)), im(psi(ii,nf,ir))
         = 1 + 2*nf reals per record
+
+Stock mpiramS writes a different file under the same name: a direct-access
+``psif.dat`` whose record length it saves to ``recl.dat``
+(``third_party/mpiramS/README.RECL``). uacpy's patched build writes the
+sequential layout above (``third_party/MODIFICATIONS.md``), and that is the
+one this reader parses; a stock file is recognised by its ``recl.dat`` and
+refused by name.
 """
 
 import numpy as np
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Union, Dict
+from typing import Union
+from uacpy.core._export import ExportRecord
 from uacpy.core.exceptions import FileFormatError
 
 
-def read_psif(work_dir: Union[str, Path]) -> Dict:
+@dataclass(frozen=True, eq=False)
+class PsifFile(ExportRecord):
+    """An mpiramS ``psif.dat`` as :func:`read_psif` reads it.
+
+    Attributes
+    ----------
+    n_samples : float
+        The header's ``Nsam = fs·T`` (``peramx.f90:356``, with
+        ``fs = 4·fc`` at ``:354``), the driver's time-sample count, as the
+        real the file holds; :class:`~uacpy.Field`'s ``synthesis_floor``
+        applies the least-whole-count rule to it.
+    c0 : float
+        The reference sound speed (m/s), the RAM settings' ``c0``.
+    water_min : float
+        The header's ``cmin``: the water's minimum sound speed (m/s,
+        ``peramx.f90:295``), :class:`~uacpy.core.results.SoundSpeeds`'
+        ``water_min``.
+    sample_rate : float
+        The header's ``fs`` (Hz).
+    q_factor : float
+        The band's quality factor (the deck's ``Q``).
+    frequencies : ndarray
+        The marched frequencies (Hz), shape ``(nf,)``.
+    depths : ndarray
+        The output depth grid (m), shape ``(nzo,)``.
+    ranges : ndarray
+        The output ranges (m), shape ``(nr,)``.
+    pe_field : ndarray
+        The PE field ``ψ`` as peramx writes it, complex, shape
+        ``(nzo, nf, nr)``; the RAM wrapper turns it into pressure.
+    """
+
+    n_samples: float
+    c0: float
+    water_min: float
+    sample_rate: float
+    q_factor: float
+    frequencies: np.ndarray
+    depths: np.ndarray
+    ranges: np.ndarray
+    pe_field: np.ndarray
+
+    _REPR_FIELDS = ('c0', 'sample_rate', 'q_factor', 'frequencies', 'depths',
+                    'ranges', 'pe_field')
+    _REPR_UNITS = {'c0': 'm/s', 'sample_rate': 'Hz', 'frequencies': 'Hz',
+                   'depths': 'm', 'ranges': 'm'}
+
+    _ARRAY_FIELDS = ('frequencies', 'depths', 'ranges', 'pe_field')
+    _XARRAY_FIELDS = {'pe_field': 'pe_field', 'depth': 'depths',
+                      'frequency': 'frequencies', 'range': 'ranges'}
+
+    def _payload(self):
+        return {'pe_field': (self.pe_field, ('depth', 'frequency', 'range'),
+                             '')}
+
+    def _coords(self):
+        return {'depth': (self.depths, 'm'),
+                'frequency': (self.frequencies, 'Hz'),
+                'range': (self.ranges, 'm')}
+
+
+def read_psif(filepath: Union[str, Path]) -> PsifFile:
     """
     Read mpiramS output file (``psif.dat``).
 
     Parameters
     ----------
-    work_dir : str or Path
-        Directory containing ``psif.dat``.
+    filepath : str or Path
+        The ``psif.dat`` file itself, or the directory containing it.
 
     Returns
     -------
-    dict with keys (header scalars use the DEV.md §4.2 metadata schema —
-    the raw Fortran ``Nsam`` / ``cmin`` are renamed to ``n_samples`` /
-    ``c_min`` here so consumers forward them to ``Result.metadata``
-    verbatim):
-        n_samples, nf, nzo, nr : ints / floats from the header
-                                 (``n_samples`` ← Fortran ``Nsam``)
-        c0, c_min, fs, Q       : float scalars from the header
-                                 (``c_min`` ← Fortran ``cmin``)
-        rout : ndarray, shape (nr,)        — output ranges (m)
-        frq  : ndarray, shape (nf,)        — frequency vector (Hz)
-        zg   : ndarray, shape (nzo,)       — output depth grid (m)
-        psif : ndarray, shape (nzo, nf, nr), complex128 — acoustic field
+    psif : PsifFile
+        The header scalars (``n_samples`` ← Fortran ``Nsam``,
+        ``water_min`` ← ``cmin``, ``sample_rate`` ← ``fs``, ``c0``,
+        ``q_factor`` ← ``Q``), the
+        ``frequencies`` (Hz), ``depths`` and ``ranges`` (m), and the
+        complex ``pe_field``, shape ``(nzo, nf, nr)``.
+
+    Raises
+    ------
+    FileFormatError
+        No ``psif.dat`` at the path, a malformed or truncated file, or a
+        stock mpiramS direct-access file (a ``recl.dat`` beside it), which
+        is a different layout from the sequential one uacpy's patched build
+        writes.
     """
-    work_dir = Path(work_dir)
-    psif_file = work_dir / 'psif.dat'
+    filepath = Path(filepath)
+    psif_file = filepath / 'psif.dat' if filepath.is_dir() else filepath
 
     if not psif_file.exists():
-        raise FileFormatError(f"mpiramS output not found: {psif_file}")
+        raise FileFormatError(f"mpiramS output not found: {psif_file}.")
 
     # ``psif.dat`` is written by mpiramS on this host during the same run, so
     # its byte order is the host's; ``FortranFile`` reads native endianness,
@@ -61,9 +133,25 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
     # Imported here rather than at module level so ``import uacpy.io`` does
     # not pull scipy in; only this reader needs it.
     from scipy.io import FortranEOFError, FortranFormattingError
+    stock = (psif_file.parent / 'recl.dat').exists()
     try:
         return _read_psif_records(psif_file)
-    except (FortranEOFError, FortranFormattingError, ValueError) as exc:
+    except (FortranEOFError, FortranFormattingError, ValueError,
+            FileFormatError) as exc:
+        if stock:
+            raise FileFormatError(
+                f"{psif_file}: not the sequential layout uacpy's patched "
+                f"mpiramS writes; the recl.dat beside it marks a stock "
+                f"mpiramS direct-access psif.dat "
+                f"({type(exc).__name__}: {exc}).",
+                remediation="Re-run the case through uacpy.RAM "
+                            "(backend='mpirams'), whose patched binary writes "
+                            "the sequential file, or read the direct-access "
+                            "records yourself with the record length in "
+                            "recl.dat (third_party/mpiramS/README.RECL).",
+            ) from exc
+        if isinstance(exc, FileFormatError):
+            raise
         # scipy's FortranFile raises TypeError-derived FortranEOFError /
         # FortranFormattingError on a truncated or mis-framed record, and
         # ValueError on a garbage length marker; all mean the same thing
@@ -72,12 +160,12 @@ def read_psif(work_dir: Union[str, Path]) -> Dict:
             f"{psif_file}: malformed or truncated mpiramS output "
             f"({type(exc).__name__}: {exc}).",
             remediation="The mpiramS run may have been killed mid-write; "
-                        "re-run it, or check the work_dir points at a "
+                        "re-run it, or check the path points at a "
                         "completed run.",
         ) from exc
 
 
-def _read_psif_records(psif_file: Path) -> Dict:
+def _read_psif_records(psif_file: Path) -> PsifFile:
     """Walk the sequential-unformatted records of one ``psif.dat``."""
     from scipy.io import FortranFile
     with FortranFile(str(psif_file), 'r') as f:
@@ -121,41 +209,45 @@ def _read_psif_records(psif_file: Path) -> Dict:
                 f"imply more depth records than a {file_size}-byte file holds."
             )
 
-        # Depth records: 1 + 2*nf reals each, nzo records per range, nr ranges.
-        # Each record is [z, Re_1, Im_1, ..., Re_nf, Im_nf], so the real parts
-        # are the odd slots and the imaginary parts the even ones after z.
-        # The depth axis repeats across ranges; take it from the first only.
-        zg = np.zeros(nzo, dtype=np.float64)
-        psif = np.zeros((nzo, nf, nr), dtype=np.complex128)
-        for ir in range(nr):
-            for ii in range(nzo):
-                rec = f.read_reals(dtype=np.float64)
-                # Exact length, not a minimum: a record longer than the header
-                # implies is as much a header/file disagreement as a short one,
-                # and reading its first 1 + 2*nf reals would silently return a
-                # field built from a layout this reader has misidentified.
-                if rec.size != 1 + 2 * nf:
-                    raise FileFormatError(
-                        f"{psif_file}: depth record (ir={ir}, iz={ii}) holds "
-                        f"{rec.size} reals, expected {1 + 2 * nf} "
-                        f"(z + {nf} complex values); the file does not match "
-                        f"its own header."
-                    )
-                if ir == 0:
-                    zg[ii] = rec[0]
-                psif[ii, :, ir] = rec[1::2] + 1j * rec[2::2]
+    # Depth records: 1 + 2*nf reals each, nzo records per range, nr ranges.
+    # Each record is [z, Re_1, Im_1, ..., Re_nf, Im_nf], so the real parts
+    # are the odd slots and the imaginary parts the even ones after z. Every
+    # record has the same length, so the body is read as one structured array
+    # (one Python call, not one per record) behind the three header records:
+    # 8 reals, nf reals, nr reals, each framed by two 4-byte length markers.
+    payload = 8 * (1 + 2 * nf)
+    record = np.dtype([('head', '=i4'), ('z', '=f8'),
+                       ('re_im', '=f8', (2 * nf,)), ('tail', '=i4')])
+    offset = (8 + 8 * 8) + (8 + 8 * nf) + (8 + 8 * nr)
+    n_records = nzo * nr
+    body = np.fromfile(psif_file, dtype=record, count=n_records,
+                       offset=offset)
+    # Framing first: a record of the wrong length shifts every later one, so
+    # the first bad marker names the disagreement where a bare count would
+    # only say "short". Exact length, not a minimum: a record longer than the
+    # header implies is as much a header/file disagreement as a short one.
+    bad = np.flatnonzero((body['head'] != payload) | (body['tail'] != payload))
+    if bad.size:
+        ir, ii = divmod(int(bad[0]), nzo) if nzo else (0, 0)
+        raise FileFormatError(
+            f"{psif_file}: depth record (ir={ir}, iz={ii}) holds "
+            f"{int(body['head'][bad[0]]) // 8} reals, expected {1 + 2 * nf} "
+            f"(z + {nf} complex values); the file does not match its own "
+            f"header."
+        )
+    if body.size != n_records:
+        raise FileFormatError(
+            f"{psif_file}: holds {body.size} of the {n_records} depth records "
+            f"its header announces (nzo={nzo} x nr={nr}); the file is "
+            f"truncated."
+        )
+    # The depth axis repeats across ranges; take it from the first only.
+    zg = body['z'][:nzo].copy()
+    re_im = body['re_im'].reshape(nr, nzo, 2 * nf) if n_records else \
+        np.zeros((nr, nzo, 2 * nf))
+    psif = np.transpose(re_im[:, :, 0::2] + 1j * re_im[:, :, 1::2],
+                        (1, 2, 0)).astype(np.complex128)
 
-    return {
-        'n_samples': Nsam,
-        'nf': nf,
-        'nzo': nzo,
-        'nr': nr,
-        'rout': rout,
-        'c0': c0,
-        'c_min': cmin,
-        'fs': fs,
-        'Q': Q,
-        'frq': frq,
-        'zg': zg,
-        'psif': psif,
-    }
+    return PsifFile(n_samples=Nsam, c0=c0, water_min=cmin, sample_rate=fs,
+                    q_factor=Q,
+                    frequencies=frq, depths=zg, ranges=rout, pe_field=psif)

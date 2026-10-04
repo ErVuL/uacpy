@@ -152,14 +152,17 @@ def test_oasn_surface_noise_level_in_an_infinitely_deep_ocean_is_the_source_leve
     """``oasn.tex`` Block VI defines ``SSLEV`` as "the acoustic pressure the
     same source distribution would yield in an infinitely deep ocean", and
     the transparent-bottom fixture *is* that ocean, so every diagonal element
-    of the covariance must read ``10**(SSLEV/10)``. This is the
+    of the covariance must read ``10**(SSLEV/10)`` µPa²/Hz, i.e.
+    ``REFERENCE_PRESSURE_WATER**2 * 10**(SSLEV/10)`` Pa²/Hz. This is the
     scale-sensitive half of the OASN check: the coherence test below is
     normalised and cannot see a factor. Measured −0.019 .. −0.021 dB over the
     81 sensors (the finite λ/30 sheet depth OASN uses, ``oasnun22.f:515``,
     accounts for −0.031 dB of that in exact quadrature); the 0.2 dB bound is
     10x the measurement, and a factor 2 in power is +3.01 dB.
     """
-    diag_dB = 10.0 * np.log10(np.real(np.diag(oasn_halfspace_covariance)))
+    from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+    diag_dB = 10.0 * np.log10(np.real(np.diag(oasn_halfspace_covariance))
+                              / REFERENCE_PRESSURE_WATER ** 2)
     err = diag_dB - _NOISE_LEVEL_DB
     assert np.max(np.abs(err)) < 0.2, (
         f"diagonal is {err.min():.3f}..{err.max():.3f} dB from SSLEV")
@@ -318,7 +321,7 @@ def test_oass_reverberation_loss_matches_the_first_order_perturbation_integral(
     are 4x and 3.7x that. Beyond 40 % of the receiver window OASS's
     reverberation synthesis under-resolves — measured −0.38 dB at 2.3 km and
     −4.7 dB at 4 km on this 4 km window, restored to ≤ 0.15 dB by
-    ``nw_samples=8192`` on the mean-field OAST — so the assertions stop at
+    ``n_wavenumbers=8192`` on the mean-field OAST — so the assertions stop at
     1.5 km while the receivers run to 4 km. A field off by a factor 2 is
     3.01 dB.
     """

@@ -15,7 +15,7 @@ from figure_scripts._common import SQUARE, WIDE, shallow_water
 
 import uacpy
 from uacpy.models import Bellhop, RunMode
-from uacpy.visualization.plots import shared_colorbar
+from uacpy.plot import shared_colorbar
 
 
 def tl_field():
@@ -31,10 +31,10 @@ def tl_field():
 def ray_fan():
     """A ray fan coloured by boundary interaction."""
     env, source, receiver = shallow_water()
-    rays = Bellhop(n_beams=41, alpha=(-20.0, 20.0)).run(
+    rays = Bellhop(n_beams=41, launch_angles=(-20.0, 20.0)).run(
         env, source, receiver, run_mode=RunMode.RAYS)
     fig, ax = rays.plot(env=env, show_receivers=False, figsize=WIDE,
-                        title='Bellhop — ray fan, alpha=(-20°, +20°)')
+                        title='Bellhop — ray fan, launch_angles=(-20°, +20°)')
     # The seafloor fill (zorder 7) outranks the default legend zorder (5) and
     # paints over the lower legend rows where the two overlap.
     ax.get_legend().set_zorder(10)
@@ -45,7 +45,7 @@ def eigenrays():
     """Only the rays that actually connect source to one receiver."""
     env, source, _ = shallow_water()
     point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-    eig = Bellhop(n_beams=4000, alpha=(-45.0, 45.0)).run(
+    eig = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0)).run(
         env, source, point, run_mode=RunMode.EIGENRAYS)
     fig, ax = eig.top_n_by_miss(12).plot(
         env=env, figsize=WIDE,
@@ -57,7 +57,7 @@ def arrivals():
     """The impulse structure at that receiver: amplitude vs delay."""
     env, source, _ = shallow_water()
     point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-    arr = Bellhop(n_beams=4000, alpha=(-45.0, 45.0)).run(
+    arr = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0)).run(
         env, source, point, run_mode=RunMode.ARRIVALS)
     fig, ax = arr.plot(figsize=WIDE,
                        title='Bellhop — arrivals at (3 km, 60 m)')

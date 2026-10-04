@@ -20,7 +20,7 @@ Two of the three had a trap the obvious bulk read walks into:
   fails.
 
 The synthetic ``.shd`` writer here is also what ``TestMultiSourceShadeFiles``
-at the end of the file uses: ``read_shd_bin``'s ``xs_km=``/``ys_km=`` source
+at the end of the file uses: ``read_shd_bin``'s ``xs_m=``/``ys_m=`` source
 selector and its compressed ``'TL'`` source grid decode layouts no uacpy run
 produces, so no model test reaches them.
 """
@@ -40,6 +40,7 @@ from uacpy.io.oases_reader import (
     _read_oasp_trf_binary,
     _unique_in_order,
 )
+from uacpy.tests.conftest import recorded_warnings
 
 _E = '<'
 
@@ -203,6 +204,27 @@ def test_oasp_trf_single_precision_block_equals_record_at_a_time_read(tmp_path):
                                ).astype(np.complex64))
 
 
+def test_oasp_trf_needs_the_callers_receiver_depths(tmp_path):
+    """The header holds only RD, RDLOW and |IR| (INREC flips IR positive,
+    oaseun31.f:1185), so it cannot tell a non-uniform array from a uniform
+    one: ``receiver_depths`` is required, and a non-uniform axis comes back
+    verbatim rather than as the header's linspace."""
+    import inspect
+    from uacpy.io.oases_reader import read_oasp_trf
+    param = inspect.signature(read_oasp_trf).parameters['receiver_depths']
+    assert param.default is inspect.Parameter.empty
+    values = np.zeros((2, 1, 4, 2), dtype=np.float32)
+    path = tmp_path / 'grid.trf'
+    _write_trf(path, values, 1, 4, double=False)
+    with pytest.raises(
+            TypeError,
+            match="required positional argument: 'receiver_depths'"):
+        read_oasp_trf(path)
+    assert read_oasp_trf(path, [10.0, 20.0, 60.0, 90.0]).coords[
+        'depth'].tolist() == [
+        10.0, 20.0, 60.0, 90.0]
+
+
 def test_oasp_trf_double_precision_block_equals_record_at_a_time_read(tmp_path):
     """The record marker of a COMPLEX*16 ``.trf`` is 16, not the ``.rpo`` 8.
 
@@ -234,7 +256,8 @@ def test_oasp_trf_double_precision_marker_is_not_the_single_precision_eight(
     raw[header_bytes:header_bytes + 4] = struct.pack(_E + 'i', 8)
     path.write_bytes(bytes(raw))
 
-    with pytest.raises(FileFormatError):
+    with pytest.raises(FileFormatError,
+                       match='Fortran record marker mismatch'):
         _read_oasp_trf_binary(path, np.arange(2, dtype=float))
 
 
@@ -271,7 +294,9 @@ def test_oasp_trf_malformed_data_records_raise_file_format_error(
         raw[at:at + 4] = struct.pack(_E + 'i', 1 << 29)
     path.write_bytes(bytes(raw))
 
-    with pytest.raises(FileFormatError):
+    with pytest.raises(
+            FileFormatError,
+            match='truncated transfer function|Fortran record marker mismatch'):
         _read_oasp_trf_binary(path, np.arange(2, dtype=float))
 
 
@@ -364,7 +389,7 @@ def test_shd_pressure_block_equals_seek_per_record_read(tmp_path, shape):
     path = tmp_path / f'{shape}.shd'
     recl = _write_shd(path, samples, plot_type=plot_type, **kw)
 
-    got = read_shd_bin(str(path))['pressure']
+    got = read_shd_bin(str(path)).pressure
     reference = _shd_reference(path, 10, kw['Ntheta'], kw['Nsz'], kw['Nrz'],
                                kw['Nrr'], recl)
 
@@ -388,9 +413,9 @@ def test_shd_padding_beyond_the_stride_budget_reads_the_same_samples(
                       Nrz=5, Nrr=12, recl_floor=400)
     reference = _shd_reference(path, 10, 2, 2, 5, 12, recl)
 
-    strided = read_shd_bin(str(path))['pressure']
+    strided = read_shd_bin(str(path)).pressure
     monkeypatch.setattr(oalib_reader, '_SHD_STRIDE_PADDING_BUDGET_BYTES', 0)
-    fallback = read_shd_bin(str(path))['pressure']
+    fallback = read_shd_bin(str(path)).pressure
 
     assert np.array_equal(strided, reference)
     assert np.array_equal(fallback, reference)
@@ -405,11 +430,11 @@ def test_shd_pressure_block_read_in_slices_equals_one_whole_read(
     path = tmp_path / 'chunked.shd'
     recl = _write_shd(path, samples, Nfreq=1, Ntheta=3, Nsx=1, Nsy=1, Nsz=2,
                       Nrz=7, Nrr=16)
-    whole = read_shd_bin(str(path))['pressure']
+    whole = read_shd_bin(str(path)).pressure
 
     # A budget of one and a half records forces an uneven slice boundary.
     monkeypatch.setattr(oalib_reader, '_SHD_STRIDE_CHUNK_BYTES', 6 * recl)
-    sliced = read_shd_bin(str(path))['pressure']
+    sliced = read_shd_bin(str(path)).pressure
 
     assert np.array_equal(sliced, whole)
     assert np.array_equal(sliced, samples[0])
@@ -429,9 +454,9 @@ def test_shd_frequency_selection_reads_the_slab_of_that_frequency(tmp_path):
         got = read_shd_bin(str(path), frequency=100.0 + 50.0 * ifreq)
         reference = _shd_reference(path, 10 + ifreq * rows_per_slab, Ntheta,
                                    Nsz, Nrz, Nrr, recl)
-        assert got['pressure_freq'] == 100.0 + 50.0 * ifreq
-        assert np.array_equal(got['pressure'], reference)
-        assert np.array_equal(got['pressure'], samples[ifreq])
+        assert got.pressure_frequency == 100.0 + 50.0 * ifreq
+        assert np.array_equal(got.pressure, reference)
+        assert np.array_equal(got.pressure, samples[ifreq])
 
 
 def test_shd_source_position_selection_reads_the_slab_of_that_source(tmp_path):
@@ -447,8 +472,8 @@ def test_shd_source_position_selection_reads_the_slab_of_that_source(tmp_path):
 
     for idx_x in range(Nsx):
         for idx_y in range(Nsy):
-            got = read_shd_bin(str(path), xs_km=float(idx_x),
-                               ys_km=2.0 * idx_y)['pressure']
+            got = read_shd_bin(str(path), xs_m=1000.0 * idx_x,
+                               ys_m=2000.0 * idx_y).pressure
             slab = idx_x * Nsy + idx_y
             reference = _shd_reference(path, 10 + slab * rows_per_slab,
                                        Ntheta, Nsz, Nrz, Nrr, recl)
@@ -466,7 +491,7 @@ def test_shd_truncated_pressure_block_raises_file_format_error(tmp_path,
                Nrr=50)
     path.write_bytes(path.read_bytes()[:-missing_bytes])
 
-    with pytest.raises(FileFormatError):
+    with pytest.raises(FileFormatError, match='truncated pressure data'):
         read_shd_bin(str(path))
 
 
@@ -499,7 +524,7 @@ def test_shd_record_shorter_than_its_own_range_row_names_the_disagreement(
 # --------------------------------------------------------------------------
 
 class TestMultiSourceShadeFiles:
-    """``read_shd_bin``'s ``xs_km=``/``ys_km=`` selector and its ``'TL'``
+    """``read_shd_bin``'s ``xs_m=``/``ys_m=`` selector and its ``'TL'``
     source-grid layout decode files no uacpy run produces.
 
     Every uacpy wrapper writes a single-source 2-D deck, so the model tests
@@ -532,59 +557,76 @@ class TestMultiSourceShadeFiles:
     def test_the_selector_returns_the_slab_of_the_named_source(
             self, tmp_path, idx_x, idx_y):
         # _write_shd lays the source axes out at 1000 m and 2000 m spacing,
-        # and the selector takes km.
+        # and the selector takes metres, like the source_x / source_y axes
+        # it returns.
         path = tmp_path / 'multi.shd'
         self._write(path)
-        data = read_shd_bin(str(path), xs_km=idx_x * 1.0, ys_km=idx_y * 2.0)
+        data = read_shd_bin(str(path), xs_m=idx_x * 1000.0,
+                            ys_m=idx_y * 2000.0)
         slot = idx_x * self.NSY + idx_y
         expected = (slot + 1) + 1j * (slot + 1)
-        assert data['pressure'].shape == (self.NTHETA, self.NSZ, self.NRZ,
+        assert data.pressure.shape == (self.NTHETA, self.NSZ, self.NRZ,
                                           self.NRR)
-        assert np.all(data['pressure'] == expected)
+        assert np.all(data.pressure == expected)
 
     def test_the_nearest_source_is_chosen_on_both_sides_of_a_midpoint(
             self, tmp_path):
         # The selector is an argmin, so the boundary is the midpoint between
-        # two source x positions: 0 m and 1000 m meet at 0.5 km.
+        # two source x positions: 0 m and 1000 m meet at 500 m.
         path = tmp_path / 'nearest.shd'
         self._write(path)
-        below = read_shd_bin(str(path), xs_km=0.499, ys_km=0.0)
-        above = read_shd_bin(str(path), xs_km=0.501, ys_km=0.0)
-        assert np.all(below['pressure'] == 1 + 1j)      # slot (0, 0)
-        assert np.all(above['pressure'] == 3 + 3j)      # slot (1, 0)
+        below = read_shd_bin(str(path), xs_m=499.0, ys_m=0.0)
+        above = read_shd_bin(str(path), xs_m=501.0, ys_m=0.0)
+        assert np.all(below.pressure == 1 + 1j)      # slot (0, 0)
+        assert np.all(above.pressure == 3 + 3j)      # slot (1, 0)
 
-    def test_xs_km_without_ys_km_raises_a_typed_error(self, tmp_path):
+    def test_the_source_selector_is_keyword_only(self, tmp_path):
+        """A positional ``read_shd_bin(f, 5.0, 10.0)`` cannot be read as a
+        position in any unit: the selector takes keywords only."""
+        path = tmp_path / 'kw.shd'
+        self._write(path)
+        with pytest.raises(TypeError, match='takes 1 positional argument but'):
+            read_shd_bin(str(path), 1000.0, 0.0)
+        assert np.all(read_shd_bin(str(path), xs_m=1000.0,
+                                   ys_m=0.0).pressure == 3 + 3j)
+
+    def test_xs_m_without_ys_m_raises_a_typed_error(self, tmp_path):
         from uacpy.core.exceptions import ConfigurationError
         path = tmp_path / 'half.shd'
         self._write(path)
-        with pytest.raises(ConfigurationError, match='ys_km must be provided'):
-            read_shd_bin(str(path), xs_km=0.0)
+        with pytest.raises(ConfigurationError, match='ys_m must be provided'):
+            read_shd_bin(str(path), xs_m=0.0)
+
+    def test_the_selector_takes_the_metres_it_returns(self, tmp_path):
+        """A coordinate read from ``source_x`` selects its own slot."""
+        path = tmp_path / 'round.shd'
+        self._write(path)
+        pos = read_shd_bin(str(path), xs_m=0.0, ys_m=0.0)
+        data = read_shd_bin(str(path), xs_m=float(pos.source_x[2]),
+                            ys_m=float(pos.source_y[1]))
+        assert np.all(data.pressure == 6 + 6j)       # slot 2 * NSY + 1
 
     def test_no_selector_on_a_multi_source_file_warns_and_takes_slot_zero(
             self, tmp_path):
-        import warnings
         path = tmp_path / 'unselected.shd'
         self._write(path)
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             data = read_shd_bin(str(path))
-        assert any('no xs_km=/ys_km= selector' in str(w.message)
+        assert any('no xs_m=/ys_m= selector' in str(w.message)
                    for w in record), [str(w.message) for w in record]
-        assert np.all(data['pressure'] == 1 + 1j)
+        assert np.all(data.pressure == 1 + 1j)
 
     def test_a_single_source_file_selects_without_warning(self, tmp_path):
         # The other side of the Nsx/Nsy boundary: one slot, nothing to choose.
-        import warnings
         path = tmp_path / 'single.shd'
         samples = np.full((1, 1, 1, self.NRZ, self.NRR), 7 + 7j,
                           dtype=np.complex64)
         _write_shd(path, samples, Nfreq=1, Ntheta=1, Nsx=1, Nsy=1, Nsz=1,
                    Nrz=self.NRZ, Nrr=self.NRR)
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             data = read_shd_bin(str(path))
         assert not [w for w in record if 'selector' in str(w.message)]
-        assert np.all(data['pressure'] == 7 + 7j)
+        assert np.all(data.pressure == 7 + 7j)
 
     def test_a_tl_plot_type_expands_the_source_grid_from_its_two_limits(
             self, tmp_path):
@@ -602,18 +644,18 @@ class TestMultiSourceShadeFiles:
                 _E + 'dd', *limits).ljust(4 * recl, b'\x00')
         path.write_bytes(bytes(raw))
 
-        data = read_shd_bin(str(path), xs_km=2.0, ys_km=3.0)
-        np.testing.assert_allclose(data['Pos']['s']['x'], [0.0, 2000.0, 4000.0])
-        np.testing.assert_allclose(data['Pos']['s']['y'], [0.0, 3000.0])
+        data = read_shd_bin(str(path), xs_m=2000.0, ys_m=3000.0)
+        np.testing.assert_allclose(data.source_x, [0.0, 2000.0, 4000.0])
+        np.testing.assert_allclose(data.source_y, [0.0, 3000.0])
         # x index 1, y index 1 -> slot 1 * NSY + 1 = 3.
-        assert np.all(data['pressure'] == 4 + 4j)
+        assert np.all(data.pressure == 4 + 4j)
 
     def test_a_non_tl_plot_type_reads_every_source_coordinate(self, tmp_path):
         # The other side of the PlotType branch: the uncompressed layout
         # carries Nsx values, not two limits.
         path = tmp_path / 'uncompressed.shd'
         self._write(path)
-        data = read_shd_bin(str(path), xs_km=0.0, ys_km=0.0)
-        np.testing.assert_allclose(data['Pos']['s']['x'],
+        data = read_shd_bin(str(path), xs_m=0.0, ys_m=0.0)
+        np.testing.assert_allclose(data.source_x,
                                    [0.0, 1000.0, 2000.0])
-        np.testing.assert_allclose(data['Pos']['s']['y'], [0.0, 2000.0])
+        np.testing.assert_allclose(data.source_y, [0.0, 2000.0])

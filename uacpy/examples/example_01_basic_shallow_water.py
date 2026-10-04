@@ -39,14 +39,14 @@ source = uacpy.Source(depths=50.0, frequencies=100.0)
 receiver = uacpy.Receiver(depths=np.linspace(5, 95, 50),
                           ranges=np.linspace(100, 10000, 100))
 
-# 300 Gaussian beams over ±80°, enough to fill a 100 m duct out to 10 km.
-tl = uacpy.Bellhop(beam_type='B', n_beams=300, alpha=(-80, 80)).run(
+# 300 beams over ±80°, enough to fill a 100 m duct out to 10 km.
+tl = uacpy.Bellhop(backend='fortran', n_beams=300, launch_angles=(-80, 80)).run(
     env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 # The TL field on the fixed 20–120 dB scale every uacpy figure shares, with
 # the jet_r colormap of the Acoustics Toolbox: red is loud, blue is quiet.
-uacpy.plot_field(tl, ax=axes[0, 0], env=env)
+uacpy.plot.plot_field(tl, ax=axes[0, 0], env=env)
 # A Field sliced to one axis plots itself as a line cut.
 tl.at(depth=50.0).plot(ax=axes[0, 1], color='b',
                        title='TL vs range at source depth')

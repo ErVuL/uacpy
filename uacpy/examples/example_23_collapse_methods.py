@@ -2,7 +2,7 @@
 
 When an Environment carries a feature a model cannot represent, uacpy reduces
 it rather than refusing — and the `collapse={…}` constructor parameter is where
-you choose HOW, one key per feature, with a UserWarning naming each thing it
+you choose HOW, one key per feature, with a FallbackWarning naming each thing it
 dropped.
 
 The same range-dependent environment goes to Scooter (range-independent
@@ -17,6 +17,7 @@ SoundSpeedProfile.from_2d · compare_models(ncols=, contours=)
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
@@ -58,18 +59,26 @@ fig, _ = env.plot()
 fig.savefig(OUT / 'example_23_environment.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fields = {
-    f"bathy={bathymetry!r}, ssp={ssp!r}":
-        uacpy.Scooter(collapse={'bathymetry': bathymetry, 'ssp': ssp}).run(
-            env, source, receiver)
-    for bathymetry, ssp in [('max', 'r0'), ('max', 'rmax'),
-                            ('median', 'mean'), ('min', 'rmax')]
-}
+# Each run's FallbackWarnings are the point of the example, so they are
+# captured and printed. A collapse to a shallower seabed ('median' 140 m,
+# 'min' 80 m) also leaves the deepest receivers under it, which Scooter says
+# too; those cells are the collapsed seabed, as the panels show.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    fields = {
+        f"bathy={bathymetry!r}, ssp={ssp!r}":
+            uacpy.Scooter(collapse={'bathymetry': bathymetry, 'ssp': ssp}).run(
+                env, source, receiver)
+        for bathymetry, ssp in [('max', 'r0'), ('max', 'rmax'),
+                                ('median', 'mean'), ('min', 'rmax')]
+    }
+for warning in caught:
+    print(f"  noted: {' '.join(str(warning.message).split())}")
 for label, field in fields.items():
     print(f"  {label:34s} TL {np.nanmin(field.dB):.1f}-"
           f"{np.nanmax(field.dB):.1f} dB")
 
-fig, _ = uacpy.compare_models(
+fig, _ = uacpy.plot.compare_models(
     fields, env=env, ncols=2, vmin=40, vmax=110, contours=[60, 80],
     title='One range-dependent environment, collapsed four ways')
 fig.savefig(OUT / 'example_23_collapse_methods.png', dpi=150,

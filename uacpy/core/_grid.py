@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import numpy as np
 
+from uacpy.core._repr import axis, build, extent
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.constants import DECK_RANGE_RESOLUTION_M
-from uacpy.core._carrier_validate import (
-    _DeepCopyMixin,
-    _reject_complex, _require_non_negative, _require_strictly_increasing,
+from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
+from uacpy.core._validate import (
+    reject_complex, require_non_negative, require_strictly_increasing,
 )
+from uacpy.core._carrier import DeepCopyMixin, RevalidateOnAssignMixin
+from uacpy.core._export import CarrierExport
+from uacpy.core._plotting import plotter
 
 INTERP_METHODS = ('linear', 'nearest', 'cubic')
 
@@ -67,7 +70,20 @@ def _reject_label_absorbing_axis(axis, label, name):
             f"and index 0 would be returned.")
 
 
-def _nearest_index_on_axis(axis_values, value, name='range'):
+def coarse_axes(axes, limit: float, *, inclusive: bool = False):
+    """``[(name, spacing), ...]`` of the ``(name, values)`` axes whose
+    largest sample spacing ``|diff|`` exceeds ``limit`` (reaches it, with
+    ``inclusive``). ``|diff|``: a descending axis is the same grid stored the
+    other way round."""
+    out = []
+    for name, values in axes:
+        spacing = float(np.max(np.abs(np.diff(values))))
+        if spacing > limit or (inclusive and spacing == limit):
+            out.append((name, spacing))
+    return out
+
+
+def nearest_index_on_axis(axis_values, value, name='range'):
     """Index of the sample in ``axis_values`` nearest to the label ``value``.
 
     The nearest rule the non-blendable carriers select with (``Surface``,
@@ -106,7 +122,7 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
     if method not in INTERP_METHODS:
         raise ConfigurationError(
             f"interpolation method must be one of {INTERP_METHODS}; "
-            f"got {method!r}"
+            f"got {method!r}."
         )
     label = _as_finite_scalar_label(value, name)
     x = np.asarray(axis_values, dtype=float)
@@ -160,7 +176,7 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
     return out, v
 
 
-class _RangeProfile(_DeepCopyMixin):
+class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     """Base for the 1-D ``value(range)`` shape carriers.
 
     :class:`~uacpy.core.bathymetry.Bathymetry` (seafloor depth, positive down)
@@ -169,7 +185,7 @@ class _RangeProfile(_DeepCopyMixin):
     satisfy; the range-axis validation, the ``at``/``eval``/``isel`` selectors
     and the derived properties all live here.
 
-    Subclasses are ``@dataclass(eq=False, repr=False)`` carrying ``ranges``
+    Subclasses are ``@carrier(eq=False, repr=False)`` carrying ``ranges``
     plus the vector named by ``_VALUE_FIELD``. They call
     :meth:`_init_range_profile` from ``__post_init__`` and implement
     :meth:`_validate_values`.
@@ -191,6 +207,14 @@ class _RangeProfile(_DeepCopyMixin):
         """The value vector, whatever ``_VALUE_FIELD`` names it."""
         return getattr(self, self._VALUE_FIELD)
 
+    # The export protocol: the value vector on the range axis.
+    def _payload(self):
+        return {self._VALUE_FIELD[:-1]: (self._values, ('range',),
+                                         self._VALUE_UNIT)}
+
+    def _coords(self):
+        return {'range': (self.ranges, 'm')}
+
     def _validate_values(self) -> None:
         """Subclass hook: guard the value vector (sign / finiteness)."""
         raise NotImplementedError
@@ -199,8 +223,8 @@ class _RangeProfile(_DeepCopyMixin):
         cls = type(self).__name__
         # Ahead of the float64 casts below, which discard an imaginary part —
         # see _reject_complex for the two ways they do it.
-        _reject_complex(self.ranges, f"{cls} ranges")
-        _reject_complex(self._values, f"{cls} {self._VALUE_FIELD}")
+        reject_complex(self.ranges, f"{cls} ranges")
+        reject_complex(self._values, f"{cls} {self._VALUE_FIELD}")
         self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
         setattr(self, self._VALUE_FIELD,
                 np.array(self._values, dtype=float).reshape(-1))
@@ -210,20 +234,16 @@ class _RangeProfile(_DeepCopyMixin):
                 f"({self._values.size}) must have the same length.")
         if self.ranges.size == 0:
             raise ConfigurationError(f"{cls}: needs at least one point.")
-        _require_non_negative(self.ranges, f"{cls} ranges", hint="metres")
+        require_non_negative(self.ranges, f"{cls} ranges", hint="metres")
         self._validate_values()
         if self.ranges.size > 1:
-            _require_strictly_increasing(
+            require_strictly_increasing(
                 self.ranges, f"{cls}.ranges", min_step=DECK_RANGE_RESOLUTION_M)
 
     def __repr__(self) -> str:
-        v = self._values
-        r_lo = float(self.ranges[0]) / 1000
-        r_hi = float(self.ranges[-1]) / 1000
-        return (f"{type(self).__name__}(n_r={self.ranges.size}, "
-                f"range=[{r_lo:g}, {r_hi:g}] km, "
-                f"{self._VALUE_LABEL}=[{float(np.min(v)):g}, "
-                f"{float(np.max(v)):g}] {self._VALUE_UNIT})")
+        return build(type(self).__name__, [
+            axis(self.ranges, 'ranges', 'm'),
+            f"{self._VALUE_LABEL}={extent(self._values, self._VALUE_UNIT)}"])
 
     def to_pairs(self) -> np.ndarray:
         """``(N, 2)`` ``(range, value)`` array."""
@@ -239,7 +259,17 @@ class _RangeProfile(_DeepCopyMixin):
 
     @property
     def is_range_dependent(self) -> bool:
-        """True when the value varies with range."""
+        """True when the profile carries more than one range node.
+
+        A structural test (node count), like ``SoundSpeedProfile`` /
+        ``Bottom`` / ``Surface``: nodes with equal values still count.
+        :attr:`varies_with_range` asks whether the values differ."""
+        return self.ranges.size > 1
+
+    @property
+    def varies_with_range(self) -> bool:
+        """True when the value changes with range: more than one node,
+        and not all at the same value."""
         return self.ranges.size > 1 and bool(np.ptp(self._values) > 0)
 
     def at(self, *, range):
@@ -279,14 +309,10 @@ class _RangeProfile(_DeepCopyMixin):
 
         Depth-valued profiles (:class:`~uacpy.core.bathymetry.Bathymetry`)
         point their axis downward; height-valued ones
-        (:class:`~uacpy.core.altimetry.Altimetry`) keep it upward."""
-        # Deferred into the body: ``uacpy.visualization`` imports
-        # ``uacpy.core`` at module scope, so this line at file scope makes
-        # ``import uacpy`` raise ImportError. docs/DEV.md section 7 records
-        # the inversion.
-        from uacpy.visualization.plots.environment import _plot_range_profile
-        return _plot_range_profile(self, ax=ax, title=title,
-                                   figsize=figsize, **kwargs)
+        (:class:`~uacpy.core.altimetry.Altimetry`) keep it upward. Draws
+        through :func:`uacpy.plot.plot_range_profile`."""
+        return plotter('plot_carrier')(self, ax=ax, title=title,
+                                       figsize=figsize, **kwargs)
 
 
 def _query_profile(ranges, values, query, method='linear'):
@@ -301,7 +327,7 @@ def _query_profile(ranges, values, query, method='linear'):
     """
     if method not in INTERP_METHODS:
         raise ConfigurationError(
-            f"method must be one of {INTERP_METHODS}; got {method!r}")
+            f"method must be one of {INTERP_METHODS}; got {method!r}.")
     x = np.asarray(ranges, dtype=float)
     y = np.asarray(values, dtype=float)
     rq = np.asarray(query, dtype=float)

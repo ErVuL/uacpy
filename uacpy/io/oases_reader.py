@@ -21,15 +21,18 @@ References:
 
 import struct
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple, TypedDict, Union
+from typing import Dict, Optional, Union
 
 import numpy as np
 
-from uacpy.core.exceptions import FileFormatError
+from uacpy.core._export import ExportRecord
+from uacpy.core.exceptions import (ConfigurationError, FileFormatError,
+                                   IOWarning, UnsupportedFeatureError)
+from uacpy.core.results import Field, ResultStack
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import (
-    PARSE_ERRORS,
     _bound_counts,
     fortran_float,
     read_fortran_record as _read_fortran_record,
@@ -61,244 +64,98 @@ def _decode_fortran_title(raw: bytes) -> str:
     return raw.decode('ascii', errors='ignore').strip('\x00 \t\r\n\v\f')
 
 
-class OastTL(TypedDict):
-    """The named fields :func:`read_oast_tl` hands back; the function's own
-    Returns section carries the shapes, which depend on ``NFREQ``.
-
-    A ``Tuple[...]`` return type here is read by the caller in
-    ``uacpy/models/oases.py`` as ``oast_out['depths']`` — a string subscript
-    of something declared a tuple."""
-
-    tl: np.ndarray
-    depths: np.ndarray
-    ranges: np.ndarray
-    metadata: Dict[str, Any]
-
-
 def read_oast_tl(
     filepath: Union[str, Path],
-    receiver_depths: np.ndarray,
-) -> OastTL:
+    receiver_depths: Optional[np.ndarray] = None,
+    *,
+    frequencies: Optional[np.ndarray] = None,
+) -> ResultStack:
     """
-    Read OAST transmission loss output on its native grid.
+    Read OAST transmission loss output on its native grids.
 
-    OAST outputs two files:
-    - .plp: Plot metadata (ASCII with binary markers) - contains grid info
-    - .plt: Actual curve data (pure ASCII, one value per line)
-
-    OAST writes TL (in dB) directly to disk; this reader returns the
-    native ``(n_depths, n_ranges)`` TL grid plus the depth and range
-    axes. Resampling onto a user receiver grid is the caller's job —
-    use :meth:`Field.resample_to` after wrapping.
-
-    The TL curves are *not* necessarily first in the ``.plt``: options that
-    add curves inside the same receiver loop (``'I'`` → PLINTGR, ``'a'`` →
-    PLSPECT, unoast31.f:590-605) write theirs ahead of PLTLOS's, and ``'A'``
-    / ``'D'`` add more afterwards. Every curve is described by a ``.plp``
-    record whose 6-character tag names it (``<param>TLRAN`` for TL vs range,
-    oasfun22.f:330), so the TL curves are selected by tag rather than by
-    position.
+    OAST writes TL (dB) to a ``.plt`` and the plot description — the only
+    record of its range sampling — to the ``.plp`` beside it. This reader
+    returns the TL on OAST's own grids; resampling onto a receiver grid is
+    the caller's :meth:`Field.resample_to`.
 
     Parameters
     ----------
     filepath : str or Path
-        Path to .plt or .plp file (base name works for both)
-    receiver_depths : ndarray
-        Receiver depth axis (m) the deck asked for. It is what the ``RD:``
-        labels of the ``.plp`` are matched against, so the returned depths
-        carry the caller's own precision rather than the labels' 0.1 m; it
-        is *not* assumed to be the axis OAST plotted, which the deck's
-        ``IDINC`` may decimate.
+        The ``.plt`` or ``.plp`` file, or their base name.
+    receiver_depths : ndarray, optional
+        The receiver depth axis (m) the deck asked for. The ``RD:`` labels
+        of the ``.plp`` (printed to 0.1 m) are matched against it, so the
+        depths carry the caller's precision; omitted, the depths are the
+        labels as printed, and a ``.plp`` without labels raises.
+    frequencies : array_like, optional
+        The frequencies (Hz) of the plotted blocks, one each, in the order
+        the run wrote them (the OAST deck's frequencies). Required for a
+        ``.plp`` without ``Freq:`` labels; on a labelled ``.plp`` the labels
+        are used and a ``frequencies`` more than 0.05 Hz (half the
+        ``F7.1`` label step) from them is refused.
 
     Returns
     -------
-    result : dict
-        Named fields, like the sibling OASES readers:
-
-        - ``'tl'`` : ndarray — transmission loss on the OAST native grid.
-          Shape ``(n_depths, n_ranges_native)`` for a single-frequency run.
-          A multi-frequency deck (``NFREQ > 1``) writes one curve per
-          plotted receiver *per frequency* and yields shape
-          ``(n_freq, n_depths, n_ranges_native)``, the frequency axis
-          ascending as the run swept it.
-        - ``'depths'`` : ndarray — the depths OAST actually plotted, which
-          is a subset of ``receiver_depths`` on a deck whose receiver record
-          carries ``IDINC > 1``.
-        - ``'ranges'`` : ndarray — OAST's native range grid in metres.
-          **Shape ``(n_ranges_native,)`` for a single frequency and
-          ``(n_freq, n_ranges_native)`` for a sweep**: OAST rebuilds the
-          grid inside its frequency loop, so ``DX`` scales as ``1/f`` and
-          the frequencies do not share one range axis.
-        - ``'metadata'`` : dict — ``{'oast_grid_shape': …,
-          'n_frequencies': n_f, 'frequencies': ndarray}``. ``'frequencies'``
-          comes from the ``Freq:`` labels (``F7.1``, oasfun22.f:368) and is
-          absent from a ``.plp`` that carries no labels.
+    tl : ResultStack
+        **Always** a :class:`~uacpy.core.results.ResultStack` over
+        ``'frequency'`` — of length 1 for a single-frequency run — of real
+        TL :class:`~uacpy.core.results.Field` slabs ``(n_depths,
+        n_ranges)``, so a caller never branches on the type. Each slab
+        carries its **own** native range axis: OAST rebuilds its range grid
+        inside the frequency loop (``DX`` scales as ``1/f``,
+        ``unoast31.f:481``), so the frequencies share no axis, and summing
+        the slabs (:meth:`ResultStack.superpose`) is refused for that
+        reason. The coordinate is the ``Freq:`` labels (``F7.1``,
+        ``oasfun22.f:368``), or ``frequencies`` for a ``.plp`` that carries
+        none.
 
     Raises
     ------
     FileFormatError
-        If the ``.plp`` file is missing or cannot be parsed (OAST chooses
-        its own range grid via FFT-based sampling, so the native grid
-        cannot be reconstructed without it), if it carries no TL-vs-range
-        curve, if its ``Freq:``/``RD:`` labels do not form a full grid, or
-        if the receivers of one frequency disagree about the range axis.
+        If the ``.plp`` file is missing or cannot be parsed, if it carries
+        no TL-vs-range curve, if its ``Freq:``/``RD:`` labels do not form a
+        full grid, or if the receivers of one frequency disagree about the
+        range axis, or if it carries no ``Freq:`` labels and no
+        ``frequencies`` is given.
+    ConfigurationError
+        If ``frequencies`` does not hold one value per plotted block, or
+        disagrees with the ``Freq:`` labels.
     """
-    filepath = Path(filepath)
-
-    # OAST writes the curve data on unit 20 and the plot description on unit
-    # 19 (``bin/oast``: FOR019=.plp, FOR020=.plt); an unmapped unit 20 lands
-    # in .020 instead.
-    # Whichever of the three the caller named (or a bare root), the trio
-    # is the same: each is the given path with its own suffix.
-    plt_file = filepath.with_suffix('.plt')
-    plp_file = filepath.with_suffix('.plp')
-    f020_file = filepath.with_suffix('.020')
-
-    # Try to find TL data file (prefer .plt, then .020)
-    if plt_file.exists():
-        tl_data_file = plt_file
-    elif f020_file.exists():
-        tl_data_file = f020_file
+    from uacpy.io._parsers import parse_oast_tl
+    parsed = parse_oast_tl(filepath, receiver_depths)
+    n_freq = int(parsed['metadata']['n_frequencies'])
+    tl = parsed['tl'] if n_freq > 1 else parsed['tl'][None]
+    ranges = parsed['ranges'] if n_freq > 1 else parsed['ranges'][None]
+    labels = parsed['metadata'].get('plotted_frequencies')
+    if frequencies is not None:
+        frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
+        if frequencies.shape != (n_freq,):
+            raise ConfigurationError(
+                f"read_oast_tl: {filepath} holds {n_freq} plotted frequency "
+                f"block(s); frequencies= gives {frequencies.size}.",
+                remediation="Pass one frequency (Hz) per plotted block, in "
+                            "the order of the OAST deck's frequencies.")
+    if labels is None:
+        if frequencies is None:
+            raise FileFormatError(
+                f"{filepath} carries no 'Freq:' labels; pass "
+                f"frequencies=[...] (the OAST deck's frequencies).")
     else:
-        raise FileFormatError(
-            f"OAST TL data file not found. Checked: {plt_file}, {f020_file}",
-            remediation="Add the 'T' option (PLTL) to the OAST option string "
-                        "and re-run: OAST writes its TL data file only when "
-                        "TL plotting is enabled.",
-        )
-
-    # Parse .plp file to get OAST's native range grid. The grid is
-    # mandatory: OAST chooses its own ranges via FFT-based sampling, so
-    # without .plp we have no way to know what range each TL value
-    # corresponds to. Raise rather than fabricate.
-    if not plp_file.exists():
-        raise FileFormatError(
-            f"OAST .plp grid file not found: {plp_file}. "
-            "Without it the native range grid cannot be reconstructed."
-        )
-    curves = _parse_oast_plp(plp_file)
-    tl_curves = [c for c in curves if c['tag'].endswith(_OAST_TL_RANGE_TAG)]
-
-    if not tl_curves:
-        tags = sorted({c['tag'] for c in curves})
-        raise FileFormatError(
-            f"{plp_file} carries no TL-vs-range curve "
-            f"(no '*{_OAST_TL_RANGE_TAG}' record); curves present: {tags}. "
-            f"Add the 'T' option (PLTL) to the OAST option string."
-        )
-
-    # One TL curve per (output parameter, receiver). uacpy returns a single
-    # TL grid, so more than one output parameter is ambiguous — say so rather
-    # than pick a slab.
-    params = sorted({c['tag'][0] for c in tl_curves})
-    if len(params) > 1:
-        raise FileFormatError(
-            f"{plp_file} carries TL curves for {len(params)} output "
-            f"parameters {params} (OASES optpar letters N,W,U,V,R,B,S); "
-            f"uacpy returns a single TL grid. Request one output parameter "
-            f"in the OAST option string."
-        )
-
-    freq_axis, depth_axis, slots = _oast_curve_slots(
-        plp_file, tl_curves, receiver_depths)
-    n_freq = len(freq_axis) if freq_axis is not None else (
-        max(s[0] for s in slots) + 1)
-    depths_oast = (_match_label_depths(depth_axis, receiver_depths)
-                   if depth_axis is not None
-                   else np.asarray(receiver_depths, dtype=float))
-    n_depths_oast = len(depths_oast)
-
-    blocks = _read_plt_blocks(tl_data_file)
-    n_expected = sum(1 for c in curves if c['index'] is not None)
-    if len(blocks) != n_expected:
-        raise FileFormatError(
-            f"{tl_data_file} holds {len(blocks)} data blocks but "
-            f"{plp_file} describes {n_expected}; the pair is inconsistent "
-            f"(truncated or interleaved run).",
-            remediation="Delete both files and re-run the case: the .plp and "
-                        "its data file must come from one run, so a stale "
-                        "file left in the working directory by an earlier "
-                        "run produces exactly this mismatch.",
-        )
-
-    n_ranges_oast = tl_curves[0]['n']
-    # The curve count sizes the TL grid allocation; one G13.6 value occupies
-    # at least 2 bytes on disk, so no product of counts can exceed the .plt
-    # size in half-bytes — reject a garbage 'N' before np.empty runs.
-    _bound_counts(tl_data_file, tl_data_file.stat().st_size, 2,
-                  n_freq=n_freq, n_depths=n_depths_oast,
-                  n_ranges=n_ranges_oast)
-
-    # OAST recomputes DLRAN = 2*pi/(NWVNO*DLWVNO) inside the frequency loop
-    # (unoast31.f:481, DLWVNO proportional to FREQ at :477), so RSTEP scales
-    # as 1/f and each frequency owns its own range axis. The point count LF
-    # is clamped to NWVNO at :492, which is what makes the axes look alike:
-    # equal N, halved DX. Within one frequency every receiver shares the
-    # grid; across frequencies they need not.
-    grids: Dict[int, Tuple[float, float]] = {}
-    tl_oast = np.empty((n_freq, n_depths_oast, n_ranges_oast), dtype=float)
-    filled = np.zeros((n_freq, n_depths_oast), dtype=bool)
-    for i, (curve, (i_freq, i_depth)) in enumerate(zip(tl_curves, slots)):
-        if curve['n'] != n_ranges_oast:
-            raise FileFormatError(
-                f"{plp_file}: TL curve {i} has {curve['n']} range samples, "
-                f"curve 0 has {n_ranges_oast} — the curves do not share one "
-                f"range grid."
-            )
-        grid = (curve['xoff'], curve['dx'])
-        if grids.setdefault(i_freq, grid) != grid:
-            raise FileFormatError(
-                f"{plp_file}: TL curve {i} starts at XOFF={curve['xoff']} km "
-                f"in steps of DX={curve['dx']} km, but another curve of the "
-                f"same frequency uses {grids[i_freq]} — the receivers of one "
-                f"frequency do not share a range grid."
-            )
-        if curve['index'] is None:
-            raise FileFormatError(
-                f"{plp_file}: TL curve {i} ({curve['tag']}) parameterises "
-                f"both axes (DX={curve['dx']}, DY={curve['dy']}), so PLTWRI "
-                f"wrote no {tl_data_file.suffix} block for it "
-                f"(oasgun21.f:658-660) and it carries no TL."
-            )
-        tl_oast[i_freq, i_depth] = _curve_values(
-            blocks[curve['index']], curve, tl_data_file)
-        filled[i_freq, i_depth] = True
-
-    # The label grid factors on its totals, so two curves sharing one
-    # (Freq:, RD:) pair leave another slot untouched — and untouched here is
-    # whatever np.empty allocated.
-    if not filled.all():
-        missing = [(freq_axis[j] if freq_axis is not None else j,
-                    float(depths_oast[k]))
-                   for j, k in zip(*np.nonzero(~filled))]
-        raise FileFormatError(
-            f"{plp_file}: no TL curve for {missing} (frequency Hz, depth m); "
-            f"the run's curves do not cover every frequency at every plotted "
-            f"receiver."
-        )
-
-    range_rows = np.array([
-        km_to_m(grids[j][0] + np.arange(n_ranges_oast) * grids[j][1])
-        for j in range(n_freq)
-    ])
-    if n_freq == 1:
-        tl_oast = tl_oast[0]
-        ranges_oast = range_rows[0]
-    else:
-        ranges_oast = range_rows
-
-    metadata = {
-        'oast_grid_shape': tl_oast.shape,
-        'n_frequencies': n_freq,
-    }
-    if freq_axis is not None:
-        metadata['frequencies'] = np.asarray(freq_axis, dtype=float)
-    return {
-        'tl': tl_oast,
-        'depths': depths_oast,
-        'ranges': ranges_oast,
-        'metadata': metadata,
-    }
+        labels = np.asarray(labels, dtype=float)
+        if frequencies is not None and \
+                np.any(np.abs(frequencies - labels) > 0.05):
+            raise ConfigurationError(
+                f"read_oast_tl: frequencies={frequencies.tolist()} Hz "
+                f"disagrees with the 'Freq:' labels {labels.tolist()} Hz "
+                f"of {filepath}.",
+                remediation="Omit frequencies= to use the labels, or pass "
+                            "the deck the file came from.")
+        frequencies = labels
+    slabs = [Field(data=tl[i], coords={'depth': parsed['depths'],
+                                       'range': ranges[i]},
+                   model='', backend='', frequencies=float(frequencies[i]))
+             for i in range(n_freq)]
+    return ResultStack(slabs, frequencies, coordinate_name='frequency')
 
 
 def _unique_in_order(values: list) -> list:
@@ -365,6 +222,12 @@ def _oast_curve_slots(plp_file: Path, tl_curves: list, receiver_depths):
         reason = ("its TL curves carry none of the 'Freq:'/'RD:' labels "
                   "PLTLOS writes (oasfun22.f:334-337)")
 
+    if receiver_depths is None:
+        raise FileFormatError(
+            f"{plp_file}: {reason}, so the file alone cannot say which depth "
+            f"each curve belongs to.",
+            remediation="Pass receiver_depths= (the deck's receiver axis) "
+                        "to attribute the curves by position.")
     n_depths = len(receiver_depths)
     n_freq, remainder = divmod(len(tl_curves), n_depths)
     if remainder or n_freq == 0:
@@ -381,7 +244,7 @@ def _oast_curve_slots(plp_file: Path, tl_curves: list, receiver_depths):
         f"receiver record decimates with IDINC > 1 (unoast31.f:630, "
         f"oaseun31.f:1156), which writes fewer curves than the deck has "
         f"receivers.",
-        UserWarning,
+        IOWarning,
         skip_file_prefixes=USER_FRAME_SKIP,
     )
     return None, None, [divmod(i, n_depths) for i in range(len(tl_curves))]
@@ -444,7 +307,7 @@ _PLP_LABEL_KEYS = ('Freq', 'SD', 'RD')
 def _plp_labels(lines: list, i: int, n_lab: int) -> Dict[str, float]:
     """Numeric ``Freq:`` / ``SD:`` / ``RD:`` labels of one plot block.
 
-    PLPWRI writes each label as ``FORMAT(1H ,A16)`` (oasgun21.f:779), and
+    PLPWRI writes each label as ``FORMAT(1H ,A16)`` (oasgun21.f:615, FORMAT 779), and
     the plot programs terminate the text with ``'$'``. A record that is not
     one of :data:`_PLP_LABEL_KEYS` followed by a number is skipped: the
     label list is free text that other routines fill differently.
@@ -561,8 +424,8 @@ def _parse_oast_plp(plp_file: Path) -> list:
             )
         i += 3                                    # OPTION, PTIT, TITLE
         n_lab = int(_plp_value(plp_file, lines, i, 'NUMBER OF LABELS'))
-        # NLAB and NC are the file's own DO-loop bounds (oasgun21.f:614,
-        # :653). A negative NLAB walks the cursor backwards over records it
+        # NLAB and NC are the file's own record counts (oasgun21.f:614,
+        # :631). A negative NLAB walks the cursor backwards over records it
         # has already read, which never terminates.
         _check_plp_count(plp_file, i, 'NLAB', n_lab, len(lines))
         labels = _plp_labels(lines, i + 1, n_lab)
@@ -662,7 +525,7 @@ def _curve_values(block: np.ndarray, curve: Dict, plt_file: Path) -> np.ndarray:
 
 
 @typed_format_error
-def read_oasn_covariance(
+def _read_oasn_covariance_payload(
     filepath: Union[str, Path]
 ) -> Dict:
     """
@@ -705,7 +568,7 @@ def read_oasn_covariance(
 
     Examples
     --------
-    >>> data = read_oasn_covariance('test.xsm')
+    >>> data = _read_oasn_covariance_payload('test.xsm')
     >>> cov = data['covariance']  # shape: (n_freq, n_rcv, n_rcv)
     >>> print(f"Covariance for {data['n_receivers']} receivers")
     """
@@ -713,7 +576,7 @@ def read_oasn_covariance(
 
     if not filepath.exists():
         raise FileFormatError(
-            f"OASN covariance file not found: {filepath}",
+            f"OASN covariance file not found: {filepath}.",
             remediation="Re-run OASN with 'N' in the option string: the "
                         "covariance matrices reach the .xsm file only under "
                         "that letter.",
@@ -730,7 +593,7 @@ def read_oasn_covariance(
         # Probe the byte order from the first int32 (n_rcv at record 5).
         f.seek(4 * recl)
         probe = f.read(4)
-        endian = detect_endian(probe, source=f'read_oasn_covariance:{filepath.name}')
+        endian = detect_endian(probe, source=f'_read_oasn_covariance_payload:{filepath.name}')
 
         # Read header (first 10 records)
         # Records 1-4 are four consecutive 8-character slices of one
@@ -792,7 +655,7 @@ def read_oasn_covariance(
         if len(buf) < (n_total - 1) * recl + 8:
             raise FileFormatError(
                 f"{filepath}: truncated covariance data — expected "
-                f"{n_total} records of {recl} bytes, got {len(buf)} bytes"
+                f"{n_total} records of {recl} bytes, got {len(buf)} bytes."
             )
         buf = buf.ljust(n_total * recl, b'\x00')
         flat = np.frombuffer(buf, dtype=rec_dt, count=n_total)
@@ -817,7 +680,7 @@ def read_oasn_covariance(
 
 
 @typed_format_error
-def read_oasn_replicas(
+def _read_oasn_replicas_payload(
     filepath: Union[str, Path]
 ) -> Dict:
     """
@@ -847,8 +710,8 @@ def read_oasn_replicas(
         - 'freq_max': float, maximum frequency (Hz)
         - 'freq_delta': float, frequency increment (Hz)
         - 'z_min', 'z_max', 'n_z': replica depth grid (m)
-        - 'x_min', 'x_max', 'n_x': replica x-offset grid (km)
-        - 'y_min', 'y_max', 'n_y': replica y-offset grid (km)
+        - 'x_min', 'x_max', 'n_x': replica x-offset grid (m)
+        - 'y_min', 'y_max', 'n_y': replica y-offset grid (m)
         - 'receiver_positions': ndarray, shape (n_rcv, 3) [x, y, z] in m
         - 'receiver_types': ndarray, receiver types
         - 'receiver_gains': ndarray, receiver gains (dB)
@@ -857,21 +720,20 @@ def read_oasn_replicas(
 
     Notes
     -----
-    The grid fields are reported in the units the deck states them in, which
-    are not the same for all three axes: depth in m, x/y offsets in km
-    (``doc/oasn.tex:109-111``). Receiver coordinates are all in m
-    (``doc/oasn.tex:47-51``).
+    Every grid field is returned in metres. The file holds depth in m but
+    the x/y offsets in km (``doc/oasn.tex:109-111``), which are converted
+    here. Receiver coordinates are all in m (``doc/oasn.tex:47-51``).
 
     Examples
     --------
-    >>> data = read_oasn_replicas('test.rpo')
+    >>> data = _read_oasn_replicas_payload('test.rpo')
     >>> replicas = data['replicas']  # shape: (n_freq, n_z, n_x, n_y, n_rcv)
     """
     filepath = Path(filepath)
 
     if not filepath.exists():
         raise FileFormatError(
-            f"OASN replica file not found: {filepath}",
+            f"OASN replica file not found: {filepath}.",
             remediation="Re-run OASN with 'R' in the option string: the "
                         "replica fields reach the .rpo file only under that "
                         "letter.",
@@ -881,7 +743,7 @@ def read_oasn_replicas(
         head = f.read(4)
         f.seek(0)
         endian = detect_endian(
-            head, source=f'read_oasn_replicas:{filepath.name}',
+            head, source=f'_read_oasn_replicas_payload:{filepath.name}',
         )
 
         # Read title (CHARACTER*80, oasmun21_bin.f:506)
@@ -950,13 +812,13 @@ def read_oasn_replicas(
         if flat.size < n_total:
             raise FileFormatError(
                 f"{filepath}: truncated replica data — expected "
-                f"{n_total} records, got {flat.size}"
+                f"{n_total} records, got {flat.size}."
             )
         if np.any(flat['m1'] != 8) or np.any(flat['m2'] != 8):
             raise FileFormatError(
                 f"{filepath}: unexpected replica record layout — "
                 "Fortran record markers are not the expected 8-byte "
-                "payload length"
+                "payload length."
             )
         vals = (flat['re'] + 1j * flat['im']).astype(np.complex64)
         replicas = vals.reshape(n_freq, n_z, n_x, n_y, n_rcv)
@@ -971,11 +833,11 @@ def read_oasn_replicas(
         'z_min': z_min,
         'z_max': z_max,
         'n_z': n_z,
-        'x_min': x_min,
-        'x_max': x_max,
+        'x_min': float(km_to_m(x_min)),
+        'x_max': float(km_to_m(x_max)),
         'n_x': n_x,
-        'y_min': y_min,
-        'y_max': y_max,
+        'y_min': float(km_to_m(y_min)),
+        'y_max': float(km_to_m(y_max)),
         'n_y': n_y,
         'receiver_positions': receiver_positions,
         'receiver_types': receiver_types,
@@ -1000,78 +862,68 @@ _OASES_OUTPUT_PARAM_LETTERS = ('N', 'W', 'U', 'V', 'R', 'B', 'S')
 def read_oasp_trf(
     filepath: Union[str, Path],
     receiver_depths: np.ndarray,
-) -> Dict:
+) -> Field:
     """
-    Read OASP transfer function file (.trf format)
+    Read an OASP transfer function file (.trf) as a pressure Field.
 
-    OASP outputs transfer functions for postprocessing with PP module.
-    These are complex frequency-domain responses.
-
-    Only the Fortran-unformatted binary layout exists in practice: OASP's
-    ``bintrf`` is a DATA-statement ``.true.`` (``unoasp22.f:1166``) that
-    nothing in the tree reassigns, so ``TRFHEAD`` always takes its
-    ``FORM='UNFORMATTED'`` branch (``oasiun23.f:844-846``).
+    OASP's default output parameter ``'N'`` is the normal stress,
+    ``sigma_zz = -p`` in fluids (``oases/doc/oasp.tex:185``), on the
+    ``e^{+i omega t}`` convention every engine shares, so the pressure is
+    its negation — the conversion the OASP model applies to its own output.
 
     Parameters
     ----------
     filepath : str or Path
-        Path to .trf file
+        Path to the ``.trf`` file.
     receiver_depths : ndarray
         Receiver depth axis (m), taken verbatim from the caller that wrote
         the deck. The ``.trf`` cannot supply it: TRFHEAD writes the explicit
         depth list only for ``IR < 0`` (oasiun23.f:870-877), but INREC has
         already flipped IR positive in COMMON /VARS1/ (oaseun31.f:1185,
-        oases/src/compar.f:69-70) by the time TRFHEAD runs, so the header carries only
-        RD, RDLOW and ``|IR|`` — a uniform grid — whatever the deck asked
-        for. The header's count is cross-checked against this axis.
+        oases/src/compar.f:69-70) by the time TRFHEAD runs, so the header
+        carries only RD, RDLOW and ``|IR|`` — a uniform grid — whatever the
+        deck asked for. The header's count is cross-checked against this
+        axis.
 
     Returns
     -------
-    data : dict
-        Dictionary containing:
-        - 'title': str, simulation title
-        - 'option': str, output option used
-        - 'freq': ndarray, frequencies (Hz)
-        - 'ranges': ndarray, ranges (m)
-        - 'depths': ndarray, receiver depths (m)
-        - 'transfer_function': ndarray, complex transfer functions
-                              shape (n_freq, n_range, n_depth)
-        - 'source_depth': float, source depth (m)
-        - 'center_frequency': float, center frequency (Hz)
+    field : Field
+        Complex pressure, coords ``(depth, range, frequency)``,
+        ``phase_reference='travelling_wave'``, the source depth as
+        ``source_depths`` and the file's title and centre frequency in
+        ``metadata``; ``model`` is empty, the file being the source.
 
-    Notes
-    -----
-    Format follows the OASES PULSETRF binary specification from
-    trford.f/oasiun23.f.
-
-    Examples
-    --------
-    >>> data = read_oasp_trf('pulse.trf', receiver_depths=[20., 50., 80.])
-    >>> trf = data['transfer_function']  # shape: (n_freq, n_range, n_depth)
+    Raises
+    ------
+    FileFormatError
+        The file is missing or not a PULSETRF file.
+    UnsupportedFeatureError
+        The file holds another output parameter (``V``/``H`` velocity,
+        ``R``/``K``/``S``): a Field carries pressure, and labelling a
+        velocity or a stress as one would misread it.
     """
-    filepath = Path(filepath)
-
-    if not filepath.exists():
-        raise FileFormatError(
-            f"OASP transfer function file not found: {filepath}",
-            remediation="Check the OASP run completed: the .trf is its "
-                        "primary output, so a missing one means the binary "
-                        "stopped before writing it and its stdout carries "
-                        "the reason.",
-        )
-
-    depths = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
-
-    try:
-        return _read_oasp_trf_binary(filepath, depths)
-    except PARSE_ERRORS as e:
-        raise FileFormatError(
-            f"Failed to read OASP transfer function file {filepath} as "
-            f"Fortran-unformatted PULSETRF ({type(e).__name__}: {e}).",
-            remediation="Verify the run finished writing the .trf; OASES "
-                        "only ever writes the binary layout (bintrf is "
-                        "hardwired .true., unoasp22.f:1166).",
-        ) from e
+    from uacpy.io._parsers import parse_oasp_trf
+    raw = parse_oasp_trf(filepath, receiver_depths)
+    if raw['option'] != 'N':
+        raise UnsupportedFeatureError(
+            'read_oasp_trf',
+            f"{filepath} holds OASP output parameter {raw['option']!r}, not "
+            f"the normal stress 'N' a pressure Field is built from.",
+            alternatives=["uacpy.io._parsers.parse_oasp_trf(filepath, "
+                          "receiver_depths) for the transfer function as "
+                          "the file holds it"],
+            alternatives_label='readers')
+    return Field(
+        data=-np.transpose(raw['transfer_function'], (2, 1, 0)).astype(
+            np.complex128),
+        coords={'depth': raw['depths'], 'range': raw['ranges'],
+                'frequency': raw['freq']},
+        model='', backend='',
+        phase_reference='travelling_wave',
+        frequencies=raw['freq'],
+        source_depths=np.array([raw['source_depth']]),
+        metadata={'title': raw['title'],
+                  'center_frequency': raw['center_frequency']})
 
 
 def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
@@ -1112,7 +964,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
         probe = f.read(4)
         if len(probe) < 4:
             raise FileFormatError(
-                f"Cannot open {filepath} as Fortran-unformatted TRF: too short"
+                f"Cannot open {filepath} as Fortran-unformatted TRF: too short."
             )
         endian = detect_endian(probe, source=f'read_oasp_trf:{filepath}')
         f.seek(0)
@@ -1120,12 +972,12 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
             fileid_raw = _read_fortran_record(f, raw=True, endian=endian)
         except IOError as e:
             raise FileFormatError(
-                f"Cannot open {filepath} as Fortran-unformatted TRF: {e}"
+                f"Cannot open {filepath} as Fortran-unformatted TRF: {e}."
             ) from e
         fileid = fileid_raw.decode('ascii', errors='ignore').strip()
         if 'PULSETRF' not in fileid:
             raise FileFormatError(
-                f"Expected 'PULSETRF' in first record, got {fileid!r}"
+                f"Expected 'PULSETRF' in first record, got {fileid!r}."
             )
 
         # prognm record consumed but not used
@@ -1261,7 +1113,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
         # over (JRH, JRV) inside the frequency loop (INTGR3, oasiun23.f:757-773), so
         # the whole block reads in one strided pass rather than three
         # ``f.read``/``struct.unpack`` pairs per record. The .rpo replicas
-        # at :932 can compare their marker against the constant 8 because
+        # (``_read_oasn_replicas_payload``) can compare their marker against the constant 8 because
         # PUTREP writes COMPLEX*8 only; a .trf is COMPLEX*8 or COMPLEX*16, so
         # the marker checked here is the payload width detected above and
         # hardcoding 8 would reject every double-precision file.
@@ -1277,7 +1129,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
             raise FileFormatError(
                 f"{filepath}: truncated transfer function — expected "
                 f"{n_total} data records of {data_bytes + 8} bytes, got "
-                f"{flat.size}"
+                f"{flat.size}."
             )
         if np.any(flat['m1'] != data_bytes) or np.any(flat['m2'] != data_bytes):
             raise FileFormatError(
@@ -1298,9 +1150,9 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
             f"372-376); a time series synthesized from this spectrum decays "
             f"by exp(OMEGIM*t) — 50x (34 dB) small at the end of the window "
             f"— because the synthesis does not undo the contour. Re-run "
-            f"with option 'J' or pinned nw_samples >= 1 for a real "
+            f"with option 'J' or pinned n_wavenumbers >= 1 for a real "
             f"frequency axis.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     unnamed = sorted(set(iparm) - set(_OASP_OUTPUT_PARAM_LETTERS.keys()))
     if unnamed:
@@ -1322,7 +1174,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
 
 
 @typed_format_error
-def read_oasr_reflection_coefficients(
+def _read_oasr_reflection_payload(
     filepath: Union[str, Path],
     format_type: str = 'auto'
 ) -> Dict:
@@ -1376,7 +1228,7 @@ def read_oasr_reflection_coefficients(
 
     Examples
     --------
-    >>> data = read_oasr_reflection_coefficients('test.trc')
+    >>> data = _read_oasr_reflection_payload('test.trc')
     >>> mag = data['magnitude'][0]  # First frequency
     >>> angles = data['angles_or_slowness'][0]
     >>> print(f"Reflection coefficient at 45°: {mag[np.argmin(np.abs(angles-45))]}")
@@ -1385,7 +1237,7 @@ def read_oasr_reflection_coefficients(
 
     if not filepath.exists():
         raise FileFormatError(
-            f"OASR reflection coefficient file not found: {filepath}",
+            f"OASR reflection coefficient file not found: {filepath}.",
             remediation="Re-run OASR with 'T' in the option string: the "
                         "reflection coefficient table reaches the .rco/.trc "
                         "files only under that letter.",
@@ -1395,7 +1247,7 @@ def read_oasr_reflection_coefficients(
     # the sampling-type code OASR stamps as it writes (unoasr21.f:204-205),
     # while the extension is only what the file is called. The extension is
     # kept as a hint so a disagreement can be reported rather than followed —
-    # a renamed table used to come back with its abscissa relabelled.
+    # a renamed table is reported, not relabelled.
     extension_hint = None
     if format_type == 'auto':
         if filepath.suffix == '.rco':
@@ -1431,11 +1283,11 @@ def read_oasr_reflection_coefficients(
                         f"{format_type} — following the header, so the "
                         f"abscissa is read as {format_type}. Pass "
                         f"format_type='{extension_hint}' to override.",
-                        UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+                        IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
             sampling_type = format_type
         else:
-            raise FileFormatError(f"Invalid header format: {header_line}")
+            raise FileFormatError(f"Invalid header format: {header_line}.")
 
         # Read data for each frequency
         frequencies = []
@@ -1503,8 +1355,47 @@ def read_oasr_reflection_coefficients(
     }
 
 
+@dataclass(frozen=True, eq=False)
+class OasesRhsHeader(ExportRecord):
+    """The header of a mean-field ``.rhs`` as :func:`read_oases_rhs_header`
+    reads it; the field names are OASP's reading of the first record (that
+    function says what an OAST or OASR producer writes into the same slots).
+
+    Attributes
+    ----------
+    n_time_samples : int
+        ``NX`` (``nfreq`` from OAST/OASR).
+    freq_min, freq_max : float
+        ``FR1``, ``FR2`` (Hz); ``freq_min`` is *the* frequency from
+        OAST/OASR.
+    time_step : float
+        ``DT`` (s; ``1/(nfreq*dlfreq)`` from OAST/OASR).
+    frequency : float
+        The per-frequency header's own ``FREQ`` (Hz).
+    source_layer : int
+        ``LAYS(1)``.
+    n_wavenumbers : int
+        ``NWVNO``.
+    interface : int
+        ``IN1``, the 1-based OASES layer index of the first rough
+        interface.
+    """
+
+    n_time_samples: int
+    freq_min: float
+    freq_max: float
+    time_step: float
+    frequency: float
+    source_layer: int
+    n_wavenumbers: int
+    interface: int
+
+    _REPR_UNITS = {'freq_min': 'Hz', 'freq_max': 'Hz', 'time_step': 's',
+                   'frequency': 'Hz'}
+
+
 @typed_format_error
-def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
+def read_oases_rhs_header(filepath: Union[str, Path]) -> OasesRhsHeader:
     """Read the header of a mean-field ``.rhs`` (OASES unit 45).
 
     A producer run with option ``'s'`` writes three kinds of record
@@ -1523,13 +1414,13 @@ def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
     ``unoasr21.f:222-223``). So on the OAST/OASR path ``n_time_samples`` is the
     frequency-block count — which OASS requires to be 1, since it pins
     ``nfreq=1`` and reads exactly one per-frequency header
-    (``unoass21.f:123``, ``:127``) — and ``freq_min`` is the single frequency
+    (``unoass21.f:123``, ``:136``) — and ``freq_min`` is the single frequency
     the mean field ran at. The keys are not renamed per producer: the file
     layout is one layout, and a caller that knows which producer it drove knows
     which reading applies.
 
     OASSP reads exactly the same three records — the first at
-    ``unoassp30.f:181``, the other two at ``:546-547`` — and then **replaces**
+    ``unoassp30.f:180``, the other two at ``:548-549`` — and then **replaces**
     its own deck's ``NT/FR1/FR2/DT`` with the first record's values, warning
     only when ``NX`` or ``DT`` differ (``:182-188``). A caller that writes the
     deck from these values instead of from a second guess makes that
@@ -1541,9 +1432,14 @@ def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
     carries the shallowest rough interface, and that is the single interface
     OASSP scatters from.
 
+    Parameters
+    ----------
+    filepath : str or Path
+        The file to read.
+
     Returns
     -------
-    dict
+    OasesRhsHeader
         ``n_time_samples`` (int, ``NX`` — ``nfreq`` from OAST/OASR),
         ``freq_min`` / ``freq_max`` (Hz; ``freq_min`` is *the* frequency from
         OAST/OASR), ``time_step`` (s, ``DT`` — ``1/(nfreq*dlfreq)`` from
@@ -1555,7 +1451,7 @@ def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
 
     if not filepath.is_file():
         raise FileFormatError(
-            f"OASES .rhs mean-field file not found: {filepath}",
+            f"OASES .rhs mean-field file not found: {filepath}.",
             remediation="Re-run the producer with 's' in the option string, "
                         "over an environment carrying a rough interface: "
                         "SCTRHS skips every interface with ROUGH2 < 1e-10 "
@@ -1611,13 +1507,255 @@ def read_oases_rhs_header(filepath: Union[str, Path]) -> Dict:
             f"interface smooth — SCTRHS skips ROUGH2 < 1e-10, "
             f"oaseun31.f:2310)."
         )
-    return {
-        'n_time_samples': int(nx),
-        'freq_min': float(fr1),
-        'freq_max': float(fr2),
-        'time_step': float(dt),
-        'frequency': float(freq),
-        'source_layer': int(lays1),
-        'n_wavenumbers': int(nwvno),
-        'interface': int(interface),
-    }
+    return OasesRhsHeader(
+        n_time_samples=int(nx), freq_min=float(fr1), freq_max=float(fr2),
+        time_step=float(dt), frequency=float(freq), source_layer=int(lays1),
+        n_wavenumbers=int(nwvno), interface=int(interface))
+
+
+# ---------------------------------------------------------------------------
+# Public readers
+#
+# The private payload parsers above return each file as written. The public
+# readers below return the result object the OASES models return —
+# Covariance, Replicas, ReflectionCoefficient — with ``model`` left empty:
+# the file, not a model run, is the source.
+# ---------------------------------------------------------------------------
+
+def _oasn_frequency_axis(data: Dict) -> np.ndarray:
+    """The frequency axis (Hz) of an OASN ``.xsm`` / ``.rpo`` payload.
+
+    The headers carry ``freq_min``, ``freq_max`` and ``n_frequencies``;
+    OASN steps its frequency loop uniformly between the first two, so the
+    axis is their ``linspace``.
+    """
+    n = int(data.get('n_frequencies', 1))
+    f1 = float(data.get('freq_min', 0.0))
+    f2 = float(data.get('freq_max', f1))
+    if n <= 1:
+        return np.array([f1], dtype=float)
+    return np.linspace(f1, f2, n, dtype=float)
+
+
+def _depth_positions(receiver_depths, n_receivers: int):
+    """``(n, 3)`` ``[x, y, z]`` receiver positions for a vertical array of
+    ``receiver_depths``, or ``None`` when the depths do not match the file's
+    receiver count."""
+    if receiver_depths is None:
+        return None
+    depths = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
+    if depths.size != n_receivers:
+        return None
+    positions = np.zeros((depths.size, 3), dtype=float)
+    positions[:, 2] = depths
+    return positions
+
+
+def _header_metadata(data: Dict, arrays) -> Dict:
+    """Every header field of a payload except the ``arrays`` the carrier
+    holds as attributes."""
+    return {key: value for key, value in data.items() if key not in arrays}
+
+
+def read_oasn_covariance(
+    filepath: Union[str, Path],
+    receiver_depths: Optional[np.ndarray] = None,
+):
+    """Read an OASN/OASS ``.xsm`` as a :class:`~uacpy.core.results.Covariance`.
+
+    The file is Fortran direct access with 8-byte records: ten header
+    records (title, receiver and frequency counts, ``FREQ1``/``FREQ2``/
+    ``DELFRQ``, the surface and white noise levels), then the complex
+    covariance matrix ``COVMAT(IRCV, JRCV, IFREQ)`` IRCV-fastest
+    (``oasn.tex:583-618``), returned as ``covariance[ifreq, ircv, jrcv]``
+    in the binary's own units: the square of the reference the deck's
+    levels are in (µPa²/Hz for OASN noise levels re 1 µPa²/Hz). The OASN
+    model converts it to Pa²/Hz.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        The ``.xsm`` file.
+    receiver_depths : ndarray, optional
+        Depths (m) of the array's elements. The file carries no positions;
+        given, and one per receiver, they fill ``receiver_positions`` as a
+        vertical array at ``x = y = 0``.
+
+    Returns
+    -------
+    Covariance
+        ``covariance`` ``(n_freq, n_rcv, n_rcv)``; ``frequencies`` the
+        header's uniform FREQ1…FREQ2 axis; ``model`` empty. ``metadata``
+        holds every header field: ``title``, ``n_receivers``,
+        ``n_frequencies``, ``freq_min``, ``freq_max``, ``freq_delta``,
+        ``surface_noise_level``, ``white_noise_level`` (dB).
+    """
+    from uacpy.core.results import Covariance
+    data = _read_oasn_covariance_payload(filepath)
+    return Covariance(
+        covariance=data['covariance'],
+        receiver_positions=_depth_positions(
+            receiver_depths, data['covariance'].shape[1]),
+        backend='oasn',
+        frequencies=_oasn_frequency_axis(data),
+        metadata=_header_metadata(data, ('covariance',)),
+    )
+
+
+def read_oasn_replicas(filepath: Union[str, Path]):
+    """Read an OASN ``.rpo`` as a :class:`~uacpy.core.results.Replicas`.
+
+    Sequential binary: the header (title, counts, the frequency sweep, the
+    replica grid ``min max n`` per axis — z in m, x/y in km on disk,
+    ``oasn.tex:109-111``), one record per array element (X, Y, Z in m, type,
+    linear gain), then the replicas IRCV-innermost, then IYR, IXR, IZR,
+    IFREQ (``oasn.tex:651-689``).
+
+    Parameters
+    ----------
+    filepath : str or Path
+        The file to read.
+
+    Returns
+    -------
+    Replicas
+        ``replicas`` ``(n_freq, n_z, n_x, n_y, n_rcv)``; ``candidates``
+        ``{'depth', 'x', 'y'}``, the grid axes in metres (OASN interpolates
+        each linearly between its endpoints, ``unoasn22.f:197-222``);
+        ``receiver_positions`` from
+        the file. ``metadata`` holds the header fields — ``title``,
+        ``n_receivers``, the frequency sweep, the grid endpoints and counts
+        (metres), ``receiver_types`` and ``receiver_gains`` (dB).
+    """
+    from uacpy.core.results import Replicas
+    data = _read_oasn_replicas_payload(filepath)
+    return Replicas(
+        replicas=data['replicas'],
+        candidates={
+            'depth': np.linspace(data['z_min'], data['z_max'], data['n_z']),
+            'x': np.linspace(data['x_min'], data['x_max'], data['n_x']),
+            'y': np.linspace(data['y_min'], data['y_max'], data['n_y']),
+        },
+        receiver_positions=data.get('receiver_positions'),
+        backend='oasn',
+        frequencies=_oasn_frequency_axis(data),
+        metadata=_header_metadata(data, ('replicas', 'receiver_positions')),
+    )
+
+
+def _stack_oasr_blocks(data: Dict):
+    """Stack a :func:`_read_oasr_reflection_payload` payload's
+    per-frequency blocks into ``(theta, R, phi, frequencies)`` arrays.
+
+    ``R`` and ``phi`` are ``(n_angles,)`` for one frequency and
+    ``(n_angles, n_frequencies)`` otherwise; ``phi`` (radians) is unwrapped
+    along the angle axis. OASR writes the phase as a principal value
+    (``oases/src/oasjun21.f:102`` takes ``atan2z``), but every consumer
+    interpolates it linearly between bracketing angles, which
+    ``misc/RefCoef.f90:119`` states requires an unwrapped phase ("Assumes phi
+    has been unwrapped so that it varies smoothly"); interpolating across a
+    ±2π step sweeps the phase the long way round and returns a reflection
+    coefficient of the wrong sign. Unwrapping is a no-op on an
+    already-smooth table.
+
+    Raises
+    ------
+    ConfigurationError
+        No angle/slowness rows (OASR writes the table only under option
+        ``'T'``), or blocks that do not share one angle grid.
+    """
+    from uacpy.core.exceptions import ConfigurationError
+    freqs = np.asarray(data.get('frequencies', []), dtype=float)
+    angle_lists = data.get('angles_or_slowness', [])
+    R_lists = data.get('magnitude', [])
+    phi_lists = data.get('phase', [])
+    if not angle_lists:
+        raise ConfigurationError(
+            f"OASR reader returned no frequency samples: the file carries "
+            f"{freqs.size} frequency value(s) and no angle/slowness rows. "
+            f"Re-run OASR with 'T' in the option string — the reflection "
+            f"coefficient table is written only under that letter.")
+    theta = np.asarray(angle_lists[0], dtype=float)
+    n_angles = len(theta)
+    for i, (a, m, p) in enumerate(zip(angle_lists, R_lists, phi_lists)):
+        if len(a) != n_angles:
+            raise ConfigurationError(
+                f"OASR: angle grid mismatch between frequencies "
+                f"(freq[{i}] has {len(a)} angles, freq[0] has {n_angles}). "
+                f"Multi-frequency stacking requires a shared angle grid."
+            )
+        if len(m) != n_angles or len(p) != n_angles:
+            raise ConfigurationError(
+                f"OASR: payload length mismatch at frequency index {i}: "
+                f"angles={len(a)}, magnitude={len(m)}, phase={len(p)}."
+            )
+    if len(freqs) == 1:
+        R = np.asarray(R_lists[0], dtype=float)
+        phi_rad = np.asarray(phi_lists[0], dtype=float)
+    else:
+        R = np.column_stack([np.asarray(m, dtype=float) for m in R_lists])
+        phi_rad = np.column_stack([np.asarray(p, dtype=float)
+                                   for p in phi_lists])
+    return theta, R, np.unwrap(phi_rad, axis=0), freqs
+
+
+def read_oasr_reflection_coefficients(
+    filepath: Union[str, Path],
+    format_type: str = 'auto',
+):
+    """Read an OASR grazing-angle table (``.trc``) as a
+    :class:`~uacpy.core.results.ReflectionCoefficient`.
+
+    The per-frequency blocks are stacked into ``(n_angles[, n_frequencies])``
+    arrays with the phase (radians) unwrapped along the angle axis. The
+    header's fourth field is the abscissa code OASR stamps
+    (``unoasr21.f:204-205``: 2 grazing angle, 1 slowness), and it decides
+    the reading whatever the file is called; ``format_type`` is passed to
+    the table parser.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        The file to read.
+    format_type : str, optional
+        Passed to the table parser. Default ``'auto'``.
+
+    Returns
+    -------
+    ReflectionCoefficient
+        ``angles`` (grazing degrees), ``magnitude``, ``phase``; ``frequencies`` one
+        per block; ``model`` empty; ``metadata`` the header fields
+        (``sampling_type``, ``n_frequencies``, ``freq_min``, ``freq_max``).
+
+    Raises
+    ------
+    UnsupportedFeatureError
+        A slowness-sampled table (``.rco``): the carrier is indexed by
+        grazing angle, and turning slowness into angle needs the incident
+        medium's sound speed, which the file does not carry. OASR writes
+        the angle table (``.trc``) beside it under option ``'T'``.
+    ConfigurationError
+        No angle rows (OASR writes the table only under ``'T'``), or
+        blocks that do not share one angle grid.
+    """
+    from uacpy.core.exceptions import UnsupportedFeatureError
+    from uacpy.core.results import ReflectionCoefficient
+    data = _read_oasr_reflection_payload(filepath, format_type=format_type)
+    if data.get('sampling_type') == 'slowness':
+        raise UnsupportedFeatureError(
+            'read_oasr_reflection_coefficients',
+            f"{filepath} is sampled in slowness; a ReflectionCoefficient is "
+            f"indexed by grazing angle and the file carries no sound speed "
+            f"to convert with",
+            alternatives=["the grazing-angle .trc OASR writes beside it "
+                          "under option 'T'"],
+            alternatives_label='files')
+    theta, R, phi, freqs = _stack_oasr_blocks(data)
+    return ReflectionCoefficient(
+        angles=theta, magnitude=R, phase=phi,
+        backend='oasr',
+        frequencies=freqs if len(freqs) else None,
+        metadata=_header_metadata(
+            data, ('frequencies', 'angles_or_slowness', 'magnitude',
+                   'phase')),
+    )

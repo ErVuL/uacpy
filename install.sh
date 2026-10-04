@@ -3,18 +3,22 @@
 # install.sh - Build and install all UACPY native model binaries
 #
 # Compiles the following acoustic propagation models:
-#   - OALIB (Acoustics-Toolbox): Kraken, KrakenField, Scooter, SPARC, Bellhop (Fortran)
+#   - OALIB (Acoustics-Toolbox): Kraken, KrakenC, KrakenField, Scooter, SPARC,
+#     Bounce, Bellhop (Fortran)
 #   - BellhopCUDA: C++/CUDA Bellhop (optional, for GPU acceleration)
 #   - OASES: Ocean Acoustics and Seismics (optional, downloaded from MIT)
 #   - mpiramS: Parabolic Equation model (broadband PE)
 #   - ramsurf: Collins-style PE family (rams0.5 elastic, ramsurf1.5 rough surface)
+#   - RAMGEO: Collins PE for range-dependent layered fluid seabeds
 #
 # Layout produced:
-#   uacpy/bin/oalib/       — Kraken, Scooter, SPARC, Bellhop (Fortran)
+#   uacpy/bin/oalib/       — Kraken, KrakenC, KrakenField, Scooter, SPARC,
+#                            Bounce, Bellhop (Fortran)
 #   uacpy/bin/bellhopcuda/ — BellhopCXX / BellhopCUDA (C++/CUDA)
 #   uacpy/bin/oases/       — OASES suite
 #   uacpy/bin/mpirams/     — mpiramS PE model
 #   uacpy/bin/ramsurf/     — Collins rams0.5 (elastic), ramsurf1.5 (rough surface)
+#   uacpy/bin/ramgeo/      — RAMGEO
 #
 # By default runs interactively. Use -y/--yes for non-interactive mode.
 #
@@ -105,11 +109,11 @@ BUILD_MODELS=1     # 0 with --no-models: skip all native builds (data-only insta
 # component in the same format so the user sees a single, consistent report.
 STATUS_OALIB="skipped"        # Bellhop (Fortran) + Kraken/KrakenC/Bounce/Scooter/SPARC/KrakenField
 STATUS_BELLHOPCUDA="skipped"  # bellhopcxx / bellhopcuda (optional)
-STATUS_OASES="skipped"        # OAST / OASN / OASR / OASP (optional)
+STATUS_OASES="skipped"        # OAST / OASN / OASR / OASP / OASS / OASSP (optional)
 STATUS_MPIRAMS="skipped"      # mpiramS PE
 STATUS_RAMSURF="skipped"      # rams0.5 + ramsurf1.5
 STATUS_RAMGEO="skipped"       # RAMGEO (RD layered fluid)
-STATUS_DATA="skipped"         # offline data cache (GEBCO / WOA23 / sediment)
+STATUS_DATA="skipped"         # offline data cache (the --data datasets)
 NOTE_OALIB=""
 NOTE_BELLHOPCUDA=""
 NOTE_OASES=""
@@ -678,7 +682,7 @@ choose_data() {
     local sel=""
     prompt_yes_no "  • Coastline: Natural Earth land polygons (~tens of MB, public domain)?" \
         && sel="${sel}coastline,"
-    prompt_yes_no "  • Sediment samples: DECK41 + grain-size (~tens of MB, public domain)?" \
+    prompt_yes_no "  • Sediment samples: NCEI grain-size DB (~3 MB, public domain)?" \
         && sel="${sel}sediment,"
     prompt_yes_no "  • EMODnet seabed substrate: Folk 5cl, European seas (~200 MB, CC-BY 4.0)?" \
         && sel="${sel}emodnet,"
@@ -1642,14 +1646,14 @@ fi
 # -------------------------
 # Sanity tests (non-invasive)
 # -------------------------
-echo -e "${BLUE}=== Running quick executable sanity checks ===${NC}"
+echo -e "${BLUE}=== Checking the built binaries are executable (not run) ===${NC}"
 
 test_runnable() {
     local exe="$1"
     if [ -x "$exe" ]; then
         # Acoustics-Toolbox binaries read CLI args as env-file roots; do
-        # not invoke them here.
-        echo -e "  ✓ Runnable: ${GREEN}$(basename "$exe")${NC}"
+        # not invoke them here. This checks the executable bit only.
+        echo -e "  ✓ Executable: ${GREEN}$(basename "$exe")${NC}"
         return 0
     else
         echo -e "  ${YELLOW}Not executable or missing: $(basename "$exe")${NC}"
@@ -2219,10 +2223,12 @@ else
     echo "  - Build record: not written (${BIN_ROOT} is not writable)."
 fi
 echo ""
-echo "Quick test:"
-echo "  cd uacpy && python -c \"import uacpy; print(uacpy.__version__)\""
-echo "  python uacpy/examples/example_01_basic_shallow_water.py"
-echo ""
+if [[ "$OVERALL" == "ok" ]]; then
+    echo "Quick test (from this directory):"
+    echo "  python -c \"import uacpy; print(uacpy.__version__)\""
+    echo "  python uacpy/examples/example_01_basic_shallow_water.py"
+    echo ""
+fi
 
 if [[ "$OVERALL" != "ok" ]]; then
     echo -e "${RED}One or more components ${OVERALL}. Exiting non-zero.${NC}"

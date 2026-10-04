@@ -21,6 +21,11 @@ from uacpy.visualization.style import (
 )
 
 
+#: The depth axis runs this factor past the deepest seafloor drawn,
+#: so the seabed fill shows below it.
+DEPTH_AXIS_HEADROOM = 1.05
+
+
 def _close_figures_since(before) -> None:
     """Close every pyplot figure opened after the ``before`` snapshot."""
     import matplotlib.pyplot as plt
@@ -28,9 +33,16 @@ def _close_figures_since(before) -> None:
         plt.close(num)
 
 
-def typed_plot_error(plotter):
+def typed_plot_error(plotter=None, *, who=None):
     """Decorator: surface a plotter's raw degenerate-input exceptions as a typed
     :class:`~uacpy.core.exceptions.ConfigurationError`, leaving no figure behind.
+
+    Used bare (``@typed_plot_error``) on a public plotter, whose own name is
+    the call the user made. A private plotter reached through a result's
+    ``.plot()`` names that call instead, ``@typed_plot_error(who='Rays.plot')``,
+    so a refusal never names a function the user did not call. ``who`` may
+    also be a callable of the plotter's arguments, for a private plotter that
+    several carrier classes share.
 
     Many plotters pass arrays straight to matplotlib (or index ``[0]``/``[-1]``
     for axis limits, subscript result dicts like an arrival's ``['delay']``,
@@ -47,6 +59,14 @@ def typed_plot_error(plotter):
     any figure opened during a failed call is closed before the exception
     propagates — a rejected call leaves pyplot's registry exactly as it found
     it."""
+    if plotter is None:
+        return functools.partial(typed_plot_error, who=who)
+
+    def _name(args, kwargs):
+        if who is None:
+            return plotter.__name__
+        return who(*args, **kwargs) if callable(who) else who
+
     @functools.wraps(plotter)
     def wrapper(*args, **kwargs):
         import matplotlib.pyplot as plt
@@ -56,9 +76,21 @@ def typed_plot_error(plotter):
         except (IndexError, KeyError, ValueError) as exc:
             _close_figures_since(before)
             raise ConfigurationError(
-                f"{plotter.__name__}: invalid plot input "
+                f"{_name(args, kwargs)}: invalid plot input "
                 f"({type(exc).__name__}: {exc}). Check the arrays are non-empty "
                 f"and their lengths/shapes match the plotter's expected inputs."
+            ) from exc
+        except AttributeError as exc:
+            _close_figures_since(before)
+            # matplotlib reports a keyword no artist takes as
+            # "Artist.set() got an unexpected keyword argument 'x'"; that is
+            # a keyword the plotter forwarded, so name it as the caller's.
+            if 'unexpected keyword argument' not in str(exc):
+                raise
+            raise ConfigurationError(
+                f"{_name(args, kwargs)}: a keyword was passed that neither this "
+                f"plotter nor the matplotlib call it forwards to takes "
+                f"({exc})."
             ) from exc
         except Exception:
             _close_figures_since(before)
@@ -106,11 +138,11 @@ def _carrier_or_arrays(first, others, *, count, who, fields,
             f"this result's own arrays, or the plotter its docstring "
             f"names.")
     # The carrier must be the one this plotter draws, not merely one of the
-    # right width. Declaring the arrays as required positionals used to give
-    # that check for free; with defaults, plot_spectrogram(FKResult) became a
-    # figure with wavenumbers on an axis labelled "Time (s)". Field names
-    # carry the identity, and comparing them keeps this module from importing
-    # the carrier classes — which live in a sibling package.
+    # right width: the arrays have defaults, so without this check
+    # plot_spectrogram(FKResult) draws wavenumbers on an axis labelled
+    # "Time (s)". Field names carry the identity, and comparing them keeps
+    # this module from importing the carrier classes — which live in a
+    # sibling package.
     if carrier is not None:
         names, fields_wanted = carrier
         # The class NAME as well as the fields. Two carriers in this package
@@ -169,8 +201,9 @@ def _refuse_spread_carrier(ax, who, field, also=None):
         f"{remedy}.")
 
 
-def _plot_warn(message, category=UserWarning) -> None:
-    """Warn from inside a plotter, attributed to the **user's** call line.
+def _plot_warn(message, category) -> None:
+    """Warn ``message`` as ``category`` (a :class:`~uacpy.core.exceptions.UACPYWarning`
+    subclass) from inside a plotter, attributed to the **user's** call line.
 
     Every plotter is decorated, so a raw ``warnings.warn`` lands one frame
     short and blames this module: the user is told to change a knob and handed
@@ -194,6 +227,36 @@ def fig_ax(ax, figsize):
     if ax is None:
         return plt.subplots(figsize=figsize)
     return ax.figure, ax
+
+
+def _grid_figure(fig, nrows, ncols, figsize, default_figsize, *, who,
+                 **subplots_kw):
+    """``(fig, axes, owns_fig)`` for a multi-panel plotter's ``fig=`` argument.
+
+    ``fig=None`` opens a new figure of ``figsize`` (``default_figsize`` when
+    that is ``None``), which the plotter owns: it lays it out and credits it.
+    A ``Figure`` or ``SubFigure`` handed in takes the ``(nrows, ncols)`` grid
+    via its own ``subplots``, so the panels can sit inside a larger
+    publication figure; the caller owns that one's size, layout and credit,
+    so ``figsize=`` alongside it is refused rather than ignored. ``axes`` is
+    always the 2-D ``(nrows, ncols)`` array."""
+    import matplotlib.pyplot as plt
+    if fig is None:
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=default_figsize if figsize is None else figsize,
+            squeeze=False, **subplots_kw)
+        return fig, axes, True
+    if not hasattr(fig, 'subplots') or not hasattr(fig, 'add_axes'):
+        raise ConfigurationError(
+            f"{who}: fig= must be a matplotlib Figure or SubFigure; got "
+            f"{type(fig).__name__}.",
+            remediation="fig = plt.figure(layout='constrained'), or one "
+                        "panel of fig.subfigures(...).")
+    if figsize is not None:
+        raise ConfigurationError(
+            f"{who}: figsize= sizes a new figure, and fig= hands in one that "
+            f"already has its size — give one of them.")
+    return fig, fig.subplots(nrows, ncols, squeeze=False, **subplots_kw), False
 
 
 def invert_yaxis_once(ax) -> None:
@@ -289,7 +352,7 @@ def _fill_margins(ax):
 
 
 def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
-                   max_markersize=8, source_markersize_bonus=0):
+                   max_markersize=8, source_markersize_bonus=0, env=None):
     """Draw the source and receiver markers on a (depth, range) cross-section.
 
     Shared by the environment, ray and field plotters so the geometry reads
@@ -297,12 +360,13 @@ def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
     object exposing ``depths``) or a bare array of source depths;
     ``source_range_m`` is where the source sits — 0 by the package convention
     that range is measured from it. ``receiver`` is decimated by
-    :func:`_draw_receiver_grid`."""
+    :func:`_draw_receiver_grid`, which leaves out the receivers ``env``'s
+    seafloor puts inside the seabed."""
     # Every marker that may sit on a spine, as (x, half width in data units).
     needs = []
     if receiver is not None and getattr(receiver, 'depths', None) is not None:
         rr_km = _draw_receiver_grid(ax, receiver.ranges, receiver.depths,
-                                    max_markersize=max_markersize)
+                                    max_markersize=max_markersize, env=env)
         needs.append((float(rr_km.max()), _marker_half_width_in_data(
             ax, min(RECEIVER_MARKER_STYLE.get('markersize', 8), max_markersize))))
     source_depths = getattr(source, 'depths', source)
@@ -333,21 +397,57 @@ def _draw_geometry(ax, source=None, receiver=None, *, source_range_m=0.0,
         ax.set_xlim(left[1] - left[2] * new_span, right[1] + right[2] * new_span)
 
 
+def _lattice_indices(n, cap):
+    """At most ``cap`` indices into ``n`` samples, the first and the last
+    included, so the outermost receiver is always marked, spaced as evenly
+    as the sample grid allows.
+
+    An exact stride is used when one divides ``n - 1`` and still keeps at
+    least half the cap: every gap is then the same (41 ranges against a cap
+    of 20: every 4th, 11 dots). Otherwise the indices are
+    ``linspace(0, n - 1, k)`` rounded, with ``k`` held to at most half the
+    samples so no gap is a single sample beside a two-sample one; gaps then
+    differ by at most one sample. The stride is never 1 while ``n``
+    exceeds the cap, and the last two dots are never a single sample apart
+    while the rest are wider."""
+    if n <= cap:
+        return np.arange(n)
+    for intervals in range(cap - 1, 0, -1):
+        if (n - 1) % intervals == 0:
+            if intervals + 1 >= cap / 2:
+                return np.arange(0, n, (n - 1) // intervals)
+            break
+    k = min(cap, (n - 1) // 2 + 1)
+    return np.unique(np.round(np.linspace(0, n - 1, k)).astype(int))
+
+
 def _draw_receiver_grid(ax, ranges_m, depths, *, max_markersize,
-                        zorder=ZORDER_RECEIVERS):
+                        zorder=ZORDER_RECEIVERS, env=None):
     """Draw the decimated receiver lattice; return the full range axis in km.
 
-    Markers keep default clipping so a later user zoom hides out-of-view
-    receivers instead of painting them across the figure."""
+    With ``env``, a lattice point deeper than the seafloor at its range is
+    left out: it sits in the seabed, where most engines return no field, and a
+    marker there would read as a receiver in the water. Markers keep default
+    clipping so a later user zoom hides out-of-view receivers instead of
+    painting them across the figure."""
     rr_km = m_to_km(np.atleast_1d(ranges_m))
     rd = np.atleast_1d(depths)
     style = dict(RECEIVER_MARKER_STYLE)
     style['markersize'] = min(style.get('markersize', 8), max_markersize)
     max_r, max_d = _receiver_dot_caps(ax, style['markersize'])
-    step_r = max(1, rr_km.size // max_r)
-    step_d = max(1, rd.size // max_d)
-    RR, RD = np.meshgrid(rr_km[::step_r], rd[::step_d])
-    ax.plot(RR.ravel(), RD.ravel(), zorder=zorder, **style)
+    RR, RD = np.meshgrid(rr_km[_lattice_indices(rr_km.size, max_r)],
+                         rd[_lattice_indices(rd.size, max_d)])
+    RR, RD = RR.ravel(), RD.ravel()
+    if env is not None:
+        bathymetry = env.bathymetry
+        if env.bathymetry.varies_with_range:
+            seafloor = np.interp(RR, m_to_km(bathymetry.ranges),
+                                 bathymetry.depths)
+        else:
+            seafloor = np.full(RR.shape, float(env.depth))
+        in_water = RD <= seafloor
+        RR, RD = RR[in_water], RD[in_water]
+    ax.plot(RR, RD, zorder=zorder, **style)
     return rr_km
 
 
@@ -371,34 +471,73 @@ _AXIS_LABELS = {
 # ``'dB'`` is missing on purpose: its label comes from the field (see
 # :func:`_value_label`), because the dB view of a signal-excess grid is not TL.
 _VALUE_LABELS = {
-    'mag_dB': '|H| (dB)',
-    'mag': '|p|',
+    'level': '|H| (dB)',
+    'magnitude': '|p|',
     'phase': 'Phase (rad)',
     'real': 'Re(p)',
     'imag': 'Im(p)',
 }
 
 
-def _require_nonempty(caller: str, **arrays) -> None:
+def _axes_pair(who: str, ax, panels: str):
+    """``ax`` unpacked as the two axes of a two-panel plotter.
+
+    Every single-panel plotter takes one ``Axes``, so a single one is the
+    natural thing to hand a two-panel plotter too; unpacking it fails inside
+    the plotter with a ``TypeError`` that names neither the argument nor what
+    it wants. ``panels`` names the pair, e.g. ``'(ax_delay, ax_freq)'``."""
+    if (isinstance(ax, (tuple, list, np.ndarray)) and len(ax) == 2
+            and all(hasattr(a, 'plot') for a in ax)):
+        return ax[0], ax[1]
+    raise ConfigurationError(
+        f"{who}: draws two panels, so ax= takes a pair of axes "
+        f"{panels}; got {type(ax).__name__}.",
+        remediation="fig, (a, b) = plt.subplots(1, 2), then pass ax=(a, b); "
+                    "or leave ax=None for a new figure.")
+
+
+def _checked_dynamic_range_dB(who: str, value) -> float:
+    """``dynamic_range_dB`` as a float, refused unless finite and positive.
+
+    Every plotter that floors a dB view spells the floor this one way: a
+    positive number of dB below the view's 0 dB reference (its peak, or the
+    reference the caller named). At or below zero the floor sits on the
+    reference and there is nothing left to draw."""
+    try:
+        span = float(value)
+    except (TypeError, ValueError):
+        span = float('nan')
+    if not (np.isfinite(span) and span > 0.0):
+        raise ConfigurationError(
+            f"{who}: dynamic_range_dB={value!r} must be a finite positive "
+            f"number of dB — how far below the 0 dB reference the axis "
+            f"reaches.")
+    return span
+
+
+def _require_nonempty(who: str, **arrays) -> None:
     """Refuse an empty input array by name: an empty panel with axes and a
     title reads as a result, and the guide promises degenerate input raises."""
     for name, value in arrays.items():
         if np.size(value) == 0:
             raise ConfigurationError(
-                f"{caller}: {name} is empty; there is nothing to draw.")
+                f"{who}: {name} is empty; there is nothing to draw.")
 
 
 def _default_value(field: Field) -> str:
     """The ``value`` view rendered when the caller names none.
 
     A time trace is linear pressure, not a level, so it defaults to the raw
-    samples; so does a real-valued field that is not a level and has no dB
-    view (a detection probability, unit '1'). Everything else defaults to its
-    dB view. Shared so a panel drawn inside a composite figure labels itself
-    with the same view ``plot_field`` would have picked on its own."""
+    samples; so does every other real-valued field whose stored ``unit`` is
+    not dB (a pressure snapshot in Pa, a detection probability in '1'), since
+    real data has a dB view only when it already is one. Complex data and a
+    real dB grid default to the dB view. The unit is read from the field,
+    never inferred here. Shared so a panel drawn inside a composite figure
+    labels itself with the same view ``plot_field`` would have picked on its
+    own."""
     if 'time' in field.coords:
         return 'real'
-    if not field.is_complex and getattr(field, 'unit', None) == '1':
+    if not field.is_complex and field.unit != 'dB':
         return 'real'
     return 'dB'
 
@@ -416,7 +555,17 @@ def _is_multi_source_total(field) -> bool:
     return len(stamp.get('depths', ())) > 1
 
 
-def _value_label(field: Field, value: str) -> str:
+def _time_trace_label(field: Field) -> str:
+    """Axis / colorbar label for a time-domain trace: ``p(t)`` in the unit
+    the field carries, or the registry's own label for a trace that is not
+    a pressure (the band-limited impulse response, ``h(t) (1/s)``)."""
+    if getattr(field, 'kind', 'pressure') != 'pressure':
+        return quantity_label(field.kind, field.unit)
+    unit = getattr(field, 'unit', None)
+    return f'p(t) ({unit})' if unit else 'p(t)'
+
+
+def _value_label(field: Field, value: str, *, who: str = 'plot_field') -> str:
     """Axis / colorbar label for the ``value`` view of ``field``.
 
     Split from :func:`_value_array` for callers that label a panel someone else
@@ -443,8 +592,11 @@ def _value_label(field: Field, value: str) -> str:
         # probability, a signal excess) is named by what it is — 'Re(p)'
         # belongs to the real part of a complex pressure only.
         if 'time' in field.coords:
-            return 'p(t)'
-        if not field.is_complex and getattr(field, 'kind', 'pressure') != 'pressure':
+            return _time_trace_label(field)
+        # A real pressure field that is not a level is the pressure itself,
+        # named with the unit it carries ('Pressure (Pa)'), not 'Re(p)'.
+        if not field.is_complex and (field.kind != 'pressure'
+                                     or field.unit != 'dB'):
             # From the registry, the same source the dB branch above reads, not
             # from the tag spelling: mangling ``kind`` produced 'probability
             # of detection' where the dedicated plotter's colorbar and the
@@ -454,40 +606,48 @@ def _value_label(field: Field, value: str) -> str:
         return _VALUE_LABELS[value]
     except KeyError:
         raise ConfigurationError(
-            f"plot_field: unknown value={value!r}; "
-            "valid: 'dB', 'mag_dB', 'mag', 'phase', 'real', 'imag'"
+            f"{who}: unknown value={value!r}; "
+            "valid: 'dB', 'level', 'magnitude', 'phase', 'real', 'imag'"
         ) from None
 
 
-def _value_array(field: Field, value: str) -> Tuple[np.ndarray, str]:
-    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'dB', 'mag_dB',
-    'mag', 'phase', 'real', 'imag'}``."""
-    label = _value_label(field, value)
-    if value == 'dB':
-        return field.dB, label
-    if value == 'mag_dB':
+def _value_array(field: Field, value: str, *,
+                 who: str = 'plot_field') -> Tuple[np.ndarray, str]:
+    """Return ``(array, axis_label)`` for ``value`` ∈ ``{'dB', 'level',
+    'magnitude', 'phase', 'real', 'imag'}``."""
+    label = _value_label(field, value, who=who)
+    if value in ('dB', 'level') and 'time' in field.coords:
+        # Field.dB raises AttributeError here; a plot call reports a bad view
+        # as ConfigurationError, as it does for every other unusable value.
+        raise ConfigurationError(
+            f"{who}: value={value!r} has no meaning on a time-domain "
+            f"field — a trace is linear pressure, not a level. Use "
+            f"value='real' (the samples), or .extract_tone(f) for a complex "
+            f"narrowband field with a dB view.")
+    if value == 'dB' and not field.is_complex and field.unit != 'dB':
+        # Field.dB raises AttributeError here too: real data is a level only
+        # when its stored unit says so.
+        raise ConfigurationError(
+            f"{who}: value='dB' has no meaning on this field — its data "
+            f"are real and in {field.unit!r}, not a level. Use value='real' "
+            f"to draw the values themselves.")
+    if value == 'level' and not field.is_complex:
         # Modulus in dB: 20·log10|H| = −TL (shares the floored dB conversion).
-        # Complex only, for the same reason 'mag' is: ``.dB`` negates the
+        # Complex only, for the same reason 'magnitude' is: ``.dB`` negates the
         # modulus of COMPLEX data, but hands back real data untouched
         # because it is already a level — so negating that flips a level
         # rather than converting one. On signal excess, where the sign is
         # the meaning, -20 dB (undetectable) plotted as +20.
-        if not field.is_complex:
-            raise ConfigurationError(
-                f"plot_field: value={value!r} requires complex data; this "
-                f"field is real and already a level, so its dB view is "
-                f"value='dB'.")
-        return -field.dB, label
-    if value in ('mag', 'phase'):
-        if not field.is_complex:
-            raise ConfigurationError(
-                f"plot_field: value={value!r} requires complex data")
-        return (field.magnitude if value == 'mag' else field.phase), label
-    if value == 'real':
-        return (field.data.real if field.is_complex else field.data), label
-    if not field.is_complex:
-        raise ConfigurationError("plot_field: value='imag' requires complex data")
-    return field.data.imag, label
+        raise ConfigurationError(
+            f"{who}: value={value!r} requires complex data; this "
+            f"field is real and already a level, so its dB view is "
+            f"value='dB'.")
+    if value in ('magnitude', 'phase', 'imag') and not field.is_complex:
+        raise ConfigurationError(
+            f"{who}: value={value!r} requires complex data.")
+    # The arrays are the Field's own views (``value`` is the view's name);
+    # this layer adds the label.
+    return field.view(value), label
 
 
 def _coord_label(name: str) -> str:
@@ -523,7 +683,7 @@ def _is_loss_view(field: Field, value: str) -> bool:
     loud end at the top. Two quantities read that way: transmission loss (the
     dB view of a ``pressure`` field) and OASS reverberation, whose stored
     numbers are a loss for the reason ``quantities.LOSS_KINDS`` gives. Every other dB
-    view is a **level** (signal excess, ``mag_dB``) and more of a level is
+    view is a **level** (signal excess, ``level``) and more of a level is
     more, so it reads upward like any other quantity.
 
     Identifying a loss takes both the field and the view, exactly as
@@ -556,6 +716,48 @@ def _cell_edge_extent(x: np.ndarray, y: np.ndarray):
     hx = abs(x[1] - x[0]) / 2.0 if x.size > 1 else 0.5
     hy = abs(y[1] - y[0]) / 2.0 if y.size > 1 else 0.5
     return (x.min() - hx, x.max() + hx, y.min() - hy, y.max() + hy)
+
+
+#: Largest spread of an axis' sample spacing, as a fraction of its span, at
+#: which ``imshow``'s evenly stretched rows still sit on the samples.
+_UNIFORM_GRID_TOLERANCE = 1e-6
+
+
+def _is_uniform_axis(coord) -> bool:
+    """Whether ``coord`` is evenly spaced, the one grid ``imshow`` can draw.
+
+    ``imshow`` stretches the rows evenly between the extent's two ends, so on
+    a receiver grid dense near the surface a row lands where the next-coarser
+    spacing would put it: a stripe at 60 m drawn at 73–83 m. The spread of the
+    spacing is measured against the axis' own span."""
+    c = np.asarray(coord, dtype=float)
+    if c.size < 3:
+        return True
+    step = np.diff(c)
+    return float(np.ptp(step)) <= _UNIFORM_GRID_TOLERANCE * abs(c[-1] - c[0])
+
+
+def _depth_range_heatmap(ax, ranges_m, depths, data, **kw):
+    """Draw a ``(depth, range)`` panel at its true coordinates.
+
+    ``imshow`` on an evenly spaced grid, where it is exact and one
+    ``set_array`` per animation frame is cheap; ``pcolormesh`` with
+    ``shading='nearest'`` on any other grid, which centres each cell on its
+    own sample (:func:`_is_uniform_axis` says why ``imshow`` cannot). Range is
+    drawn in km, depth increasing downward. ``aspect`` applies to either."""
+    aspect = kw.pop('aspect', None)
+    if _is_uniform_axis(ranges_m) and _is_uniform_axis(depths):
+        if aspect is not None:
+            kw['aspect'] = aspect
+        return ax.imshow(data, extent=_imshow_extent(ranges_m, depths),
+                         origin='upper', **kw)
+    im = ax.pcolormesh(m_to_km(np.asarray(ranges_m, dtype=float)),
+                       np.asarray(depths, dtype=float), data,
+                       shading='nearest', **kw)
+    invert_yaxis_once(ax)
+    if aspect is not None:
+        ax.set_aspect(aspect)
+    return im
 
 
 def _flip_y(extent):
@@ -632,7 +834,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
     m_lo, m_hi = _fill_margins(ax)
     fill_lo, fill_hi = min(x_lo, 0.0) - m_lo, x_hi + m_hi
 
-    if env.has_range_dependent_bathymetry:
+    if env.bathymetry.varies_with_range:
         r_km = m_to_km(env.bathymetry.ranges)
         z = env.bathymetry.depths
         # Runs whichever way the two spans differ. A bathymetry NARROWER than
@@ -650,7 +852,8 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
         # The depth headroom follows the seafloor over the DATA span: the
         # painted margins beyond it are a marker's width and set no limit.
         max_seafloor = float(np.max(np.interp(np.clip(r_km, x_lo, x_hi), r_km, z)))
-        depth_max = max(max(ax.get_ylim()), max_seafloor * 1.05)
+        depth_max = max(max(ax.get_ylim()),
+                        max_seafloor * DEPTH_AXIS_HEADROOM)
         if depth_max > max(ax.get_ylim()):
             ax.set_ylim(depth_max, min(ax.get_ylim()))
         ax.fill_between(r_km, z, depth_max,
@@ -659,7 +862,7 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
                           **BOTTOM_LINE_STYLE)
         _sink_line_into_sediment(line)
     else:
-        depth_max = max(max(ax.get_ylim()), env.depth * 1.05)
+        depth_max = max(max(ax.get_ylim()), env.depth * DEPTH_AXIS_HEADROOM)
         if depth_max > max(ax.get_ylim()):
             ax.set_ylim(depth_max, min(ax.get_ylim()))
         ax.fill_between(
@@ -678,9 +881,9 @@ def _pinned_subtitle(field: Field) -> str:
     # A reduced map pins one frequency but AVERAGED a band, and the pinned
     # value is a centroid — so a 50 Hz and a 400 Hz average about the same
     # centre would caption identically, naming the one frequency the map is
-    # not. ``metadata['band_hz']`` is what the reducers record for exactly
-    # this, so the band wins over the pin when it is there.
-    band = (field.metadata or {}).get('band_hz')
+    # not. ``band_hz`` is what the reducers record for exactly this, so
+    # the band wins over the pin when it is there.
+    band = field.band_hz
     parts = []
     for name, v in field.pinned.items():
         label, unit = _AXIS_LABELS.get(name, (name, ''))
@@ -702,28 +905,28 @@ def _pinned_subtitle(field: Field) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# animate_field — time-series Field → matplotlib FuncAnimation
+# Provenance footnotes — data-source and model credits
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _credit_attributions(data_source, *, carrier=None):
-    """Resolve a ``data_source`` plotter argument to attribution strings.
+def _credit_attributions(show_data_credit, *, carrier=None):
+    """Resolve a ``show_data_credit`` plotter argument to attribution strings.
 
     Accepts ``None`` / ``False`` (no credit), ``True`` (use ``carrier`` — the
     plot's own provenance object), an object with a ``.data_sources`` attribute
     (an ``Environment`` or ``Result``), an iterable of ``DataSource`` / str, or a
     single ``DataSource`` / str. Returns the de-duplicated attribution texts.
     """
-    if not data_source:
+    if not show_data_credit:
         return []
-    if data_source is True:                       # use the plot's own provenance
+    if show_data_credit is True:                       # use the plot's own provenance
         items = list(getattr(carrier, 'data_sources', None) or [])
     else:
-        items = getattr(data_source, 'data_sources', None)
+        items = getattr(show_data_credit, 'data_sources', None)
         if items is None:                         # an explicit list / DataSource / str
-            items = (list(data_source)
-                     if isinstance(data_source, (list, tuple, set))
-                     else [data_source])
+            items = (list(show_data_credit)
+                     if isinstance(show_data_credit, (list, tuple, set))
+                     else [show_data_credit])
     out, seen = [], set()
     for s in items:
         # An item is a DataProvenance (→ its .source), a bare DataSource, or a
@@ -739,7 +942,7 @@ def _credit_attributions(data_source, *, carrier=None):
 
 def _model_attribution(result):
     """One-line model credit ``"<model> — <author>, <engine>"`` from a result's
-    :class:`~uacpy.models.sources.ModelSource`, or ``None`` when the result
+    :class:`~uacpy.models.provenance.ModelProvenance`, or ``None`` when the result
     carries no model provenance. The model-side counterpart of the data-source
     attributions resolved by :func:`_credit_attributions`."""
     src = getattr(result, 'model_source', None)
@@ -752,20 +955,20 @@ def _model_attribution(result):
 def _credit_lines(data_attributions, model_attribution):
     """Compose the footnote rows from data + model provenance.
 
-    One citation per line, stacked. Each group (``Data`` / ``Model``) is
-    labelled on its first line; further lines align under it. One harmonised
-    layout for environment plots (data only), result plots (model, plus data
-    when an env is supplied) and maps.
+    One citation per line, stacked, the ``Model`` group above the ``Data``
+    group. Each group is labelled on its first line; further lines align
+    under it. One harmonised layout for environment plots (data only),
+    result plots (model, plus data when an env is supplied) and maps.
     """
     groups = []
-    if data_attributions:
-        groups.append(("Data:", list(data_attributions)))
     if model_attribution:
         # A single attribution string, or a list of them (multi-model
         # comparison figures).
         lines = ([model_attribution] if isinstance(model_attribution, str)
                  else list(model_attribution))
         groups.append(("Model:", lines))
+    if data_attributions:
+        groups.append(("Data:", list(data_attributions)))
     if not groups:
         return []
     width = max(len(label) for label, _ in groups)
@@ -806,10 +1009,9 @@ def _title_or(title, default):
     """The title to draw: ``default`` only when the caller gave none.
 
     ``title=None`` is "not given"; ``title=''`` is a caller asking for **no**
-    title, and is a legitimate value that must be honoured. Every plotter used
-    to spell this ``title or default``, which conflates the two because the
-    empty string is falsy — so ``plot_field(f, title='')`` came back captioned
-    ``Depth = 50 m``. The only way to get a blank title was ``title=' '``.
+    title, and is a legitimate value that must be honoured. ``title or
+    default`` conflates the two because the empty string is falsy, so
+    ``plot_field(f, title='')`` would come back captioned ``Depth = 50 m``.
     """
     return default if title is None else title
 
@@ -879,11 +1081,11 @@ def _fit_subplot_margins(fig, axes, *, pad_px=4.0, right_limit=1.0):
 
     Measured, like :func:`_reserve_credit_margin`, and for the same reason: a
     margin given as a *fraction* cannot hold a label whose width is set in
-    *points*. ``compare_models`` used to open with a fixed
-    ``subplots_adjust(left=0.05, right=0.88)``; measured on its own two-field
-    figure, the depth label of a one-column comparison started 11 px outside
-    the canvas at the default font size and 57 px outside it at 20 pt, and at
-    two columns the range labels dropped 7 px below it.
+    *points*. Measured on ``compare_models``' own two-field figure under a
+    fixed ``subplots_adjust(left=0.05, right=0.88)`` alone, the depth label of
+    a one-column comparison started 11 px outside the canvas at the default
+    font size and 57 px outside it at 20 pt, and at two columns the range
+    labels dropped 7 px below it.
 
     ``right_limit`` is the fraction of the width the panels may occupy, so a
     caller can keep a strip free for a colorbar it has not drawn yet.
@@ -930,33 +1132,54 @@ def _fit_colorbar_strip(fig, cbar_ax, pad_px=4.0):
         fig.subplots_adjust(right=sp.right - dx)
 
 
-def _draw_result_credit(fig, result, *, env=None, data_source=True, **draw_kw):
+def _draw_result_credit(fig, result, *, env=None, show_data_credit=True, **draw_kw):
     """Unified provenance footnote for a *result* figure: the model that
     produced it (always, when known) plus any data sources from ``env``.
 
     The single call every result plotter makes — keeps data + model credit
     rendering identical across :func:`plot_field`, `_plot_rays`, … ."""
-    data = _credit_attributions(data_source, carrier=env)
+    data = _credit_attributions(show_data_credit, carrier=env)
     _draw_credit(fig, data, model=_model_attribution(result), **draw_kw)
 
 
 def _draw_sea_ice(ax, sea_ice):
     """Sea-ice cover as a thick surface line coloured by concentration.
 
-    ``sea_ice`` is a concentration 0–1 (uniform) or ``(ranges_km, concentration)``
-    (**range-varying** — e.g. an ice edge). Drawn as one bold line riding the water
+    ``sea_ice`` is a concentration 0–1 (uniform), or the
+    :class:`~uacpy.data.AlongTrack` of concentration
+    :func:`uacpy.data.fetch_sea_ice_concentration_transect` returns
+    (**range-varying** — e.g. an ice edge), its ranges in metres drawn on the
+    panel's km axis. Any other value, or an ``AlongTrack`` of another
+    quantity, is refused. Drawn as one bold line riding the water
     surface, coloured **dark → violet** with the local concentration (dark = thin /
     open leads, bright violet = consolidated pack). Nothing is drawn for an
     ice-free section.
     """
     from matplotlib.collections import LineCollection
     from matplotlib.colors import LinearSegmentedColormap, Normalize
+    from uacpy.data import AlongTrack
     if np.isscalar(sea_ice):
         x0, x1 = ax.get_xlim()
         rngs = np.array([x0, x1], dtype=float)
         conc = np.array([float(sea_ice)] * 2, dtype=float)
+    elif isinstance(sea_ice, AlongTrack):
+        if sea_ice.quantity != 'sea_ice_concentration':
+            raise ConfigurationError(
+                f"sea_ice: the AlongTrack holds {sea_ice.quantity!r}, not "
+                f"'sea_ice_concentration'.",
+                remediation="Pass the track "
+                            "fetch_sea_ice_concentration_transect returns.")
+        rngs = m_to_km(np.asarray(sea_ice.ranges, dtype=float))
+        conc = np.asarray(sea_ice.data, dtype=float)
     else:
-        rngs, conc = (np.asarray(a, dtype=float) for a in sea_ice)
+        raise ConfigurationError(
+            f"sea_ice: a {type(sea_ice).__name__} is neither a uniform "
+            f"concentration nor an AlongTrack.",
+            remediation="Pass a concentration 0-1 for uniform cover, or the "
+                        "AlongTrack fetch_sea_ice_concentration_transect "
+                        "returns (build AlongTrack(ranges=, lats=, lons=, "
+                        "data=, unit='1', quantity='sea_ice_concentration') "
+                        "for a track of your own).")
     # An all-NaN concentration track means no drawable ice; numpy reports
     # that nanmean through warnings.warn ("Mean of empty slice"), which the
     # isfinite guard already converts into the no-op return below.
@@ -992,7 +1215,7 @@ def _draw_surface_boundary(ax, env):
     marginal ice zone) is drawn as per-range zones, mirroring the bottom.
     """
     surface = env.surface
-    props = getattr(surface, 'properties', None)
+    props = getattr(surface, 'nodes', None)
     if not props:
         return
 

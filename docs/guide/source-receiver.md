@@ -36,15 +36,18 @@ receiver = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 100),
 | `frequencies` | **required** | Hz. Scalar or vector — [§6](#6-frequencies--a-scalar-or-a-band). |
 | `source_type` | `'point'` | Source *geometry*: `'point'`, `'line'`, `'scaled'` — [§4](#4-source_type--what-the-source-physically-is). |
 | `beam_pattern` | `None` | Directivity, `(N, 2)` of `[angle_deg, level_dB]` or a `.sbp` path — [§5](#5-beam_pattern--a-directional-source). |
+| `weights` | `None` → all `1` | Complex drive of each depth, summed by `ResultStack.superpose()`; on a one-depth `Source` the run applies it to the field it returns — [§3](#3-source-depth--one-or-several). |
+| `source_level_dB` | `None` | dB re 1 µPa at 1 m for a unit-weight element; recorded as every result's `source_level_dB` attribute so `Field.at_source_level()` turns TL into a received level. The engines never read it: TL is unchanged. |
 
 | `Receiver(...)` | Default | Meaning |
 |---|---|---|
 | `depths` | **required** | Receiver depth(s), metres, positive down. |
 | `ranges` | `None` → `0.0` **+ warning** | Metres, measured from the source. |
-| `receiver_type` | `'grid'` | Sampling layout. `'grid'` is the only implemented one; `'line'` raises — [§7](#7-conventions-that-bite). |
 
 Both coerce scalars and lists to 1-D `float64` arrays, so `depths=25.0` and
-`depths=[25.0]` leave you holding the same `array([25.])`. Both are
+`depths=[25.0]` leave you holding the same `array([25.])`, and both refuse a
+2-D array: a `Receiver` is the cross-product of its two 1-D axes, so a
+`np.meshgrid` pair is refused with a message saying so. Both are
 `@dataclass(eq=False)` — a generated `__eq__` over `ndarray` fields raises, so
 they compare by identity — and both carry `copy()` for a deep copy, symmetric
 with `Environment`.
@@ -53,11 +56,11 @@ The derived attributes exist so you never recount an axis by hand:
 
 ```python
 >>> source
-Source(25.0m, 200.0Hz, type='point')
+Source(depth 25 m, frequency 200 Hz, point)
 >>> source.n_sources, source.n_frequencies
 (1, 1)
 >>> receiver
-Receiver(grid: 100 depths × 250 ranges)
+Receiver(100 depths 1–99 m, 250 ranges 50–5000 m)
 >>> receiver.n_depths, receiver.n_ranges
 (100, 250)
 >>> receiver.depth_min, receiver.depth_max, receiver.range_min, receiver.range_max
@@ -175,9 +178,9 @@ one slab per depth, plus the coordinate they vary along:
 ```python
 >>> Bellhop(n_beams=3000).run(env, uacpy.Source(depths=[15., 50., 85.],
 ...                                             frequencies=200.0), receiver)
-ResultStack[Field](n_slabs=3, source_depth=[15.0, 50.0, 85.0])
+ResultStack(3 Field slabs, source depths [15, 50, 85] m)
 >>> Kraken().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0), receiver)
-ResultStack[Field](n_slabs=2, source_depth=[20.0, 60.0])
+ResultStack(2 Field slabs, source depths [20, 60] m)
 ```
 
 Bellhop writes every depth into one deck and its reader splits the slabs,
@@ -195,32 +198,44 @@ weights — `Σ wᵢ·pᵢ` on the shared grid:
 >>> pair = uacpy.Source(depths=[40.0, 60.0], frequencies=200.0, weights=[1, -1])
 >>> field = Kraken().run(env, pair, receiver).superpose()   # antiphase pair
 >>> field.metadata['superposed_sources']
-{'depths': [40.0, 60.0], 'weights': [(1+0j), (-1+0j)]}
+{'depths': [40.0, 60.0], 'weights': [(1+0j), (-1+0j)], 'coherent': True}
 ```
 
 `superpose([w1, w2, …])` takes the weights from the call instead. A stack of
 real dB values has lost its phase and refuses to add — superpose the complex
 field the run returned.
 
+A **one-depth** `Source` has nothing to stack, so the run applies its weight
+itself — the one-slab `superpose()` — and records it the same way:
+`Source(depths=25.0, frequencies=200.0, weights=2.0)` returns a field 6.02 dB
+louder than the unweighted run, with `metadata['superposed_sources']` =
+`{'depths': [25.0], 'weights': [(2+0j)]}`. In a mode that returns real dB
+(`INCOHERENT_TL`, `SEMICOHERENT_TL`, OAST's `COHERENT_TL`) the weight has
+nothing to scale, and the run refuses it before the engine starts.
+
 Outside the field modes only Bellhop stacks (`RAYS`, `ARRIVALS`,
-`EIGENRAYS`). Mode shapes, reflection tables and array products have no
+`EIGENRAYS`). Kraken's `MODES` takes a multi-depth `Source` without stacking:
+the mode set does not depend on the source depth, so the run returns one
+`Modes` whose `source_depths` lists every depth, and `Modes.excitation(source)`
+reads the shapes there. Reflection tables and array products have no
 per-source sum, so those modes say so rather than silently using the first
 depth:
 
 ```python
->>> Kraken().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0),
-...              receiver, run_mode=RunMode.MODES)
-ConfigurationError: Kraken takes a single source depth per MODES run; got 2:
+>>> OASR().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0),
+...            receiver)
+ConfigurationError: OASR takes a single source depth per REFLECTION run; got 2:
 [20.0, 60.0]. A multi-depth Source stacks only in the
 field modes (COHERENT_TL / INCOHERENT_TL / SEMICOHERENT_TL / BROADBAND /
-TIME_SERIES); for MODES loop over single-depth Sources externally.
+TIME_SERIES); for REFLECTION loop over single-depth Sources externally.
 ```
 
 | Mode | Multi-element `depths`? |
 |---|---|
 | `COHERENT_TL`, `INCOHERENT_TL`, `SEMICOHERENT_TL`, `BROADBAND`, `TIME_SERIES` | ✅ every model returns `ResultStack` |
 | `RAYS`, `ARRIVALS`, `EIGENRAYS` | ✅ [Bellhop](../models/bellhop.md) returns `ResultStack` |
-| `MODES`, `REFLECTION`, `COVARIANCE`, `REPLICA`, `REVERBERATION` | ❌ `ConfigurationError` ([Bounce](../models/bounce.md) reads no source depth and ignores the extras) |
+| `MODES` | ✅ [Kraken](../models/kraken.md) returns one `Modes` carrying every depth |
+| `REFLECTION`, `COVARIANCE`, `REPLICA`, `REVERBERATION` | ❌ `ConfigurationError` ([Bounce](../models/bounce.md) reads no source depth and ignores the extras) |
 
 A sweep over anything else — frequency, a model knob — still goes through
 [`run_parallel`](utilities.md); `.stack()` on the outcome gives the same
@@ -299,12 +314,6 @@ Try one of these source geometries instead:
   • 'point'
 ```
 
-> **`Source(source_type='line')` and `Receiver(receiver_type='line')` are
-> unrelated.** The first is a physical source shape, supported by several
-> models. The second is a *sampling* rule (pair `depths[i]` with `ranges[i]`
-> instead of taking the cross-product) that no model implements, so the
-> carrier rejects it. The shared word names two different concepts.
-
 ---
 
 ## 5. `beam_pattern` — a directional source
@@ -370,8 +379,9 @@ Two details that decide whether your pattern does what you meant:
 
 - **The angle axis must span what the engine asks for.** Bellhop queries
   *launch* angles (the reference `shaded.sbp` covers ±180°); Kraken queries
-  *mode* angles in [0°, 90°]. A pattern that stops short is extrapolated from
-  its end sample.
+  *mode* angles in [0°, 90°]. Bellhop refuses a pattern that does not cover
+  its launch fan (`ConfigurationError` naming both spans); Kraken holds a
+  pattern that stops short at its end sample.
 - **Interpolation happens in amplitude, not in dB.** The engines convert levels
   with `10**(dB/20)` *before* interpolating between your samples
   (`beampattern.f90:59`), so a coarsely sampled pattern rounds off a steep
@@ -409,22 +419,25 @@ one value:
 
 ```python
 >>> Kraken().run(env, source, point, frequencies=np.linspace(150., 250., 8))
-Field(kind='pressure', unit='Pa', model='Kraken', axes=(depth, range, frequency))
+Field(Kraken, pressure Pa, depth 60 m × range 3000 m × 8 frequencies 150–250 Hz)
 ```
 
 That keyword is an **override** of the broadband grid, useful for reusing one
 `Source` across several sweeps; when omitted, `source.frequencies` is used.
-Models that only honour it in a broadband mode say so rather than silently
-applying it:
+It applies to the BROADBAND and TIME_SERIES modes. A single-frequency mode
+takes its frequency from the `Source`, and every engine except OASP (whose
+solver always runs a sweep the keyword pins) refuses it there:
 
 ```
-UserWarning: Bellhop.run(run_mode=COHERENT_TL): ignoring frequencies= —
-these apply to BROADBAND/TIME_SERIES only.
+ConfigurationError: Bellhop.run(run_mode=COHERENT_TL) takes its frequency
+from source.frequencies; frequencies= applies to BROADBAND and TIME_SERIES runs.
 ```
 
 Unlike `depths` and `ranges`, `frequencies` is **not** required to be
-increasing — only finite and strictly positive. It indexes a result axis, not
-an interpolation abscissa.
+increasing — only finite, strictly positive and **distinct**. It indexes a
+result axis in the order you give it, not an interpolation abscissa, and a
+frequency listed twice is refused: it would be two identical bins under one
+label.
 
 ---
 
@@ -440,7 +453,7 @@ the field there is infinite for a point source, so no engine can give you a
 useful number — and every engine now refuses it the same way. Run
 `Receiver(depths=[30.0, 60.0], ranges=[0.0, 1000.0])` on any model —
 Bellhop, Kraken, Scooter, RAM, SPARC, the OASES family included — and the
-`r = 0` column comes back **`NaN` with a `UserWarning`**: Bellhop's notes
+`r = 0` column comes back **`NaN` with a `ValidityWarning`**: Bellhop's notes
 that no ray travels zero distance; the others name the `1/√r`-type spreading
 factor that is singular there and mask the meaningless number the engine
 wrote into that column.
@@ -461,7 +474,7 @@ A source at exactly `z = 0` is accepted but warns, because it sits on the
 pressure-release surface where the field is ~0 and the result is degenerate:
 
 ```
-UserWarning: Kraken: a source at depth 0 m is on the pressure-release sea
+ValidityWarning: Kraken: a source at depth 0 m is on the pressure-release sea
 surface, where the field is ~0 — the result is degenerate (null / saturated
 TL, model-dependent). Use a small positive depth (e.g. 1 m).
 ```
@@ -522,10 +535,10 @@ for model in (Bellhop(n_beams=4000), Kraken(), RAM()):
 ![Below the seabed](figures/srcrcv_below_domain.png)
 
 ```
-UserWarning: Bellhop: receiver depth 150.0 m is below the model's resolvable
-depth (100.0 m). It is accepted; the result there reflects the model's
-below-domain behaviour (a physical transmitted / evanescent field from Kraken
-and OASES; NaN from Bellhop, Scooter, SPARC and RAM).
+ValidityWarning: Bellhop: receiver depth 160.0 m is below the model's
+resolvable depth (100.0 m). It is accepted; the result there reflects the
+model's below-domain behaviour (a physical transmitted / evanescent field from
+Kraken and OASES; NaN from Bellhop, Scooter, SPARC and RAM).
 ```
 
 A **receiver is an output**. Asking for a value under the seabed is a
@@ -556,32 +569,27 @@ Set source depth to ≤ 100.0m
 sediment column too, so over 100 m of water with an 8 m sand layer their limit
 is 108 m while Bellhop's is 100 m.
 
-### `receiver_type='line'` is rejected at construction
+### A receiver is a grid; a track is indexed out of it
 
-`'line'` would pair `depths[i]` with `ranges[i]` instead of taking the
-cross-product. No model's result assembly does that — every one returns the
-full grid — so the carrier refuses the layout outright rather than letting a
-run hand back a shape you did not ask for:
+A `Receiver` always means the depth × range cross-product: every model
+returns the full grid. Paired samples — `depths[i]` with `ranges[i]`, a
+glider track — come from a grid over the track's distinct values, indexed
+by the pairs:
 
 ```python
->>> uacpy.Receiver(depths=[10., 20., 30.],
-...                ranges=[1000., 2000., 3000.], receiver_type='line')
-ConfigurationError: receiver_type must be 'grid'; got 'line'.
-receiver_type='line' is not implemented — every model returns the full depth
-x range grid, so the paired (depths[i], ranges[i]) sampling would be silently
-ignored. Use receiver_type='grid' and index the diagonal yourself:
-tl[np.arange(len(depths)), np.arange(len(ranges))].
+zu, iz = np.unique(track_depths, return_inverse=True)
+ru, ir = np.unique(track_ranges, return_inverse=True)
+tl = model.run(env, src, uacpy.Receiver(depths=zu, ranges=ru)).dB
+paired = tl[iz, ir]      # one value per track point
 ```
-
-Refusing beats returning a `(3, 3)` grid to someone who asked for 3 points.
 
 ### `Receiver` without `ranges` warns
 
 ```python
 >>> uacpy.Receiver(depths=50.0)
-UserWarning: Receiver: ranges not given, defaulting to a single point at 0 m
-(the source location), which is singular for TL/pressure runs; pass explicit
-ranges= to avoid this.
+FallbackWarning: Receiver: ranges not given, defaulting to a single point at
+0 m (the source location), which is singular for TL/pressure runs; pass
+explicit ranges= to avoid this.
 ```
 
 The default exists because two run modes genuinely have no range axis:

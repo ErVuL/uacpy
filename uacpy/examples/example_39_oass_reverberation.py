@@ -15,6 +15,7 @@ different quantity from TL in the same dB unit) · result.plot()
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
@@ -33,7 +34,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 # (oass.tex:182-183).
 env = uacpy.Environment(
     bathymetry=100.0,
-    ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1500.0]),
+    ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1500.0]),
     bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
         sound_speed=1700.0, density=1.8, attenuation=0.5, roughness=0.5)),
 )
@@ -48,10 +49,20 @@ work_dir = OUT / 'example_39_work'
 # that is not a bottom layer, because attaching the spectrum to the wrong
 # record leaves a POSITIVE RG there — an infinite correlation length, i.e. no
 # back-scatter at all, from a run that still exits 0.
-reverb = uacpy.OASS(interface=3, correlation_length=10.0,
-                    spectral_exponent=2.0, rms_roughness=0.5,
-                    work_dir=work_dir, cleanup=False).run(
-    env, source, receiver, run_mode=uacpy.RunMode.REVERBERATION)
+# A 0.5 m rms roughness at 250 Hz leaves perturbation theory above about
+# 73° grazing; OASS says where, and that notice is printed. Any other warning
+# is shown as usual.
+with warnings.catch_warnings(record=True) as caught:
+    reverb = uacpy.OASS(interface=3, correlation_length=10.0,
+                        spectral_exponent=2.0, rms_roughness=0.5,
+                        work_dir=work_dir, cleanup=False).run(
+        env, source, receiver, run_mode=uacpy.RunMode.REVERBERATION)
+for warning in caught:
+    if 'Rayleigh parameter' in str(warning.message):
+        print(f"  noted: {str(warning.message).split(' (JKPS')[0]}")
+    else:
+        warnings.showwarning(warning.message, warning.category,
+                             warning.filename, warning.lineno)
 
 print(f"  kind={reverb.kind!r} unit={reverb.unit!r} grid={reverb.data.shape}")
 print("  both decks left on disk: "

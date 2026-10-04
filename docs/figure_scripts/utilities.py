@@ -19,7 +19,7 @@ import uacpy
 from uacpy.core import acoustics
 from uacpy.metrics import tl_bias, tl_max_error, tl_rmse
 from uacpy.models import Bellhop, Kraken, RunMode
-from uacpy.visualization.plots import plot_field_difference
+from uacpy.plot import plot_field_difference
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
 GUIDE = True
@@ -79,9 +79,9 @@ def sound_speed_equations():
     temperatures = np.linspace(0.0, 30.0, 121)
     pressures = np.linspace(0.0, 6000.0, 121)          # dbar ≈ metres
 
-    unesco = acoustics.sound_speed_unesco(temperatures, 35.0, 0.0)
-    delgrosso = acoustics.sound_speed_delgrosso(temperatures, 35.0, 0.0)
-    teos10 = acoustics.sound_speed_teos10(temperatures, 35.0, 0.0)
+    unesco = acoustics.sound_speed_unesco(temperatures, 35.0, pressure_dbar=0.0)
+    delgrosso = acoustics.sound_speed_delgrosso(temperatures, 35.0, pressure_dbar=0.0)
+    teos10 = acoustics.sound_speed_teos10(temperatures, 35.0, pressure_dbar=0.0)
     mackenzie = acoustics.sound_speed_mackenzie(temperatures, 35.0, 0.0)
 
     fig, axes = plt.subplots(1, 3, figsize=(12.0, 4.0))
@@ -113,8 +113,8 @@ def sound_speed_equations():
 
     ax = axes[2]
     T, P = np.meshgrid(temperatures, pressures)
-    delta = (acoustics.sound_speed_delgrosso(T, 35.0, P)
-             - acoustics.sound_speed_unesco(T, 35.0, P))
+    delta = (acoustics.sound_speed_delgrosso(T, 35.0, pressure_dbar=P)
+             - acoustics.sound_speed_unesco(T, 35.0, pressure_dbar=P))
     limit = float(np.max(np.abs(delta)))
     mesh = ax.pcolormesh(temperatures, pressures, delta, cmap='RdBu_r',
                          vmin=-limit, vmax=limit, shading='auto')
@@ -148,7 +148,7 @@ def cross_model_metrics():
 
     fig, axes = plt.subplots(3, 1, figsize=(9.0, 9.0), sharex=True, sharey=True)
     bellhop.plot(env=env, ax=axes[0], show_colorbar=True)
-    axes[0].set_title('Bellhop — Gaussian beams', fontweight='bold', fontsize=11)
+    axes[0].set_title('Bellhop — hat beams', fontweight='bold', fontsize=11)
     kraken.plot(env=env, ax=axes[1], show_colorbar=True)
     axes[1].set_title('Kraken — normal modes', fontweight='bold', fontsize=11)
 

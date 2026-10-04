@@ -10,7 +10,7 @@ A flipped altimetry sign would push the RMSE past 25 dB, which is what the
 regression test `altimetry-consistency-bellhop-vs-ramsurf` guards on every run.
 
 Uses: env altimetry through two different solvers · Field.backend ·
-core.metrics.tl_rmse / tl_max_error / tl_bias(range_window=) · Field.at() ·
+metrics.tl_rmse / tl_max_error / tl_bias(range_window=) · Field.at() ·
 plot.compare
 """
 
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.core.metrics import tl_bias, tl_max_error, tl_rmse
+from uacpy.metrics import tl_bias, tl_max_error, tl_rmse
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -42,7 +42,7 @@ source = uacpy.Source(depths=50.0, frequencies=200.0)
 receiver = uacpy.Receiver(depths=np.array([50.0]),
                           ranges=np.linspace(500.0, 6000.0, 200))
 
-bellhop = uacpy.Bellhop().run(env, source, receiver,
+bellhop = uacpy.Bellhop(backend='fortran').run(env, source, receiver,
                               run_mode=uacpy.RunMode.COHERENT_TL)
 ram = uacpy.RAM().run(env, source, receiver,
                       run_mode=uacpy.RunMode.COHERENT_TL)

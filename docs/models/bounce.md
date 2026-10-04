@@ -25,7 +25,7 @@ R(θ) = |R(θ)| · e^{iφ(θ)}
 `|R|` is the fraction of amplitude returned (0 = perfectly absorbing, 1 =
 perfectly reflecting) and `φ` is the phase the boundary adds, in the Acoustics
 Toolbox's `e^{+iωt}` time convention (`index.htm:801`; the outgoing propagators
-are `e^{−ikr}`): `rc.R * exp(1j * rc.phi)` is exactly the coefficient BOUNCE
+are `e^{−ikr}`): `rc.magnitude * exp(1j * rc.phase)` is exactly the coefficient BOUNCE
 computed. Both depend on the grazing angle θ, measured from
 the interface — **0° is a ray skimming along the seabed, 90° is normal
 incidence.**
@@ -83,8 +83,7 @@ If you need it, you need [OASES](oases.md) or [Scooter](scooter.md) end to end.
 |---|---|---|
 | You want transmission loss | Bounce computes no field | any propagation model |
 | Reflection across a **band** | one frequency per run | [OASES](oases.md) (OASR) |
-| A shear-converted coefficient (P-SV, P-Slow) | BOUNCE emits P-P only | [OASES](oases.md) (OASR) |
-| P-SV conversion, transmission coefficients | BOUNCE emits P-P only | [OASES](oases.md) (OASR) |
+| A transmission coefficient | BOUNCE emits the reflected P-P coefficient only | [OASES](oases.md) (OASR, `reflection_type='transmission'`) |
 | The bottom changes along the track | range-independent by construction | [RAM](ram.md), [Bellhop](bellhop.md) |
 
 ### Bounce or OASR?
@@ -96,8 +95,8 @@ a fluid stack they agree. They differ in reach and in plumbing:
 |---|---|---|
 | Media | fluid or elastic layers over a fluid or elastic half-space | full seismo-acoustic |
 | Frequency | one per run | swept in one run → 2-D `R(θ, f)` |
-| Angle grid | derived from `c_low`/`c_high`/`rmax` | you pass `angles=` |
-| Coefficient | P-P | P-P, P-SV, transmission |
+| Angle grid | derived from `c_low`/`c_high`/`rmax_m` | you pass `angles=` |
+| Coefficient | P-P | P-P, transmission |
 | Writes `.brc` / `.irc` | ✅ — consumed directly by AT models | ✗ |
 
 Bounce is the one wired into the rest of the toolbox. OASR is the one to reach
@@ -111,7 +110,7 @@ for when you need physics BOUNCE does not model, or a broadband picture.
 |---|---|---|
 | Layered bottom | ✅ | the whole point — an arbitrary stack of fluid layers |
 | Elastic media (shear) | ✅ | elastic layers and half-space; P-P coefficient only |
-| Range-dependent bottom | ❌ | collapsed to the median column, with a `UserWarning` |
+| Range-dependent bottom | ❌ | collapsed to the median column, with a `FallbackWarning` |
 | Range-dependent bathymetry / SSP | ❌ | Bounce reads no range axis |
 | Sea-surface altimetry | ❌ | |
 | Multiple frequencies | ❌ | raises; loop, or use OASR |
@@ -119,7 +118,7 @@ for when you need physics BOUNCE does not model, or a broadband picture.
 Bounce reads **no source or receiver geometry** — the plane-wave reflection
 coefficient does not depend on where anything is. `source.frequencies[0]` and
 `receiver.range_max` are the only two numbers it takes from those carriers, and
-`rmax=` replaces the second one.
+`rmax_m=` replaces the second one.
 
 See [environment carriers](../guide/environment.md) for how to build the
 `SeabedColumn`, `SedimentLayer` and `BoundaryProperties` that describe a stack,
@@ -139,10 +138,10 @@ from uacpy.models import Bounce, RunMode
 
 That is the entire list, and it is the default — `run_mode=` can be omitted.
 
-The result carries `theta` (degrees), `R` (magnitude, 0–1) and `phi` (radians),
-plus the usual `.at` / `.isel` / `.eval` slicing on an `angle=` axis. Note the
-deliberate asymmetry documented in [results](../guide/results.md): slicing an
-*angle* keeps `theta` as a length-1 axis, because θ is this type's permanent
+The result carries `angles` (grazing, degrees), `magnitude` (0–1) and `phase`
+(radians), plus the usual `.at` / `.isel` / `.eval` slicing on an `angle=` axis.
+Note the deliberate asymmetry documented in [results](../guide/results.md):
+slicing an *angle* keeps `angles` as a length-1 axis, because θ is this type's permanent
 abscissa.
 
 Like every uacpy result it draws itself with `.plot()` — see
@@ -160,9 +159,9 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | Name | Default | Meaning |
 |---|---|---|
 | `c_low` | `None` | Lowest phase velocity tabulated (m/s). Must be `> 0`. `None` derives `min(1400, min(env.ssp))` at `run()` time — AT `bounce.htm` asks for "the lowest speed in the problem (say 1400.0)", and the 1400 there is the example, not the rule, so cold or brackish water needs the lower value or the table loses its grazing wedge. |
-| `c_high` | `1e9` | Highest phase velocity. `1e9` zeroes the minimum wavenumber and buys the full 0–90° sweep. |
-| `rmax` | `None` | Range (m) the table is sized for — it sets how many angles you get. `None` auto-derives from `receiver.range_max`, or 10 km. |
-| `n_angles` | `None` | Ask for ≈ N samples directly; `rmax` is back-derived to match. |
+| `c_high` | `None` | Highest phase velocity; `None` resolves to `1e9`, which zeroes the minimum wavenumber and buys the full 0–90° sweep. |
+| `rmax_m` | `None` | Range (m) the table is sized for — it sets how many angles you get. `None` auto-derives from `receiver.range_max` (10 km when that is 0); with `receiver=None`, pin it or `n_angles`. |
+| `n_angles` | `None` | Ask for ≈ N samples directly; `rmax_m` is back-derived to match. |
 
 **Everything else**
 
@@ -192,7 +191,7 @@ import numpy as np
 import uacpy
 from uacpy.models import Bounce
 
-GRID = dict(c_low=1400.0, c_high=1e9, rmax=10_000.0)
+GRID = dict(c_low=1400.0, c_high=1e9, rmax_m=10_000.0)
 PROBE = uacpy.Receiver(depths=50.0, ranges=10_000.0)
 WATER_SPEED = 1500.0
 
@@ -256,7 +255,7 @@ for alpha, style in [(0.0, '-'), (0.2, '--'), (0.6, '-.'), (1.5, ':')]:
         acoustic_type='half-space',
         sound_speed=1650.0, density=1.9, attenuation=alpha,
     ))
-    ax.plot(rc.theta, rc.R, style, lw=1.6,
+    ax.plot(rc.angles, rc.magnitude, style, lw=1.6,
             label=f'α = {alpha:g} dB/λ')
 ```
 
@@ -281,11 +280,11 @@ for i, name in enumerate(names):
     bottom = uacpy.BoundaryProperties.from_preset(name)
     rc = reflection(bottom)
     colour = f'C{i}'
-    ax.plot(rc.theta, rc.R, color=colour, lw=1.6,
+    ax.plot(rc.angles, rc.magnitude, color=colour, lw=1.6,
             label=f'{name} ({bottom.sound_speed:.0f} m/s)')
     if bottom.sound_speed > WATER_SPEED:
-        theta_c = uacpy.critical_angle(bottom.sound_speed, WATER_SPEED)
-        ax.plot([theta_c], [np.interp(theta_c, rc.theta, rc.R)],
+        theta_c = uacpy.acoustics.critical_angle(bottom.sound_speed, WATER_SPEED)
+        ax.plot([theta_c], [np.interp(theta_c, rc.angles, rc.magnitude)],
                 'o', color=colour, ms=5.0)
 ```
 
@@ -297,19 +296,20 @@ column. Granite holds on to everything out to 75°; silt gives up beyond 18°,
 and leaks even below that.
 
 Clay is the instructive extreme: its sound speed *equals* the water's, so there
-is no critical angle at all and `|R| = 0.19` at every angle — pure density
-contrast, `(1.5 − 1.027)/(1.5 + 1.027)` against the 1.027 g/cm³ water every
-deck writes (`0.2` in a textbook that takes ρ_w = 1; pass
-`Environment(water_density=1.0)` or `bottom_loss_curve(..., water_density=1.0)`
-to reproduce one). A clay seabed is close to an anechoic termination, and a
+is no critical angle at all and `|R| = 0.2` at every angle — pure density
+contrast, `(1.5 − 1)/(1.5 + 1)` in Jensen et al. Table 1.3's ratio `ρ_b/ρ_w`,
+which the preset carries against the 1.027 g/cm³ water every deck writes (its
+stored density is `1.5 × 1.027 = 1.541` g/cm³). A seabed typed in as an
+absolute density is read against that same water: `density=1.5` gives
+`(1.5 − 1.027)/(1.5 + 1.027) = 0.19`. A clay seabed is close to an anechoic termination, and a
 shallow channel over clay barely propagates.
 
 Sonar-equation work wants this as a loss rather than a ratio:
 `BL(θ) = −20 log₁₀|R(θ)|` is the bottom loss in dB per bounce, which is the unit
 the [OASES](oases.md) page plots. The catalogue spans it: at 10° grazing, sand
-gives up 0.7 dB per bounce and clay 14.4 dB. Note that sand's advantage is a
+gives up 0.7 dB per bounce and clay 13.9 dB. Note that sand's advantage is a
 low-angle one — by 24°, just under its critical angle, it is already losing
-2.1 dB.
+2.0 dB.
 
 No preset is *slower* than the water, and a slow bottom behaves differently
 again: it has no critical angle at all, and instead an **intromission angle**
@@ -364,7 +364,7 @@ The layer is an etalon: part of the wave reflects off the water/sand interface
 and part off the sand/granite interface, and the two returns interfere. The
 round-trip phase through the layer is `2 (ω/c_layer) h sin θ_layer`, and where
 the two returns arrive out of step the reflection is suppressed — here at 34°
-and 60°, where `|R|` drops to 0.16 and 0.60. The nulls are not evenly spaced in
+and 60°, where `|R|` drops to 0.17 and 0.60. The nulls are not evenly spaced in
 that round-trip phase — 285° at the first, 578° at the second — because the
 granite's own reflection phase is swinging with angle too, and they are not
 perfect cancellations, because the two returns do not have equal amplitude.
@@ -387,7 +387,7 @@ R = np.empty((theta.size, freqs.size))
 for j, f in enumerate(freqs):
     source = uacpy.Source(depths=25.0, frequencies=float(f))
     rc = Bounce(**GRID).run(env, source, PROBE)
-    R[:, j] = np.interp(theta, rc.theta, rc.R)
+    R[:, j] = np.interp(theta, rc.angles, rc.magnitude)
 
 im = ax.pcolormesh(freqs, theta, R, shading='nearest', cmap='viridis',
                    vmin=0.0, vmax=1.0)
@@ -432,7 +432,7 @@ single-halfspace `.env` and cannot represent a layer stack. When `env.bottom`
 is layered, uacpy runs Bounce first, writes the `.brc` table, and hands Bellhop
 that table as its bottom boundary. (A non-layered elastic half-space never
 routes — bellhop.f90 evaluates its exact acousto-elastic reflection
-coefficient natively.) You get a `UserWarning` saying so, because BOUNCE
+coefficient natively.) You get a `FallbackWarning` saying so, because BOUNCE
 is range-independent: the bottom is collapsed to one representative column
 first. `Bellhop(auto_bounce=False)` opts out and collapses the stack to a
 single half-space instead.
@@ -500,8 +500,8 @@ propagation-facing table but not for inspecting normal incidence.
 
 **The angle grid is uniform in `cos θ`, not in θ.** It comes from a uniform
 sweep in horizontal slowness, which means it is *coarse where you probably care
-most*: with `rmax=10 km` the spacing is 0.9° below 5° grazing and 0.04° near
-normal incidence. Raise `rmax` (or set `n_angles`) if the sub-critical region
+most*: with `rmax_m=10 km` the spacing is 0.9° below 5° grazing and 0.04° near
+normal incidence. Raise `rmax_m` (or set `n_angles`) if the sub-critical region
 looks under-sampled. You cannot specify the angles directly — OASR can.
 
 **A bare half-space's phase is referenced at the seafloor — no workaround
@@ -531,17 +531,21 @@ the critical angle is *larger* than a surface-speed estimate suggests.
 
 **Files only exist if you pin `work_dir`.** Without it, uacpy uses a temp
 directory and wipes it when `run()` returns; `metadata['brc_file']` is not
-populated with a stale path. The in-memory `.theta` / `.R` / `.phi` are always
+populated with a stale path. The in-memory `.angles` / `.magnitude` / `.phase` are always
 there.
 
-**A `Receiver` is required but barely used.** `run()` keeps the uniform
-signature every model has; Bounce reads only `receiver.range_max`, and only when
-`rmax=None`. Pin `rmax` and the receiver becomes a formality.
+**A `Receiver` is optional once the table is pinned.** `run()` keeps the
+uniform signature every model has; Bounce reads only `receiver.range_max`, and
+only when both `rmax_m` and `n_angles` are `None`. Pin either one and
+`run(env, source, None)` is accepted; with neither, `receiver=None` raises
+`ConfigurationError`.
 
 **Range-dependent bottoms are collapsed, not refused.** You get the median
-column and a `UserWarning`. If the bottom genuinely varies along your track,
+column and a `FallbackWarning`. If the bottom genuinely varies along your track,
 `R(θ)` is the wrong abstraction and you want [RAM](ram.md) or
 [Bellhop](bellhop.md) with a range-dependent bottom.
+
+Bounce's measured agreement with closed forms and the published benchmarks, and its known limits there, are on the [validation page](validation.md).
 
 ---
 

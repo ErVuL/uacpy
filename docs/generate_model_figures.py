@@ -12,6 +12,10 @@ Usage
     python docs/generate_model_figures.py bellhop ram  # only these modules
     python docs/generate_model_figures.py --list       # show what exists
 
+A filter that names a module exactly selects that module alone; otherwise it
+selects every module whose name contains it. ``UACPY_FIGURE_OUTPUT=DIR``
+writes every PNG into ``DIR`` instead of ``docs/``.
+
 Exit status is non-zero if any figure fails, so this doubles as a check that
 every documented example still runs. Requires the native binaries
 (``./install.sh``) for the model pages.
@@ -40,14 +44,14 @@ def discover(filters):
     """Module name -> imported module, for every figure_scripts submodule."""
     import figure_scripts
 
+    names = [info.name for info in pkgutil.iter_modules(figure_scripts.__path__)
+             if not info.name.startswith('_')]
     found = {}
-    for info in pkgutil.iter_modules(figure_scripts.__path__):
-        if info.name.startswith('_'):
+    for name in names:
+        if filters and not any(
+                f == name or (f not in names and f in name) for f in filters):
             continue
-        if filters and not any(f in info.name for f in filters):
-            continue
-        found[info.name] = importlib.import_module(
-            f'figure_scripts.{info.name}')
+        found[name] = importlib.import_module(f'figure_scripts.{name}')
     return dict(sorted(found.items()))
 
 
@@ -86,7 +90,8 @@ def main(argv=None) -> int:
             try:
                 fig = builder()
                 path = _common.save(fig, stem, guide=guide)
-                rel = path.relative_to(REPO_ROOT)
+                rel = (path.relative_to(REPO_ROOT)
+                       if path.is_relative_to(REPO_ROOT) else path)
                 print(f'  ok   {rel}  ({time.time() - t0:.1f}s)')
             except Exception:
                 failed += 1

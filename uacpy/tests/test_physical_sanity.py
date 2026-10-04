@@ -257,11 +257,12 @@ class TestMunkProfile:
 
     @pytest.fixture
     def munk_receiver(self):
-        """12-point depth grid at one long range — enough to compare
-        median TL near the surface vs the channel vs the bottom."""
+        """12-point depth grid over a 49-51 km window (41 ranges) — enough
+        to compare median TL near the surface vs the channel vs the bottom
+        without one range's interference deciding it."""
         return uacpy.Receiver(
             depths=np.linspace(50.0, 4950.0, 12),
-            ranges=np.array([50000.0]),
+            ranges=np.linspace(49000.0, 51000.0, 41),
         )
 
     @pytest.mark.requires_binary
@@ -269,18 +270,21 @@ class TestMunkProfile:
         self, munk_env, munk_source, munk_receiver,
     ):
         """Bellhop on a canonical Munk profile must trap refracted energy
-        in the sound channel. At 50 km this scenario measures 6.0 dB
-        surface-vs-channel and 6.8 dB bottom-vs-channel; the 4 dB / 2 dB
-        thresholds sit below both so a lost channel or an inverted
-        gradient fails while beam-sampling jitter does not.
+        in the sound channel. Medians over 49-51 km, surface-vs-channel /
+        bottom-vs-channel: 6.73 / 4.45 dB with these 500 hat beams, 5.26-6.99
+        / 3.98-5.30 dB over 250-2000 beams, and RAM 5.82 / 4.21 dB on the
+        same cells. A single range is interference-fragile: at 50 km alone
+        the same beams read 2.27-3.74 dB surface-vs-channel. The 4 dB / 2 dB
+        thresholds sit below every windowed measurement so a lost channel
+        or an inverted gradient fails while beam-sampling jitter does not.
         """
-        bellhop = Bellhop(verbose=False, n_beams=500, alpha=(-25, 25))
+        bellhop = Bellhop(verbose=False, n_beams=500, launch_angles=(-25, 25))
         result = bellhop.run(
             munk_env, munk_source, munk_receiver,
             run_mode=RunMode.COHERENT_TL,
         )
-        tl = np.asarray(result.dB).reshape(-1)
         z = np.asarray(munk_receiver.depths)
+        tl = np.asarray(result.dB).reshape(z.size, -1)
 
         tl_surface = float(np.median(tl[z < 200.0]))
         tl_mid = float(np.median(tl[(z > 800.0) & (z < 3000.0)]))
@@ -320,13 +324,13 @@ class TestInterpolationAccuracy:
 
         # At exact points, should return exact values
         for i, (d, c) in enumerate(ssp_data):
-            c_interp = env.get_sound_speed(d)
+            c_interp = env.ssp.sound_speed_at(d)
             assert np.abs(c_interp - c) < 1e-6, f"At depth {d}, expected {c}, got {c_interp}"
 
     def test_environment_ssp_interpolation_bounds(self):
         """Interpolated SSP values stay within the tabulated range.
 
-        ``Environment.get_sound_speed`` is linear (``np.interp``), so an
+        ``SoundSpeedProfile.sound_speed_at`` is linear (``np.interp``), so an
         interpolant can never overshoot its two bracketing samples; the
         ±1 m/s slack is float noise, not headroom for a spline.
         """
@@ -343,7 +347,7 @@ class TestInterpolationAccuracy:
         # Interpolate at intermediate points
         test_depths = np.linspace(0, 100, 101)
         for d in test_depths:
-            c = env.get_sound_speed(d)
+            c = env.ssp.sound_speed_at(d)
             # Should be within min/max of original data
             assert min(speeds) - 1 <= c <= max(speeds) + 1, \
                 f"Interpolated speed {c} at depth {d} outside bounds [{min(speeds)}, {max(speeds)}]"
@@ -360,30 +364,30 @@ class TestSoundSpeedEquations:
         # 85-101) evaluates to that value from the same published
         # coefficients. abs=0.02 is the rounding of the quoted 2-dp figure;
         # T=0 needs no ITS-90/IPTS-68 care because the scales meet there.
-        assert sound_speed_unesco(0.0, 35.0, 0.0) == pytest.approx(1449.14, abs=0.02)
+        assert sound_speed_unesco(0.0, 35.0, pressure_dbar=0.0) == pytest.approx(1449.14, abs=0.02)
 
     def test_unesco_agrees_with_mackenzie_at_surface(self):
         from uacpy.core.acoustics import sound_speed_unesco, sound_speed_mackenzie
         # the two independent surface formulas agree to < 0.2 m/s
         for t, s in [(5, 35), (15, 35), (25, 36)]:
-            assert sound_speed_unesco(t, s, 0.0) == pytest.approx(sound_speed_mackenzie(t, s, 0.0), abs=0.2)
+            assert sound_speed_unesco(t, s, pressure_dbar=0.0) == pytest.approx(sound_speed_mackenzie(t, s, 0.0), abs=0.2)
 
     def test_delgrosso_matches_unesco_within_documented_difference(self):
         from uacpy.core.acoustics import sound_speed_unesco, sound_speed_delgrosso
         # Del Grosso and UNESCO agree to < 1 m/s over realistic profiles; the
         # small residual grows with depth (UNESCO overpredicts, Dushaw 1993).
         for t, s, p in [(25, 35, 0), (15, 35.5, 600), (4, 34.8, 3000), (1.5, 34.7, 8000)]:
-            assert sound_speed_delgrosso(t, s, p) == pytest.approx(
-                sound_speed_unesco(t, s, p), abs=1.0)
+            assert sound_speed_delgrosso(t, s, pressure_dbar=p) == pytest.approx(
+                sound_speed_unesco(t, s, pressure_dbar=p), abs=1.0)
         # near-identical at the surface
-        assert sound_speed_delgrosso(15, 35, 0) == pytest.approx(
-            sound_speed_unesco(15, 35, 0), abs=0.05)
+        assert sound_speed_delgrosso(15, 35, pressure_dbar=0) == pytest.approx(
+            sound_speed_unesco(15, 35, pressure_dbar=0), abs=0.05)
 
     def test_monotonic_increase_with_each_variable(self):
         from uacpy.core.acoustics import sound_speed_unesco as c
-        assert c(20, 35, 0) > c(10, 35, 0)        # temperature
-        assert c(15, 38, 0) > c(15, 32, 0)        # salinity
-        assert c(15, 35, 5000) > c(15, 35, 0)     # pressure
+        assert c(20, 35, depth=0) > c(10, 35, depth=0)          # temperature
+        assert c(15, 38, depth=0) > c(15, 32, depth=0)          # salinity
+        assert c(15, 35, depth=5000) > c(15, 35, depth=0)       # depth
 
 
 class TestPekerisRoot:

@@ -5,8 +5,12 @@ import warnings
 import numpy as np
 import pytest
 
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import (
+    ConfigurationError, DataFetchError, ProvenanceWarning,
+)
+from uacpy.core.geo import great_circle_km
 from uacpy.data import seaice_local
+from uacpy.tests.conftest import recorded_warnings
 
 
 def test_decode_to_fraction():
@@ -108,8 +112,10 @@ def test_transect_classifies_each_waypoint_from_its_own_cell(monkeypatch):
     g = seaice_local._GRID['N']
 
     class _LatBandTF:
-        def transform(self, lon, lat):
-            row = 1 if lat >= 85.25 else 3
+        def transform(self, a, b, direction=None):
+            if direction == 'INVERSE':       # a cell centre: its band's latitude
+                return 0.0, (85.5 if b > g['y0'] - 2 * g['px'] else 85.0)
+            row = 1 if b >= 85.25 else 3
             return g['x0'] + 3.5 * g['px'], g['y0'] - (row + 0.5) * g['px']
 
     north = np.zeros((12, 5, 6), dtype=np.float32)
@@ -119,8 +125,10 @@ def test_transect_classifies_each_waypoint_from_its_own_cell(monkeypatch):
              'N': north, 'S': np.zeros((12, 5, 6), dtype=np.float32)}
     monkeypatch.setattr(seaice_local, '_model', lambda: model)
 
-    r, c = seaice_local.fetch_sea_ice_concentration_transect(
+    track = seaice_local.fetch_sea_ice_concentration_transect(
         (86.0, 0.0), (85.0, 0.0), month=3, n_points=4)
+    r, c = track.ranges, track.data
+    assert track.provenance.source.id == 'seaice'
     assert r.shape == (4,) and c.shape == (4,)
     assert r[0] == 0.0 and np.all(np.diff(r) > 0)
     assert c.tolist() == pytest.approx([0.9, 0.9, 0.9, 0.05])
@@ -128,7 +136,7 @@ def test_transect_classifies_each_waypoint_from_its_own_cell(monkeypatch):
     # 15 % ice-edge → elastic canopy, 0.05 < it → open-water vacuum.
     surf = seaice_local.sea_ice_surface_transect(
         (86.0, 0.0), (85.0, 0.0), month=3, n_points=4)
-    assert [bp.acoustic_type for bp in surf.properties] == \
+    assert [bp.acoustic_type for bp in surf.nodes] == \
         ['half-space', 'half-space', 'half-space', 'vacuum']
 
 
@@ -141,6 +149,8 @@ def test_sea_ice_surface_transect(synthetic_model):
     assert isinstance(surf, Surface)
     assert surf.n_ranges == 4 and surf.is_elastic
     assert surf.at(range=0).acoustic_type == 'half-space'
+    assert {p.source.id for p in surf.data_sources} == {'seaice'}
+    assert [p.range_m for p in surf.data_sources] == list(surf.ranges)
 
 
 def test_auto_transect_places_ice_edge_at_observed_boundary(monkeypatch):
@@ -154,16 +164,17 @@ def test_auto_transect_places_ice_edge_at_observed_boundary(monkeypatch):
     probe_n = 200
     step_m = length_m / (probe_n - 1)
 
-    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+    def fake_transect(start, end, *, date=None, month=None, n_points=6,
+                      max_distance_km=None):
         r = np.linspace(0.0, length_m, n_points)
-        return r, np.where(r < edge_m, 0.9, 0.0)
+        return _track(r, np.where(r < edge_m, 0.9, 0.0))
 
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
                         fake_transect)
     surf = seaice_local.sea_ice_surface_transect(
         (85.0, 0.0), (60.0, 0.0), month=3, max_points=probe_n)
     rr = np.asarray(surf.ranges, dtype=float)
-    kinds = [bp.acoustic_type for bp in surf.properties]
+    kinds = [bp.acoustic_type for bp in surf.nodes]
     assert rr[0] == 0.0 and rr[-1] == pytest.approx(length_m)
     assert kinds[0] == 'half-space' and kinds[-1] == 'vacuum'
     # Nearest-node reconstruction transitions midway between adjacent kept
@@ -181,9 +192,10 @@ def test_an_explicit_count_above_max_points_is_capped_with_a_warning(
         monkeypatch):
     seen = {}
 
-    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+    def fake_transect(start, end, *, date=None, month=None, n_points=6,
+                      max_distance_km=None):
         seen['n_points'] = n_points
-        return np.linspace(0.0, 1.0e6, n_points), np.full(n_points, 0.9)
+        return _track(np.linspace(0.0, 1.0e6, n_points), np.full(n_points, 0.9))
 
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
                         fake_transect)
@@ -196,8 +208,9 @@ def test_an_explicit_count_above_max_points_is_capped_with_a_warning(
 def test_auto_transect_collapses_a_uniform_zone_to_one_node(monkeypatch):
     """A single run (ice everywhere) still collapses to one range-independent
     node — two identical columns would read as a range-dependent surface."""
-    def fake_transect(start, end, *, date=None, month=None, n_points=6):
-        return np.linspace(0.0, 1.0e6, n_points), np.full(n_points, 0.9)
+    def fake_transect(start, end, *, date=None, month=None, n_points=6,
+                      max_distance_km=None):
+        return _track(np.linspace(0.0, 1.0e6, n_points), np.full(n_points, 0.9))
 
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
                         fake_transect)
@@ -234,7 +247,9 @@ def test_fetch_sea_ice_surface(synthetic_model):
     # 0.7 at the March pixel >= threshold -> ice. June's unobserved pixel takes
     # its 0.8 neighbour, so it is ice too. September has nothing observed
     # anywhere -> inland -> raises.
-    assert seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=3) is not None
+    ice = seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=3)
+    assert [(p.source.id, p.requested_point) for p in ice.data_sources] == [
+        ('seaice', (85.0, 0.0))]
     assert seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=6) is not None
     with pytest.raises(DataFetchError, match='inland'):
         seaice_local.fetch_sea_ice_surface((85.0, 0.0), month=9)
@@ -293,15 +308,15 @@ def test_a_partial_climatology_says_how_thin_it_is(tmp_path, monkeypatch):
 
 
 def test_sea_ice_surface_transect_warns_once_for_no_data_waypoints(monkeypatch):
-    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+    def fake_transect(start, end, *, date=None, month=None, n_points=6,
+                      max_distance_km=None):
         conc = np.full(n_points, 0.9)
         conc[:2] = np.nan                      # land clipped along the track
-        return np.linspace(0.0, 1.0e5, n_points), conc
+        return _track(np.linspace(0.0, 1.0e5, n_points), conc)
 
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
                         fake_transect)
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
+    with recorded_warnings() as rec:
         surf = seaice_local.sea_ice_surface_transect(
             (85.0, 0.0), (60.0, 0.0), month=3, n_points=8)
     hits = [w for w in rec if 'no NSIDC concentration' in str(w.message)]
@@ -313,14 +328,14 @@ def test_sea_ice_surface_transect_warns_once_for_no_data_waypoints(monkeypatch):
 
 
 def test_sea_ice_surface_transect_with_full_coverage_does_not_warn(monkeypatch):
-    def fake_transect(start, end, *, date=None, month=None, n_points=6):
+    def fake_transect(start, end, *, date=None, month=None, n_points=6,
+                      max_distance_km=None):
         conc = np.where(np.arange(n_points) < n_points // 2, 0.9, 0.0)
-        return np.linspace(0.0, 1.0e5, n_points), conc
+        return _track(np.linspace(0.0, 1.0e5, n_points), conc)
 
     monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration_transect',
                         fake_transect)
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
+    with recorded_warnings() as rec:
         seaice_local.sea_ice_surface_transect(
             (85.0, 0.0), (60.0, 0.0), month=3, n_points=8)
     assert not [w for w in rec if 'no NSIDC concentration' in str(w.message)]
@@ -328,7 +343,9 @@ def test_sea_ice_surface_transect_with_full_coverage_does_not_warn(monkeypatch):
 
 def test_sea_ice_names_the_cell_it_substituted(monkeypatch):
     """The hop to a neighbouring observed cell is up to 2 cells (50 km) and
-    changes the answer, so it warns like ``sound_speed._nearest_wet_column``."""
+    changes the answer, so the offset rule warns with the cell it read and
+    the km, one cell past the own cell's half-diagonal; a
+    ``max_distance_km`` below the hop refuses it."""
     pytest.importorskip('pyproj')
     from uacpy.data import seaice_local
     grid = np.full((12, 5, 5), np.nan, dtype=np.float32)
@@ -339,9 +356,22 @@ def test_sea_ice_names_the_cell_it_substituted(monkeypatch):
     monkeypatch.setattr(seaice_local, '_model', lambda: model)
     monkeypatch.setattr(seaice_local, '_rowcol',
                         lambda m, hemi, lat, lon: (2, 2))
-    with pytest.warns(UserWarning, match='nearest observed cell'):
-        conc = seaice_local.fetch_sea_ice_concentration((85.0, 0.0), month=3)
+    here = seaice_local._cell_center(model, 'N', 2, 2)
+    there = seaice_local._cell_center(model, 'N', 2, 3)
+    hop = float(great_circle_km(*here, *there))
+    assert hop > seaice_local._cell_half_diagonal_km(model, 'N', 2, 2)
+    with pytest.warns(ProvenanceWarning,
+                      match=rf'the cell centred .* {hop:.1f} km'):
+        conc, prov = seaice_local.sea_ice_at(here, month=3)
     assert conc == pytest.approx(0.8)
+    assert prov.data_point == pytest.approx(there)
+    assert prov.offset_km == pytest.approx(hop)
+    with pytest.raises(DataFetchError, match='max_distance_km'):
+        seaice_local.fetch_sea_ice_concentration(here, month=3,
+                                                 max_distance_km=hop - 0.1)
+    with pytest.warns(ProvenanceWarning):
+        assert seaice_local.fetch_sea_ice_concentration(
+            here, month=3, max_distance_km=hop + 0.1) == pytest.approx(0.8)
 
 
 def test_sea_ice_direct_hit_is_silent(monkeypatch):
@@ -354,10 +384,13 @@ def test_sea_ice_direct_hit_is_silent(monkeypatch):
     monkeypatch.setattr(seaice_local, '_model', lambda: model)
     monkeypatch.setattr(seaice_local, '_rowcol',
                         lambda m, hemi, lat, lon: (2, 2))
+    here = seaice_local._cell_center(model, 'N', 2, 2)
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         assert seaice_local.fetch_sea_ice_concentration(
-            (85.0, 0.0), month=3) == pytest.approx(0.8)
+            here, month=3) == pytest.approx(0.8)
+        _conc, prov = seaice_local.sea_ice_at(here, month=3)
+    assert prov.offset_km == pytest.approx(0.0, abs=1e-6)
 
 
 def test_sea_ice_canopy_roughness_is_opt_in():
@@ -428,7 +461,7 @@ def test_a_built_seaice_cache_records_its_years(tmp_path, monkeypatch):
 
 def test_the_seaice_period_is_read_back_from_the_cache(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    seaice_local._MODEL.clear()
+    seaice_local._model.memo.clear()
     dest = tmp_path / 'seaice'
     dest.mkdir(parents=True)
     grids = {h: np.full((12, 4, 4), 0.6, dtype=np.float32) for h in ('N', 'S')}
@@ -442,7 +475,7 @@ def test_the_seaice_period_is_read_back_from_the_cache(tmp_path, monkeypatch):
 def test_a_seaice_cache_without_a_period_loads_its_grids(tmp_path, monkeypatch):
     """Old caches carry no ``years``. Absent is not an error."""
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    seaice_local._MODEL.clear()
+    seaice_local._model.memo.clear()
     dest = tmp_path / 'seaice'
     dest.mkdir(parents=True)
     grids = {h: np.full((12, 4, 4), 0.6, dtype=np.float32) for h in ('N', 'S')}
@@ -457,7 +490,7 @@ def test_the_environment_provenance_carries_the_seaice_vintage(tmp_path,
                                                                monkeypatch):
     from uacpy.data.environment import _climatology_vintage
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    seaice_local._MODEL.clear()
+    seaice_local._model.memo.clear()
     dest = tmp_path / 'seaice'
     dest.mkdir(parents=True)
     grids = {h: np.full((12, 4, 4), 0.6, dtype=np.float32) for h in ('N', 'S')}
@@ -474,3 +507,15 @@ def test_sea_ice_grid_names_the_bad_month_before_the_bad_hemisphere(monkeypatch)
         seaice_local.sea_ice_grid(13, hemi='X')
     with pytest.raises(ConfigurationError, match="hemi must be 'N'/'S'"):
         seaice_local.sea_ice_grid(3, hemi='X')
+
+
+def _track(ranges, concentration):
+    """A concentration transect, as fetch_sea_ice_concentration_transect
+    returns it (the waypoints play no part in the surface built from it)."""
+    from uacpy.data import SOURCES, AlongTrack, DataProvenance
+    n = len(ranges)
+    return AlongTrack(ranges=ranges, lats=np.zeros(n), lons=np.zeros(n),
+                      data=concentration, unit='1',
+                      quantity='sea_ice_concentration',
+                      provenance=DataProvenance(source=SOURCES['seaice']))
+

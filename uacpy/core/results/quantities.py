@@ -14,27 +14,36 @@ a quantity here is what makes a new Field kind a *data* edit rather than a
 hunt through the plotters.
 
 Deliberately **not** modelled: unit conversion, dimensional analysis, or a
-per-unit "which way is louder" flag. Two of the four quantities are inverted —
+per-unit "which way is louder" flag. Two of the registered quantities are
+inverted —
 transmission loss (``pressure`` in dB) and OASS reverberation, both *losses*,
 so less of either is louder — and the two documented cases in
 :meth:`Field.max` are cheaper than a field that would read ``+1`` in every row
 but two.
 
-The reverberation direction is not a convention uacpy chose. OASES writes
-``-10·log10 E[|p_scat|²]`` in ``REVINT`` (``oassun26.f:853-858``): ``CVMAGS``
-squares an accumulator that is already an intensity, ``VALG10`` takes log10,
-and ``VSMUL(-5E0)`` scales it. The leading minus is what makes it a loss, and
-uacpy's reader applies no sign change, so a larger stored number is a *weaker*
-scattered field. Reverberation level is recovered as ``RL = SL - this``.
+The reverberation direction is not a convention uacpy chose. OASS's
+``kind='reverberation'`` data is -10*log10 E[|p_scat|^2], REVINT's dB
+conversion at oassun26.f:853-858, where CVMAGS squares an accumulator that is
+already an intensity, VCLIP floors it at 1e-30, and VALG10 then VSMUL by -5E0
+give the -10*log10 on that intensity. The leading minus makes it a LOSS: a
+larger value is a weaker scattered field, and RL = SL - this; uacpy's reader
+applies no sign change. Not transmission loss, though, so it does not compare
+against a TL field.
 
-``REVRAN``'s block at ``oassun26.f:633-638`` is byte-identical arithmetic on a
-cross-range covariance and is **not** the source of these numbers — it feeds
-the contour branch, not the ``.plt`` uacpy reads. Cite ``REVINT``.
+REVRAN's block at oassun26.f:633-638 is byte-identical arithmetic and is NOT
+this: it accumulates a cross-range covariance and writes CFF(1,1), while
+REVINT writes CFFs, the array unoass21.f:38 equivalences to the XS that
+PLTLOS plots into the .plt uacpy reads. Option 'r' reaches REVINT; REVRAN
+belongs to the capital-'C' CCONTU contour branch (unoass21.f:626-628). OASES
+option letters are case-sensitive: lowercase 'c' sets ICONTU, the
+depth-integrand contours (unoass21.f:602-604), which reach neither routine.
+Cite REVINT.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Mapping
 
 from uacpy.core.exceptions import ConfigurationError
@@ -87,10 +96,12 @@ QUANTITIES: Mapping[str, Quantity] = {
         # A matched-field / range-Doppler ambiguity surface: correlation
         # power against a hypothesis, normalised by its own maximum, so the
         # peak is 0 dB by construction and every cell says how far under the
-        # best hypothesis it sits. dB only, like reverberation — the linear
-        # form carries no information the dB one does not, and reading it in
-        # dB re max is what makes sidelobes visible. It is a LEVEL, not a
-        # loss (more of it is a better match), which is what ``_LOSS_KINDS``
+        # best hypothesis it sits. dB only, like reverberation: the peak
+        # power it is relative to is kept on the Field (Field.reference), so
+        # the linear surface is reference * 10**(dB / 10) and a linear unit
+        # would be a second spelling of the same values; reading it in dB re
+        # max is what makes sidelobes visible. It is a LEVEL, not a
+        # loss (more of it is a better match), which is what ``LOSS_KINDS``
         # leaving it out already says.
         Quantity('ambiguity', {'dB': 'Normalised power (dB re max)'}),
         # Time-integrated squared pressure over one transient — Abraham's
@@ -107,6 +118,13 @@ QUANTITIES: Mapping[str, Quantity] = {
         # received-level map are both dB re 1 µPa and are not the same
         # reading of the same field. A LEVEL, so more of it is more.
         Quantity('peak_pressure', {'dB': 'Peak SPL (dB re 1 µPa)'}),
+        # The band-limited impulse response Field.to_time_trace returns when
+        # no source spectrum or waveform is given: sum H(f) e^{2πift} Δf, a
+        # pressure ratio re a unit source at 1 m times hertz, so per second.
+        # Its own quantity because a pressure axis would caption it Pa, and
+        # a unit arrival reads about the bandwidth in value, not 1. Neither
+        # a loss nor a dB quantity.
+        Quantity('impulse_response', {'1/s': 'h(t) (1/s)'}),
     )
 }
 
@@ -138,7 +156,7 @@ def quantity(kind: str) -> Quantity:
         raise ConfigurationError(
             f"unknown Field kind {kind!r}; register it in "
             f"uacpy/core/results/quantities.py. Known kinds: "
-            f"{', '.join(sorted(QUANTITIES))}"
+            f"{', '.join(sorted(QUANTITIES))}."
         ) from None
 
 
@@ -150,5 +168,25 @@ def label(kind: str, unit: str) -> str:
     except KeyError:
         raise ConfigurationError(
             f"{kind!r} is not measured in {unit!r}; "
-            f"valid units: {', '.join(q.units)}"
+            f"valid units: {', '.join(q.units)}."
         ) from None
+
+
+#: The unit of each coordinate name a result uses, what the CF ``units``
+#: attribute of that exported axis says: SI, unsuffixed, angles in degrees
+#: as every angle axis in the package is stored. A name outside the table
+#: (an element index, a mode number) is unitless and written without one.
+COORDINATE_UNITS: Mapping[str, str] = MappingProxyType({
+    'depth': 'm', 'range': 'm', 'source_depth': 'm',
+    'receiver_depth': 'm', 'receiver_range': 'm',
+    'x': 'm', 'y': 'm', 'z': 'm',
+    'frequency': 'Hz', 'time': 's',
+    'angle': 'deg', 'bearing': 'deg',
+    'phase_speed': 'm/s', 'wavenumber': 'rad/m',
+})
+
+
+def coordinate_unit(name: str) -> str:
+    """The unit of coordinate ``name`` (:data:`COORDINATE_UNITS`), or ``''``
+    for a unitless one."""
+    return COORDINATE_UNITS.get(str(name), '')

@@ -19,13 +19,14 @@ actually ran) · env altimetry · SeabedColumn with shear
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.core.exceptions import UnsupportedFeatureError
+from uacpy import UnsupportedFeatureError
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -33,8 +34,10 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 depth, r_max = 100.0, 5000.0
 source = uacpy.Source(depths=50.0, frequencies=100.0)
+# Ranges start at 300 m: closer in, the deepest receivers see direct and
+# surface-reflected paths steeper than the PE's 30° band.
 receiver = uacpy.Receiver(depths=np.linspace(2.0, depth - 2.0, 30),
-                          ranges=np.linspace(200.0, r_max, 40))
+                          ranges=np.linspace(300.0, r_max, 39))
 
 fluid = uacpy.BoundaryProperties(acoustic_type='half-space',
                                  sound_speed=1700.0, density=1.7,
@@ -70,7 +73,7 @@ cases = {
         altimetry=surface),
 }
 
-ram = uacpy.RAM(accuracy=1e-1)
+ram = uacpy.RAM()
 for label, env in cases.items():
     print(f"  {label:28s} → {ram.select_backend(env)}")
 
@@ -87,9 +90,19 @@ except UnsupportedFeatureError as exc:
 
 fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
 for ax, (label, env) in zip(axes, cases.items()):
-    field = ram.run(env, source, receiver,
-                    run_mode=uacpy.RunMode.COHERENT_TL)
-    uacpy.plot_field(field, ax=ax, env=env, vmin=30, vmax=110,
+    # RAM's depth grid at 100 Hz (dz ≈ 0.8 m, from its λ/16 cost floor) is
+    # coarse beside the 3 m corrugation, so ramsurf staircases it by up to a
+    # cell; its notice is printed. Any other warning is shown as usual.
+    with warnings.catch_warnings(record=True) as caught:
+        field = ram.run(env, source, receiver,
+                        run_mode=uacpy.RunMode.COHERENT_TL)
+    for warning in caught:
+        if 'staircased' in str(warning.message):
+            print(f"  noted: {str(warning.message).split(';')[0]}")
+        else:
+            warnings.showwarning(warning.message, warning.category,
+                                 warning.filename, warning.lineno)
+    uacpy.plot.plot_field(field, ax=ax, env=env, vmin=30, vmax=110,
                      title=f"{label}\nbackend={field.backend}")
 fig.tight_layout()
 fig.savefig(OUT / 'example_20_ram_backends.png', dpi=120)

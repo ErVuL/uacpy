@@ -1,0 +1,45 @@
+{
+ "generator": "CMRE janus-c 3.0.5 (WS/janus/reference-main/c), janus-tx/janus-rx, pset 1 (11520 Hz, 4160 Hz), S16 WAV, --stream-amp 0.95 (default)",
+ "fixtures": {
+  "cmre_a_clean.wav": {
+   "packet": "A",
+   "how": "janus-tx --packet-class-id 16 --packet-app-type 0 --packet-app-data 0x2A5A5A5A5 --stream-fs 48000",
+   "read_rate_hz": 48000,
+   "bits": "0011001000010000000000101010010110100101101001011010010110000011"
+  },
+  "cmre_b_clean.wav": {
+   "packet": "B",
+   "how": "janus-tx --packet-class-id 16 --packet-app-type 5 --packet-mobility 1 --packet-forward 1 --packet-app-data 0x123456789 --stream-fs 48000",
+   "read_rate_hz": 48000,
+   "bits": "0011101100010000000101010010001101000101011001111000100100100101"
+  },
+  "cmre_c_doppler.wav": {
+   "packet": "C",
+   "how": "janus-tx --packet-class-id 16 --packet-app-type 9 --packet-app-data 0x3C0FFEE11 --stream-fs 47904 (the WAV header says 47904), read as 48000 Hz: Doppler scale a = 48000/47904 - 1 = 2.004008e-03 (+3.006 m/s at c = 1500)",
+   "read_rate_hz": 48000,
+   "bits": "0011001000010000001001111100000011111111111011100001000101111011"
+  },
+  "cmre_a_noisy.wav": {
+   "packet": "A",
+   "how": "cmre_a_clean.wav + numpy default_rng(124) white noise at 0 dB in-band SNR (4160 Hz band, signal power over the 176-chip frame), rescaled to peak 0.99 when above it",
+   "read_rate_hz": 48000,
+   "bits": "0011001000010000000000101010010110100101101001011010010110000011"
+  }
+ },
+ "uacpy_to_cmre": {
+  "A": {
+   "bits": "0011001000010000000000101010010110100101101001011010010110000011",
+   "janus_rx_bits": "0011001000010000000000101010010110100101101001011010010110000011",
+   "janus_rx_crc_valid": true,
+   "pcm16_sha256": "85098302cc04cb8434c31634e798e4455d56715938470e7886644d2bd27591ec",
+   "how": "janus_modulate(bits, 48000) * 0.95 * 32767, rounded to int16, written as a mono 16-bit WAV (python wave), decoded by janus-rx --stream-fs 48000"
+  },
+  "B": {
+   "bits": "0011101100010000000101010010001101000101011001111000100100100101",
+   "janus_rx_bits": "0011101100010000000101010010001101000101011001111000100100100101",
+   "janus_rx_crc_valid": true,
+   "pcm16_sha256": "725177ad95c365303da7b35ddf389be418fba56b2f4f96497f96af33c3d7df55",
+   "how": "janus_modulate(bits, 48000) * 0.95 * 32767, rounded to int16, written as a mono 16-bit WAV (python wave), decoded by janus-rx --stream-fs 48000"
+  }
+ }
+}

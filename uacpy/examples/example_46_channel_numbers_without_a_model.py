@@ -37,8 +37,8 @@ from uacpy.acoustic_signal import (arrival_transfer_function,
                                    transfer_function_from_impulse_response,
                                    uniform_frequency_step)
 from uacpy.comms import pulse_shaped_taps
-from uacpy.core.bottom import BoundaryProperties
-from uacpy.core.acoustics import (hankel_transform, modal_attenuation,
+from uacpy import BoundaryProperties
+from uacpy.acoustics import (hankel_transform, modal_attenuation,
                                   modal_field, peak_level,
                                   sound_exposure_level, spl,
                                   wavenumber_taper)
@@ -89,7 +89,7 @@ print(f"\nB. df = {df:g} Hz -> the response repeats every "
       f"{delays_s[-1] * 1e3:.0f} ms, so it fits")
 
 # Keep only the paths a 4 ms pulse could overlap, and see what that costs.
-gated = gate_transfer_function(H, freqs, 2.0e-3, origin=0.0)
+gated = gate_transfer_function(H, frequencies=freqs, duration=2.0e-3, origin=0.0)
 band_loss = broadband_propagation_loss(H)
 gated_loss = broadband_propagation_loss(gated)
 # The amplitudes above are RELATIVE (the first path is 1), so these are
@@ -110,7 +110,7 @@ record = 0.8 * envelope * np.sin(2 * np.pi * f_tone * t + 0.7)
 
 print(f"\nC. rms level   {spl(record):7.2f} dB re 1 uPa")
 print(f"   peak level  {peak_level(record):7.2f} dB re 1 uPa")
-print(f"   exposure    {sound_exposure_level(record, 1 / fs):7.2f} "
+print(f"   exposure    {sound_exposure_level(record, fs):7.2f} "
       f"dB re 1 uPa^2 s")
 
 # One tone out of that record, evaluated AT the frequency. Sampling the
@@ -128,7 +128,7 @@ print(f"   nearest-bin instead:  {20 * np.log10(abs(nearest / phasor)):+.3f}"
 
 # ── D. There and back ─────────────────────────────────────────────────────
 # The two array-level transforms are exact inverses of each other.
-t_ir, h = impulse_response_from_transfer_function(H, freqs, 20000.0)
+t_ir, h = impulse_response_from_transfer_function(H, frequencies=freqs, sample_rate=20000.0)
 f_back, H_back = transfer_function_from_impulse_response(
     h, 20000.0, band=(freqs[0], freqs[-1]))
 reference = (np.interp(f_back, freqs, H.real)
@@ -137,8 +137,9 @@ print(f"\nD. H -> h -> H   |ratio| {np.abs(H_back).mean() / np.abs(reference).me
       f"   max|err| {np.abs(H_back - reference).max():.2e}")
 
 # The same arrivals as a modem would see them, through its own pulse.
-tap_times, taps = pulse_shaped_taps(amplitudes, delays_s, 2000.0,
-                                    pulse='rrc', rolloff=0.25, span=8)
+shaped = pulse_shaped_taps(amplitudes, delays_s, 2000.0,
+                           pulse='rrc', rolloff=0.25, span=8)
+tap_times, taps = shaped.delays_s, shaped.taps
 print(f"   as {taps.size} root-raised-cosine taps at 2000 Bd, "
       f"first at {tap_times[0] * 1e3:.1f} ms")
 
@@ -196,8 +197,8 @@ for k_pole, strength in ((0.38, 1.0), (0.30, 0.6)):
 # 0.9698.
 taper = wavenumber_taper(k_grid, freq, 1400.0, 1900.0)
 r_out = np.linspace(200.0, 6000.0, 300)
-p_full = hankel_transform(G_k, k_grid, r_out, atten=0.0)
-p_cut = hankel_transform(G_k * taper, k_grid, r_out, atten=0.0)
+p_full = hankel_transform(G_k, k_grid, r_out, attenuation=0.0)
+p_cut = hankel_transform(G_k * taper, k_grid, r_out, attenuation=0.0)
 print(f"\nF. dk = {k_grid[1] - k_grid[0]:.2e} 1/m -> alias period "
       f"{2 * np.pi / (k_grid[1] - k_grid[0]) / 1e3:.1f} km; "
       f"panel ends at {r_out[-1] / 1e3:.1f} km")
@@ -237,8 +238,13 @@ fig, axes = plt.subplots(2, 2, figsize=(12, 8))
 axes[0, 0].stem(delays_s * 1e3, powers, basefmt=' ')
 axes[0, 0].axvspan(0.0, span99 * 1e3, color='tab:orange', alpha=0.15,
                    label=f'99% energy span {span99 * 1e3:.1f} ms')
-axes[0, 0].axvline(spread * 1e3, color='tab:red', ls='--',
-                   label=f'rms spread {spread * 1e3:.1f} ms')
+# The rms spread is a width about the power-weighted mean delay, not a
+# position: drawn as mean ± spread.
+mean_delay = np.sum(powers * delays_s) / np.sum(powers)
+axes[0, 0].errorbar(mean_delay * 1e3, 0.5 * powers.max(), xerr=spread * 1e3,
+                    fmt='o', color='tab:red', capsize=4,
+                    label=f'mean delay {mean_delay * 1e3:.1f} ms '
+                          f'± rms spread {spread * 1e3:.1f} ms')
 axes[0, 0].set(xlabel='Delay (ms)', ylabel='Power (linear)',
                title='A. A measured power delay profile')
 axes[0, 0].legend(fontsize=8)
@@ -257,7 +263,7 @@ axes[1, 0].plot(t * 1e3, record, lw=0.6)
 axes[1, 0].set(xlabel='Time (ms)', ylabel='Pressure (Pa)',
                title=f'C. A record: rms {spl(record):.1f}, peak '
                      f'{peak_level(record):.1f}, SEL '
-                     f'{sound_exposure_level(record, 1 / fs):.1f} dB')
+                     f'{sound_exposure_level(record, fs):.1f} dB')
 
 axes[1, 1].plot(ranges_m * 1e-3, -20 * np.log10(np.abs(p_lossless[0])),
                 lw=0.9, label='lossless')

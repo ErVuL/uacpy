@@ -6,7 +6,7 @@ estimator, and the subspace MUSIC estimator. Bartlett's beamwidth sets the
 classical resolution limit; the other two are built to beat it.
 
 Uses: acoustic_signal.steering_vectors · sample_covariance ·
-bartlett_spectrum · mvdr_spectrum · music_spectrum
+bartlett · mvdr · music_spectrum
 """
 
 import os
@@ -16,9 +16,8 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
-from uacpy.acoustic_signal import (bartlett_spectrum, music_spectrum,
-                                   mvdr_spectrum, sample_covariance,
-                                   steering_vectors)
+from uacpy.acoustic_signal import (bartlett, music_spectrum, mvdr,
+                                   sample_covariance, steering_vectors)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -43,11 +42,11 @@ data += 0.05 * (rng.standard_normal(data.shape)
 covariance = sample_covariance(data)
 angles = np.linspace(-40, 40, 801)
 replicas = steering_vectors(positions, angles, frequency, c)
-bartlett = bartlett_spectrum(covariance, replicas)
-capon = mvdr_spectrum(covariance, replicas)
+conventional = bartlett(covariance, replicas)
+capon = mvdr(covariance, replicas)
 music = music_spectrum(covariance, replicas, n_sources=2)
 
-for name, spectrum in (('Bartlett', bartlett), ('MVDR', capon),
+for name, spectrum in (('Bartlett', conventional), ('MVDR', capon),
                        ('MUSIC', music)):
     peaks = angles[np.argsort(spectrum)[-2:]]
     print(f"  {name:9s} two strongest bearings: "
@@ -55,7 +54,7 @@ for name, spectrum in (('Bartlett', bartlett), ('MVDR', capon),
           f"(true {true_angles[0]:+.0f}°, {true_angles[1]:+.0f}°)")
 
 fig, ax = plt.subplots(figsize=(11, 6))
-for label, spectrum in (('Bartlett (conventional)', bartlett),
+for label, spectrum in (('Bartlett (conventional)', conventional),
                         ('MVDR / Capon', capon), ('MUSIC', music)):
     ax.plot(angles, 10 * np.log10(spectrum / spectrum.max()), label=label)
 for angle in true_angles:

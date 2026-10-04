@@ -23,9 +23,10 @@ import warnings
 import numpy as np
 import pytest
 
-from uacpy import BoundaryProperties, Environment, Receiver, Source
+from uacpy import Receiver, Source
 from uacpy.models import RAM, Bellhop, Kraken, RunMode, Scooter
 from uacpy.models.oases import OASP
+from uacpy.tests.conftest import make_pekeris
 
 pytestmark = pytest.mark.requires_binary
 
@@ -38,13 +39,8 @@ PHASE_TOL_DEG = 10.0
 
 
 def _pekeris():
-    return Environment(
-        name='phase-pekeris', bathymetry=WATER_DEPTH, ssp=1500.0,
-        bottom=BoundaryProperties(
-            acoustic_type='half-space',
-            sound_speed=1600.0, density=1.5, attenuation=0.5,
-        ),
-    )
+    return make_pekeris(name='phase-pekeris', bathymetry=WATER_DEPTH,
+                        sound_speed=1600.0, density=1.5)
 
 
 def _source(source_type):
@@ -104,8 +100,8 @@ CASES = [
                  id='bellhop-point'),
     pytest.param(lambda: Bellhop(verbose=False, backend='fortran'), 'line',
                  id='bellhop-line'),
-    pytest.param(lambda: RAM(verbose=False, backend='mpiramS'), 'point',
-                 id='ram-mpiramS-point'),
+    pytest.param(lambda: RAM(verbose=False, backend='mpirams'), 'point',
+                 id='ram-mpirams-point'),
     pytest.param(lambda: RAM(verbose=False, backend='ramgeo'), 'point',
                  id='ram-collins-point'),
     pytest.param(lambda: OASP(verbose=False), 'point', id='oasp-point',

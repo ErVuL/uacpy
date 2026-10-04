@@ -40,7 +40,6 @@ import gc
 import os
 import pathlib
 import threading
-import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -48,11 +47,13 @@ import numpy as np
 import pytest
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data import _cache
+from uacpy.data import _cache, _http
 from uacpy.data._netcdf import NetcdfGrid, netcdf_lock
-from uacpy.io.file_manager import FileManager
-from uacpy.models.base import PropagationModel, _PINNED_WORK_DIRS
+from uacpy.models._workspace import FileManager
+from uacpy.models.base import PropagationModel
+from uacpy.models._workspace import _PINNED_WORK_DIRS
 from uacpy.parallel import Job, _reap_scratch_root
+from uacpy.tests.conftest import recorded_warnings
 
 # Threads per race. Small enough to stay quick, large enough that an unguarded
 # check-then-set loses every time.
@@ -139,14 +140,15 @@ def test_threads_racing_a_cold_woa23_handle_open_the_file_once(tmp_path,
     assert len({id(h) for h in handles}) == 1
 
 
-# One row per data memo that used to double-load: the module, its memo dict,
+# One row per data memo that used to double-load: the module, its memo dict
+# (None: the entry is a ``_cache.per_root_memo`` and holds it as ``.memo``),
 # the entry point threads call, and the builder behind it.
 _MEMOS = [
-    ('uacpy.data.emodnet_local', '_INDEX', '_index', '_build_index'),
-    ('uacpy.data.seaice_local', '_MODEL', '_model', '_build_model'),
-    ('uacpy.data.crust1_local', '_MODEL', '_model', '_build_model'),
-    ('uacpy.data.diesing_local', '_MODEL', '_model', '_build_model'),
-    ('uacpy.data.sediment_db', '_SAMPLES', '_samples', '_build_samples'),
+    ('uacpy.data.emodnet_local', None, '_index', '_build_index'),
+    ('uacpy.data.seaice_local', None, '_model', '_build_model'),
+    ('uacpy.data.crust1_local', None, '_model', '_build_model'),
+    ('uacpy.data.diesing_local', None, '_model', '_build_model'),
+    ('uacpy.data.sediment_db', None, '_samples', '_build_samples'),
     ('uacpy.data.wind_local', '_CLIM', '_clim', '_Climatology'),
 ]
 
@@ -160,7 +162,8 @@ def test_threads_racing_a_cold_data_memo_build_it_once(
     import importlib
 
     module = importlib.import_module(module_name)
-    memo = getattr(module, memo_attr)
+    memo = (getattr(module, memo_attr) if memo_attr
+            else getattr(module, entry_attr).memo)
     builder = _CountingBuilder()
     monkeypatch.setattr(module, builder_attr, builder)
     # wind_local resolves the cached file before it memoises, so the dataset
@@ -199,7 +202,7 @@ def test_a_failed_memo_build_is_not_cached(tmp_path):
     def factory(p):
         raise OSError('truncated')
 
-    with pytest.raises(DataFetchError):
+    with pytest.raises(DataFetchError, match='is present but unreadable'):
         _cache.cached_grid_at(path, factory, 'globsed')
     assert str(path) not in _cache._GRIDS
 
@@ -389,7 +392,7 @@ def test_concurrent_wind_climatology_reads_never_enter_netcdf_together(
         pathlib.Path(out).write_bytes(b'not a real grid')
         return True
 
-    monkeypatch.setattr(wind_local, 'curl_download', curl_stub)
+    monkeypatch.setattr(_http, 'curl_download', curl_stub)
     monkeypatch.setattr(_netcdf, 'open_netcdf', open_stub)
     caches = [str(tmp_path / f'c{i}') for i in range(8)]
     counter_index = iter(caches)
@@ -469,7 +472,8 @@ def test_a_refusal_names_the_live_thread_that_holds_the_work_dir(tmp_path):
     holder.start()
     try:
         assert claimed.wait(timeout=5.0)
-        with pytest.raises(ConfigurationError) as refusal:
+        with pytest.raises(ConfigurationError,
+                           match='is already in use by thread') as refusal:
             _StubModel(shared)._setup_file_manager()
         message = str(refusal.value)
         assert "thread 'owning-worker'" in message
@@ -589,7 +593,7 @@ def test_a_recycled_thread_ident_does_not_inherit_a_work_dir_claim(tmp_path):
     second.start()
     second.join(timeout=5.0)
 
-    owner, depth = entries[0]
+    owner, depth = entries[0][:2]
     assert owner is second, "the newcomer took the claim in its own name"
     assert depth == 1, "a fresh claim, not a re-entrant second on a stale one"
 
@@ -709,16 +713,21 @@ def test_an_unpinned_work_dir_is_never_claimed(tmp_path):
 # ── F5: kept RAM-backed work dirs are named ──────────────────────────────────
 
 class _TmpfsJobModel:
-    """Job model stand-in carrying only the flags the reaper reads."""
+    """Job model stand-in carrying only the scratch policy the reaper
+    reads."""
 
     def __init__(self, use_tmpfs):
-        self.cleanup = False
-        self.work_dir = None
         self.use_tmpfs = use_tmpfs
+
+    def scratch_policy(self):
+        from uacpy.models._workspace import ScratchPolicy
+        return ScratchPolicy(pinned_dir=None, keeps_files=True,
+                             on_tmpfs=self.use_tmpfs)
 
 
 class _ResultWithFiles:
-    """Result stand-in carrying only the ``*_file`` metadata the reaper reads."""
+    """Result stand-in carrying only the ``work_dir`` metadata the reaper
+    reads."""
 
     def __init__(self, **metadata):
         self.metadata = metadata
@@ -727,13 +736,12 @@ class _ResultWithFiles:
 def _reap(use_tmpfs, scratch_root, results=()):
     jobs = [Job(model=_TmpfsJobModel(use_tmpfs), env=None, source=None,
                 receiver=None)]
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
+    with recorded_warnings() as caught:
         _reap_scratch_root(str(scratch_root), jobs, results)
     return [str(w.message) for w in caught]
 
 
-@pytest.mark.skipif(not FileManager._tmpfs_available(),
+@pytest.mark.skipif(not FileManager.dev_shm_usable(),
                     reason='no writable /dev/shm')
 def test_kept_tmpfs_work_dirs_are_reported_even_though_the_root_is_empty(
         tmp_path):
@@ -744,7 +752,7 @@ def test_kept_tmpfs_work_dirs_are_reported_even_though_the_root_is_empty(
     assert any('use_tmpfs=True' in m for m in messages), messages
 
 
-@pytest.mark.skipif(not FileManager._tmpfs_available(),
+@pytest.mark.skipif(not FileManager.dev_shm_usable(),
                     reason='no writable /dev/shm')
 def test_a_kept_tmpfs_work_dir_is_named_in_the_warning(tmp_path):
     """/dev/shm is shared with every other process, so naming only the root
@@ -752,9 +760,8 @@ def test_a_kept_tmpfs_work_dir_is_named_in_the_warning(tmp_path):
     leftovers warning names its directory outright."""
     scratch_root = tmp_path / 'scratch'
     scratch_root.mkdir()
-    results = [_ResultWithFiles(shd_file='/dev/shm/bellhop_ab12/run.shd',
-                                prt_file='/dev/shm/bellhop_ab12/run.prt'),
-               _ResultWithFiles(mod_file='/dev/shm/kraken_cd34/run.mod')]
+    results = [_ResultWithFiles(work_dir='/dev/shm/bellhop_ab12'),
+               _ResultWithFiles(work_dir='/dev/shm/kraken_cd34')]
     messages = _reap(True, scratch_root, results)
     assert any('/dev/shm/bellhop_ab12' in m for m in messages), messages
     assert any('/dev/shm/kraken_cd34' in m for m in messages), messages
@@ -766,13 +773,13 @@ def test_a_kept_work_dir_outside_tmpfs_is_left_out_of_the_ram_warning(tmp_path):
     scratch root the other warning already covers."""
     from uacpy.parallel import _kept_tmpfs_dirs
 
-    results = [_ResultWithFiles(shd_file=str(tmp_path / 'bellhop_ab12/run.shd')),
-               _ResultWithFiles(shd_file='/dev/shm/bellhop_ef56/run.shd')]
+    results = [_ResultWithFiles(work_dir=str(tmp_path / 'bellhop_ab12')),
+               _ResultWithFiles(work_dir='/dev/shm/bellhop_ef56')]
     assert _kept_tmpfs_dirs(results) == ['/dev/shm/bellhop_ef56']
 
 
 def test_a_result_with_no_output_paths_leaves_the_warning_unnamed(tmp_path):
-    """A job that raised before writing an output has no ``*_file`` metadata,
+    """A job that raised before producing a result has no ``work_dir``,
     so its dir cannot be named; the warning still reports the RAM as held."""
     scratch_root = tmp_path / 'scratch'
     scratch_root.mkdir()
@@ -796,8 +803,7 @@ def test_an_empty_scratch_root_with_no_keepers_is_removed(tmp_path):
     jobs = [Job(model=_TmpfsJobModel(False), env=None, source=None,
                 receiver=None)]
     jobs[0].model.cleanup = True
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
+    with recorded_warnings() as caught:
         removed = _reap_scratch_root(str(scratch_root), jobs)
     assert removed is True
     assert not scratch_root.exists()
@@ -808,7 +814,7 @@ def test_the_fork_reset_drops_inherited_work_dir_claims(tmp_path):
     """A forked child inherits the parent's claims and its lock; both are
     reset, or ``run_parallel(start_method='fork')`` would refuse a directory
     no live thread is using."""
-    from uacpy.models.base import _reset_work_dir_claims
+    from uacpy.models._workspace import _reset_work_dir_claims
 
     if not hasattr(os, 'register_at_fork'):
         pytest.skip('no os.register_at_fork on this platform')
@@ -821,3 +827,50 @@ def test_the_fork_reset_drops_inherited_work_dir_claims(tmp_path):
         assert _StubModel(shared).run('after fork') == 'after fork'
     finally:
         fm.cleanup_work_dir()
+
+
+def test_a_pinned_work_dir_held_by_another_process_is_refused(tmp_path):
+    """RA-CONTRACT-13: the in-memory claim registry cannot see another
+    process, so the claim also takes an advisory flock on the directory; a
+    run in this process into a directory another process holds is refused
+    instead of trading scratch files with it. Released with the claim."""
+    import subprocess
+    import sys
+    fcntl = pytest.importorskip('fcntl')
+    shared = tmp_path / 'shared'
+    shared.mkdir()
+    holder = subprocess.Popen(
+        [sys.executable, '-c',
+         'import fcntl, os, sys, time\n'
+         f'fd = os.open({str(shared)!r}, os.O_RDONLY)\n'
+         'fcntl.flock(fd, fcntl.LOCK_EX)\n'
+         'print("held", flush=True)\n'
+         'sys.stdin.readline()\n'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == 'held'
+        with pytest.raises(ConfigurationError, match='another process'):
+            _StubModel(shared)._setup_file_manager()
+        assert str(shared.resolve()) not in _PINNED_WORK_DIRS
+    finally:
+        holder.stdin.write('\n')
+        holder.stdin.flush()
+        holder.wait(timeout=10)
+    assert _StubModel(shared).run('after') == 'after'
+    fd = os.open(str(shared), os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # released
+    finally:
+        os.close(fd)
+
+
+def test_source_depths_that_print_alike_get_their_own_scratch_dirs():
+    """RA-CONTRACT-17: the per-depth subdirectory names ``:g`` (six
+    significant digits) only while that keeps them apart; 1000.001 and
+    1000.004 m share ``source_depth_1000m``, so both take their full repr
+    and no slab's ``*_file`` paths point at another's files."""
+    from uacpy.models._stacking import _source_depth_subdirs
+    assert _source_depth_subdirs([30.0, 60.0]) == [
+        'source_depth_30m', 'source_depth_60m']
+    names = _source_depth_subdirs([1000.001, 1000.004])
+    assert names == ['source_depth_1000.001m', 'source_depth_1000.004m']

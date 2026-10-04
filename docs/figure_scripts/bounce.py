@@ -17,16 +17,16 @@ from figure_scripts._common import TALL, WIDE, layered_elastic
 
 import uacpy
 from uacpy.models import Bellhop, Bounce, RunMode
-from uacpy.visualization.plots import shared_colorbar
+from uacpy.plot import shared_colorbar
 
 # One angular grid for every figure. ``c_high=1e9`` zeroes BOUNCE's minimum
 # wavenumber, which is what buys coverage all the way down to 0° grazing; a
-# pinned ``rmax`` makes the sample count independent of the receiver.
-GRID = dict(c_low=1400.0, c_high=1e9, rmax=10_000.0)
+# pinned ``rmax_m`` makes the sample count independent of the receiver.
+GRID = dict(c_low=1400.0, c_high=1e9, rmax_m=10_000.0)
 
 # BOUNCE reads no source or receiver geometry. A Receiver is still required by
 # the uniform ``run()`` signature — it is consulted only for ``range_max``,
-# which ``rmax`` above has already pinned.
+# which ``rmax_m`` above has already pinned.
 PROBE = uacpy.Receiver(depths=50.0, ranges=10_000.0)
 
 WATER_SPEED = 1500.0
@@ -74,9 +74,9 @@ def attenuation_ladder():
             acoustic_type='half-space',
             sound_speed=1650.0, density=1.9, attenuation=alpha,
         ))
-        ax.plot(rc.theta, rc.R, style, lw=1.6,
+        ax.plot(rc.angles, rc.magnitude, style, lw=1.6,
                 label=f'α = {alpha:g} dB/λ')
-    theta_c = uacpy.critical_angle(1650.0, WATER_SPEED)
+    theta_c = uacpy.acoustics.critical_angle(1650.0, WATER_SPEED)
     ax.axvline(theta_c, color='0.35', lw=1.0,
                label=f'critical angle {theta_c:.1f}°')
     ax.set_xlim(0.0, 90.0)
@@ -103,11 +103,11 @@ def material_presets():
         bottom = uacpy.BoundaryProperties.from_preset(name)
         rc = reflection(bottom)
         colour = f'C{i}'
-        ax.plot(rc.theta, rc.R, color=colour, lw=1.6,
+        ax.plot(rc.angles, rc.magnitude, color=colour, lw=1.6,
                 label=f'{name} ({bottom.sound_speed:.0f} m/s)')
         if bottom.sound_speed > WATER_SPEED:
-            theta_c = uacpy.critical_angle(bottom.sound_speed, WATER_SPEED)
-            ax.plot([theta_c], [np.interp(theta_c, rc.theta, rc.R)],
+            theta_c = uacpy.acoustics.critical_angle(bottom.sound_speed, WATER_SPEED)
+            ax.plot([theta_c], [np.interp(theta_c, rc.angles, rc.magnitude)],
                     'o', color=colour, ms=5.0)
     ax.set_xlim(0.0, 90.0)
     ax.set_ylim(0.0, 1.05)
@@ -135,11 +135,11 @@ def shear_loss():
     for bottom, label, style in [(fluid, 'fluid (shear dropped)', '--'),
                                  (elastic, 'elastic (c_s = 3000 m/s)', '-')]:
         rc = reflection(bottom)
-        ax_r.plot(rc.theta, rc.R, style, lw=1.6, label=label)
-        ax_p.plot(rc.theta, np.degrees(rc.phi), style, lw=1.6, label=label)
+        ax_r.plot(rc.angles, rc.magnitude, style, lw=1.6, label=label)
+        ax_p.plot(rc.angles, np.degrees(rc.phase), style, lw=1.6, label=label)
 
-    theta_s = uacpy.critical_angle(elastic.shear_speed, WATER_SPEED)
-    theta_p = uacpy.critical_angle(elastic.sound_speed, WATER_SPEED)
+    theta_s = uacpy.acoustics.critical_angle(elastic.shear_speed, WATER_SPEED)
+    theta_p = uacpy.acoustics.critical_angle(elastic.sound_speed, WATER_SPEED)
     for ax in (ax_r, ax_p):
         ax.axvline(theta_s, color='0.35', lw=1.0,
                    label=f'shear critical {theta_s:.0f}°')
@@ -167,8 +167,8 @@ def layered_stack():
     for bottom, label, style in [(bare, 'bare granite', '--'),
                                  (stack, '8 m sand over granite', '-')]:
         rc = reflection(bottom)
-        ax_r.plot(rc.theta, rc.R, style, lw=1.6, label=label)
-        ax_p.plot(rc.theta, np.degrees(rc.phi), style, lw=1.6, label=label)
+        ax_r.plot(rc.angles, rc.magnitude, style, lw=1.6, label=label)
+        ax_p.plot(rc.angles, np.degrees(rc.phase), style, lw=1.6, label=label)
     for ax in (ax_r, ax_p):
         ax.grid(True, alpha=0.3)
         ax.set_xlim(0.0, 90.0)
@@ -197,7 +197,7 @@ def frequency_dependence():
     for j, f in enumerate(freqs):
         source = uacpy.Source(depths=25.0, frequencies=float(f))
         rc = Bounce(**GRID).run(env, source, PROBE)
-        R[:, j] = np.interp(theta, rc.theta, rc.R)
+        R[:, j] = np.interp(theta, rc.angles, rc.magnitude)
 
     fig, ax = plt.subplots(figsize=TALL)
     im = ax.pcolormesh(freqs, theta, R, shading='nearest', cmap='viridis',

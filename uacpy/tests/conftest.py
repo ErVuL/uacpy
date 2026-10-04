@@ -27,13 +27,16 @@ import matplotlib
 
 matplotlib.use("Agg")
 
+import contextlib  # noqa: E402
 import socket  # noqa: E402
 import tempfile  # noqa: E402
+import warnings  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 import uacpy  # noqa: E402
+from pathlib import Path
 
 _HAS_NETWORK = None
 
@@ -142,30 +145,220 @@ def make_pekeris(**overrides):
     return uacpy.Environment(**env_kw)
 
 
-def concrete_model_classes() -> dict:
-    """Every concrete ``PropagationModel`` wrapper on ``uacpy.models``'s
-    public surface, ``{name: class}``.
+def make_halfspace(sound_speed, **kwargs):
+    """A fluid half-space at ``sound_speed`` (m/s), density 1.8 and
+    attenuation 0.3 unless given; every other keyword goes to
+    :class:`uacpy.BoundaryProperties`."""
+    return uacpy.BoundaryProperties(
+        acoustic_type='half-space', sound_speed=sound_speed,
+        density=kwargs.pop('density', 1.8),
+        attenuation=kwargs.pop('attenuation', 0.3), **kwargs)
 
-    Derived rather than listed, and a plain function rather than a fixture so
-    module-level helpers can call it (``from uacpy.tests.conftest import
-    concrete_model_classes``). Every gate over "the set of models" that keeps
-    its own copy of the list is blind to the model it does not know about: a
-    thirteenth wrapper enters ``uacpy.models.__all__`` and the hand-written
-    twelve never notices. ``PropagationModel`` and ``OASES`` are abstract
-    bases, not wrappers, and drop out on ``inspect.isabstract``.
+
+def layered_seabed_column(thickness, speed):
+    """Two sediment layers (``thickness`` then twice it; ``speed`` then
+    ``speed + 50`` m/s; the upper one elastic) over an elastic 1900 m/s
+    half-space."""
+    return uacpy.SeabedColumn(
+        layers=[uacpy.SedimentLayer(thickness=thickness, sound_speed=speed,
+                                    density=1.5, attenuation=0.5,
+                                    shear_speed=400.0, shear_attenuation=1.0),
+                uacpy.SedimentLayer(thickness=2.0 * thickness,
+                                    sound_speed=speed + 50,
+                                    density=1.7, attenuation=0.6)],
+        halfspace=uacpy.BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1900.0, density=2.0,
+            attenuation=0.1, shear_speed=600.0, shear_attenuation=0.5),
+    )
+
+
+def wide_range_dependent_env(n_columns=24, n_bathy=97, r_end=60000.0):
+    """A bottom with many columns under a wavy seafloor with many nodes.
+
+    The two axes deliberately do not line up, so most bathymetry nodes fall
+    between bottom columns and the nearest-column rule actually has to choose.
     """
-    import inspect
+    ranges = np.linspace(0.0, r_end, n_columns)
+    bottom = uacpy.Bottom(
+        columns=[layered_seabed_column(10.0 + 5.0 * (i % 7),
+                                       1650.0 + 10.0 * (i % 11))
+                 for i in range(n_columns)],
+        ranges=ranges)
+    r_bathy = np.linspace(0.0, r_end, n_bathy)
+    z_bathy = 120.0 + 60.0 * np.sin(r_bathy / r_end * 6.0 * np.pi)
+    return uacpy.Environment(
+        name='wide-rd',
+        bathymetry=list(zip(r_bathy.tolist(), z_bathy.tolist())),
+        ssp=1500.0, bottom=bottom)
 
-    import uacpy.models as models
-    from uacpy.models.base import PropagationModel
 
-    found = {}
-    for name in models.__all__:
-        obj = getattr(models, name, None)
-        if (isinstance(obj, type) and issubclass(obj, PropagationModel)
-                and not inspect.isabstract(obj)):
-            found[name] = obj
-    return found
+def range_independent_layered_env():
+    """One ``layered_seabed_column`` under a sloping 60-400 m seafloor."""
+    return uacpy.Environment(
+        name='ri', bathymetry=[(0.0, 60.0), (5000.0, 400.0)],
+        ssp=1500.0, bottom=layered_seabed_column(4.0, 1600.0))
+
+
+def water_density_env(**kw):
+    """A 100-m, 1500 m/s guide named ``'rho'`` over a 1700 m/s half-space of
+    density 1.5; every keyword goes to :class:`uacpy.Environment`."""
+    kw.setdefault('name', 'rho')
+    kw.setdefault('bathymetry', 100.0)
+    kw.setdefault('ssp', 1500.0)
+    kw.setdefault('bottom', uacpy.BoundaryProperties(
+        sound_speed=1700.0, density=1.5, attenuation=0.5))
+    return uacpy.Environment(**kw)
+
+
+@contextlib.contextmanager
+def recorded_warnings():
+    """``warnings.catch_warnings(record=True)`` with ``simplefilter('always')``:
+    yields the list every warning raised inside the block is appended to."""
+    with warnings.catch_warnings(record=True) as rec:
+        warnings.simplefilter('always')
+        yield rec
+
+
+def warning_messages(fn, needle):
+    """Run ``fn`` and return the warning messages containing ``needle``."""
+    with recorded_warnings() as rec:
+        fn()
+    return [str(w.message) for w in rec if needle in str(w.message)]
+
+
+# ── the seams a test stops or watches a run at ──────────────────────────
+#
+# ``launch_spy``, ``stop_at`` and ``stage_spy`` are the one place the suite
+# names the method that starts a binary and the stage hooks of
+# ``PropagationModel``; a test names a stage, so renaming a hook is one edit
+# here.
+
+
+class LaunchReached(Exception):
+    """Raised by the ``launch_spy`` stub: the run reached its binary."""
+
+
+class StageReached(Exception):
+    """Raised by the ``stop_at`` stub: the run reached the stage named in
+    ``args[0]``."""
+
+
+#: The method every engine starts a binary through.
+_LAUNCH_METHOD = '_run_subprocess'
+
+#: The ``PropagationModel`` stage hook each stage name stands for.
+_STAGE_HOOKS = {
+    'project': '_project_environment',   # stage 1
+    'settings': '_resolve_settings',     # stage 3
+    'write': '_write_input',             # stage 4: the deck
+    'launch': '_launch',                 # stage 4: the binary
+    'read': '_read_output',              # stage 4: the binary's output
+    'result': '_to_result',              # stage 5
+}
+
+
+@pytest.fixture
+def launch_spy(monkeypatch):
+    """``launch_spy(target, then=None) -> list``: replace the method that
+    starts a binary on ``target`` (an engine class or instance) with a stub
+    that appends ``(cmd, cwd, kwargs)`` to the returned list and raises
+    :class:`LaunchReached`, or returns ``then(cmd, cwd, **kwargs)`` when
+    ``then`` is given."""
+    def install(target, then=None):
+        calls = []
+
+        def stub(cmd, cwd, **kwargs):
+            calls.append((cmd, cwd, kwargs))
+            if then is None:
+                raise LaunchReached()
+            return then(cmd, cwd, **kwargs)
+
+        if isinstance(target, type):
+            monkeypatch.setattr(
+                target, _LAUNCH_METHOD,
+                lambda self, cmd, cwd, **kwargs: stub(cmd, cwd, **kwargs))
+        else:
+            monkeypatch.setattr(target, _LAUNCH_METHOD, stub)
+        return calls
+    return install
+
+
+@pytest.fixture
+def stop_at(monkeypatch):
+    """``stop_at(target, stage)``: replace the hook of ``stage`` (a key of
+    ``_STAGE_HOOKS``) on ``target`` (an engine class or instance) with a
+    stub that raises ``StageReached(stage)``, so a run stops as it enters
+    that stage."""
+    def install(target, stage):
+        def stub(*args, **kwargs):
+            raise StageReached(stage)
+        monkeypatch.setattr(target, _STAGE_HOOKS[stage], stub)
+    return install
+
+
+@pytest.fixture
+def stage_spy(monkeypatch):
+    """``stage_spy(target, stage) -> list``: wrap the hook of ``stage`` on
+    ``target`` (a class) so each call appends its keyword arguments to the
+    returned list, then runs the hook."""
+    def install(target, stage):
+        name = _STAGE_HOOKS[stage]
+        hook = getattr(target, name)
+        calls = []
+
+        def spy(self, *args, **kwargs):
+            calls.append(kwargs)
+            return hook(self, *args, **kwargs)
+
+        monkeypatch.setattr(target, name, spy)
+        return calls
+    return install
+
+
+# ── the registered engines ──────────────────────────────────────────────
+
+
+def engine_params(value='class'):
+    """One ``pytest.param`` per engine of ``uacpy.models._registry.ENGINES``,
+    in registry order, with the engine's class name as its id and the
+    ``requires_<install>`` markers of the installs its entry declares
+    (``EngineEntry.requires``). The value is the engine class, or its class
+    name when ``value='name'``.
+
+    A plain function rather than a fixture, so a module-level
+    ``parametrize`` can call it (``from uacpy.tests.conftest import
+    engine_params``). A test parametrised over it meets an engine added to
+    the registry on its first run."""
+    from uacpy.models._registry import ENGINES
+
+    params = []
+    for entry in ENGINES.values():
+        marks = [getattr(pytest.mark, f'requires_{install}')
+                 for install in entry.requires]
+        arg = entry.load() if value == 'class' else entry.class_name
+        params.append(pytest.param(arg, marks=marks, id=entry.class_name))
+    return params
+
+
+def engine_names() -> set:
+    """The class names of the registered engines."""
+    from uacpy.models._registry import ENGINES
+    return {entry.class_name for entry in ENGINES.values()}
+
+
+def engine_entry(name):
+    """The registry entry (``EngineEntry``) of the engine whose class is
+    named ``name``."""
+    from uacpy.models._registry import ENGINES
+
+    return next(e for e in ENGINES.values() if e.class_name == name)
+
+
+def build_engine(name, **kwargs):
+    """An instance of the registered engine whose class is named ``name``,
+    built with its registry ``example_kwargs`` and ``kwargs`` (which win)."""
+    entry = engine_entry(name)
+    return entry.load()(**{**dict(entry.example_kwargs), **kwargs})
 
 
 @pytest.fixture
@@ -310,3 +503,55 @@ def elastic_env(elastic_bottom):
         ssp=1500.0,
         bottom=elastic_bottom,
     )
+
+
+# Reference Acoustics-Toolbox SSP files vendored under third_party.
+_AT_REF_DIR = (Path(__file__).resolve().parent.parent /
+               "third_party" / "Acoustics-Toolbox" / "tests")
+
+
+# ── a two-layer water column and a measured absorption table ────────────
+#
+# Warm and salty over cold and fresher, with a 20 m thermocline between the
+# layers: the Francois-Garrison profile the absorption tests of the law, the
+# AT and RAM decks and the engines share.
+
+TWO_LAYER_DEPTHS = np.array([0.0, 40.0, 60.0, 100.0])
+TWO_LAYER_TEMPERATURE = np.array([20.0, 20.0, 8.0, 8.0])
+TWO_LAYER_SALINITY = np.array([35.0, 35.0, 34.0, 34.0])
+
+
+def two_layer_absorption():
+    """The two-layer column as a Francois-Garrison profile (pH 8)."""
+    from uacpy.core.absorption import FrancoisGarrison
+    return FrancoisGarrison(
+        temperature=TWO_LAYER_TEMPERATURE, salinity=TWO_LAYER_SALINITY,
+        pH=8.0, depths=TWO_LAYER_DEPTHS)
+
+
+def two_layer_dB_per_m(frequency, depth):
+    """The formula at ``depth`` with the two-layer water there, by hand."""
+    from uacpy.core.acoustics.attenuation import absorption_francois_garrison
+    t = np.interp(depth, TWO_LAYER_DEPTHS, TWO_LAYER_TEMPERATURE)
+    s = np.interp(depth, TWO_LAYER_DEPTHS, TWO_LAYER_SALINITY)
+    return float(absorption_francois_garrison(frequency, t, s, 8.0,
+                                             depth)) / 1000.0
+
+
+def measured_absorption_table(depths=(0.0, 100.0)):
+    """A measured α(f, z) with no law behind it (``model=None``): 2 depths
+    × 2 frequencies, dB/km."""
+    from uacpy.core.absorption import AbsorptionCoefficient
+    return AbsorptionCoefficient(
+        frequencies=np.array([1000.0, 10000.0]),
+        data=np.array([[0.06, 0.90], [0.04, 0.50]]), units='dB/km',
+        depths=np.asarray(depths, dtype=float))
+
+
+def at_deck_water_rows(deck_text):
+    """``(depth, c, alphaI)`` of every row of an AT deck written as a water
+    SSP row (zero shear and shear attenuation)."""
+    import re
+    rows = re.findall(r'^  (\S+) (\S+) 0\.000000 \S+ (\S+) 0\.000000 /$',
+                      deck_text, flags=re.M)
+    return np.array([[float(v) for v in row] for row in rows])

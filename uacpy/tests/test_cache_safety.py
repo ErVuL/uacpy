@@ -3,7 +3,7 @@
 Two findings, both demonstrated before they were fixed:
 
 * the EMODnet polygon index and the NSIDC sea-ice climatology were **pickles**,
-  so a planted cache file ran arbitrary code through ``fetch_bottom_local`` and
+  so a planted cache file ran arbitrary code through ``fetch_bottom_grainsize`` and
   ``fetch_sea_ice_concentration``. Neither file is ever downloaded — both are
   built locally — so the vector is write access to the cache directory, which a
   shared ``$UACPY_DATA_CACHE`` and a tarball'd working tree both hand over.
@@ -120,7 +120,8 @@ def test_a_leftover_pickle_index_is_refused_with_a_migration_error(
     stale = cache / dataset / module.RETIRED_INDEX_FILE
     stale.write_bytes(pickle.dumps(_Payload(marker)))
 
-    with pytest.raises(ConfigurationError) as excinfo:
+    with pytest.raises(ConfigurationError,
+                       match='is in the retired pickle format') as excinfo:
         module._build_index() if dataset == 'emodnet' else module._build_model()
 
     text = str(excinfo.value)
@@ -148,7 +149,7 @@ def test_a_present_npz_wins_over_a_leftover_pickle(cache):
     poly = shapely.geometry.box(2.0, 54.0, 3.0, 56.0)
     _emodnet_npz(cache / 'emodnet' / emodnet_local.INDEX_FILE,
                  [shapely.to_wkb(poly)], [2])
-    assert emodnet_local.fetch_seabed_local((55.0, 2.5))['folk_5cl'] == 2
+    assert emodnet_local.fetch_emodnet_substrate_local((55.0, 2.5)).folk_class == 2
 
 
 # ── the round-trip the format change rests on ────────────────────────────────
@@ -169,8 +170,8 @@ def test_the_npz_index_round_trips_geometry_codes_and_lookup(cache):
     assert [shapely.to_wkb(g) for g in rebuilt] == wkb        # byte-identical
     assert all(shapely.equals_exact(a, b, 0.0)
                for a, b in zip(polys, rebuilt))
-    assert emodnet_local.fetch_seabed_local((55.0, 2.5))['folk_5cl'] == 2
-    assert emodnet_local.fetch_seabed_local((58.0, 6.0))['folk_5cl'] == 5
+    assert emodnet_local.fetch_emodnet_substrate_local((55.0, 2.5)).folk_class == 2
+    assert emodnet_local.fetch_emodnet_substrate_local((58.0, 6.0)).folk_class == 5
 
 
 def test_the_seaice_npz_round_trips_nan_and_dtype(cache):

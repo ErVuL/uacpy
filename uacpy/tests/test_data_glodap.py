@@ -65,7 +65,7 @@ def full_cache(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
-    sediment_db._SAMPLES.clear()
+    sediment_db._samples.memo.clear()
     _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
@@ -77,18 +77,21 @@ def full_cache(tmp_path, monkeypatch):
 # ── reader ──────────────────────────────────────────────────────────────────
 
 def test_ph_profile_trims_at_seafloor(glodap_cache):
-    depths, ph = glodap_local.fetch_ph_profile((30.5, -40.5))
+    profile = glodap_local.fetch_ph_profile((30.5, -40.5))
+    depths, ph = profile.depths, profile.ph
+    assert profile.ph_scale == 'total'
+    assert profile.provenance.source.id == 'glodap'
     # The deepest (2000 m) level is a NaN fill → trimmed; two finite levels stay.
     assert depths.tolist() == [0.0, 500.0]
     assert ph.tolist() == [pytest.approx(8.10), pytest.approx(8.05)]
 
 
 def test_ph_defaults_to_the_level_nearest_the_column_mid_depth(glodap_cache):
-    # Levels 0 / 500 / 2000 m: the mid-depth 1000 m is nearest the 500 m level,
-    # the row build_francois_garrison takes by default from a T/S column of
-    # the same extent.
+    # Levels 0 / 500 / 2000 m: the mid-depth 1000 m is nearest the 500 m
+    # level.
     point = (31.5, -40.5)
-    depths, ph = glodap_local.fetch_ph_profile(point)
+    profile = glodap_local.fetch_ph_profile(point)
+    depths, ph = profile.depths, profile.ph
     mid = 0.5 * (depths.min() + depths.max())
     assert glodap_local.fetch_ph(point) == glodap_local.fetch_ph(
         point, reference_depth=mid)
@@ -119,14 +122,17 @@ def test_ph_missing_cache_names_install_flag(tmp_path, monkeypatch):
 # ── absorption integration ────────────────────────────────────────────────────
 
 def test_with_absorption_uses_glodap_ph(full_cache):
-    # A cached GLODAP grid replaces the default pH=8.1 with the value at the
-    # Francois-Garrison nominal-row depth (the column mid-depth — the same
-    # level its T/S row comes from; 8.05 here), and stamps 'glodap'
-    # provenance.
+    # A cached GLODAP grid replaces the default pH with its column, as
+    # (depth, pH) pairs on its own levels (0 m 8.10, 500 m 8.05 here, the
+    # column trimmed at the seafloor), on the total scale, and stamps
+    # 'glodap' provenance.
     env = data.fetch_environment((30.5, -40.5), ssp_sources='local',
                                  bottom_sources='grainsize',
                                  with_absorption=True)
-    assert env.absorption.pH == pytest.approx(8.05, abs=0.01)
+    pairs = env.absorption.pH
+    assert pairs.shape[1] == 2 and pairs[0, 0] == 0.0
+    assert pairs[:2, 1] == pytest.approx([8.10, 8.05], abs=1e-6)
+    assert env.absorption.ph_scale == 'total'
     assert 'glodap' in [s.source.id for s in env.data_sources]
 
 
@@ -137,16 +143,16 @@ def test_with_absorption_no_glodap_keeps_default(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
-    sediment_db._SAMPLES.clear()
+    sediment_db._samples.memo.clear()
     _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root)
     _write_sediment(root, deck41=False, ligurian=False)
-    from uacpy.data.absorption import DEFAULT_OCEAN_PH
+    from uacpy.core.constants import REFERENCE_PH
     env = data.fetch_environment((30.5, -40.5), ssp_sources='local',
                                  bottom_sources='grainsize',
                                  with_absorption=True)
-    assert env.absorption.pH == pytest.approx(DEFAULT_OCEAN_PH)
+    assert env.absorption.pH == pytest.approx(REFERENCE_PH)
     assert 'glodap' not in [s.source.id for s in env.data_sources]
 
 
@@ -187,7 +193,7 @@ def test_curl_failure_leaves_no_destination(tmp_path, monkeypatch):
 
 # ── tarball extraction guards ────────────────────────────────────────────────
 
-def test_extract_ph_rejects_decompression_bomb(tmp_path):
+def test_an_archive_member_over_the_size_cap_is_refused_unread(tmp_path):
     import gzip
     import tarfile
     info = tarfile.TarInfo(glodap_local.GLODAP_FILE)
@@ -197,11 +203,12 @@ def test_extract_ph_rejects_decompression_bomb(tmp_path):
         f.write(info.tobuf(tarfile.GNU_FORMAT))
         f.write(b'\0' * 1024)
     with pytest.raises(DataFetchError, match='decompression bomb'):
-        glodap_local._extract_ph(tar_path, tmp_path / 'out.nc')
+        _http.extract_member(tar_path, glodap_local.GLODAP_FILE,
+                             tmp_path / 'out.nc', name='glodap')
     assert not (tmp_path / 'out.nc').exists()
 
 
-def test_extract_ph_non_regular_member_raises(tmp_path):
+def test_an_archive_member_that_is_not_a_regular_file_is_refused(tmp_path):
     import tarfile
     tar_path = tmp_path / 'dir.tar.gz'
     with tarfile.open(tar_path, 'w:gz') as tf:
@@ -209,7 +216,8 @@ def test_extract_ph_non_regular_member_raises(tmp_path):
         info.type = tarfile.DIRTYPE
         tf.addfile(info)
     with pytest.raises(DataFetchError, match='not a regular file'):
-        glodap_local._extract_ph(tar_path, tmp_path / 'out.nc')
+        _http.extract_member(tar_path, glodap_local.GLODAP_FILE,
+                             tmp_path / 'out.nc', name='glodap')
 
 
 def _write_glodap_fillvalue(cache, fill=-999.0):
@@ -252,7 +260,8 @@ def test_fillvalue_levels_are_dropped_not_read_as_ph(tmp_path, monkeypatch):
     _cache.invalidate_grids()
     _write_glodap_fillvalue(root)
 
-    depths, ph = glodap_local.fetch_ph_profile((30.5, -40.5))
+    profile = glodap_local.fetch_ph_profile((30.5, -40.5))
+    depths, ph = profile.depths, profile.ph
     assert np.all(np.isfinite(ph)), f"non-finite pH survived: {ph}"
     assert np.all((ph > 6.0) & (ph < 9.0)), f"implausible pH values: {ph}"
     np.testing.assert_allclose(depths, [0.0, 500.0])

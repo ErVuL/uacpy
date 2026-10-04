@@ -1,64 +1,23 @@
-"""Tests for parallel runs (``uacpy.run_parallel`` / ``Job``) and the
-``model.copy()`` round-trip that knob sweeps rely on."""
+"""Tests for parallel runs (``uacpy.run_parallel`` / ``Job``). The
+``model.copy()`` round trip that knob sweeps rely on, and the check that a
+parallel run returns what a direct run returns, are held for every registered
+engine by ``test_engine_conformance.py``."""
 
 import numpy as np
 import pytest
 
 import uacpy
-from uacpy.models.base import _collect_init_params
 from uacpy.parallel import Job, ParallelResult, run_parallel
-
-CONCRETE_MODELS = [
-    'Bellhop', 'Bounce', 'Kraken',
-    'OASN', 'OASP', 'OASR', 'OAST', 'RAM', 'SPARC', 'Scooter',
-]
+from uacpy.tests.conftest import build_engine, engine_params
 
 
-def _values_equal(a, b):
-    if a is b:
-        return True
-    if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
-        try:
-            return np.array_equal(np.asarray(a), np.asarray(b))
-        except Exception:
-            return False
-    try:
-        return bool(a == b)
-    except Exception:
-        return repr(a) == repr(b)
-
-
-# ── model.copy() round-trip (the invariant knob sweeps depend on) ─────────
-
-@pytest.mark.parametrize('model_name', CONCRETE_MODELS)
-def test_copy_roundtrip_preserves_all_constructor_args(model_name):
-    """``copy()`` must reproduce every stored constructor argument — otherwise
-    a parallel batch would silently run with the wrong configuration."""
-    cls = getattr(uacpy.models, model_name)
-    model = cls()
-    clone = model.copy()
-
-    assert type(clone) is type(model)
-    for name, _default in _collect_init_params(cls):
-        if hasattr(model, name):
-            assert hasattr(clone, name), f"{model_name}.copy() dropped '{name}'"
-            assert _values_equal(getattr(model, name), getattr(clone, name)), (
-                f"{model_name}.copy() changed '{name}': "
-                f"{getattr(model, name)!r} != {getattr(clone, name)!r}"
-            )
-
-
+@pytest.mark.requires_binary
 def test_copy_override_changes_only_target():
     model = uacpy.models.Bellhop(n_beams=100, beam_type='G')
     clone = model.copy(n_beams=777)
     assert clone.n_beams == 777
     assert clone.beam_type == model.beam_type
     assert model.n_beams == 100  # original untouched
-
-
-def test_copy_rejects_unknown_override():
-    with pytest.raises(uacpy.ConfigurationError):
-        uacpy.models.Bellhop().copy(definitely_not_a_param=1)
 
 
 # ── ParallelResult container semantics (no subprocess needed) ────────────────
@@ -94,7 +53,8 @@ def test_parallelresult_collect_and_stack():
     # isel: positional slab selection, parity with stack[i] and at().
     assert stack.isel(depth=0) is stack[0]
     assert stack.isel(depth=1) is stack.at(depth=30.0)   # label 30 → index 1
-    with pytest.raises(uacpy.ConfigurationError):
+    with pytest.raises(uacpy.ConfigurationError,
+                       match='pass exactly the stacking-axis keyword'):
         stack.isel(range=0)                              # wrong (non-stacking) axis
 
 
@@ -104,7 +64,8 @@ def test_parallelresult_stack_all_failed_raises():
         labels=[0], coordinate_name='case',
     )
     assert sr.ok is False
-    with pytest.raises(uacpy.ConfigurationError):
+    with pytest.raises(uacpy.ConfigurationError,
+                       match=r"no successful results to stack \(1 failed\)"):
         sr.stack()
 
 
@@ -122,7 +83,7 @@ def pekeris_env():
 
 
 def test_run_parallel_empty_raises():
-    with pytest.raises(uacpy.ConfigurationError):
+    with pytest.raises(uacpy.ConfigurationError, match='jobs is empty'):
         run_parallel([])
 
 
@@ -134,6 +95,12 @@ def test_run_parallel_shared_pinned_work_dir_raises(tmp_path):
         def __init__(self, work_dir):
             self.work_dir = work_dir
 
+        def scratch_policy(self):
+            from pathlib import Path
+            from uacpy.models._workspace import ScratchPolicy
+            return ScratchPolicy(pinned_dir=Path(self.work_dir),
+                                 keeps_files=True, on_tmpfs=False)
+
     shared = tmp_path / 'shared_scratch'
     jobs = [
         Job(model=_PinnedModel(str(shared)), env='e', source='s', receiver='r'),
@@ -144,16 +111,42 @@ def test_run_parallel_shared_pinned_work_dir_raises(tmp_path):
         run_parallel(jobs)
 
 
-def test_main_is_importable_helper(monkeypatch, tmp_path):
-    """The spawn-safety probe: True only when __main__ is a real file."""
+@pytest.mark.parametrize('name', engine_params('name'))
+def test_every_engine_states_its_scratch_policy_from_its_knobs(
+        name, tmp_path):
+    """``run_parallel`` decides which work dirs a batch leaves behind, and
+    which jobs collide, from ``scratch_policy()``: the pinned ``work_dir``,
+    whether the files are kept (``cleanup=False``, the default for a pinned
+    dir) and ``use_tmpfs``, each read from the knob it names."""
+    from uacpy.models._workspace import ScratchPolicy
+    assert build_engine(name).scratch_policy() == ScratchPolicy(
+        pinned_dir=None, keeps_files=False, on_tmpfs=False)
+    assert build_engine(name, cleanup=False,
+                        use_tmpfs=True).scratch_policy() == ScratchPolicy(
+        pinned_dir=None, keeps_files=True, on_tmpfs=True)
+    pinned = build_engine(name, work_dir=tmp_path)
+    assert pinned.scratch_policy() == ScratchPolicy(
+        pinned_dir=tmp_path, keeps_files=True, on_tmpfs=False)
+    assert build_engine(name, work_dir=str(tmp_path),
+                        cleanup=True).scratch_policy() == ScratchPolicy(
+        pinned_dir=tmp_path, keeps_files=False, on_tmpfs=False)
+
+
+def test_only_a_main_named_by_an_unreadable_file_blocks_the_workers(
+        monkeypatch, tmp_path):
+    """A spawned worker re-runs ``__main__`` only when it names a file, so a
+    REPL / Jupyter / ``python -c`` main (no ``__file__``) and a real ``.py``
+    script both boot; piped stdin (``__file__ == '<stdin>'``) does not."""
     import sys, types
-    from uacpy.parallel import _main_is_importable
+    from uacpy.parallel import _main_cannot_be_reimported
     fake = types.ModuleType('__main__')
     monkeypatch.setitem(sys.modules, '__main__', fake)
-    assert _main_is_importable() is False           # no __file__ (REPL/stdin)
+    assert _main_cannot_be_reimported() is False     # REPL / Jupyter / -c
+    fake.__file__ = '<stdin>'
+    assert _main_cannot_be_reimported() is True      # piped stdin
     f = tmp_path / "m.py"; f.write_text("")
     fake.__file__ = str(f)
-    assert _main_is_importable() is True             # importable .py script
+    assert _main_cannot_be_reimported() is False     # a .py script
 
 
 def test_run_parallel_broken_pool_interactive_message(monkeypatch):
@@ -174,24 +167,34 @@ def test_run_parallel_broken_pool_interactive_message(monkeypatch):
     monkeypatch.setattr(P, 'ProcessPoolExecutor', _DeadPool)
     job = Job(model=object(), env='e', source='s', receiver='r')
 
-    monkeypatch.setattr(P, '_main_is_importable', lambda: False)   # interactive
-    with pytest.raises(uacpy.ConfigurationError, match="interactive session"):
+    monkeypatch.setattr(P, '_main_cannot_be_reimported', lambda: True)  # stdin
+    with pytest.raises(uacpy.ConfigurationError, match="piped stdin"):
         P.run_parallel([job], start_method='spawn')
 
-    # Importable __main__ (a real .py script) and the pool dies before any job
+    # A re-runnable __main__ (a .py script) and the pool dies before any job
     # completes: that is a *startup* death, and for a script the usual cause is
     # a module-level run_parallel with no `if __name__ == "__main__":` guard,
     # so the message must name the guard rather than blame a segfault.
-    monkeypatch.setattr(P, '_main_is_importable', lambda: True)    # real script
+    monkeypatch.setattr(P, '_main_cannot_be_reimported', lambda: False)
     with pytest.raises(uacpy.ConfigurationError, match="__main__") as ei:
         P.run_parallel([job], start_method='spawn')
     assert isinstance(ei.value.__cause__, BrokenProcessPool)       # original kept
 
 
-def test_run_parallel_broken_pool_after_a_job_completes_says_mid_run(monkeypatch):
-    """Once a job has completed, a dead pool really is a mid-run crash."""
+@pytest.mark.parametrize('main_blocks', [False, True],
+                         ids=['script-or-interactive-main', 'stdin-main'])
+def test_run_parallel_broken_pool_after_a_job_completes_says_mid_run(
+        monkeypatch, main_blocks):
+    """Once a worker has booted, a dead pool is a mid-run crash whatever
+    ``__main__`` is, and ``raise_on_error=False`` keeps the finished result."""
     import uacpy.parallel as P
     from concurrent.futures.process import BrokenProcessPool
+    from uacpy.models import _launch
+    # The emulated initializer below also makes this process's launches
+    # single-threaded; monkeypatch puts the flag back at teardown, or every
+    # later test in this pytest process would build pool-worker commands.
+    monkeypatch.setattr(_launch, '_single_threaded_launches',
+                        _launch._single_threaded_launches)
 
     class _OneThenDead:
         """First future succeeds; the pool then breaks."""
@@ -226,18 +229,96 @@ def test_run_parallel_broken_pool_after_a_job_completes_says_mid_run(monkeypatch
         def cancel(self): return True
         def result(self, *a, **k):
             if self._ok:
-                return 'result-object'
+                # What _job_worker hands back: (result, warnings).
+                return 'result-object', []
             raise BrokenProcessPool("pool died")
 
     monkeypatch.setattr(P, 'ProcessPoolExecutor', _OneThenDead)
     monkeypatch.setattr(P, 'as_completed', lambda m: list(m))
-    monkeypatch.setattr(P, '_main_is_importable', lambda: True)
+    # Every __main__ shape: a worker that booted cannot have died of one.
+    monkeypatch.setattr(P, '_main_cannot_be_reimported', lambda: main_blocks)
     jobs = [Job(model=object(), env='e', source='s', receiver='r'),
             Job(model=object(), env='e', source='s', receiver='r')]
-    with pytest.raises(uacpy.ConfigurationError, match="died mid-run"):
+    # A solver that died is a ModelExecutionError, as DOCUMENTATION §4 types
+    # it, so ``except ModelExecutionError`` around a batch catches it.
+    with pytest.raises(uacpy.ModelExecutionError, match="died mid-run") as ei:
         P.run_parallel(jobs, start_method='spawn')
+    assert isinstance(ei.value.__cause__, BrokenProcessPool)
+    assert not isinstance(ei.value, uacpy.ConfigurationError)
+    # The worker ran, so the never-launched sentinel would be false; the
+    # pool reports no exit code, so it is unknown.
+    assert ei.value.return_code is None
+    assert ei.value.return_code != uacpy.ModelExecutionError.NEVER_LAUNCHED
+
+    # raise_on_error=False keeps what finished: the first job's result comes
+    # back and only the job the crash cut off carries the error.
+    out = P.run_parallel(jobs, start_method='spawn', raise_on_error=False)
+    assert out.results == ['result-object', None]
+    assert list(out.errors) == [1]
+    assert isinstance(out.errors[1], uacpy.ModelExecutionError)
+    assert 'died mid-run' in str(out.errors[1])
 
 
+class _KillsItsWorker:
+    """A picklable stand-in model: ``run`` returns its label, or SIGKILLs the
+    worker process running it when the label is ``'die'`` — the shape of a
+    native binary OOM-killed mid-batch."""
+
+    def run(self, env, source, receiver, run_mode=None, **kw):
+        import os
+        import signal
+        if env == 'die':
+            os.kill(os.getpid(), signal.SIGKILL)
+        return env
+
+
+def test_a_worker_killed_mid_batch_under_a_fileless_main_keeps_the_finished_job(
+        monkeypatch):
+    """A REPL / Jupyter / ``python -c`` session has a ``__main__`` with no
+    file. A real spawned pool boots there; when one worker is then killed, the
+    crash is a ``ModelExecutionError`` and ``raise_on_error=False`` returns the
+    job that finished before it."""
+    import sys
+    import types
+    monkeypatch.setitem(sys.modules, '__main__', types.ModuleType('__main__'))
+    jobs = [Job(model=_KillsItsWorker(), env='done', source=None, receiver=None),
+            Job(model=_KillsItsWorker(), env='die', source=None, receiver=None)]
+    out = run_parallel(jobs, n_workers=1, start_method='spawn',
+                       raise_on_error=False)
+    assert out.results[0] == 'done'
+    assert out.results[1] is None
+    assert isinstance(out.errors[1], uacpy.ModelExecutionError)
+    assert not isinstance(out.errors[1], uacpy.ConfigurationError)
+
+
+@pytest.mark.parametrize('module, refused', [('__main__', True),
+                                               ('a_user_module', False)])
+def test_a_model_class_defined_in_an_interactive_main_is_refused_up_front(
+        monkeypatch, module, refused):
+    """Under a REPL / Jupyter / ``python -c`` main, a class defined there is
+    unknown to a spawned worker; ``run_parallel`` names it before any pool
+    starts instead of reporting the worker's death as a crashed binary."""
+    import sys
+    import types
+    import uacpy.parallel as P
+    monkeypatch.setitem(sys.modules, '__main__', types.ModuleType('__main__'))
+
+    class _NoPool:
+        def __init__(self, *a, **k):
+            raise AssertionError('reached the pool')
+    monkeypatch.setattr(P, 'ProcessPoolExecutor', _NoPool)
+    model_cls = type('SessionModel', (), {})
+    model_cls.__module__ = module
+    job = Job(model=model_cls(), env='e', source='s', receiver='r')
+    if refused:
+        with pytest.raises(uacpy.ConfigurationError, match='SessionModel'):
+            P.run_parallel([job], start_method='spawn')
+    else:
+        with pytest.raises(AssertionError, match='reached the pool'):
+            P.run_parallel([job], start_method='spawn')
+
+
+@pytest.mark.requires_binary
 def test_job_defaults():
     j = Job(model=uacpy.models.Bellhop(), env='e', source='s', receiver='r')
     assert j.run_mode is None and j.run_kwargs == {} and j.label is None
@@ -402,6 +483,7 @@ def test_run_parallel_collects_errors(pekeris_env):
     assert len(batch.stack()) == 1
 
 
+@pytest.mark.requires_binary
 def test_copy_onto_a_user_work_dir_does_not_inherit_cleanup(tmp_path):
     """``copy(work_dir=...)`` must not wipe the caller's directory.
 
@@ -435,6 +517,7 @@ def test_copy_onto_a_user_work_dir_does_not_inherit_cleanup(tmp_path):
     assert keep.exists(), "caller's work_dir was wiped by an inherited cleanup"
 
 
+@pytest.mark.requires_binary
 def test_copy_preserves_an_explicit_cleanup_choice(tmp_path):
     """An explicitly requested cleanup=True still survives copy()."""
     d = tmp_path / 'scratch'
@@ -444,11 +527,12 @@ def test_copy_preserves_an_explicit_cleanup_choice(tmp_path):
     assert base2.copy(work_dir=tmp_path / 'b').cleanup is False
 
 
+@pytest.mark.requires_binary
 def test_pool_death_before_any_job_names_the_main_guard(monkeypatch):
     """A pool that dies before any job completes must blame the __main__ guard.
 
     An unguarded module-level ``run_parallel`` in a .py script leaves
-    ``__main__`` importable, so the interactive-session check does not fire.
+    ``__main__`` re-runnable, so the piped-stdin message does not fire.
     Dying before any job completes is a *startup* death, and for a script the
     usual cause is the missing guard — not the segfault/OOM that a mid-run
     death would indicate.
@@ -484,6 +568,13 @@ class TestScratchRootIsReaped:
         def __init__(self, cleanup=True, work_dir=None):
             self.cleanup = cleanup
             self.work_dir = work_dir
+
+        def scratch_policy(self):
+            from pathlib import Path
+            from uacpy.models._workspace import ScratchPolicy
+            return ScratchPolicy(
+                pinned_dir=None if self.work_dir is None else Path(self.work_dir),
+                keeps_files=self.cleanup is False, on_tmpfs=False)
 
     def _job(self, **kw):
         return Job(self._Model(**kw), None, None, None)
@@ -547,7 +638,8 @@ class TestScratchRootIsReaped:
         monkeypatch.setattr(par, 'ProcessPoolExecutor', _DeadPool)
         job = par.Job(self._Model(cleanup=False), None, None, None)
         with pytest.warns(UserWarning, match=r"work dir\(s\) were kept"):
-            with pytest.raises(ConfigurationError):
+            with pytest.raises(ConfigurationError,
+                               match='workers died on bootstrap'):
                 par.run_parallel([job], n_workers=1)
         assert root.exists()
 
@@ -575,7 +667,8 @@ class TestScratchRootIsReaped:
 
         monkeypatch.setattr(par, 'ProcessPoolExecutor', _DeadPool)
         job = par.Job(self._Model(), None, None, None)
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='workers died on bootstrap'):
             par.run_parallel([job], n_workers=1)
         assert not root.exists()
 
@@ -585,3 +678,88 @@ class TestScratchRootIsReaped:
         root.mkdir()
         assert _reap_scratch_root(str(root), [self._job()]) is True
         assert not root.exists()
+
+
+class _WarningModel:
+    """A picklable stand-in model whose run warns once and returns its
+    label."""
+
+    def run(self, env, source, receiver, run_mode=None, **kw):
+        import warnings
+        warnings.warn(f"cells of {env} are NaN", UserWarning)
+        return env
+
+
+def test_a_workers_warnings_reach_the_caller_and_the_result():
+    """RA-CONTRACT-11: a warning raised in a worker never reached the
+    caller's filters; every one is recorded per job and re-emitted in the
+    calling process under its own category, prefixed with the job label."""
+    jobs = [Job(model=_WarningModel(), env='a', source=None, receiver=None,
+                label='first'),
+            Job(model=_WarningModel(), env='b', source=None, receiver=None)]
+    with pytest.warns(UserWarning) as record:
+        out = run_parallel(jobs, n_workers=1)
+    texts = sorted(str(w.message) for w in record
+                   if 'are NaN' in str(w.message))
+    assert texts == ["run_parallel job 'first': cells of a are NaN",
+                     "run_parallel job 1: cells of b are NaN"]
+    assert out.results == ['a', 'b']
+    assert out.warnings == {0: [(UserWarning, 'cells of a are NaN')],
+                            1: [(UserWarning, 'cells of b are NaN')]}
+
+
+def test_a_worker_launches_its_engines_single_threaded(monkeypatch):
+    """RA-CONTRACT-6: the pool supplies the parallelism, so the worker
+    initializer makes every engine launch single-threaded (bellhopcxx
+    ``-1``) instead of one thread per core per worker."""
+    import multiprocessing as mp
+    import tempfile
+    from uacpy.models import _launch
+    from uacpy.models.bellhop import _backend
+    from uacpy.parallel import _worker_init
+    monkeypatch.setattr(_launch, '_single_threaded_launches', False)
+    # Read through the binding an engine calls, so the reset and the
+    # initializer's write are both seen where the launch decision is made.
+    assert _backend._launch_single_threaded() is False
+    saved = tempfile.tempdir
+    try:
+        _worker_init(mp.get_context('fork').Value('i', 0), saved or '.')
+    finally:
+        tempfile.tempdir = saved
+    assert _backend._launch_single_threaded() is True
+
+
+@pytest.mark.requires_binary
+def test_bellhopcxx_in_a_worker_runs_one_thread_and_reads_merged_arrivals(
+        monkeypatch):
+    """The two halves of one decision: launched with ``-1``, bellhopcxx
+    merges its arrivals itself (``arr.hpp:79``), so the reader must not
+    merge them again."""
+    from uacpy.core.exceptions import ExecutableNotFoundError
+    from uacpy.models import _launch
+    from uacpy.models.bellhop._backend import (
+        arrivals_need_merge, build_command)
+    try:
+        model = uacpy.Bellhop(backend='cxx')
+    except ExecutableNotFoundError:
+        pytest.skip('bellhopcxx not installed')
+    monkeypatch.setattr(_launch, '_single_threaded_launches', False)
+    def command():
+        return build_command(model._exe, 'model', backend=model._resolved_backend,
+                             dimensionality=model.dimensionality)
+
+    assert '-1' not in command()
+    monkeypatch.setattr(_launch, '_single_threaded_launches', True)
+    assert '-1' in command()
+    assert arrivals_need_merge(backend=model._resolved_backend, exe=model._exe,
+                               model_name=model.model_name) is False
+
+
+def test_stacking_jobs_that_returned_stacks_is_refused():
+    """RA-CONTRACT-17: a multi-depth job returns a ResultStack, and a stack
+    of stacks neither superposes nor plots; ``stack()`` says so."""
+    from uacpy.core.results import Field, ResultStack
+    f = Field(data=np.ones((1, 1)), coords={'depth': [1.0], 'range': [1.0]})
+    inner = ResultStack([f, f], [10.0, 20.0], coordinate_name='source_depth')
+    with pytest.raises(uacpy.ConfigurationError, match='ResultStack'):
+        ParallelResult([inner, inner], {}, [1, 2]).stack()

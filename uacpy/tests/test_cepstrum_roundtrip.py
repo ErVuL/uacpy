@@ -25,6 +25,8 @@ import numpy as np
 from uacpy.acoustic_signal import (
     cepstrum, complex_cepstrum, inverse_complex_cepstrum,
 )
+from uacpy.core.exceptions import ConfigurationError
+import pytest
 
 
 def _delta_echo(n: int, delay: int, amplitude: float) -> np.ndarray:
@@ -38,7 +40,7 @@ def test_real_cepstrum_of_single_echo_matches_analytic_series():
     """c[kD] = (-1)^{k+1} a^k / (2k), mirrored at N-kD, zero elsewhere
     (to the truncated-series tail, < a^6)."""
     n, delay, a = 1024, 100, 0.5
-    c = cepstrum(_delta_echo(n, delay, a))
+    c = cepstrum(_delta_echo(n, delay, a)).cepstrum
 
     for k in (1, 2, 3):
         expected = (-1.0) ** (k + 1) * a ** k / (2 * k)
@@ -110,7 +112,7 @@ def test_long_pass_lifter_isolates_echo_quefrency_in_noise():
     x = base.copy()
     x[delay:] += a * base[: n - delay]
 
-    c = cepstrum(x, lifter=-100)
+    c = cepstrum(x, lifter=-100).cepstrum
     assert np.allclose(c[:101], 0.0)          # envelope removed
     peak_quefrency = int(np.argmax(c[: n // 2]))
     assert peak_quefrency == delay, (
@@ -130,3 +132,81 @@ def test_inverse_complex_cepstrum_requires_the_namedtuple():
     with pytest.raises(ConfigurationError, match="ComplexCepstrum"):
         inverse_complex_cepstrum(cc.cepstrum)
     np.testing.assert_allclose(inverse_complex_cepstrum(cc), x, atol=1e-12)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# acoustic_signal/timefreq.py — lifter, smoothing windows, cwt, cepstra
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCepstralLifterMask:
+    """Scalar lifter L builds the mask 1 on quefrencies |q| <= |L| (head
+    and mirrored tail), inverted for negative L; an array lifter
+    multiplies element-wise after an exact shape check."""
+
+    def test_low_pass_mask_exact(self):
+        from uacpy.acoustic_signal.timefreq import _apply_lifter
+        c = np.arange(1.0, 9.0)
+        want = c * np.array([1, 1, 1, 0, 0, 0, 1, 1], dtype=float)
+        np.testing.assert_allclose(_apply_lifter(c, 2), want, rtol=0)
+
+    def test_zero_lifter_keeps_only_dc(self):
+        from uacpy.acoustic_signal.timefreq import _apply_lifter
+        c = np.arange(1.0, 9.0)
+        want = np.zeros(8)
+        want[0] = 1.0
+        np.testing.assert_allclose(_apply_lifter(c, 0), want, rtol=0)
+
+    def test_negative_lifter_is_the_complement(self):
+        from uacpy.acoustic_signal.timefreq import _apply_lifter
+        c = np.arange(1.0, 9.0)
+        np.testing.assert_allclose(
+            _apply_lifter(c, 2) + _apply_lifter(c, -2), c, rtol=0)
+
+    def test_array_lifter_multiplies_and_checks_shape(self):
+        from uacpy.acoustic_signal.timefreq import _apply_lifter
+        c = np.arange(1.0, 9.0)
+        np.testing.assert_allclose(_apply_lifter(c, 2.0 * np.ones(8)),
+                                   2.0 * c, rtol=0)
+        with pytest.raises(ConfigurationError, match="must match"):
+            _apply_lifter(c, np.ones(7))
+
+
+class TestCepstrumWindowConvention:
+    """``window=`` multiplies by the *periodic* (fftbins) window before
+    the spectrum."""
+
+    def test_matches_prewindowed_signal(self):
+        import scipy.signal as _sig
+        from uacpy.acoustic_signal.timefreq import cepstrum
+        x = np.random.default_rng(7).normal(size=64)
+        w = _sig.get_window("hann", 64, fftbins=True)
+        np.testing.assert_allclose(cepstrum(x, window="hann").cepstrum,
+                                   cepstrum(x * w).cepstrum, rtol=1e-12,
+                                   atol=1e-12)
+
+
+class TestComplexCepstrumDelayEstimator:
+    """The linear-phase ramp is rounded to whole samples: a pure delayed
+    impulse reports exactly its ramp; degenerate lengths report zero
+    without dividing by zero."""
+
+    def test_delayed_impulse_reports_the_ramp(self):
+        from uacpy.acoustic_signal.timefreq import complex_cepstrum
+        x = np.zeros(31)
+        x[3] = 1.0
+        r = complex_cepstrum(x)
+        assert r.delay == 3            # three samples LATE: positive
+        assert np.isfinite(r.cepstrum).all()
+
+    def test_two_sample_signal_computes_the_ramp(self):
+        from uacpy.acoustic_signal.timefreq import complex_cepstrum
+        # Two samples: the one-sample delay sits at Nyquist, where +1 and -1
+        # are the same ramp — only its magnitude is determined.
+        assert abs(complex_cepstrum(np.array([0.0, 1.0])).delay) == 1
+
+    def test_single_sample_signal_is_zero_delay(self):
+        from uacpy.acoustic_signal.timefreq import complex_cepstrum
+        r = complex_cepstrum(np.array([2.0]))
+        assert r.delay == 0
+        assert np.isfinite(r.cepstrum).all()

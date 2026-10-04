@@ -23,12 +23,13 @@ Uses: uacpy.FrancoisGarrison on the Environment · Bottom.from_halfspaces ·
 Bottom.halfspace_at · Kraken.compute_modes · Kraken(backend='krakenc') ·
 Kraken(mode_coupling='adiabatic', n_segments=) ·
 multi-depth Source(weights=) → ResultStack · ResultStack.superpose ·
-Modes.plot(show_imaginary=) ·
-plot_mode_wavenumbers · plot_modes_heatmap · plot_field(contours=)
+Modes.excitation · Modes.phase_speeds · Modes.plot(show_imaginary=) ·
+plot_mode_wavenumbers · plot_modes_heatmap · plot_field(contours=, source=)
 """
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
@@ -47,27 +48,30 @@ bathymetry = np.array([[0, 100], [8000, 120], [10000, 150],
 # The seabed's property nodes deliberately sit on a different range vector than
 # the bathymetry: they are independent fields in uacpy, and geologically the
 # seafloor shape and the sediment-to-rock transition are set by different
-# processes.
+# processes. The rock of the 18 km node continues to the 20 km end of the
+# section, so the last node repeats it there.
 bottom = uacpy.Bottom.from_halfspaces(
-    np.array([0.0, 6000.0, 12000.0, 18000.0]),
-    sound_speed=np.array([1600, 1650, 1750, 1800]),   # hardening
-    density=np.array([1.5, 1.7, 2.0, 2.2]),           # compacting
-    attenuation=np.array([0.8, 0.5, 0.3, 0.2]),       # less lossy
-    shear_speed=np.array([0, 0, 400, 600]),           # rock on the slope
+    np.array([0.0, 6000.0, 12000.0, 18000.0, 20000.0]),
+    sound_speed=np.array([1600, 1650, 1750, 1800, 1800]),   # hardening
+    density=np.array([1.5, 1.7, 2.0, 2.2, 2.2]),            # compacting
+    attenuation=np.array([0.8, 0.5, 0.3, 0.2, 0.2]),        # less lossy
+    shear_speed=np.array([0, 0, 400, 600, 600]),            # rock on the slope
     acoustic_type='half-space')
 ssp_pairs = np.array([[0, 1520], [50, 1505], [100, 1495],
                       [200, 1490], [400, 1485]])
 # Francois-Garrison lives on the Environment, so the same volume attenuation
 # acts in the mode computations and in the segmented TL run.
-absorption = uacpy.FrancoisGarrison(temperature_c=10.0, salinity_psu=35.0,
-                                    pH=8.0, z_bar_m=50.0)
+absorption = uacpy.FrancoisGarrison(temperature=10.0, salinity=35.0,
+                                    pH=8.0)
 
 env = uacpy.Environment(name="Continental shelf", bathymetry=bathymetry,
                         ssp=uacpy.SoundSpeedProfile.from_pairs(ssp_pairs),
                         bottom=bottom, absorption=absorption)
 source = uacpy.Source(depths=50.0, frequencies=50.0)
+# Ranges start at 1 km: closer in, the deepest receivers see direct and
+# surface-reflected paths steeper than the modes' 25° window carries.
 receiver = uacpy.Receiver(depths=np.linspace(5, 380, 60),
-                          ranges=np.linspace(100, 20000, 100))
+                          ranges=np.linspace(1000, 20000, 96))
 
 # The two ends of the guide, each as a range-independent environment.
 shelf_env = uacpy.Environment(
@@ -81,7 +85,20 @@ slope_env = uacpy.Environment(
     bottom=bottom.halfspace_at(range=20000, interp='nearest'),
     absorption=absorption)
 
-shelf_modes = uacpy.Kraken().compute_modes(shelf_env, source)
+# Francois & Garrison fitted their equation from 200 Hz up, so at this 50 Hz
+# every run evaluates it below its fitted band, and says so. The notice is
+# printed once here and filtered for the runs that follow.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    shelf_modes = uacpy.Kraken().compute_modes(shelf_env, source)
+for warning in caught:
+    if 'below 200 Hz' in str(warning.message):
+        print(f"  noted: {str(warning.message).split(' — ')[0]}")
+    else:
+        warnings.showwarning(warning.message, warning.category,
+                             warning.filename, warning.lineno)
+warnings.filterwarnings('ignore', message='FrancoisGarrison: .* below 200 Hz',
+                        category=uacpy.ValidityWarning)
 # The slope bottom has shear, which is what krakenc adds over kraken.
 slope_modes = uacpy.Kraken(backend='krakenc').compute_modes(slope_env, source)
 print(f"  shelf (cs={shelf_env.bottom.halfspace_at(range=0).shear_speed:.0f} "
@@ -108,12 +125,12 @@ dipole_stack = uacpy.Kraken(mode_coupling='adiabatic',
     env, dipole_source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
 dipole = dipole_stack.superpose()                 # weights = [1, -1]
 in_phase = dipole_stack.superpose(weights=[1, 1])
-# Shelf mode 1 sampled at the two source depths: the dipole excites it by
-# their difference, the in-phase pair by their sum.
-mode_1_at_pair = np.interp(dipole_source.depths, shelf_modes.depths,
-                           shelf_modes.phi[:, 0].real)
-excitation_ratio = (abs(mode_1_at_pair[0] - mode_1_at_pair[1])
-                    / abs(mode_1_at_pair[0] + mode_1_at_pair[1]))
+# Modes.excitation is Σ wᵢ·φₘ(zᵢ): shelf mode 1 is driven by the difference of
+# its shape at the two depths under the dipole, by the sum in phase.
+in_phase_source = uacpy.Source(depths=[40.0, 60.0], frequencies=50.0,
+                               weights=[1, 1])
+excitation_ratio = (abs(shelf_modes.excitation(dipole_source)[0])
+                    / abs(shelf_modes.excitation(in_phase_source)[0]))
 print(f"  antiphase pair at 40/60 m: {dipole_stack.n_slabs} slabs superposed; "
       f"shelf mode 1 excited {20 * np.log10(excitation_ratio):.1f} dB "
       f"relative to the in-phase pair; median TL "
@@ -127,7 +144,7 @@ plt.close(fig)
 # Mode shapes at both ends. On the slope, krakenc numbers the interface waves
 # first (highest Re(k)); their phase speed is below the water sound speed, so
 # filtering on that leaves the trapped water-column modes the shelf panel shows.
-phase_speed = 2 * np.pi * float(slope_modes.f0) / slope_modes.k.real
+phase_speed = slope_modes.phase_speeds      # ω / Re(k), m/s
 c_water_min = float(np.min(ssp_pairs[:, 1]))
 trapped = np.where(phase_speed >= c_water_min)[0]
 n_interface = int(np.sum(phase_speed < c_water_min))
@@ -173,7 +190,7 @@ fig.suptitle('All shelf mode shapes', fontsize='x-large', fontweight='bold')
 fig.savefig(OUT / 'example_06_modes_heatmap.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, ax = uacpy.plot_field(
+fig, ax = uacpy.plot.plot_field(
     tl, env=env, contours=[70, 85, 100],
     title=f'Kraken adiabatic modes over the shelf transition\n'
           f'({N_SEGMENTS} segments, contours at 70/85/100 dB)')
@@ -186,15 +203,13 @@ fig.savefig(OUT / 'example_06_result.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 fig, (left, right) = plt.subplots(1, 2, figsize=(16, 6))
-uacpy.plot_field(in_phase.to_dB(), left, env=env, show_colorbar=False,
+uacpy.plot.plot_field(in_phase.to_dB(), left, env=env, show_colorbar=False,
+                 source=in_phase_source,
                  title='Pair in phase\nsuperpose(weights=[1, 1])')
-uacpy.plot_field(dipole.to_dB(), right, env=env, show_colorbar=False,
+uacpy.plot.plot_field(dipole.to_dB(), right, env=env, show_colorbar=False,
+                 source=dipole_source,
                  title='Pair in antiphase\n'
                        'Source(weights=[1, -1]) → superpose()')
-for ax in (left, right):
-    ax.plot(np.zeros(2), dipole_source.depths, marker='*', markersize=14,
-            linestyle='none', color='white', markeredgecolor='black',
-            markeredgewidth=1.2, zorder=10, clip_on=False)
 uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
 fig.suptitle('Two sources, one ResultStack, two weightings',
              fontsize='x-large', fontweight='bold')

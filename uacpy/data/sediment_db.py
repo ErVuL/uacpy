@@ -36,19 +36,23 @@ from uacpy._log import log_message
 from uacpy.core.exceptions import DataFetchError
 from uacpy.core.materials import MATERIALS
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
+from uacpy.core.geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
+from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
-from uacpy.data.sediment import (
-    bottom_from_class, bottom_from_grain_size, range_dependent_bottom_along,
-    water_sound_speed_at,
-)
+from uacpy.data.sediment import (SeabedSample, bottom_from_class,
+                                 bottom_from_grain_size)
 
-__all__ = ['download_sediment_db', 'fetch_sediment_sample', 'fetch_bottom_local',
-           'fetch_bottom_local_transect']
+from uacpy.data._offset_policy import SAMPLE_OFFSET_WARN_KM
 
-DEFAULT_MAX_DISTANCE_KM = 250.0
+__all__ = ['download_sediment_db', 'fetch_sediment_sample', 'fetch_bottom_grainsize']
+
+#: Farthest sample (km) searched without a caller's ``max_distance_km``: past
+#: it no sample answers, so ``bottom_sources='auto'`` falls through to the
+#: Diesing map and the pelagic model rather than taking a sample from
+#: another sea.
+SAMPLE_SEARCH_RADIUS_KM = 250.0
 
 # NCEI Seafloor Sediment Grain-Size Database (G00127, public domain): a ~3 MB
 # tarball of TSV tables. We join the per-sample lat/lon with a weighted-mean ϕ
@@ -89,9 +93,6 @@ _LON_COLS = ('longitude', 'lon', 'long', 'x')
 _PHI_COLS = ('phi', 'mean_phi', 'mean', 'mean_grain_size', 'grain_size_phi')
 _LITH_COLS = ('lithology', 'dominant_lithology', 'dominant', 'description')
 
-_SAMPLES = {}   # cache_root -> (grainsize_index, lithology_index), either None
-_cache.register_cache(_SAMPLES.clear)
-
 
 def _tar_rows(tf, suffix):
     """All TSV rows from the member of ``tf`` whose name ends with ``suffix``."""
@@ -122,6 +123,18 @@ def download_sediment_db(cache_dir=None, *, url: Optional[str] = None,
     ``url`` fetches that address instead of :data:`GRAINSIZE_TARBALL_URL` — a mirror,
     or a copy staged on an http server of your own. What is written and
     how it is read are the same whatever address served it.
+
+    Parameters
+    ----------
+    cache_dir : str or Path, optional
+        Directory to write into; ``None`` is the dataset's own directory under
+        the cache root (:func:`dataset_root`).
+    url : str, optional
+        The one address to fetch; ``None`` is :data:`GRAINSIZE_TARBALL_URL`.
+    timeout : float, optional
+        Network timeout in seconds. Default 180.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
     """
     dest = _cache.prepare_download(
         'sediment', "downloading NCEI grain-size DB (G00127, ~3 MB)",
@@ -176,7 +189,7 @@ def download_sediment_db(cache_dir=None, *, url: Optional[str] = None,
                 "NCEI grain-size DB parsed to zero usable samples.",
                 remediation="Retry; the upstream tarball layout may have changed.",
             )
-    _SAMPLES.clear()                          # force rebuild of the KD-tree
+    _cache.invalidate_grids()
     log_message('sediment', f"grain-size DB normalized: {n} samples → {out}",
                 verbose=verbose)
     return out
@@ -219,13 +232,15 @@ def _read_csv(path, value_cols, transform):
 
     Both raises are :class:`DataFetchError` because that is the data layer's
     exception whatever the reason: the caller asks *can I get a sediment value
-    here?* and acts the same way on every no. Neither file is one the user
-    supplied — ``./install.sh`` wrote both — so neither unreadable cache is a
+    here?* and acts the same way on every no. Neither file is an argument
+    of the call — ``./install.sh`` writes ``grainsize.csv`` and
+    ``deck41.csv`` is dropped in by hand — so neither unreadable file is a
     ``ConfigurationError``; ``gebco_local`` types the identical failure (a
-    cached dataset missing an expected variable) the same way.
+    cached dataset missing an expected variable) the same way. Both files are
+    read as UTF-8.
     """
     lats, lons, phis = [], [], []
-    with open(path, newline='') as fh:
+    with open(path, newline='', encoding='utf-8') as fh:
         reader = csv.reader(fh)
         header = next(reader, None)
         if header is None:
@@ -285,13 +300,23 @@ def _index(path, value_cols, transform):
     """``(tree, phis, lats, lons)`` for one CSV, or ``None`` if it has no rows."""
     if not path.exists():
         return None
-    lats, lons, phis = _read_csv(path, value_cols, transform)
+    # Any parser failure leaves as a typed error, so the bottom chains fall
+    # through to their next source instead of aborting.
+    with _cache.reading('sediment', path):
+        try:
+            lats, lons, phis = _read_csv(path, value_cols, transform)
+        except UnicodeDecodeError as exc:
+            raise DataFetchError(
+                f"Sediment file {path.name} is not UTF-8 text ({exc}).",
+                remediation=f"Save {path} as UTF-8 text.",
+            ) from exc
     if not phis:
         return None
     lats, lons = np.array(lats), np.array(lons)
     return cKDTree(_unit_vectors(lats, lons)), np.array(phis), lats, lons
 
 
+@_cache.per_root_memo
 def _samples():
     """Build (or reuse) the nearest-neighbour indices of ϕ samples.
 
@@ -303,10 +328,10 @@ def _samples():
     measured sample beside it is never returned — the opposite of the
     preference this module documents.
 
-    Built through :func:`uacpy.data._cache.memoize`, so threads racing a cold
+    Built through :func:`uacpy.data._cache.per_root_memo`, so threads racing a cold
     memo build the trees once between them rather than once each.
     """
-    return _cache.memoize(_SAMPLES, str(_cache.cache_root()), _build_samples)
+    return _build_samples()
 
 
 def _build_samples():
@@ -378,14 +403,17 @@ def _prefers_grain_size(grainsize, lithology) -> bool:
                                _QUANTITATIVE_REACH_FACTOR * lithology[0])
 
 
-def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
+def fetch_sediment_sample(point, *, max_distance_km=None):
     """Nearest local sediment sample to ``point``.
 
-    Returns ``{'phi', 'material', 'distance_km', 'latitude', 'longitude'}`` —
-    the sample's own coordinates travel with it so a caller can record where
-    the value actually came from. A grain-size sample carries ``phi``
-    (float) and ``material=None``. A DECK41 lithology the grain-size relations
-    cannot evaluate carries ``phi=None`` and a material preset instead: 'rock'
+    Returns a :class:`~uacpy.data.SeabedSample` — the sample's own
+    coordinates travel with it as ``sample_point``, and ``provenance`` is the
+    :class:`~uacpy.data.DataProvenance` of the index the sample came from
+    (``'grainsize'`` or ``'deck41'``) with the sample as its ``data_point``,
+    so ``offset_km`` measures the hop. A grain-size sample carries
+    ``grain_size_phi`` and ``material=None``. A DECK41 lithology the
+    grain-size relations cannot evaluate carries ``grain_size_phi=None`` and
+    a material preset instead: 'rock'
     takes ``'limestone'``, the same preset the EMODnet substrate route uses for
     hard substrata, and 'gravel' / 'gravel and coarser' take ``'gravel'``,
     being coarser than either relation is fitted over.
@@ -398,15 +426,27 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
     nearer class beat a better sample; preferring the sample unconditionally
     let one a hundred times farther away beat a class next door.
 
-    Raises ``DataFetchError`` if the closest sample is farther than
-    ``max_distance_km`` (sparse point data — no nearby ground truth).
+    A sample farther than :data:`SAMPLE_OFFSET_WARN_KM` is returned with a
+    ``ProvenanceWarning`` (the offset rule: sparse point data, no nearby
+    ground truth); ``DataFetchError`` refuses one farther than
+    ``max_distance_km``, or than :data:`SAMPLE_SEARCH_RADIUS_KM` without one.
+
+    Parameters
+    ----------
+    point : (lat, lon)
+        Site coordinates in decimal degrees.
+    max_distance_km : float, optional
+        Farthest sample accepted (km); ``None`` (default) searches
+        :data:`SAMPLE_SEARCH_RADIUS_KM` and warns past
+        :data:`SAMPLE_OFFSET_WARN_KM`.
     """
+    limit = checked_max_distance(max_distance_km, 'fetch_sediment_sample')
+    radius = SAMPLE_SEARCH_RADIUS_KM if limit is None else limit
     lat, lon = as_coordinate(point)
     hits = [_nearest(index, lat, lon) if index is not None else None
             for index in _samples()]
     grainsize, lithology = [
-        h if h is not None and (max_distance_km is None
-                                or h[0] <= max_distance_km) else None
+        h if h is not None and h[0] <= radius else None
         for h in hits
     ]
     if grainsize is not None and _prefers_grain_size(grainsize, lithology):
@@ -417,34 +457,44 @@ def fetch_sediment_sample(point, *, max_distance_km=DEFAULT_MAX_DISTANCE_KM):
         raise DataFetchError(
             f"Nearest sediment sample is "
             f"{min(h[0] for h in hits if h is not None):.0f} km "
-            f"away (> max_distance_km={max_distance_km:.0f}).",
+            f"away (> {radius:.0f} km, the "
+            f"{'max_distance_km' if limit is not None else 'search radius'}).",
             remediation="Raise max_distance_km, or supply a bottom directly.",
         )
     dist_km, phi, samp_lat, samp_lon = hit
+    # Cite the index the sample came from: a DECK41 lithology description is
+    # cited as DECK41, not under the NCEI grain-size database's name, licence
+    # and DOI (10.7289/V5G44N6W).
+    prov = checked_offset(
+        DataProvenance(source=SOURCES[dataset], data_point=(samp_lat, samp_lon),
+                       requested_point=(lat, lon), point_kind='sample'),
+        who='fetch_sediment_sample', warn_km=SAMPLE_OFFSET_WARN_KM,
+        max_distance_km=limit)
     if phi <= _PHI_CLASS_SENTINEL_MAX:
         # A lithology-class sentinel: no grain size the relations can evaluate
         # exists; the material preset carries the geoacoustics instead.
-        return {'phi': None,
-                'material': _PHI_CLASS_SENTINEL_MATERIAL.get(phi, 'limestone'),
-                'distance_km': dist_km,
-                'latitude': samp_lat, 'longitude': samp_lon,
-                'dataset': dataset}
-    return {'phi': phi, 'material': None, 'distance_km': dist_km,
-            'latitude': samp_lat, 'longitude': samp_lon, 'dataset': dataset}
+        return SeabedSample(
+            grain_size_phi=None,
+            material=_PHI_CLASS_SENTINEL_MATERIAL.get(phi, 'limestone'),
+            folk_class=None, folk_class_scheme=None,
+            sample_point=(samp_lat, samp_lon), distance_km=dist_km,
+            provenance=prov)
+    return SeabedSample(grain_size_phi=phi, material=None, folk_class=None,
+                        folk_class_scheme=None,
+                        sample_point=(samp_lat, samp_lon),
+                        distance_km=dist_km, provenance=prov)
 
 
-def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
-                       model=DEFAULT_GRAIN_SIZE_MODEL, environment=None,
-                       max_distance_km=DEFAULT_MAX_DISTANCE_KM,
+def fetch_bottom_grainsize(point, *, roughness=0.0, water_sound_speed=None,
+                       model=DEFAULT_GRAIN_SIZE_MODEL, hamilton_fit=None,
+                       max_distance_km=None,
                        timeout=None, verbose=False):
     """Model-ready bottom from the nearest local sediment sample.
 
-    This is the NCEI grain-size / DECK41 sample-database provider of the
-    ``fetch_bottom_local`` protocol name that ``fetch_environment`` resolves
-    per provider module (``bottom_sources='grainsize'``), and it is the one
-    exported at package level as ``uacpy.data.fetch_bottom_local``;
-    :mod:`uacpy.data.emodnet_local` exposes the same name for its EMODnet
-    substrate provider.
+    The NCEI grain-size / DECK41 sample-database provider
+    (``bottom_sources='grainsize'`` in ``fetch_environment``). The cached
+    EMODnet substrate map is :func:`uacpy.data.emodnet_local.fetch_bottom_emodnet_local`,
+    a different dataset.
 
     ``timeout``/``verbose`` are accepted (and ignored — this backend is offline)
     for signature uniformity with the network bottom fetchers.
@@ -453,11 +503,14 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
     ``model`` picks the grain-size relations (``'hamilton'`` or
     ``'apl-uw'``); a DECK41 sample whose lithology those relations cannot
     evaluate — rock, and gravel and coarser — routes through its material
-    preset and ignores it.
+    preset and ignores it. ``max_distance_km`` is as in
+    :func:`fetch_sediment_sample`.
     """
-    lat, lon = as_coordinate(point)
+    from uacpy.core.sediment import canonical_grain_size_selection
+    model, hamilton_fit = canonical_grain_size_selection(
+        model, hamilton_fit, who='fetch_bottom_grainsize')
     sample = fetch_sediment_sample(point, max_distance_km=max_distance_km)
-    if sample['material'] is not None:
+    if sample.material is not None:
         # Hard substrata route through the material preset (~3000 m/s
         # limestone), exactly as the EMODnet substrate path does — a
         # grain-size relation cannot describe rock — and so does gravel,
@@ -466,67 +519,15 @@ def fetch_bottom_local(point, *, roughness=0.0, water_sound_speed=None,
         # unconsolidated class goes in fluid, Table 1.3 giving its c_s as a
         # depth relation rather than a half-space property. ``porosity`` is
         # the catalogue's own rock/sediment split (None for rocks).
-        elastic = MATERIALS[sample['material']]['porosity'] is None
-        bottom = bottom_from_class(sample['material'], roughness=roughness,
+        elastic = MATERIALS[sample.material]['porosity'] is None
+        bottom = bottom_from_class(sample.material, roughness=roughness,
                                    elastic=elastic)
     else:
         bottom = bottom_from_grain_size(
-            sample['phi'], roughness=roughness, model=model,
-            environment=environment,
+            sample.grain_size_phi, roughness=roughness, model=model,
+            hamilton_fit=hamilton_fit,
             water_sound_speed=water_sound_speed)
     # Point samples are sparse, so the nearest one can be far from the
-    # requested position; record where it actually came from so
-    # ``citations(env)`` reports the hop and ``prov.offset_km`` measures it.
-    # Cite the index the sample actually came from. Stamping 'grainsize'
-    # unconditionally reported a DECK41 lithology description under the NCEI
-    # grain-size database's name, licence and DOI (10.7289/V5G44N6W) — a
-    # citation for a dataset the value never touched.
-    prov = DataProvenance(
-        source=SOURCES[sample.get('dataset', 'grainsize')],
-        data_point=(sample['latitude'], sample['longitude']),
-        requested_point=(lat, lon),
-    )
-    return dataclasses.replace(bottom, data_sources=(prov,))
-
-
-def fetch_bottom_local_transect(start, end, *, n_points=6, max_points=None,
-                                roughness=0.0,
-                                water_sound_speed=None,
-                                model=DEFAULT_GRAIN_SIZE_MODEL, environment=None,
-                                max_distance_km=DEFAULT_MAX_DISTANCE_KM,
-                                timeout=None, verbose=False):
-    """Range-dependent bottom from local samples along ``start`` → ``end``.
-
-    The grain-size provider of the ``fetch_bottom_local_transect`` protocol
-    name, and the one exported at package level as
-    ``uacpy.data.fetch_bottom_local_transect``. ``water_sound_speed`` also
-    takes a ``(lat, lon) -> m/s`` callable, so each column scales to the
-    water over its own seafloor. ``timeout``/``verbose`` are
-    accepted (and ignored — this backend is offline) for signature
-    uniformity with the network bottom fetchers.
-
-    An unreadable cache is reported as itself: the sample indices are built
-    once here, before any waypoint, so a corrupt or absent CSV raises its own
-    message rather than the transect's coverage message.
-    """
-    # ``range_dependent_bottom_along`` treats a waypoint's ``DataFetchError``
-    # as "this point is not covered" and fills it from the nearest covered
-    # neighbour. A cache that cannot be read raises that same exception at
-    # *every* waypoint, so all of them become gaps and the all-gaps guard
-    # reports the transect as uncovered — discarding the one remediation that
-    # would fix it ("Re-run ./install.sh --data sediment"). A broken source is
-    # not a property of any waypoint, so read it once up front and let the
-    # per-waypoint exception keep its single meaning. Discriminating on the
-    # message instead would be the wrong tool. ``_samples`` is memoized and
-    # the first waypoint would build it anyway, so a healthy cache pays a
-    # dict lookup.
-    _samples()
-    return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom_local(
-            (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model, environment=environment,
-            max_distance_km=max_distance_km),
-        start, end, n_points, source_label='local sediment DB',
-        max_points=max_points,
-    )
+    # requested position; the sample's own record says where it came from,
+    # so ``citations(env)`` reports the hop and ``prov.offset_km`` measures it.
+    return dataclasses.replace(bottom, data_sources=(sample.provenance,))

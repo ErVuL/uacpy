@@ -77,8 +77,13 @@ def test_density_no_data_raises(graw_cache):
 
 
 def test_density_transect(graw_cache):
-    ranges, rho = graw_local.fetch_seabed_density_transect(
+    track = graw_local.fetch_seabed_density_transect(
         (30.5, -40.5), (32.5, -40.5), n_points=4)
+    ranges, rho = track.ranges, track.data
+    assert (track.quantity, track.unit) == ('seabed_density', 'g/cm3')
+    assert track.provenance.source.id == 'graw'
+    assert track.lats.tolist() == pytest.approx([30.5, 31.1667, 31.8333, 32.5],
+                                                abs=1e-3)
     assert ranges.shape == (4,) and ranges[0] == 0.0
     assert np.allclose(rho, 1.962, atol=1e-3)
 
@@ -100,14 +105,16 @@ def test_bottom_uses_measured_density(graw_cache):
     assert bp.acoustic_type == 'half-space'
     assert bp.density == pytest.approx(1.962, abs=1e-3)
     assert bp.grain_size_phi == pytest.approx(2.74, abs=0.05)
-    assert bp.sound_speed == pytest.approx(1.1434 * 1510.0, rel=0.01)
+    assert bp.sound_speed == pytest.approx(1.1434 * 1500.0, rel=0.01)
     assert bp.attenuation > 0.0
+    assert [(p.source.id, p.requested_point) for p in bp.data_sources] == [
+        ('graw', (30.5, -40.5))]
 
 
 def test_bottom_scales_to_water_sound_speed(graw_cache):
     ref = graw_local.fetch_bottom_graw((30.5, -40.5))
     warm = graw_local.fetch_bottom_graw((30.5, -40.5), water_sound_speed=1540.0)
-    assert warm.sound_speed == pytest.approx(ref.sound_speed * 1540.0 / 1510.0,
+    assert warm.sound_speed == pytest.approx(ref.sound_speed * 1540.0 / 1500.0,
                                              rel=1e-6)
     assert warm.density == ref.density                 # measured, not scaled
 
@@ -131,8 +138,8 @@ def test_density_outside_the_relation_is_held_at_its_end(tmp_path, monkeypatch):
 def test_a_density_the_relation_cannot_represent_is_announced(
         tmp_path, monkeypatch, rho, expected_phi):
     """The case that is *not* an edge: the continental-terrace density
-    quadratic bottoms out at 1.417 g/cm³, and 45.5 % of the Graw grid's ocean
-    cells are below it. Returning its fine end silently would be the flat hold
+    relation reaches no lower than 1.448 g/cm³ at its 9 ϕ end (default
+    water), and 59.9 % of the Graw grid's ocean cells are below it. Returning its fine end silently would be the flat hold
     again, over half the ocean, so the conversion says so — and the measured
     density still travels on the boundary."""
     root = tmp_path / 'abyssal_cache'
@@ -177,8 +184,8 @@ def test_the_grain_size_it_derives_round_trips_through_the_conversion(
 
 
 def test_bottom_transect(graw_cache):
-    bottom = graw_local.fetch_bottom_graw_transect(
-        (30.5, -40.5), (32.5, -40.5), n_points=4)
+    bottom = data.fetch_bottom_transect(
+        (30.5, -40.5), (32.5, -40.5), source='graw', n_points=4)
     assert np.allclose(bottom.halfspace_density, 1.962, atol=1e-3)
 
 
@@ -222,3 +229,22 @@ def test_graw_interrupted_curl_no_final_file(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         graw_local.download_graw_db(cache_dir=str(dest))
     assert not (dest / graw_local.GRAW_FILE).exists()
+
+
+
+def test_the_density_is_inverted_with_the_environment_asked_for(graw_cache):
+    """Hamilton & Bachman give each environment its own density relation, so
+    the grain size must come from the fit the forward conversion then uses —
+    the terrace inversion paired with an abyssal forward fit described a
+    different seabed (1.45 g/cm³: 9.0 against 7.45 phi, 16 m/s slow)."""
+    import warnings
+    from uacpy.core.sediment import grain_size_from_density
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        bp = graw_local.fetch_bottom_graw((30.5, -40.5),
+                                          hamilton_fit='abyssal-plain')
+        want = grain_size_from_density(bp.density,
+                                       hamilton_fit='abyssal-plain')
+        terrace = grain_size_from_density(bp.density)
+    assert bp.grain_size_phi == pytest.approx(want)
+    assert want != pytest.approx(terrace)

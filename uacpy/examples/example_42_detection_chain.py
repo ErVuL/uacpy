@@ -49,8 +49,9 @@ beam's output against the per-element mean, on the modelled field. It comes
 out near 8.7 dB and does not decay with range: the trend over 20 km is
 +0.07 dB/km against 1.8 dB of scatter, so the gain fluctuates rather more
 than it drifts. Taking the plane-wave value anyway stretches the predicted
-detection range at 60 m from 2.7 to 4.5 km, a 40 % overestimate, and
-doubles the share of the water column it calls detectable, 13 % to 26 %.
+detection range at 60 m from 2.5 to 4.0 km — 38 % of the predicted range
+is range the realised gain does not reach — and doubles the share of the
+plane it calls detectable, 11 % to 22 %.
 
 Keeping the largest of many beams is many chances to false-alarm, so the
 threshold pays for it. The independent looks are not the 361 grid points,
@@ -58,15 +59,16 @@ and not even the orthogonal count: two beams' NOISE outputs correlate as
 the array factor of |w|^2, and hann^2 reaches its first null at three DFT
 bins against a rectangular window's one, so this sector holds about 5
 independent looks. Holding the whole scan at Pf = 1e-4 then needs
-Pf = 1.8e-5 in each: +0.45 dB of DT, and it is what the maps use.
+Pf = 1.8e-5 in each: +0.51 dB of DT, and it is what the maps use.
 
 One anchor for the whole figure. The array is the fixed object, at r = 0,
 drawn as the receiver it is; every point of both maps is a candidate TARGET
 position, and the range axis is the separation. Panel 4 is panel 1 pushed
 through the sonar equation, and both contour the SIGNAL EXCESS at 0 rather
-than standing an iso-TL level in for it — AG is a grid spanning 6 dB here,
-so the single TL level that looks like the boundary sits at a median SE of
--1.1 dB and claims break-even where the target is a decibel short. Each
+than standing an iso-TL level in for it — AG is a grid spanning 6.4 dB
+between its 5th and 95th percentiles here, so the single TL level that looks
+like the boundary (the one at the median AG) sits at a median SE of -1.2 dB
+and claims break-even where the target is about a decibel short. Each
 panel also carries the dashed line a constant AG would have promised, and
 the gap between the pair is what this example is about.
 
@@ -81,11 +83,15 @@ prediction can be trusted.
 The bottom is four regimes in one section — a flat shelf under the array, a
 sill at 130 m, a basin behind it at 175 m, then a shoaling run to 120 m —
 because a monotonic slope never cuts a mode off and then gives it back.
-Coupled modes throughout: adiabatic "assumes that all energy in a given
-mode transfers to the corresponding mode in the new environment, provided
-that environmental variations in range are gradual" (Etter 4.4.5), and a
-sill leaves no corresponding mode to transfer to. Measured over the water
-column the two disagree by 2.0 dB in the median. `example_44` runs the same
+Coupled modes throughout, and neither mode option is the reference here.
+Against RAM on this section (the mid-array element at 122 m, 200 Hz,
+receivers 5-115 m over 1-20 km; printed below), the adiabatic field's power
+averaged over each km stays within 0.8 dB of RAM while the coupled one runs
+0.1-1.6 dB low; point by point the coupled field is the closer one, 1.6 dB
+median |dTL| against 1.9 dB. `field.exe`'s coupling projects only the pressure at each segment
+edge (docs/models/kraken.md §6.6), so it is not the full coupled-mode
+answer either. Measured over the water column the two Kraken runs disagree
+by 2.0 dB in the median. `example_44` runs the same
 chain through a second propagation model and synthesises what the beam
 hears.
 
@@ -93,28 +99,29 @@ Uses: Environment.plot(source=, receiver=, source_marker_range_m=) ·
 Kraken(mode_coupling='coupled') · beamform_field · plane_wave_array_gain ·
 matched_replica_gain · independent_beams(weights=) · shading_taper ·
 sonar.detection_threshold_energy · per_look_false_alarm ·
-passive_signal_excess_field(array_gain=<grid>) ·
-probability_of_detection_field · detection_range_by_depth ·
+passive_signal_excess_field(array_gain_dB=<grid>) ·
+ResultStack.p · transition_probability_field · detection_ranges_by_depth ·
 plot_field / plot_detection_probability with env/receiver overlays
 """
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.visualization import plot_detection_probability, plot_field
+from uacpy.plot import plot_detection_probability, plot_field
 from uacpy.acoustic_signal import (beamform_field, independent_beams,
                                    matched_replica_gain,
                                    plane_wave_array_gain, shading_taper)
-from uacpy.core.results import Field
+from uacpy import Field
 from uacpy.sonar import (detection_threshold_energy,
                          passive_signal_excess_field, per_look_false_alarm,
-                         probability_of_detection_field)
-from uacpy.sonar.sonar_equation import detection_range_by_depth
+                         transition_probability_field)
+from uacpy.sonar import detection_ranges_by_depth
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -191,25 +198,32 @@ plt.close(fig)
 # target plane. Reciprocity then makes slab i the field element i would
 # measure from a target at each point — and it holds whatever the bottom
 # does in range, which the mirror-image alternative does not.
-# Coupled modes, not the adiabatic default. The adiabatic approximation
-# "assumes that all energy in a given mode transfers to the corresponding
-# mode in the new environment, provided that environmental variations in
-# range are gradual" (Etter, *Underwater Acoustic Modeling and
-# Simulation*, 4.4.5) — and a sill that shoals to 130 m cuts the steeper
-# modes off, leaving no corresponding mode to transfer to. The
-# example measures the difference below rather than asserting it.
+# Coupled modes, not the adiabatic default. Neither is the reference on
+# this section: against RAM the coupled field is closer point by point and
+# the adiabatic one closer in km-averaged level (see the module docstring).
+# The example measures the difference between the two below.
 kraken = uacpy.Kraken(verbose=False, mode_coupling='coupled')
 plane_depths = np.union1d(np.linspace(5.0, 195.0, 60),
                           np.atleast_1d(target.depths))
 plane = uacpy.Receiver(depths=plane_depths, ranges=array.ranges)
 array_as_sources = uacpy.Source(depths=elements, frequencies=FREQ)
-stack = kraken.run(env, array_as_sources, plane)   # n_el slabs of (n_z, n_r)
+# Within about 0.6 km of the array the plane's deepest cells see paths
+# steeper than the modes carry, well inside the 2.5-4 km detection ranges
+# this example measures; that notice is printed once, then filtered for the
+# adiabatic run below.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    stack = kraken.run(env, array_as_sources, plane)   # n_el slabs of (n_z, n_r)
+for warning in caught:
+    print(f"  noted: {str(warning.message).split(';')[0]}")
+warnings.filterwarnings('ignore', message='.*closest receiver sees',
+                        category=uacpy.NumericsWarning)
 
 # Each element's depth travels with its own field; 1 mm rather than exact
 # because the depth round-trips through the model deck's text format.
 for i, (z_el, _) in enumerate(stack):
     assert abs(z_el - elements[i]) < 1e-3, 'stack order'
-p_map = np.stack([np.asarray(f.data) for _, f in stack])   # (n_el, n_z, n_r)
+p_map = stack.p                                     # (n_el, n_z, n_r)
 
 # A target cannot be inside the sediment, so the shoaling bottom takes a
 # bite out of the plane. Everything below is masked, not merely ignored:
@@ -235,8 +249,26 @@ d_mode = np.where(in_water,
                          + 20.0 * np.log10(np.abs(p_map[mid]))), np.nan)
 print(f"adiabatic vs coupled on this bathymetry: median "
       f"{np.nanmedian(d_mode):.1f} dB, 90th pct "
-      f"{np.nanpercentile(d_mode, 90):.1f} dB — the sill cuts modes off, "
-      f"which is the\n  one thing the adiabatic assumption cannot follow")
+      f"{np.nanpercentile(d_mode, 90):.1f} dB — the two mode options "
+      f"bracket the answer;\n  RAM is the reference on this section")
+
+# Both against RAM, the same element over the water column 5-115 m and
+# 1-20 km: power averaged over each km, and point by point.
+ram = np.asarray(uacpy.RAM(verbose=False).run(
+    env, uacpy.Source(depths=float(elements[mid]), frequencies=FREQ),
+    plane).data)
+cells = (plane_depths >= 5.0) & (plane_depths <= 115.0)
+far = array.ranges >= 1000.0
+km_bin = np.minimum(array.ranges[far] // 1000.0, 19.0)
+for label, field in (('adiabatic', adiabatic), ('coupled', p_map[mid])):
+    power = np.abs(field[cells][:, far]) ** 2
+    ram_power = np.abs(ram[cells][:, far]) ** 2
+    per_km = np.array([10.0 * np.log10(power[:, km_bin == k].mean()
+                                       / ram_power[:, km_bin == k].mean())
+                       for k in np.unique(km_bin)])
+    point = np.median(np.abs(10.0 * np.log10(power / ram_power)))
+    print(f"  {label:>9} - RAM: km-averaged {per_km.min():+.1f} to "
+          f"{per_km.max():+.1f} dB, point by point {point:.1f} dB median")
 
 # ── 2. array processing: the gain the beamformer actually realises ──────
 # AG is a ratio of SNRs, so it has a signal half and a noise half.
@@ -259,7 +291,7 @@ print(f"AG for a matched plane wave, white noise: {ag_plane:.2f} dB "
 # its main lobe and the rest is lost. Measure what the beam actually gets:
 # the best beam's power against a single element at the array centre.
 angles = np.linspace(-45.0, 45.0, 361)
-row = beamform_field(p, elements, angles, FREQ, c=C_REF, weights=taper)
+row = beamform_field(p, elements, angles, FREQ, sound_speed=C_REF, weights=taper)
 ag_realised = row.array_gain()                             # per range
 
 # And the ceiling, which is worth computing rather than asserting. At
@@ -322,7 +354,7 @@ print(f"detection threshold for Pd={PD}, Pf={PF:g}, "
 # one, so this scan holds about a third of the looks the unshaded geometry
 # would give. Leaving the taper out over-counts and sets a needlessly
 # strict threshold.
-n_beams_independent = independent_beams(elements, angles, FREQ, c=C_REF,
+n_beams_independent = independent_beams(elements, angles, FREQ, sound_speed=C_REF,
                                         weights=taper)
 pf_per_beam = per_look_false_alarm(PF, n_beams_independent)
 dt = detection_threshold_energy(pd=PD, pf=pf_per_beam, bandwidth_hz=BW_HZ,
@@ -343,7 +375,7 @@ print(f"  the {angles.size}-point scan is {n_beams_independent:.0f} "
 # The beamformer over the whole plane. Seabed cells go NaN, which the
 # sonar-equation grid carries through: _budget_array_gain summarises an AG
 # grid with nan-aware statistics for exactly this case.
-scan = beamform_field(p_map, elements, angles, FREQ, c=C_REF, weights=taper)
+scan = beamform_field(p_map, elements, angles, FREQ, sound_speed=C_REF, weights=taper)
 with np.errstate(divide='ignore', invalid='ignore'):
     ag_map = np.where(in_water, scan.array_gain(), np.nan)
     tl_map = np.where(in_water, -10.0 * np.log10(
@@ -361,9 +393,9 @@ print(f"realised AG over the water column: median "
 se_map, pd_map = {}, {}
 for label, gain in (('constant', ag_plane), ('realised', ag_map)):
     se_map[label] = passive_signal_excess_field(
-        tl_cov, source_level=SL, noise_level=NL, array_gain=gain,
-        detection_threshold=dt)
-    pd_map[label] = probability_of_detection_field(se_map[label], sigma_dB=8.0)
+        tl_cov, source_level_dB=SL, noise_level_dB=NL, array_gain_dB=gain,
+        detection_threshold_dB=dt)
+    pd_map[label] = transition_probability_field(se_map[label], sigma_dB=8.0)
     # Over the WATER, not the whole rectangle: a masked cell is seabed, not
     # an undetected target, and counting it as one would dilute the number
     # with geology.
@@ -371,9 +403,9 @@ for label, gain in (('constant', ag_plane), ('realised', ag_map)):
     covered = 100.0 * np.mean(se_water > 0.0)
     print(f"map, {label:8s} AG: {covered:4.0f} % of the plane above threshold")
 
-_, r_by_z_const = detection_range_by_depth(se_map['constant'])
-_, r_by_z_real = detection_range_by_depth(se_map['realised'])
-# np.inf is a legitimate return from detection_range_by_depth — SE >= 0 at
+_, r_by_z_const = detection_ranges_by_depth(se_map['constant'])
+_, r_by_z_real = detection_ranges_by_depth(se_map['realised'])
+# np.inf is a legitimate return from detection_ranges_by_depth — SE >= 0 at
 # every sampled range — and nanmedian does NOT drop it. The median survives
 # a few, but silently: with a third of rows saturated the headline would
 # read inf. Count them and take the median over the finite rows.
@@ -410,11 +442,11 @@ plot_field(tl_cov, ax=axes[0, 0], env=env, receiver=array_at_origin,
            title='1. Propagation — target-to-array loss, mean of 24 elements')
 # The break-even boundary, contoured on the SIGNAL EXCESS itself — not on
 # an iso-TL level standing in for it. SE = 0 is TL = SL - NL + AG - DT, and
-# the AG in that expression is a GRID spanning 6 dB over this plane, so a
-# single iso-TL line is not that boundary: drawn at the median AG it sits
-# at a median SE of -1.1 dB, claiming break-even where the target is a
-# decibel short. Contouring SE puts panel 4's own line on panel 1, which is
-# what this panel claims to show. It crosses 5 dB of TL along its length,
+# the AG in that expression is a GRID spanning 6.4 dB (5th to 95th
+# percentile) over this plane, so a single iso-TL line is not that
+# boundary: drawn at the median AG it sits at a median SE of -1.2 dB,
+# claiming break-even where the target is about a decibel short. Contouring SE puts panel 4's own line on panel 1, which is
+# what this panel claims to show. It crosses 7.8 dB of TL along its length,
 # so it cannot be misread as a level of the plotted field — provided the
 # label does not assert a dB value, which is why it does not.
 km_panel = np.asarray(array.ranges) / 1e3

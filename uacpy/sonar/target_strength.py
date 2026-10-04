@@ -21,7 +21,7 @@ patterns for the cylinder and plate are valid near broadside / normal
 incidence only: they null at end-on even though real end-caps and edges
 still reflect (Abraham Fig. 3.24 keeps separate end-cap terms).
 
-These feed the ``target_strength`` argument of
+These feed the ``target_strength_dB`` argument of
 :func:`uacpy.sonar.active_signal_excess` /
 :func:`uacpy.sonar.active_signal_excess_field`.
 """
@@ -33,7 +33,8 @@ import warnings
 import numpy as np
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
-from uacpy.acoustic_signal._signal_validate import require_positive_finite_scalar
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
+from uacpy.core._validate import require_positive_finite_scalar
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 # Geometric-scattering validity bounds. Sphere-family: the rigid-sphere
@@ -60,17 +61,32 @@ def _require_positive(value, label: str) -> float:
     return require_positive_finite_scalar(value, "target strength", label)
 
 
-def _warn_below_geometric(scale_m: float, frequency_hz, sound_speed,
+def _require_positive_frequencies(frequency):
+    """``frequency`` as a float array, one frequency or many, each > 0
+    and finite; a scalar goes through :func:`_require_positive` and its
+    message."""
+    if np.ndim(frequency) == 0:
+        return np.asarray(_require_positive(frequency, 'frequency'))
+    f = np.asarray(frequency, dtype=float)
+    bad = ~(np.isfinite(f) & (f > 0))
+    if f.size == 0 or np.any(bad):
+        raise ConfigurationError(
+            f"target strength: frequency must be > 0 Hz and finite; got "
+            f"{int(np.count_nonzero(bad))} bad value(s) of {f.size}.")
+    return f
+
+
+def _warn_below_geometric(scale_m: float, frequency, sound_speed,
                           label: str, ka_min: float) -> None:
     """Warn when ``k·scale`` falls below the geometric-regime bound.
 
-    Skipped when ``frequency_hz`` is ``None`` — the frequency-flat
+    Skipped when ``frequency`` is ``None`` — the frequency-flat
     formulas (sphere / convex / ellipsoid) accept an optional frequency
     purely for this validity check.
     """
-    if frequency_hz is None:
+    if frequency is None:
         return
-    f = _require_positive(frequency_hz, 'frequency_hz')
+    f = _require_positive(frequency, 'frequency')
     c = _require_positive(sound_speed, 'sound_speed')
     ka = 2.0 * np.pi * f / c * scale_m
     if ka < ka_min:
@@ -78,20 +94,20 @@ def _warn_below_geometric(scale_m: float, frequency_hz, sound_speed,
             f"{label}: k·a = {ka:.2f} < {ka_min:g} — below the "
             f"geometric-scattering regime; the formula overestimates the "
             f"response of a Rayleigh/resonance-regime scatterer.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
 
 def ts_sphere(
     radius_m,
     *,
-    frequency_hz=None,
+    frequency=None,
     sound_speed=DEFAULT_SOUND_SPEED,
 ) -> float:
     """Rigid-sphere target strength ``TS = 10·log10(a²/4)`` (dB re 1 m²).
 
     Frequency-flat in the geometric regime — the classic anchor is the
-    2-m-radius sphere at ``TS = 0`` dB. Pass ``frequency_hz`` to enable
+    2-m-radius sphere at ``TS = 0`` dB. Pass ``frequency`` to enable
     the ``ka > 10`` validity check (Urick Table 9.1; Abraham §3.4
     eq. 3.218).
 
@@ -99,13 +115,13 @@ def ts_sphere(
     ----------
     radius_m : float
         Sphere radius (m).
-    frequency_hz : float, optional
+    frequency : float, optional
         Frequency (Hz), used only to warn when ``ka < 10``.
     sound_speed : float, optional
         Sound speed (m/s) for the validity check. Default 1500.
     """
     a = _require_positive(radius_m, 'radius_m')
-    _warn_below_geometric(a, frequency_hz, sound_speed, 'ts_sphere',
+    _warn_below_geometric(a, frequency, sound_speed, 'ts_sphere',
                           _KA_MIN_SPHERE)
     return float(10.0 * np.log10(a ** 2 / 4.0))
 
@@ -114,20 +130,36 @@ def ts_convex(
     radius1_m,
     radius2_m,
     *,
-    frequency_hz=None,
+    frequency=None,
     sound_speed=DEFAULT_SOUND_SPEED,
 ) -> float:
     """Smooth convex body: ``TS = 10·log10(a₁a₂/4)`` (dB re 1 m²).
 
     ``a₁``, ``a₂`` are the principal radii of curvature at the point of
     the body closest to the sonar (Abraham §3.4 eq. 3.217). Reduces to
-    :func:`ts_sphere` for ``a₁ = a₂``. Pass ``frequency_hz`` to enable
+    :func:`ts_sphere` for ``a₁ = a₂``. Pass ``frequency`` to enable
     the ``ka > 10`` check on the smaller radius.
+
+    Parameters
+    ----------
+    radius1_m, radius2_m : float
+        Principal radii of curvature (m) at the point nearest the sonar.
+    frequency : float, optional
+        Frequency (Hz); given, the high-frequency (``ka > 10``) condition is
+        checked.
+    sound_speed : float, optional
+        Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
     a1 = _require_positive(radius1_m, 'radius1_m')
     a2 = _require_positive(radius2_m, 'radius2_m')
-    _warn_below_geometric(min(a1, a2), frequency_hz, sound_speed,
-                          'ts_convex', _KA_MIN_SPHERE)
+    return _ts_convex(a1, a2, frequency, sound_speed, 'ts_convex')
+
+
+def _ts_convex(a1, a2, frequency, sound_speed, who):
+    """:func:`ts_convex` on validated radii; ``who`` names the public
+    function in the below-geometric warning."""
+    _warn_below_geometric(min(a1, a2), frequency, sound_speed,
+                          who, _KA_MIN_SPHERE)
     return float(10.0 * np.log10(a1 * a2 / 4.0))
 
 
@@ -136,7 +168,7 @@ def ts_ellipsoid(
     b_m,
     c_m,
     *,
-    frequency_hz=None,
+    frequency=None,
     sound_speed=DEFAULT_SOUND_SPEED,
 ) -> float:
     """Ellipsoid viewed along semi-axis ``a``: ``TS = 20·log10(bc/2a)``.
@@ -145,19 +177,29 @@ def ts_ellipsoid(
     radii at the tip of the ``a`` axis (``b²/a``, ``c²/a``); ``a = b =
     c`` recovers the sphere. The ensonified direction is along ``a`` —
     permute the semi-axes for other aspects.
+
+    Parameters
+    ----------
+    a_m, b_m, c_m : float
+        Semi-axes (m), ensonified along ``a``.
+    frequency : float, optional
+        Frequency (Hz); given, the high-frequency (``ka > 10``) condition is
+        checked.
+    sound_speed : float, optional
+        Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
     a = _require_positive(a_m, 'a_m')
     b = _require_positive(b_m, 'b_m')
     c = _require_positive(c_m, 'c_m')
-    return ts_convex(
-        b ** 2 / a, c ** 2 / a,
-        frequency_hz=frequency_hz, sound_speed=sound_speed,
-    )
+    return _ts_convex(b ** 2 / a, c ** 2 / a, frequency, sound_speed,
+                      'ts_ellipsoid')
 
 
 def _sinc2_ts(sigma_broadside, k_dim, angle_deg):
     """``10·log10[sigma_broadside · sinc²β · cos²θ]``, ``β = k_dim·sinθ`` (the
-    physical-optics aspect pattern); ``-inf`` at nulls, float for a scalar."""
+    physical-optics aspect pattern); ``-inf`` at nulls, float for a scalar.
+    ``sigma_broadside`` and ``k_dim`` may carry a frequency axis that
+    broadcasts against ``angle_deg``."""
     theta = np.deg2rad(np.asarray(angle_deg, dtype=float))
     beta = k_dim * np.sin(theta)
     # numpy's sinc is the normalized one, sinc(x) = sin(pi*x)/(pi*x), so the
@@ -166,14 +208,14 @@ def _sinc2_ts(sigma_broadside, k_dim, angle_deg):
     pattern = np.sinc(beta / np.pi) ** 2 * np.cos(theta) ** 2
     with np.errstate(divide='ignore'):
         ts = 10.0 * np.log10(sigma_broadside * pattern)
-    return float(ts) if np.ndim(angle_deg) == 0 else ts
+    return float(ts) if np.ndim(ts) == 0 else ts
 
 
 def ts_cylinder(
     radius_m,
     length_m,
-    frequency_hz,
     *,
+    frequency,
     angle_deg=0.0,
     sound_speed=DEFAULT_SOUND_SPEED,
 ):
@@ -190,8 +232,10 @@ def ts_cylinder(
     ----------
     radius_m, length_m : float
         Cylinder radius and length (m).
-    frequency_hz : float
-        Frequency (Hz).
+    frequency : float or array_like
+        Frequency or frequencies (Hz); broadcasts against ``angle_deg``, so
+        a TS-versus-frequency curve is one call. The ``ka`` check reads the
+        lowest.
     angle_deg : float or array_like, optional
         Aspect angle(s) from broadside (degrees). Default 0 (broadside).
     sound_speed : float, optional
@@ -204,9 +248,10 @@ def ts_cylinder(
     """
     a = _require_positive(radius_m, 'radius_m')
     L = _require_positive(length_m, 'length_m')
-    f = _require_positive(frequency_hz, 'frequency_hz')
+    f = _require_positive_frequencies(frequency)
     c = _require_positive(sound_speed, 'sound_speed')
-    _warn_below_geometric(a, f, c, 'ts_cylinder', _KA_MIN_CYLINDER)
+    _warn_below_geometric(a, float(f.min()), c, 'ts_cylinder',
+                          _KA_MIN_CYLINDER)
     lam = c / f
     k = 2.0 * np.pi / lam
     return _sinc2_ts(a * L ** 2 / (2.0 * lam), k * L, angle_deg)
@@ -215,8 +260,8 @@ def ts_cylinder(
 def ts_plate(
     width_m,
     height_m,
-    frequency_hz,
     *,
+    frequency,
     angle_deg=0.0,
     sound_speed=DEFAULT_SOUND_SPEED,
 ):
@@ -233,8 +278,9 @@ def ts_plate(
     ----------
     width_m, height_m : float
         Plate dimensions (m); ``width_m`` lies in the rotation plane.
-    frequency_hz : float
-        Frequency (Hz).
+    frequency : float or array_like
+        Frequency or frequencies (Hz); broadcasts against ``angle_deg``.
+        The dimension check reads the lowest.
     angle_deg : float or array_like, optional
         Angle(s) from normal incidence (degrees). Default 0.
     sound_speed : float, optional
@@ -247,9 +293,9 @@ def ts_plate(
     """
     w = _require_positive(width_m, 'width_m')
     h = _require_positive(height_m, 'height_m')
-    f = _require_positive(frequency_hz, 'frequency_hz')
+    f = _require_positive_frequencies(frequency)
     c = _require_positive(sound_speed, 'sound_speed')
-    _warn_below_geometric(min(w, h), f, c, 'ts_plate',
+    _warn_below_geometric(min(w, h), float(f.min()), c, 'ts_plate',
                           _KA_MIN_PLATE)
     lam = c / f
     k = 2.0 * np.pi / lam

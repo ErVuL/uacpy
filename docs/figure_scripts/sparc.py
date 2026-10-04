@@ -4,7 +4,7 @@ The code here is the code shown on the page: each builder is the worked
 example, so a figure cannot drift from the snippet that claims to produce it.
 
 SPARC marches a pulse, so every run costs real time. The receivers below are
-kept deliberately sparse and ``t_max`` is always pinned — the auto window
+kept deliberately sparse and ``time_max`` is always pinned — the auto window
 (2.5 x the travel time to ``RMax``) is far longer than these figures need.
 """
 
@@ -20,8 +20,22 @@ from figure_scripts._common import TALL, WIDE, shallow_water
 import uacpy
 from uacpy.core.results import Field
 from uacpy.models import SPARC
-from uacpy.visualization import plot_time_snapshots
+from uacpy.plot import plot_time_snapshots
 
+
+
+def rigid_floor_channel():
+    """The shared shallow-water channel with a rigid floor in place of its
+    sand half-space: SPARC's deck carries only vacuum and rigid boundaries
+    and refuses a half-space, so the seabed is chosen here, explicitly.
+    """
+    env, source, _ = shallow_water()
+    env = uacpy.Environment(
+        name='Shallow-water channel, rigid floor',
+        bathymetry=env.depth, ssp=env.ssp,
+        bottom=uacpy.BoundaryProperties(acoustic_type='rigid'),
+    )
+    return env, source
 
 def record_section():
     """``output_mode='R'``: a horizontal array, drawn as a record section.
@@ -30,9 +44,9 @@ def record_section():
     standard record-section gain, without which the near traces swamp the
     far ones and the moveout is invisible.
     """
-    env, source, _ = shallow_water()
+    env, source = rigid_floor_channel()
     array = uacpy.Receiver(depths=50.0, ranges=np.linspace(200.0, 1200.0, 24))
-    p = SPARC(t_max=1.0, n_t_out=1024).run(env, source, array)
+    p = SPARC(time_max=1.0, n_time_samples=1024).run(env, source, array)
 
     section = p.at(depth=50.0).to_dict()
     section['data'] = (section['data']
@@ -49,27 +63,28 @@ def record_section():
 
 def single_trace():
     """One receiver: the pulse that arrives, and the band it occupies."""
-    env, source, _ = shallow_water()
+    env, source = rigid_floor_channel()
     point = uacpy.Receiver(depths=50.0, ranges=np.array([800.0]))
-    p = SPARC(t_max=0.8, n_t_out=2048).run(env, source, point)
+    p = SPARC(time_max=0.8, n_time_samples=2048).run(env, source, point)
     trace = p.at(depth=50.0, range=800.0)
 
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.0))
     trace.plot(ax=axes[0])
     axes[0].set_title('p(t) at (800 m, 50 m)', fontweight='bold', fontsize=11)
 
-    freqs, spectrum = trace.get_spectrum()
+    H = trace.to_transfer_function(band=(0.0, 700.0))
+    freqs, spectrum = H.coords['frequency'], H.data.ravel()
     axes[1].semilogy(freqs, np.abs(spectrum) + 1e-30, linewidth=1.0)
-    for edge, label in ((100.0, 'f_min = fc/2'), (400.0, 'f_max = 2·fc')):
+    for edge, label in ((100.0, 'freq_min = fc/2'), (400.0, 'freq_max = 2·fc')):
         axes[1].axvline(edge, color='crimson', linestyle='--', linewidth=1.0)
         axes[1].annotate(label, (edge, 1.0), xycoords=('data', 'axes fraction'),
                          xytext=(4, -12), textcoords='offset points',
                          color='crimson', fontsize=9)
     axes[1].set_xlim(0.0, 700.0)
     axes[1].set_xlabel('Frequency (Hz)')
-    axes[1].set_ylabel('|P(f)|')
+    axes[1].set_ylabel('|H(f)|')
     axes[1].grid(True, alpha=0.3)
-    axes[1].set_title('and its spectrum — f_min / f_max bound the wavenumbers '
+    axes[1].set_title('and its spectrum — freq_min / freq_max bound the wavenumbers '
                       'marched', fontweight='bold', fontsize=11)
     fig.suptitle('SPARC — the received pulse and the pulse band',
                  fontweight='bold', fontsize=13)
@@ -83,10 +98,10 @@ def vertical_array():
     One run per receiver *range* instead of per depth, so a whole VLA at a
     single range costs one SPARC run.
     """
-    env, source, _ = shallow_water()
+    env, source = rigid_floor_channel()
     vla = uacpy.Receiver(depths=np.linspace(2.0, 98.0, 33),
                          ranges=np.array([800.0]))
-    p = SPARC(output_mode='D', t_max=0.9, n_t_out=1024).run(env, source, vla)
+    p = SPARC(output_mode='D', time_max=0.9, n_time_samples=1024).run(env, source, vla)
     fig, ax = p.at(range=800.0).plot(
         stacked=True, figsize=TALL,
         title='SPARC — vertical array at 800 m (output_mode=\'D\')')
@@ -96,10 +111,10 @@ def vertical_array():
 
 def snapshots():
     """``output_mode='S'``: the wavefront itself, at four instants."""
-    env, source, _ = shallow_water()
+    env, source = rigid_floor_channel()
     grid = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 40),
                           ranges=np.linspace(10.0, 500.0, 80))
-    p = SPARC(output_mode='S', t_max=0.36, n_t_out=384).run(env, source, grid)
+    p = SPARC(output_mode='S', time_max=0.36, n_time_samples=384).run(env, source, grid)
 
     times = (0.06, 0.14, 0.22, 0.30)
     late = np.asarray(p.data)[..., -1]
@@ -117,15 +132,15 @@ def pulse_shapes():
     Hanning-weighted four-sine is a narrowband tone burst, and the received
     field rings for as long as the source did.
     """
-    env, source, _ = shallow_water()
+    env, source = rigid_floor_channel()
     point = uacpy.Receiver(depths=50.0, ranges=np.array([600.0]))
-    pulses = [('PN+B', 'Pseudo-Gaussian, band-passed (default)'),
+    pulses = [('PN+B', 'Pseudo-Gaussian, band-passed (default without a waveform)'),
               ('RN+N', 'Ricker wavelet'),
               ('HN+N', 'Hanning-weighted four sine')]
 
     fig, axes = plt.subplots(3, 1, figsize=(9.0, 7.0), sharex=True)
     for ax, (code, label) in zip(axes, pulses):
-        p = SPARC(pulse_type=code, t_max=0.7, n_t_out=2048).run(
+        p = SPARC(pulse_type=code, time_max=0.7, n_time_samples=2048).run(
             env, source, point)
         p.at(depth=50.0, range=600.0).plot(ax=ax)
         ax.set_title(f"pulse_type='{code}' — {label}",
@@ -139,29 +154,30 @@ def pulse_shapes():
 
 
 def output_sampling():
-    """``n_t_out`` is the output Nyquist, and SPARC says so when it is short.
+    """``n_time_samples`` is the output Nyquist, and SPARC says so when it is short.
 
-    The window is ``[0, t_max]`` inclusive of both ends, so the output sample
-    rate is ``(n_t_out - 1) / t_max`` — the same expression the wrapper's own
-    aliasing check uses (``SPARC._resolve_n_t_out``), not ``n_t_out / t_max``,
-    which overstates it by ``n/(n-1)``. Below ``2·f_max`` the marched pulse is
-    folded back into the band and p(t) looks plausible at the wrong frequency.
+    The window is ``[0, time_max]`` inclusive of both ends, so the output sample
+    rate is ``(n_time_samples - 1) / time_max`` — the same expression the wrapper's own
+    aliasing check uses (``sparc._plan.resolve_n_time_samples``), not
+    ``n_time_samples / time_max``, which overstates it by ``n/(n-1)``. Below
+    ``2·freq_max`` the marched pulse is folded back into the band and p(t) looks
+    plausible at the wrong frequency.
     """
-    env, source, _ = shallow_water()
+    env, source = rigid_floor_channel()
     point = uacpy.Receiver(depths=50.0, ranges=np.array([600.0]))
 
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 5.4), sharex=True)
-    for ax, n_t_out in zip(axes, (128, 2048)):
+    for ax, n_time_samples in zip(axes, (128, 2048)):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            p = SPARC(t_max=0.7, n_t_out=n_t_out).run(env, source, point)
+            p = SPARC(time_max=0.7, n_time_samples=n_time_samples).run(env, source, point)
         p.at(depth=50.0, range=600.0).plot(ax=ax)
-        fs = (n_t_out - 1) / 0.7
-        ax.set_title(f'n_t_out={n_t_out} → {fs:.0f} Hz sampling, '
+        fs = (n_time_samples - 1) / 0.7
+        ax.set_title(f'n_time_samples={n_time_samples} → {fs:.0f} Hz sampling, '
                      f'Nyquist {fs / 2:.0f} Hz',
                      fontweight='bold', fontsize=11)
         if any('will alias' in str(w.message) for w in caught):
-            ax.text(0.99, 0.05, 'UserWarning: p(t) will alias', ha='right',
+            ax.text(0.99, 0.05, 'NumericsWarning: p(t) will alias', ha='right',
                     va='bottom', transform=ax.transAxes, fontsize=10,
                     color='crimson', fontweight='bold')
         if ax is not axes[-1]:

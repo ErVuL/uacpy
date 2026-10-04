@@ -8,31 +8,34 @@ substrate (Folk classification) for **European seas** through a public OGC
 model-ready bottom.
 
 Coverage is regional: outside the European-seas footprint the fetch raises
-``DataFetchError`` and the caller should supply an explicit grain size (ϕ) or
-sediment class instead (see :func:`uacpy.data.bottom_from_grain_size`).
+``DataFetchError``; ``fetch_environment(bottom_sources='auto')`` then falls
+through to the global sources (grain-size samples, Diesing, MARS, pelagic),
+and a direct caller can pick one of those or supply an explicit grain size (ϕ)
+or sediment class (see :func:`uacpy.data.bottom_from_grain_size`).
 
 The Folk 5-class (EUNIS) categories are mapped to representative grain sizes /
 materials, then converted with the calibrated relations in
 :mod:`uacpy.data.sediment`.
 """
 
+import dataclasses
 import json
 import math
 import urllib.parse
-from typing import Dict, Optional, Union
+from typing import Optional, Union
 
-from uacpy.core.environment import BoundaryProperties, Bottom
+from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import DataFetchError
-from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.core.geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data._http import http_get
-from uacpy.data.sediment import (
-    bottom_from_class, bottom_from_grain_size, range_dependent_bottom_along,
-    water_sound_speed_at,
-)
+from uacpy.data.sources import SOURCES, DataProvenance
+from uacpy.data.sediment import (SeabedSample, bottom_from_class,
+                                 bottom_from_grain_size)
 from uacpy._log import log_message
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 
-__all__ = ['fetch_seabed_substrate', 'fetch_bottom', 'fetch_bottom_transect']
+__all__ = ['fetch_emodnet_substrate', 'fetch_bottom_emodnet']
 
 EMODNET_WFS_URL = 'https://drive.emodnet-geology.eu/geoserver/wfs'
 EMODNET_LAYER = 'gtk:seabed_substrate_1m'
@@ -40,6 +43,15 @@ EMODNET_LAYER = 'gtk:seabed_substrate_1m'
 # EMODnet Folk 5-class code → representative geoacoustic handle.
 # ('phi', ϕ) routes through the grain-size relation; ('class', name) uses a
 # material preset (for hard substrata that grain size cannot describe).
+# A Folk class is a sediment classification, so the four sediment classes go
+# through ϕ, as MARS converts its Folk classes (``uacpy.data.mars``); only a
+# DECK41 lithology *word* such as 'gravel' takes a material preset (see
+# :func:`uacpy.core.sediment.grain_size_to_geoacoustics`). Class 3 is placed at
+# -1 ϕ, the sand/gravel boundary (Medwin & Clay Sect. 14.5: gravel is 2 to 256
+# mm, ϕ = -1 to -8) and the coarse end of the grain-size relations, where
+# MARS places each Folk class at its own centroid (e.g. 'G' at -3.3 ϕ). At -1 ϕ
+# the 'hamilton' relation gives a density of 2.56 g/cm³ (TR 9407 Table 2's
+# ratio 2.492 × 1.027).
 _FOLK5_TO_BOTTOM = {
     1: ('phi', 5.0),     # Mud to muddy Sand
     2: ('phi', 2.0),     # Sand
@@ -60,7 +72,7 @@ _FOLK5_UNCLASSIFIED = 6
 
 
 def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None,
-                       model=DEFAULT_GRAIN_SIZE_MODEL, environment=None):
+                       model=DEFAULT_GRAIN_SIZE_MODEL, hamilton_fit=None):
     """``BoundaryProperties`` for one Folk 5-class code, or a typed refusal.
 
     Shared by the live WFS backend and the offline polygon backend
@@ -84,7 +96,7 @@ def _bottom_from_folk5(code, lat, lon, *, roughness, water_sound_speed=None,
     kind, value = _FOLK5_TO_BOTTOM[code]
     if kind == 'phi':
         return bottom_from_grain_size(value, roughness=roughness, model=model,
-                                      environment=environment,
+                                      hamilton_fit=hamilton_fit,
                                       water_sound_speed=water_sound_speed)
     return bottom_from_class(value, roughness=roughness)
 
@@ -116,23 +128,45 @@ def _to_web_mercator(lat: float, lon: float):
             radius_m * math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)))
 
 
-def fetch_seabed_substrate(
+def fetch_emodnet_substrate(
     point: Coordinate,
     *,
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
-) -> Dict:
+    max_distance_km: Optional[float] = None,
+) -> SeabedSample:
     """Raw EMODnet seabed-substrate record at a ``(lat, lon)`` point.
 
-    Returns ``{'folk_5cl', 'folk_5cl_txt', 'original_grain_size', 'source'}``.
+    Returns a :class:`~uacpy.data.SeabedSample`: the ``folk_5cl`` code as
+    ``folk_class`` (scheme ``'folk5'``), ``details`` holding
+    ``folk_5cl_txt`` and ``original_grain_size``, and the ``'emodnet'``
+    provenance with the requested point as its data point (the polygon
+    contains it).
+
+    Parameters
+    ----------
+    point : (lat, lon)
+        Site coordinates in decimal degrees.
+    layer : str, optional
+        The WFS layer queried.
+    base_url : str, optional
+        The WFS endpoint.
+    timeout : float, optional
+        Per-request network timeout in seconds.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
+    max_distance_km : float, optional
+        The offset rule's refusal distance (km). The polygon read contains
+        ``point``, so the offset is 0 km and every limit passes.
 
     Raises
     ------
     DataFetchError
         Service failure, or no coverage at the location (European seas only).
     """
+    limit = checked_max_distance(max_distance_km, 'fetch_emodnet_substrate')
     lat, lon = as_coordinate(point)
     x, y = _to_web_mercator(lat, lon)
     query = urllib.parse.urlencode({
@@ -157,83 +191,68 @@ def fetch_seabed_substrate(
             remediation="Outside European seas, pass an explicit grain size "
                         "(ϕ) or sediment class as the bottom.",
         )
-    p = features[0]['properties']
-    return {
-        'folk_5cl': int(p['folk_5cl']),
-        'folk_5cl_txt': p.get('folk_5cl_txt'),
-        'original_grain_size': p.get('original_grain_size'),
-        'source': 'EMODnet Geology seabed substrate 1:1M',
-    }
+    p = features[0].get('properties') or {}
+    # A polygon without a Folk code is a state of the layer (the offline index
+    # builder skips the same features), so it is refused as no coverage.
+    try:
+        folk = int(p['folk_5cl'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DataFetchError(
+            f"EMODnet has no Folk class at {lat:.3f}, {lon:.3f} (the polygon "
+            f"there carries folk_5cl={p.get('folk_5cl')!r}).",
+            remediation="Pass an explicit grain size (ϕ) or sediment class "
+                        "as the bottom, or use another bottom source.",
+        ) from exc
+    return SeabedSample(
+        grain_size_phi=None, material=None, folk_class=folk,
+        folk_class_scheme='folk5', sample_point=None, distance_km=None,
+        provenance=checked_offset(
+            DataProvenance(source=SOURCES['emodnet'], data_point=(lat, lon),
+                           requested_point=(lat, lon)),
+            who='fetch_emodnet_substrate', warn_km=0.0,
+            max_distance_km=limit),
+        details={'folk_5cl_txt': p.get('folk_5cl_txt'),
+                 'original_grain_size': p.get('original_grain_size')})
 
 
-def fetch_bottom(
+def fetch_bottom_emodnet(
     point: Coordinate,
     *,
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
     model: str = DEFAULT_GRAIN_SIZE_MODEL,
-    environment: Optional[str] = None,
+    hamilton_fit: Optional[str] = None,
     layer: str = EMODNET_LAYER,
     base_url: str = EMODNET_WFS_URL,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
+    max_distance_km: Optional[float] = None,
 ) -> BoundaryProperties:
     """Model-ready bottom from EMODnet seabed substrate at a ``(lat, lon)`` point.
 
-    Convenience wrapper: :func:`fetch_seabed_substrate` → Folk-class mapping →
+    Convenience wrapper: :func:`fetch_emodnet_substrate` → Folk-class mapping →
     :func:`uacpy.data.bottom_from_grain_size` / ``bottom_from_class``. Raises
     ``DataFetchError`` outside European-seas coverage. ``water_sound_speed``
     (m/s) scales the grain-size velocity ratio to the in-situ near-seabed
     water; ``None`` uses the Hamilton reference (class bottoms are absolute and
     unaffected). ``model`` picks the grain-size relations (``'hamilton'`` or
-    ``'apl-uw'``), see :func:`uacpy.data.grain_size_to_geoacoustics`.
+    ``'apl-uw'``), see :func:`uacpy.core.sediment.grain_size_to_geoacoustics`.
+    ``max_distance_km`` is as in :func:`fetch_emodnet_substrate`.
     """
+    from uacpy.core.sediment import canonical_grain_size_selection
+    model, hamilton_fit = canonical_grain_size_selection(
+        model, hamilton_fit, who='fetch_bottom_emodnet')
     lat, lon = as_coordinate(point)
-    sub = fetch_seabed_substrate(point, layer=layer, base_url=base_url,
-                                 timeout=timeout, verbose=verbose)
-    bottom = _bottom_from_folk5(sub['folk_5cl'], lat, lon, roughness=roughness,
+    sub = fetch_emodnet_substrate(point, layer=layer, base_url=base_url,
+                                 timeout=timeout, verbose=verbose,
+                                 max_distance_km=max_distance_km)
+    bottom = _bottom_from_folk5(sub.folk_class, lat, lon, roughness=roughness,
                                 water_sound_speed=water_sound_speed,
-                                model=model, environment=environment)
+                                model=model, hamilton_fit=hamilton_fit)
     log_message(
-        'seabed', f"EMODnet '{sub['folk_5cl_txt']}' at {lat:.3f}, {lon:.3f} → "
-        f"{bottom.acoustic_type} c_p={bottom.sound_speed:.0f} m/s",
+        'seabed', f"EMODnet '{sub.details['folk_5cl_txt']}' at {lat:.3f}, "
+        f"{lon:.3f} → {bottom.acoustic_type} "
+        f"c_p={bottom.sound_speed:.0f} m/s",
         verbose=verbose,
     )
-    return bottom
-
-
-def fetch_bottom_transect(
-    start: Coordinate, end: Coordinate, *,
-    n_points=6,
-    max_points=None,
-    roughness: float = 0.0,
-    water_sound_speed: Optional[float] = None,
-    model: str = DEFAULT_GRAIN_SIZE_MODEL,
-    environment: Optional[str] = None,
-    layer: str = EMODNET_LAYER,
-    base_url: str = EMODNET_WFS_URL,
-    timeout: float = 60.0,
-    verbose: Union[bool, str] = False,
-) -> Bottom:
-    """Range-dependent bottom from EMODnet sampled along ``start`` → ``end``.
-
-    Queries EMODnet at ``n_points`` evenly-spaced points along the great-circle
-    path and assembles a :class:`~uacpy.core.environment.Bottom`
-    (explicit ``c_p`` / ρ / α arrays vs range, from the Folk-class mapping), with
-    ranges measured from ``start`` — the seafloor analogue of
-    :func:`uacpy.data.fetch_ssp_transect`.
-
-    Points outside EMODnet coverage hold the nearest covered value; the call
-    raises only if *no* point along the transect is covered.
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
-    column scales to the water over its own seafloor.
-    """
-    return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom((la, lo), roughness=roughness,
-                                    water_sound_speed=water_sound_speed_at(
-                                        water_sound_speed, la, lo),
-                                    model=model, environment=environment,
-                                    layer=layer, base_url=base_url,
-                                    timeout=timeout, verbose=verbose),
-        start, end, n_points, source_label='EMODnet', max_points=max_points,
-    )
+    return dataclasses.replace(bottom, data_sources=(sub.provenance,))

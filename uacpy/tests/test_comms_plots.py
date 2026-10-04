@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from uacpy.visualization import (
+from uacpy.plot import (
     plot_channel, plot_convergence, plot_doppler_ambiguity, plot_eye_diagram,
     plot_subcarriers, plot_sync_metric,
 )
@@ -59,11 +59,11 @@ def test_plot_channel_titles_each_panel_from_its_own_keyword():
     different one got a second title drawn over the first."""
     fig, ax = plot_channel(_TAPS, 1000.0, title='delay',
                            freq_title='response')
-    assert ax[0].get_title(loc='left') == 'delay'
-    assert ax[1].get_title(loc='left') == 'response'
+    assert ax[0].get_title() == 'delay'
+    assert ax[1].get_title() == 'response'
     # nothing left behind in the other title slots to overlap with
     for a in ax:
-        assert a.get_title(loc='center') == ''
+        assert a.get_title(loc='left') == ''
         assert a.get_title(loc='right') == ''
     plt.close(fig)
 
@@ -78,15 +78,15 @@ def test_plot_channel_refuses_a_pair_where_a_string_belongs():
 
 def test_plot_channel_title_alone_leaves_the_frequency_panel_default():
     fig, ax = plot_channel(_TAPS, 1000.0, title='just the left one')
-    assert ax[0].get_title(loc='left') == 'just the left one'
-    assert ax[1].get_title(loc='left') == 'Frequency response'
+    assert ax[0].get_title() == 'just the left one'
+    assert ax[1].get_title() == 'Frequency response'
     plt.close(fig)
 
 
 def test_plot_channel_freq_title_alone_leaves_the_delay_panel_default():
     fig, ax = plot_channel(_TAPS, 1000.0, freq_title='just the right one')
-    assert ax[0].get_title(loc='left') == 'Channel impulse response'
-    assert ax[1].get_title(loc='left') == 'just the right one'
+    assert ax[0].get_title() == 'Channel impulse response'
+    assert ax[1].get_title() == 'just the right one'
     plt.close(fig)
 
 
@@ -191,4 +191,29 @@ def test_the_quadrature_label_of_a_wide_constellation_stays_on_the_figure():
     fig.canvas.draw()
     bbox = ax.yaxis.label.get_window_extent()
     assert bbox.x0 >= 0.0, f"ylabel starts {bbox.x0:.1f} px left of the figure"
+    plt.close(fig)
+
+
+def test_an_error_free_point_is_not_drawn_as_a_measured_ber():
+    """Zero errors in N bits measures no BER; drawing it on the line at a
+    floor of 1e-12 put a fabricated waterfall decades deep. The measured line
+    carries only the non-zero points, and with ``n_bits`` each error-free one
+    is a hollow downward caret at 1/n_bits; without it, a warning."""
+    from uacpy.plot import plot_ber_curve
+    ebn0 = np.array([0.0, 4.0, 8.0, 12.0])
+    ber = np.array([1e-1, 1e-2, 0.0, 0.0])
+
+    with pytest.warns(UserWarning, match=r"2 point\(s\) have zero errors"):
+        fig, ax = plot_ber_curve(ebn0, ber)
+    np.testing.assert_array_equal(ax.lines[0].get_ydata(), [1e-1, 1e-2])
+    assert len(ax.lines) == 1
+    assert ax.get_ylim()[0] > 1e-4
+    plt.close(fig)
+
+    fig, ax = plot_ber_curve(ebn0, ber, n_bits=[1e3, 1e3, 1e4, 1e5])
+    measured, bound = ax.lines
+    np.testing.assert_array_equal(measured.get_xdata(), [0.0, 4.0])
+    np.testing.assert_array_equal(bound.get_xdata(), [8.0, 12.0])
+    np.testing.assert_allclose(bound.get_ydata(), [1e-4, 1e-5])
+    assert bound.get_marker() == 'v' and bound.get_linestyle() == 'None'
     plt.close(fig)

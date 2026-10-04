@@ -1,7 +1,7 @@
 """
 Ambient-noise model — Tollefsen / Pecknold packaging.
 
-`compute_windnoise` and the :class:`WenzNoise` class follow Tollefsen &
+`wind_noise_level` and the :class:`WenzNoise` class follow Tollefsen &
 Pecknold "A simple yet practical ambient noise model"
 (DRDC-RDDC-2022-D051, May 2022): wind / shipping / rain / thermal /
 turbulence components summed in dB re 1 µPa²/Hz.
@@ -26,21 +26,42 @@ Nichols, S. M. & Bradley, D. L. (2016). Global examination of the
 import inspect
 import warnings
 from collections import namedtuple
+from collections.abc import Mapping
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+from uacpy.core._export import Exportable
+from uacpy.core._plotting import plotter
+from uacpy.core._repr import axis, build, qty
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, NumericsWarning, ValidityWarning,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.acoustics import band_level, sum_levels_dB
 from uacpy.core.units import knots_to_ms
+from uacpy.acoustic_signal._results import ResultTuple
 
 
-NoiseComponents = namedtuple(
-    "NoiseComponents", "total wind shipping rain thermal turbulence")
+class NoiseComponents(ResultTuple, namedtuple(
+        "NoiseComponents", "total wind shipping rain thermal turbulence")):
+    """The Wenz noise spectrum level and its five terms, each in
+    dB re 1 µPa²/Hz on the frequencies it was evaluated at.
+
+    The tuple is the measurement, so
+    ``total, wind, shipping, rain, thermal, turbulence = ...`` keeps
+    working.
+    """
+
+    __slots__ = ()
+
+    def _field_units(self):
+        return {name: "dB re 1 µPa²/Hz" for name in self._fields}
 
 
 # IEC 61260-1 base-10 decidecade ("1/3-octave") bands run 10**(±1/20) about
 # their centre — 0.1 decade wide, so consecutive centres sit 0.1 decade apart
-# (:func:`uacpy.acoustic_signal.estimate.decidecade_bands`). It is the narrowest
+# (:func:`uacpy.acoustic_signal.decidecade_bands`). It is the narrowest
 # analysis band uacpy defines, and so the yardstick for whether a frequency
 # vector is a set of band centres or a plotting grid.
 _DECIDECADE_DECADES = 0.1
@@ -98,7 +119,8 @@ def _positive_frequencies(frequencies, who):
     return f
 
 
-def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
+def wind_noise_level(frequencies, *, wind_speed_kn, water_depth='deep',
+                      band_integrate=False):
     """
     Wind-driven ambient noise level (dB re 1 µPa²/Hz), with the
     Piggott (1964) shallow-water adjustment.
@@ -107,11 +129,12 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     ----------
     frequencies : ndarray or float
         Frequencies in Hz (1-Hz band assumed for a scalar).
-    u : float
-        Wind speed in **knots at the 10 m reference height** — the
-        variable DRDC-RDDC-2022-D051 §2.3 fits (eq. 8 is stated for
-        ``u`` in knots; the section defines it at 10 m). Must be
-        non-negative; ``u == 0`` silences the wind component and the
+    wind_speed_kn : float
+        Wind speed (knots) at the 10 m reference height — the variable ``u``
+        DRDC-RDDC-2022-D051 §2.3 fits, which eq. 8 states in knots.
+        Keyword-only, as in :class:`WenzNoise`, so the unit is stated at
+        every call. Must be
+        non-negative; ``wind_speed_kn == 0`` silences the wind component and the
         returned spectral level is ``-inf`` dB at every frequency (the
         surface-noise source has no power). **This deliberately differs
         from the DRDC report**, whose ``u = 0`` case returns 0 dB — a
@@ -141,7 +164,7 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         result to be band levels. A vector finer than decidecade spacing is a
         plotting grid, and the levels then move with its density — 18.0 dB
         between 20 and 1200 points over one decade — so that case raises a
-        :class:`UserWarning`.
+        ``NumericsWarning``.
 
     Returns
     -------
@@ -155,18 +178,18 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     Translated from the IDL implementation by Dan Hutt, rewritten by Vic
     Young, and packaged in Tollefsen & Pecknold (2022).
     """
-    f = _positive_frequencies(frequencies, 'compute_windnoise')
+    f = _positive_frequencies(frequencies, 'wind_noise_level')
 
-    u = float(u)
     # Written as the negation of the admissible condition so NaN is refused
     # too: ``nan < 0`` is False, and a NaN wind would then fall through to the
     # ``u == 0`` branch below and come back as the -inf switched-off sentinel,
     # i.e. a plausible finite spectrum tens of dB low.
-    if not (u >= 0):
+    if not (float(wind_speed_kn) >= 0):
         raise ConfigurationError(
-            f"compute_windnoise: wind speed u must be non-negative (knots) and "
-            f"finite, got {u}"
+            f"wind_noise_level: wind_speed_kn must be non-negative (knots) "
+            f"and finite, got {float(wind_speed_kn)}."
         )
+    u = float(wind_speed_kn)    # DRDC eq. 8's u, in knots
 
     # The deep/shallow offset c0 of DRDC §2.3 eq. 10, resolved before the
     # ``u == 0`` short circuit so an unusable ``water_depth`` is refused on
@@ -178,7 +201,7 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
     # curve, 3.0 dB below the shallow one the caller asked for at 50 Hz. So
     # the match is exact and anything else raises here. ``WenzNoise.__init__``
     # raises on this same parameter with this same value set, which leaves the
-    # direct ``compute_windnoise`` / ``WIND_MODELS['merklinger']`` calls — both
+    # direct ``wind_noise_level`` / ``WIND_MODELS['merklinger']`` calls — both
     # public exports — as the paths this guard covers.
     if water_depth == 'deep':
         cst = 42
@@ -186,7 +209,7 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         cst = 45
     else:
         raise ConfigurationError(
-            f"compute_windnoise: water_depth must be 'deep' or 'shallow', got "
+            f"wind_noise_level: water_depth must be 'deep' or 'shallow', got "
             f"{water_depth!r} (the match is exact and case-sensitive). The two "
             f"select different Piggott (1964) offsets — c0 = 42 vs 45 dB, a "
             f"3.0 dB difference at 50 Hz."
@@ -202,7 +225,7 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
         if band_integrate:
             if n_freq < 2:
                 raise ConfigurationError(
-                    "compute_windnoise(band_integrate=True) needs at least two "
+                    "wind_noise_level(band_integrate=True) needs at least two "
                     "frequencies to define band edges; got one. Use "
                     "band_integrate=False for a scalar spectral level."
                 )
@@ -232,10 +255,10 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
                 # arguments, so ``band_integrate`` is always False there and
                 # this branch is dead on that path.
                 warnings.warn(
-                    f"compute_windnoise(band_integrate=True): consecutive "
+                    f"wind_noise_level(band_integrate=True): consecutive "
                     f"frequencies come as close as {tightest:.4g} decades, "
                     f"finer than the {_DECIDECADE_DECADES:g}-decade decidecade "
-                    f"band (uacpy.acoustic_signal.estimate.decidecade_bands) — "
+                    f"band (uacpy.acoustic_signal.decidecade_bands) — "
                     f"{density}. Each band's width is taken from this "
                     f"vector's own spacing, so at this density the returned "
                     f"levels are spectral levels scaled by an arbitrary "
@@ -243,7 +266,7 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
                     f"between 20 and 1200 points over one decade). Pass "
                     f"analysis-band centres for band levels, or "
                     f"band_integrate=False for the spectral level.",
-                    UserWarning, stacklevel=2,
+                    NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
             # Band edges at the midpoints between consecutive frequencies in
             # ascending order; the two outer bands span only the half-spacing
@@ -259,10 +282,11 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
             f_sorted = f[order]
             mids = (f_sorted[1:] + f_sorted[:-1]) / 2
             edges = np.concatenate(([f_sorted[0]], mids, [f_sorted[-1]]))
-            df = np.empty_like(f)
-            df[order] = edges[1:] - edges[:-1]
-        else:
-            df = np.ones_like(f)
+            band_low = np.empty_like(f)
+            band_high = np.empty_like(f)
+            band_low[order] = edges[:-1]
+            band_high[order] = edges[1:]
+        df = np.ones_like(f)
 
         # Symbols follow DRDC-RDDC-2022-D051 §2.3: f0w/L0w the peak frequency
         # and peak level of the wind curve (eqs. 8, 9), s1w/s2w its rising and
@@ -332,6 +356,14 @@ def compute_windnoise(frequencies, u, water_depth='deep', band_integrate=False):
 
         with np.errstate(divide='ignore'):
             NL = 10 * np.log10(NL)
+        if band_integrate:
+            # Each frequency's band holds its spectral level across the band
+            # (band_level of the flat density); a zero-width band, from a
+            # repeated frequency, carries no power.
+            NL = np.array([
+                band_level(np.array([level, level]), np.array([lo, hi]))
+                if hi > lo else -np.inf
+                for level, lo, hi in zip(NL, band_low, band_high)])
 
     return NL
 
@@ -360,7 +392,7 @@ _RAIN_R3 = [0, 0.0335,  0.0277,  0.0251,  0.0277]
 # for a source that is switched *off* (shipping/rain 'no', wind speed 0), which
 # the incoherent logaddexp sum then drops.
 
-def _as_frequency_array(frequencies, caller: str) -> np.ndarray:
+def _as_frequency_array(frequencies, who: str) -> np.ndarray:
     """Coerce a submodel's ``frequencies`` argument to a 1-D float ndarray.
 
     ``WenzNoise``'s docstring advertises every registry entry as
@@ -375,7 +407,7 @@ def _as_frequency_array(frequencies, caller: str) -> np.ndarray:
     f = np.atleast_1d(np.asarray(frequencies, dtype=float))
     if f.ndim != 1:
         raise ConfigurationError(
-            f"{caller}: frequencies must be a scalar or a 1-D array of Hz; "
+            f"{who}: frequencies must be a scalar or a 1-D array of Hz; "
             f"got shape {f.shape}.")
     return f
 
@@ -389,16 +421,17 @@ def _thermal_mellen(frequencies, **_):
 def _wind_merklinger(frequencies, *, wind_speed_kn, water_depth, **_):
     """Wind (Merklinger 1979 + Piggott 1964 shallow correction); DRDC §2.3."""
     f = _as_frequency_array(frequencies, "_wind_merklinger")
-    return compute_windnoise(f, wind_speed_kn, water_depth)
+    return wind_noise_level(f, wind_speed_kn=wind_speed_kn,
+                             water_depth=water_depth)
 
 
 def _wind_coates(frequencies, *, wind_speed_kn, **_):
     """Wind (Coates 1989 / Stojanović 2007, the standard UW-comms form):
     ``50 + 7.5·√w + 20·log10(f) − 40·log10(f + 0.4)`` with ``f`` in kHz and
-    ``w`` the wind speed in m/s (converted here from the knots input).
+    ``w`` the wind speed in m/s (``wind_speed_kn`` converted at entry).
 
     ``wind_speed_kn == 0`` silences the source (-inf dB) exactly as
-    :func:`compute_windnoise` does: the formula has no wind term that vanishes
+    :func:`wind_noise_level` does: the formula has no wind term that vanishes
     with ``w``, so it would otherwise return ~44 dB re 1 µPa²/Hz at 1 kHz in a
     flat calm and the incoherent sum would inherit it."""
     fk = _as_frequency_array(frequencies, "_wind_coates") / 1000.0
@@ -414,6 +447,13 @@ def _wind_coates(frequencies, *, wind_speed_kn, **_):
 #: than at low. Any closed form through those curves sits inside this, which
 #: is what makes choosing one a matter of convention rather than accuracy.
 KNUDSEN_UNCERTAINTY_DB = 4.5
+
+
+#: Hz — the band Knudsen, Alford & Emling's curves are drawn over (their
+#: overall levels are 0.1-10 kc, and the published spectra run to about
+#: 25 kHz). The straight line keeps rising 17 dB per decade below it and
+#: falling above it, with no data behind either.
+KNUDSEN_BAND_HZ = (100.0, 25000.0)
 
 
 def _wind_knudsen(frequencies, *, wind_speed_kn, **_):
@@ -465,7 +505,18 @@ def _wind_knudsen(frequencies, *, wind_speed_kn, **_):
     under "Shallow" — and the model carries no depth term of its own.
     """
     f = _as_frequency_array(frequencies, "_wind_knudsen")
-    u = float(wind_speed_kn)
+    lo, hi = KNUDSEN_BAND_HZ
+    outside = (f < lo) | (f > hi)
+    if np.any(outside):
+        warnings.warn(
+            f"wind_model='knudsen': {int(np.count_nonzero(outside))} of "
+            f"{f.size} frequencies lie outside {lo:g}-{hi:g} Hz, the band "
+            f"Knudsen's curves cover; there the straight -17 dB/decade line "
+            f"is extrapolated with no data behind it (it keeps rising toward "
+            f"low frequency). Use wind_model='merklinger' for a spectrum "
+            f"with a low-frequency roll-off.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    u = float(wind_speed_kn)     # the fit's U_kn
     if u == 0:
         return np.full(f.shape, -np.inf, dtype=float)
     return 44.0 + 20.0 * np.log10(u) - 17.0 * np.log10(f / 1000.0)
@@ -476,7 +527,7 @@ def _shipping_wenz(frequencies, *, shipping_level, water_depth, **_):
     f = _as_frequency_array(frequencies, "_shipping_wenz")
     # Explicitly two-way, not ``30 if deep else 65``: with a bare ``else`` an
     # unrecognised string took the *shallow* branch here while the same string
-    # took the *deep* branch in ``compute_windnoise`` — opposite silent
+    # took the *deep* branch in ``wind_noise_level`` — opposite silent
     # defaults for one typo in one module. Checked ahead of the 'no' short
     # circuit so the parameter is refused on every path.
     if water_depth == 'deep':
@@ -576,13 +627,102 @@ def _rain_torres_costa(frequencies, *, rain_rate, **_):
     return out
 
 
-WIND_MODELS = {'merklinger': _wind_merklinger,
-               'coates': _wind_coates,
-               'knudsen': _wind_knudsen}
-SHIPPING_MODELS = {'wenz': _shipping_wenz, 'coates': _shipping_coates}
-RAIN_MODELS = {'torres_costa': _rain_torres_costa}
-THERMAL_MODELS = {'mellen': _thermal_mellen}
-TURBULENCE_MODELS = {'wenz': _turbulence_wenz}
+#: The submodels of each WenzNoise component, by name. Added to only through
+#: :func:`register_noise_model`; read through the ``*_MODELS`` views below.
+_SUBMODELS = {
+    'wind': {'merklinger': _wind_merklinger,
+             'coates': _wind_coates,
+             'knudsen': _wind_knudsen},
+    'shipping': {'wenz': _shipping_wenz, 'coates': _shipping_coates},
+    'rain': {'torres_costa': _rain_torres_costa},
+    'thermal': {'mellen': _thermal_mellen},
+    'turbulence': {'wenz': _turbulence_wenz},
+}
+
+
+class _SubmodelRegistry(Mapping):
+    """A read-only view of one component's submodels: lookup, ``in``,
+    iteration and ``len`` work as on a dict, and an assignment is refused
+    naming :func:`register_noise_model`, the one way to add a submodel."""
+
+    def __init__(self, kind):
+        self._kind = kind
+
+    def __getitem__(self, name):
+        return _SUBMODELS[self._kind][name]
+
+    def __iter__(self):
+        return iter(_SUBMODELS[self._kind])
+
+    def __len__(self):
+        return len(_SUBMODELS[self._kind])
+
+    def __repr__(self):
+        return f"{self._kind.upper()}_MODELS({sorted(self)})"
+
+    def _refuse(self, name):
+        raise ConfigurationError(
+            f"{self._kind.upper()}_MODELS is read-only.",
+            remediation=f"Register a submodel with register_noise_model("
+                        f"{self._kind!r}, {name!r}, fn), or pass the "
+                        f"callable directly as {self._kind}_model=fn.")
+
+    def __setitem__(self, name, fn):
+        self._refuse(name)
+
+    def __delitem__(self, name):
+        self._refuse(name)
+
+
+WIND_MODELS = _SubmodelRegistry('wind')
+SHIPPING_MODELS = _SubmodelRegistry('shipping')
+RAIN_MODELS = _SubmodelRegistry('rain')
+THERMAL_MODELS = _SubmodelRegistry('thermal')
+TURBULENCE_MODELS = _SubmodelRegistry('turbulence')
+
+
+def register_noise_model(kind, name, fn):
+    """Register ``fn`` as the ``kind`` submodel called ``name``, so
+    ``WenzNoise(..., <kind>_model=name)`` selects it and ``wenz.models``
+    records the name.
+
+    Parameters
+    ----------
+    kind : {'wind', 'shipping', 'rain', 'thermal', 'turbulence'}
+        The WenzNoise component.
+    name : str
+        The name to select it by. A name already registered by the caller is
+        replaced; a shipped submodel's name is refused, because replacing it
+        would change every WenzNoise that selects it (the defaults among
+        them).
+    fn : callable
+        ``fn(frequencies, **params)`` returning one level (dB re 1 µPa²/Hz)
+        per frequency; it receives the whole parameter bundle
+        (``wind_speed_kn``, ``water_depth``, ``shipping_level``,
+        ``rain_rate``) and ignores what it does not need via ``**_``.
+
+    A registration lasts for the process: the registries are module state.
+    """
+    if kind not in _SUBMODELS:
+        raise ConfigurationError(
+            f"register_noise_model: kind={kind!r} is not a WenzNoise "
+            f"component; choose from {sorted(_SUBMODELS)}.")
+    if not isinstance(name, str) or not name:
+        raise ConfigurationError(
+            f"register_noise_model: name must be a non-empty str; got "
+            f"{name!r}.")
+    if not callable(fn):
+        raise ConfigurationError(
+            f"register_noise_model: fn must be callable, "
+            f"fn(frequencies, **params); got {type(fn).__name__}.")
+    current = _SUBMODELS[kind].get(name)
+    if current is not None and _is_builtin_submodel(current):
+        raise ConfigurationError(
+            f"register_noise_model: {name!r} is the shipped {kind} submodel, "
+            f"and replacing it would change every WenzNoise that selects "
+            f"{kind}_model={name!r}.",
+            remediation="Register yours under another name.")
+    _SUBMODELS[kind][name] = fn
 
 
 def _resolve_submodel(value, registry, default, label):
@@ -599,11 +739,11 @@ def _resolve_submodel(value, registry, default, label):
         if value not in registry:
             raise ConfigurationError(
                 f"{label}={value!r} is not a known model; choose from "
-                f"{sorted(registry)} or pass a callable")
+                f"{sorted(registry)} or pass a callable.")
         return registry[value], value
     raise ConfigurationError(
         f"{label} must be None, a name {sorted(registry)}, or a callable; "
-        f"got {type(value).__name__}")
+        f"got {type(value).__name__}.")
 
 
 #: Default of each environmental knob ``WenzNoise`` forwards to its
@@ -623,8 +763,9 @@ def _is_builtin_submodel(fn) -> bool:
     that reads the knob, and its signature says nothing about that.
     """
     # Asked of the function, not of the registries. Membership was the
-    # obvious test and is wrong twice over: ``WIND_MODELS['mine'] = my_fn``
-    # is a documented way to register your own submodel, which would put it
+    # obvious test and is wrong twice over: ``register_noise_model('wind',
+    # 'mine', my_fn)`` is the documented way to register your own submodel,
+    # which would put it
     # back under a signature test it cannot pass; and ``fn in dict_values``
     # runs the caller's ``__eq__``, so a callable whose ``__eq__`` returns
     # an array crashed ``WenzNoise.__init__`` with a bare ValueError about
@@ -685,7 +826,7 @@ def _warn_unused_environment(selected, chosen, names, label='WenzNoise'):
             f") carries a {name} term, so the spectrum is identical to the "
             f"one you would get with {name}={default!r}. Pick a submodel "
             f"that models it, or drop the argument.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
 
@@ -702,7 +843,7 @@ def _eval_submodel(fn, label, f, params):
         raise
     except Exception as e:
         raise ConfigurationError(
-            f"{label} model failed: {type(e).__name__}: {e}") from e
+            f"{label} model failed: {type(e).__name__}: {e}.") from e
     if out.shape != f.shape:
         raise ConfigurationError(
             f"{label} model returned shape {out.shape}, expected {f.shape} "
@@ -710,7 +851,16 @@ def _eval_submodel(fn, label, f, params):
     return out
 
 
-class WenzNoise:
+_WENZ_COMPONENTS = ('total', 'wind', 'shipping', 'rain', 'thermal',
+                    'turbulence')
+
+#: The submodel each Wenz term uses when none is named.
+_DEFAULT_SUBMODELS = {'wind': 'merklinger', 'shipping': 'wenz',
+                      'rain': 'torres_costa', 'thermal': 'mellen',
+                      'turbulence': 'wenz'}
+
+
+class WenzNoise(Exportable):
     """
     Composite Wenz ambient-noise spectrum (dB re 1 µPa²/Hz).
 
@@ -723,28 +873,31 @@ class WenzNoise:
     ``turbulence='wenz'`` (DRDC §2.1 eq. 4, ``107 − 33.2·log10(f_Hz)``).
     Built-in alternatives include the Coates/Stojanović (2007) ``'coates'``
     wind and shipping models. Register your own by name
-    (``WIND_MODELS['mine'] = fn``) or pass a callable directly. Each component
+    (``register_noise_model('wind', 'mine', fn)``) or pass a callable
+    directly. Each component
     is exposed as a typed attribute; plotting lives in
-    :func:`uacpy.visualization.plot_wenz`.
+    :func:`uacpy.plot.plot_wenz`.
 
     Every level here is a **spectral** level (dB re 1 µPa²/Hz). Differencing
     one against a band-integrated source level in the sonar equation is a
     ``10·log10(w)`` error — 20 dB over a 100 Hz band; see
     :func:`uacpy.sonar.noise_background` for the rule and
-    :func:`compute_windnoise` (``band_integrate=True``) for a band level.
+    :func:`wind_noise_level` (``band_integrate=True``) for a band level.
 
     Parameters
     ----------
-    frequencies : array-like
-        Frequencies in Hz.
+    frequencies : array-like, optional
+        Frequencies in Hz of the spectrum (``total`` and the five
+        components). ``None`` (default) builds no spectrum: the band levels
+        (:meth:`band_level`, :meth:`decidecade_levels`) need none, and every
+        spectrum attribute, :meth:`as_psd` and :meth:`plot` then refuse,
+        naming ``frequencies=``.
     wind_speed_kn : float
-        Wind speed in **knots** at the 10 m reference height — the variable
-        DRDC-RDDC-2022-D051 §2.3 eq. 8 fits, and the same unit
-        :func:`uacpy.sonar.chapman_harris_surface` names ``wind_speed_kn``.
-        Keyword-only, so the unit is stated at every call site; a wind reading
-        in m/s passed here understates the total ambient level (measured
-        5.7 dB at 1 kHz for a 10 m/s reading). Convert with
-        ``uacpy.core.units.ms_to_knots`` converts.
+        Wind speed (knots) at the 10 m reference height — the unit the
+        fetchers return and :func:`uacpy.sonar.chapman_harris_surface` takes.
+        The submodels stated in m/s (Coates) convert inside. Keyword-only, so
+        the unit is stated at every call site; a m/s reading converts with
+        ``uacpy.core.units.ms_to_knots``.
     rain_rate : {'no', 'light', 'moderate', 'heavy', 'veryheavy'}
         Default ``'no'``.
     water_depth : {'deep', 'shallow'}
@@ -759,10 +912,10 @@ class WenzNoise:
 
     Attributes
     ----------
-    frequencies : ndarray
-        Input frequency vector (1-D, in Hz).
+    frequencies : ndarray or None
+        Input frequency vector (1-D, in Hz); ``None`` without a spectrum.
     wind_speed_kn : float
-        The wind speed the spectrum was built from, in knots.
+        The wind speed (knots) the spectrum was built from.
     total : ndarray
         Incoherent sum of all five components, dB re 1 µPa²/Hz.
     shipping, wind, rain, thermal, turbulence : ndarray
@@ -775,7 +928,7 @@ class WenzNoise:
 
     Notes
     -----
-    Beaufort vs wind-speed reference (Urick 1984):
+    Beaufort vs wind-speed reference (Urick 1983):
 
     ============  =========  ==============  ================
     Beaufort      Sea state  Wind (knots)    Wind (m/s)
@@ -790,11 +943,21 @@ class WenzNoise:
     7             6          28 – 33         13.9 – 17.1
     8             6          34 – 40         17.2 – 20.7
     ============  =========  ==============  ================
+
+    Examples
+    --------
+    The total spectrum level (dB re 1 µPa²/Hz) at 10 kn, medium shipping:
+
+    >>> import numpy as np
+    >>> noise = WenzNoise(np.array([100.0, 1000.0]),
+    ...                   wind_speed_kn=10.0)
+    >>> np.round(noise.total, 1)
+    array([70.8, 59.7])
     """
 
     def __init__(
         self,
-        frequencies,
+        frequencies=None,
         *,
         wind_speed_kn,
         rain_rate='no',
@@ -808,20 +971,21 @@ class WenzNoise:
     ):
         if water_depth not in ('deep', 'shallow'):
             raise ConfigurationError(
-                f"water_depth must be 'deep' or 'shallow', got {water_depth!r}"
+                f"water_depth must be 'deep' or 'shallow', got {water_depth!r}."
             )
         if shipping_level not in _SHIPPING_C2:
             raise ConfigurationError(
                 f"shipping_level must be one of {list(_SHIPPING_C2)}, "
-                f"got {shipping_level!r}"
+                f"got {shipping_level!r}."
             )
         if rain_rate not in _RAIN_INDEX:
             raise ConfigurationError(
                 f"rain_rate must be one of {list(_RAIN_INDEX)}, "
-                f"got {rain_rate!r}"
+                f"got {rain_rate!r}."
             )
 
-        self.frequencies = _positive_frequencies(frequencies, 'WenzNoise')
+        self.frequencies = (None if frequencies is None
+                            else _positive_frequencies(frequencies, 'WenzNoise'))
         self.wind_speed_kn = float(wind_speed_kn)
         # ``not (w >= 0)`` rather than ``w < 0``: a NaN wind speed passes the
         # latter and then fails the ``> 0`` blend test inside the wind model,
@@ -837,8 +1001,6 @@ class WenzNoise:
         self.water_depth = water_depth
         self.shipping_level = shipping_level
 
-        f = self.frequencies
-
         # Resolve each component to a submodel (None → registry default, str →
         # named registry model, callable → custom). Every component is a
         # log10(f) fit returning dB re 1 µPa²/Hz; -inf marks a switched-off
@@ -847,15 +1009,18 @@ class WenzNoise:
                       water_depth=water_depth,
                       shipping_level=shipping_level, rain_rate=rain_rate)
         wfn, wname = _resolve_submodel(wind_model, WIND_MODELS,
-                                       'merklinger', 'wind_model')
+                                       _DEFAULT_SUBMODELS['wind'], 'wind_model')
         sfn, sname = _resolve_submodel(shipping_model, SHIPPING_MODELS,
-                                       'wenz', 'shipping_model')
+                                       _DEFAULT_SUBMODELS['shipping'],
+                                       'shipping_model')
         rfn, rname = _resolve_submodel(rain_model, RAIN_MODELS,
-                                       'torres_costa', 'rain_model')
+                                       _DEFAULT_SUBMODELS['rain'], 'rain_model')
         tfn, tname = _resolve_submodel(thermal_model, THERMAL_MODELS,
-                                       'mellen', 'thermal_model')
+                                       _DEFAULT_SUBMODELS['thermal'],
+                                       'thermal_model')
         ufn, uname = _resolve_submodel(turbulence_model, TURBULENCE_MODELS,
-                                       'wenz', 'turbulence_model')
+                                       _DEFAULT_SUBMODELS['turbulence'],
+                                       'turbulence_model')
         _warn_unused_environment(
             {'wind': wfn, 'shipping': sfn, 'rain': rfn,
              'thermal': tfn, 'turbulence': ufn},
@@ -863,20 +1028,142 @@ class WenzNoise:
              'rain_rate': rain_rate},
             {'wind': wname, 'shipping': sname, 'rain': rname,
              'thermal': tname, 'turbulence': uname})
-        self.wind = _eval_submodel(wfn, 'wind', f, params)
-        self.shipping = _eval_submodel(sfn, 'shipping', f, params)
-        self.rain = _eval_submodel(rfn, 'rain', f, params)
-        self.thermal = _eval_submodel(tfn, 'thermal', f, params)
-        self.turbulence = _eval_submodel(ufn, 'turbulence', f, params)
         self.models = {'wind': wname, 'shipping': sname, 'rain': rname,
                        'thermal': tname, 'turbulence': uname}
-        # Sum incoherent dB sources via logsumexp to avoid 10**(x/10) overflow
-        # on very loud components (e.g. heavy rain at high frequency).
-        ln10 = np.log(10.0)
-        stack = np.stack([self.thermal, self.wind, self.shipping,
-                          self.turbulence, self.rain])
-        self.total = (10.0 / ln10) * np.logaddexp.reduce(
-            stack * (ln10 / 10.0), axis=0)
+        # Kept so a band level can evaluate the same submodels on a grid
+        # dense enough to integrate, whatever grid the spectrum was built on
+        # — or with none.
+        self._submodels = {'wind': wfn, 'shipping': sfn, 'rain': rfn,
+                           'thermal': tfn, 'turbulence': ufn}
+        self._params = params
+        self._spectra = None
+        if self.frequencies is None:
+            return
+        f = self.frequencies
+        spectra = {name: _eval_submodel(self._submodels[name], name, f,
+                                        params)
+                   for name in ('wind', 'shipping', 'rain', 'thermal',
+                                'turbulence')}
+        # An incoherent sum through logaddexp, so a very loud component
+        # (heavy rain at high frequency) cannot overflow 10**(x/10), and a
+        # -inf (switched-off) source contributes nothing.
+        spectra['total'] = sum_levels_dB(
+            spectra['thermal'], spectra['wind'], spectra['shipping'],
+            spectra['turbulence'], spectra['rain'])
+        self._spectra = spectra
+
+    # ── the export protocol ───────────────────────────────────────────
+
+    def to_dict(self):
+        """The constructor arguments that rebuild this spectrum: the
+        ``frequencies`` grid (``None`` without one), the environment
+        (``wind_speed_kn``, ``rain_rate``, ``water_depth``,
+        ``shipping_level``) and each submodel by its registry name
+        (``wind_model``, ...). :meth:`from_dict` rebuilds it, the
+        spectra evaluated anew.
+
+        Raises
+        ------
+        ConfigurationError
+            A submodel passed as a callable, which a saved record cannot
+            name.
+        """
+        custom = sorted(k for k, name in self.models.items()
+                        if name == 'custom')
+        if custom:
+            raise ConfigurationError(
+                f"WenzNoise.to_dict: the {custom} submodel(s) were passed "
+                f"as callables, which a saved record cannot name.",
+                remediation="Register each with register_noise_model("
+                            "kind, name, fn) and pass its name.")
+        return {'frequencies': (None if self.frequencies is None
+                                else np.array(self.frequencies)),
+                'wind_speed_kn': self.wind_speed_kn,
+                'rain_rate': self.rain_rate,
+                'water_depth': self.water_depth,
+                'shipping_level': self.shipping_level,
+                **{f'{kind}_model': name
+                   for kind, name in self.models.items()}}
+
+    @classmethod
+    def from_dict(cls, d):
+        """The spectrum :meth:`to_dict` wrote; ``d`` may be the mapping
+        ``np.load(path, allow_pickle=True)`` returns.
+
+        Parameters
+        ----------
+        d : mapping
+            :meth:`to_dict` output, or the mapping ``np.load`` returns
+            for it.
+        """
+        d = {k: (v.item() if isinstance(v, np.ndarray) and v.ndim == 0
+                 else v) for k, v in dict(d).items()}
+        return cls(d.pop('frequencies'), **d)
+
+    def _payload(self):
+        if self._spectra is None:
+            return {}
+        return {name: (self._spectra[name], ('frequency',),
+                       'dB re 1 µPa²/Hz') for name in _WENZ_COMPONENTS}
+
+    def _coords(self):
+        if self.frequencies is None:
+            return {}
+        return {'frequency': (self.frequencies, 'Hz')}
+
+    def _export_attrs(self):
+        attrs = self.to_dict()
+        del attrs['frequencies']
+        return attrs
+
+    @classmethod
+    def _from_export(cls, arrays, attrs):
+        return cls(arrays.get('frequency'),
+                   **{k: v for k, v in attrs.items()
+                      if k != 'frequencies'})
+
+    def _spectrum(self, name):
+        """The ``name`` spectrum (dB re 1 µPa²/Hz) on :attr:`frequencies`;
+        refused for a ``WenzNoise`` built without a frequency grid."""
+        if self._spectra is None:
+            raise ConfigurationError(
+                f"WenzNoise.{name}: this WenzNoise was built without "
+                f"frequencies=, so it holds no spectrum; band_level() and "
+                f"decidecade_levels() need none.",
+                remediation="Pass the frequency grid (Hz) the spectrum is "
+                            "wanted on, e.g. WenzNoise(frequencies=np."
+                            "geomspace(10.0, 1e5, 200), wind_speed_kn=5.0).")
+        return self._spectra[name]
+
+    @property
+    def total(self):
+        """Incoherent sum of all five components, dB re 1 µPa²/Hz."""
+        return self._spectrum('total')
+
+    @property
+    def wind(self):
+        """Wind-noise spectral level, dB re 1 µPa²/Hz."""
+        return self._spectrum('wind')
+
+    @property
+    def shipping(self):
+        """Shipping-noise spectral level, dB re 1 µPa²/Hz."""
+        return self._spectrum('shipping')
+
+    @property
+    def rain(self):
+        """Rain-noise spectral level, dB re 1 µPa²/Hz."""
+        return self._spectrum('rain')
+
+    @property
+    def thermal(self):
+        """Thermal-noise spectral level, dB re 1 µPa²/Hz."""
+        return self._spectrum('thermal')
+
+    @property
+    def turbulence(self):
+        """Turbulence-noise spectral level, dB re 1 µPa²/Hz."""
+        return self._spectrum('turbulence')
 
     # ── Convenience ────────────────────────────────────────────────────
 
@@ -889,7 +1176,7 @@ class WenzNoise:
                                self.rain, self.thermal, self.turbulence)
 
     def plot(self, **kwargs):
-        """Draw this spectrum through :func:`uacpy.visualization.plot_wenz`.
+        """Draw this spectrum through :func:`uacpy.plot.plot_wenz`.
 
         The plotter already takes the whole ``WenzNoise``, reading the total
         and the five components off it, so this hands it ``self``.
@@ -897,37 +1184,78 @@ class WenzNoise:
         total alone, ``ymin`` / ``ymax``, any matplotlib keyword. Returns
         ``(fig, ax)``, as every plotter in the package does.
         """
-        # Deferred into the body: ``uacpy.visualization`` imports
-        # ``uacpy.core`` at module scope, so this at file scope would make
-        # ``import uacpy`` raise (docs/DEV.md section 7).
-        from uacpy import visualization
-        return visualization.plot_wenz(self, **kwargs)
+        self._spectrum('total')
+        return plotter('plot_wenz')(self, **kwargs)
 
-    def as_psd(self, ref=1.0):
-        """Linear total PSD, by default in **µPa²/Hz** — the *same* 1 µPa
-        reference as :attr:`total` (dB re 1 µPa²/Hz), so the linear and dB
-        views stay harmonised::
+    def band_level(self, freq_min, freq_max, *, component='total'):
+        """Band level (dB re 1 µPa²) over ``[freq_min, freq_max]`` Hz.
 
-            10 * np.log10(w.as_psd()) == w.total      # to ~1e-14 dB
+        The spectral level integrated over the band, ``10·log10 ∫ 10^(NL/10)
+        df``: the noise term of a sonar equation whose source level is a band
+        level, where differencing the spectral level instead is a
+        ``10·log10(w)`` error. The submodels are re-evaluated on a grid of 100
+        points per decade inside the band (at least 33), so the result does
+        not depend on the frequencies the spectrum was built on, and it keeps
+        the spectrum's slope that the flat ``NL + 10·log10(w)`` shortcut
+        drops. The integral is :func:`uacpy.core.acoustics.band_level`'s, and a
+        silent component's band is ``-inf``.
 
-        The round trip through the linear domain is float64 arithmetic, so
-        most bins come back bit-exact and the rest within ~1e-14 dB.
-        ``ref`` rescales the output to another pressure unit and is the value
-        of the dB reference (1 µPa) expressed in that unit, so ``ref=1e-6``
-        (1 µPa in Pa) returns SI **Pa²/Hz** — ready for
-        :func:`uacpy.acoustic_signal.synthesize_noise_from_psd`, which expects
-        a linear PSD in the signal's own pressure units. For any ``ref``,
-        ``10 * np.log10(as_psd(ref) / ref**2)`` recovers ``total`` to the
-        same ~1e-14 dB.
+        ``component`` is ``'total'`` (default) or one of ``'wind'``,
+        ``'shipping'``, ``'rain'``, ``'thermal'``, ``'turbulence'``.
         """
-        return 10 ** (self.total / 10) * ref ** 2
+        freq_min, freq_max = float(freq_min), float(freq_max)
+        if not (0.0 < freq_min < freq_max) or not np.isfinite(freq_max):
+            raise ConfigurationError(
+                f"WenzNoise.band_level: need 0 < freq_min < freq_max (Hz), finite; "
+                f"got freq_min={freq_min!r}, freq_max={freq_max!r}.")
+        if component not in _WENZ_COMPONENTS:
+            raise ConfigurationError(
+                f"WenzNoise.band_level: component must be one of "
+                f"{_WENZ_COMPONENTS}; got {component!r}.")
+        n = max(33, int(np.ceil(100.0 * np.log10(freq_max / freq_min))) + 1)
+        f = np.geomspace(freq_min, freq_max, n)
+        names = (('thermal', 'wind', 'shipping', 'turbulence', 'rain')
+                 if component == 'total' else (component,))
+        levels = sum_levels_dB(*(
+            _eval_submodel(self._submodels[name], name, f, self._params)
+            for name in names))
+        return band_level(levels, f)
+
+    def decidecade_levels(self, freq_min, freq_max, *, component='total'):
+        """Decidecade band levels (dB re 1 µPa²) of the bands overlapping
+        ``[freq_min, freq_max]`` Hz, each the :meth:`band_level` of that band.
+
+        Returns a :class:`~uacpy.acoustic_signal.BandLevels`: the band
+        centres from :func:`uacpy.acoustic_signal.decidecade_bands` and one
+        level each, with the band edges and ``ref`` = 1 µPa.
+        """
+        # Deferred: acoustic_signal pulls in scipy.signal, which importing
+        # the noise models does not need.
+        from uacpy.acoustic_signal import BandLevels, decidecade_bands
+        lower, centers, upper = decidecade_bands(freq_min, freq_max)
+        levels = np.array([self.band_level(lo, hi, component=component)
+                           for lo, hi in zip(lower, upper)])
+        return BandLevels(centers, levels, lower=lower, upper=upper,
+                          band_type="decidecade",
+                          ref=REFERENCE_PRESSURE_WATER)
+
+    def as_psd(self):
+        """Linear total PSD in SI **Pa²/Hz**:
+        ``REFERENCE_PRESSURE_WATER**2 * 10**(total/10)``, the level
+        :attr:`total` (dB re 1 µPa²/Hz) with its 1 µPa reference expressed in
+        Pa. So ``10 * np.log10(w.as_psd() / REFERENCE_PRESSURE_WATER**2)``
+        returns ``total`` to ~1e-14 dB (float64 round-off), and the result is
+        ready for :func:`uacpy.acoustic_signal.synthesize_noise_from_psd` on a
+        signal in Pa.
+        """
+        return REFERENCE_PRESSURE_WATER ** 2 * 10 ** (self.total / 10)
 
     def __repr__(self):
-        return (
-            f"WenzNoise(n_frequencies={self.frequencies.size}, "
-            f"wind={self.wind_speed_kn:g} kn, "
-            f"depth={self.water_depth!r}, "
-            f"shipping={self.shipping_level!r}, "
-            f"rain={self.rain_rate!r}, "
-            f"models={self.models})"
-        )
+        bits = [None if self.frequencies is None
+                else axis(self.frequencies, 'frequencies', 'Hz'),
+                f"wind={qty(self.wind_speed_kn, 'kn')}",
+                f"depth={self.water_depth}", f"shipping={self.shipping_level}",
+                f"rain={self.rain_rate}"]
+        bits += [f"{term} model={name}" for term, name in self.models.items()
+                 if name != _DEFAULT_SUBMODELS[term]]
+        return build('WenzNoise', bits)

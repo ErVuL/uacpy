@@ -16,7 +16,7 @@ import uacpy
 from uacpy import comms
 from uacpy.acoustic_signal import lfm_chirp
 from uacpy.models import Bellhop, RunMode
-from uacpy.visualization import (
+from uacpy.plot import (
     plot_ber_curve,
     plot_channel,
     plot_convergence,
@@ -38,7 +38,7 @@ ROW2 = (11.0, 4.2)
 
 def _isi_channel(sample_rate=BAUD):
     """The three-path ISI channel, sampled at ``sample_rate``."""
-    return comms.multipath_channel(ISI_GAINS, ISI_DELAYS, sample_rate)
+    return comms.multipath_channel(ISI_GAINS, ISI_DELAYS, sample_rate=sample_rate)
 
 
 def _smooth(x, n=200):
@@ -83,23 +83,25 @@ def ber():
     """Measured BER against the closed-form AWGN curves, uncoded and coded."""
     rng = np.random.default_rng(0)
     ebn0 = np.arange(0.0, 13.0, 2.0)
-    ber_qpsk = comms.ber_sweep('qpsk', ebn0, 200000, rng=rng)
-    ber_qam = comms.ber_sweep('16qam', ebn0, 200000, rng=rng)
+    qpsk = comms.ber_sweep('qpsk', ebn0, 200000, rng=rng)
+    qam = comms.ber_sweep('16qam', ebn0, 200000, rng=rng)
 
     code = comms.ConvCode(interleave_depth=16)
-    ec_n0 = np.arange(-3.0, 2.1, 1.0)
-    ber_coded = comms.ber_sweep('qpsk', ec_n0, 20000, code=code, rng=rng)
+    ebn0_coded = np.arange(0.0, 5.1, 1.0)
+    coded = comms.ber_sweep('qpsk', ebn0_coded, 20000, code=code, rng=rng)
 
     fig, ax = plt.subplots(figsize=(7.6, 5.4))
-    plot_ber_curve(ebn0, ber_qpsk, ax, scheme='qpsk', label='QPSK measured')
-    plot_ber_curve(ebn0, ber_qam, ax, scheme='16qam', label='16-QAM measured',
-                   color='C1')
-    # The sweep sets the noise from the energy of the bits it puts on the
-    # channel, so a rate-1/2 code must be re-plotted per *information* bit.
-    ax.semilogy(ec_n0 - 10 * np.log10(code.rate), np.maximum(ber_coded, 1e-12),
-                marker='s', color='C2', label='QPSK + R=1/2 K=7 Viterbi')
+    # A BerCurve plots with its sweep's n_bits, which marks a zero-error point
+    # as an upper bound (1/n_bits) instead of dropping it, and overlays its
+    # scheme's AWGN theory only for an uncoded link.
+    qpsk.plot(ax=ax, label='QPSK measured')
+    qam.plot(ax=ax, label='16-QAM measured', color='C1')
+    # Eb/N0 is per information bit on every sweep (the rate is applied
+    # inside), so the coded curve shares the uncoded axis unshifted.
+    coded.plot(ax=ax, label='QPSK + R=1/2, K=7 Viterbi', marker='s',
+               color='C2')
     ax.set_ylim(1e-6, 1.0)
-    ax.set_title('Bit error rate over an AWGN channel', loc='left')
+    ax.set_title('Bit error rate over an AWGN channel')
     ax.legend(fontsize=9)
     fig.tight_layout()
     return fig
@@ -222,8 +224,8 @@ def ofdm():
     blk = N_SC + CP
 
     start, cfo = comms.schmidl_cox_sync(rx, N_SC)
-    x = comms.apply_cfo(rx[start:], cfo)
-    h_est = comms.estimate_channel(x[blk:2 * blk], tx.pilot_freq, N_SC, CP)
+    x = comms.remove_cfo(rx[start:], cfo)
+    h_est = comms.estimate_channel(x[blk:2 * blk], tx.pilot_values, N_SC, CP)
     h_true = np.fft.fft(channel, N_SC)
 
     ideal = tx.modulator.constellation
@@ -245,7 +247,7 @@ def ofdm():
                  'C0.', ms=3, label='pilot LS estimate')
     axes[0].set_xlabel('Subcarrier')
     axes[0].set_ylabel('|H| (dB)')
-    axes[0].set_title('Channel across the 256 subcarriers', loc='left')
+    axes[0].set_title('Channel across the 256 subcarriers')
     axes[0].grid(alpha=0.3)
     axes[0].legend(fontsize=9)
 
@@ -263,7 +265,7 @@ def ofdm():
     ax.set_xlabel('In-phase')
     ax.set_ylabel('Quadrature')
     ax.set_title(f'Equalized QPSK, coloured by |H| — '
-                 f'CRC {"OK" if crc_ok else "FAIL"}', loc='left')
+                 f'CRC {"OK" if crc_ok else "FAIL"}')
 
     fig.suptitle('OFDM: 256 subcarriers, 32-sample cyclic prefix, '
                  '3-path channel at 22 dB SNR', fontweight='bold', fontsize=12)
@@ -278,7 +280,7 @@ def doppler():
     """Doppler-scale estimation from a wideband probe, and its accuracy."""
     rng = np.random.default_rng(0)
     fs = 12000.0
-    _, probe = lfm_chirp(1000.0, 5000.0, 1.0, fs)
+    _, probe = lfm_chirp(1000.0, 5000.0, 1.0, sample_rate=fs)
     scales = np.linspace(-1e-3, 4e-3, 101)
 
     def record(v):
@@ -308,7 +310,7 @@ def doppler():
                  'k--', label='a = v/c')
     axes[1].set_xlabel('Closing speed (m/s)')
     axes[1].set_ylabel('Doppler scale a (×10⁻³)')
-    axes[1].set_title('Estimate versus truth', loc='left')
+    axes[1].set_title('Estimate versus truth')
     axes[1].grid(alpha=0.3)
     axes[1].legend(fontsize=9)
     fig.suptitle('Wideband Doppler: the channel dilates time, it does not '
@@ -326,7 +328,7 @@ def dsss():
 
     rng = np.random.default_rng(0)
     code = comms.m_sequence(5, [5, 2])
-    gain = comms.processing_gain_dB(code)
+    gain = comms.spreading_gain_dB(code)
     mod = comms.Modulator('bpsk')
 
     chip_snr = np.arange(-18.0, 3.1, 3.0)
@@ -336,9 +338,9 @@ def dsss():
         symbols = mod.modulate(bits)
         chips = comms.awgn(comms.spread(symbols, code), snr, rng=rng)
         ber_spread.append(
-            comms.bit_error_rate(bits, mod.demodulate(comms.despread(chips, code))))
+            comms.bit_error_rate(reference=bits, received=mod.demodulate(comms.despread(chips, code))))
         ber_plain.append(comms.bit_error_rate(
-            bits, mod.demodulate(comms.awgn(symbols, snr, rng=rng))))
+            reference=bits, received=mod.demodulate(comms.awgn(symbols, snr, rng=rng))))
 
     # same energy, same duration: one symbol held over N chips vs spread over N
     symbols = mod.modulate(rng.integers(0, 2, 2000)).real
@@ -355,23 +357,24 @@ def dsss():
     axes[0].plot(f_s, 10 * np.log10(p_n), 'k--', lw=1, label='noise alone')
     axes[0].set_xlabel('Normalized frequency (cycles/chip)')
     axes[0].set_ylabel('PSD (dB)')
-    axes[0].set_title('Same energy, spread 31-fold', loc='left')
+    axes[0].set_title('Same energy, spread 31-fold')
     axes[0].grid(alpha=0.3)
     axes[0].legend(fontsize=9)
 
     fine = np.linspace(chip_snr.min(), chip_snr.max(), 200)
-    axes[1].semilogy(chip_snr, np.maximum(ber_plain, 1e-12), 'o-',
-                     label='BPSK, no spreading')
-    axes[1].semilogy(chip_snr, np.maximum(ber_spread, 1e-12), 's-',
-                     label='despread, N = 31')
+    # A zero-error point measured no BER; n_bits marks it at 1/n_bits.
+    plot_ber_curve(chip_snr, ber_plain, axes[1], label='BPSK, no spreading',
+                   n_bits=20000)
+    plot_ber_curve(chip_snr, ber_spread, axes[1], label='despread, N = 31',
+                   n_bits=20000, marker='s')
     axes[1].semilogy(fine, comms.ber_theory('bpsk', fine + gain), 'k--', lw=1,
                      label=f'theory at SNR + {gain:.1f} dB')
-    axes[1].set_ylim(1e-6, 1.0)
+    axes[1].set_ylim(1e-7, 1.0)          # room under the 1/n_bits carets for the key
     axes[1].set_xlabel('Chip SNR (dB)')
     axes[1].set_ylabel('BER')
-    axes[1].set_title(f'Processing gain = {gain:.1f} dB', loc='left')
+    axes[1].set_title(f'Processing gain = {gain:.1f} dB')
     axes[1].grid(which='both', alpha=0.3)
-    axes[1].legend(fontsize=9)
+    axes[1].legend(fontsize=9, loc='lower left')
     fig.suptitle('Direct-sequence spread spectrum with a length-31 m-sequence',
                  fontweight='bold', fontsize=12)
     fig.tight_layout()
@@ -391,7 +394,7 @@ def janus():
     app_data[:16] = comms.bytes_to_bits(b'SOS')[:16]
     packet = comms.JanusPacket(class_id=16, app_type=0, app_data=app_data,
                                mobility=1)
-    waveform = comms.janus_transmit(packet, fs)
+    waveform = comms.janus_transmit(packet, sample_rate=fs)
 
     rx = np.concatenate([np.zeros(8000), waveform, np.zeros(4000)])
     rx = comms.awgn(rx, 6.0, rng=rng).real
@@ -405,13 +408,13 @@ def janus():
     axes[0].axhline(janus_mod.FC_INITIAL, color='w', ls='--', lw=0.8)
     axes[0].set_xlabel('Time (s)')
     axes[0].set_ylabel('Frequency (Hz)')
-    axes[0].set_title('FH-BFSK over 13 tone pairs', loc='left')
+    axes[0].set_title('FH-BFSK over 13 tone pairs')
     axes[1].plot(statistic, lw=0.9)
     axes[1].axvline(int(np.argmax(statistic)), color='g', ls=':', lw=1.2,
                     label=f'preamble at sample {start}')
     axes[1].set_xlabel('Alignment column (¼ chip)')
     axes[1].set_ylabel('CFAR statistic')
-    axes[1].set_title('GO-CFAR preamble detector', loc='left')
+    axes[1].set_title('GO-CFAR preamble detector')
     axes[1].grid(alpha=0.3)
     axes[1].legend(fontsize=9)
     fig.suptitle(f'JANUS baseline packet at 6 dB SNR — class '
@@ -428,12 +431,12 @@ def bellhop_channel():
     """Drive the modem with a Bellhop arrival structure instead of a guess."""
     env, source, _ = shallow_water()
     point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-    arrivals = Bellhop(n_beams=4000, alpha=(-10.0, 10.0)).run(
+    arrivals = Bellhop(n_beams=4000, launch_angles=(-10.0, 10.0)).run(
         env, source, point, run_mode=RunMode.ARRIVALS)
 
     gains = arrivals.received_amplitudes
     delays = arrivals.delays - arrivals.delays.min()
-    channel = comms.multipath_channel(gains, delays, BAUD)
+    channel = comms.multipath_channel(gains, delays, sample_rate=BAUD)
     channel /= np.abs(channel).max()
 
     rng = np.random.default_rng(0)

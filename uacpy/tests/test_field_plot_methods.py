@@ -7,14 +7,15 @@ auto-squeezed), a multi-receiver field must be reduced with ``.at()`` first,
 and a non-broadband field is rejected.
 """
 
+import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
 import uacpy
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results import Field, Modes, PhaseReference
-from uacpy.models.sources import model_source
+from uacpy.core.results import Field, Modes, PhaseReference, SoundSpeeds
+from uacpy.models.provenance import model_provenance
 
 _FREQS = np.linspace(100.0, 300.0, 32)
 
@@ -31,8 +32,8 @@ def _broadband(n_depth=1, n_range=1):
         coords={'depth': depths, 'range': ranges, 'frequency': _FREQS},
         model='Synthetic', source_depths=np.array([5.0]),
         frequencies=_FREQS, phase_reference=PhaseReference.TRAVELLING_WAVE,
-        model_source=model_source('acoustics_toolbox'),
-        metadata={'c0': 1500.0},
+        model_source=model_provenance('acoustics_toolbox'),
+        speeds=SoundSpeeds(surface=1500.0),
     )
 
 
@@ -109,6 +110,89 @@ def test_ir_after_at_on_grid():
     H = _broadband(n_depth=3, n_range=4)
     fig, ax = H.at(depth=25.0, range=1000.0).plot_impulse_response()
     assert ax.get_xlabel() == 'Time (s)'
+
+
+def test_the_ir_axis_names_an_impulse_response_not_a_pressure():
+    """With no source spectrum the trace is H integrated over the band, per
+    second, not a pressure: its plot reads h(t) in 1/s."""
+    _, ax = _broadband().plot_impulse_response()
+    assert ax.get_ylabel() == 'h(t) (1/s)'
+    _, ax2 = _broadband().to_time_trace().plot()
+    assert ax2.get_ylabel() == 'h(t) (1/s)'
+
+
+def test_a_trace_is_per_second_without_a_source_and_pa_with_one():
+    """Both routes of to_time_trace: the bare impulse response is
+    kind='impulse_response' in 1/s, and the same call with a source
+    waveform (or a source spectrum) is the received pressure in Pa."""
+    from uacpy.acoustic_signal import tone_burst
+    H = _broadband()
+    bare = H.to_time_trace()
+    assert (bare.kind, bare.unit) == ('impulse_response', '1/s')
+    fs = 4.0 * float(_FREQS[-1])
+    _, s = tone_burst(float(_FREQS[_FREQS.size // 2]), 5, sample_rate=fs)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        driven = H.to_time_trace(source_waveform=s, sample_rate=fs)
+        spectral = H.to_time_trace(source_spectrum=np.ones(_FREQS.size))
+    for trace in (driven, spectral):
+        assert (trace.kind, trace.unit) == ('pressure', 'Pa')
+    _, ax = driven.plot()
+    assert ax.get_ylabel() == 'p(t) (Pa)'
+    # The way back is a transfer function again, not an impulse response.
+    assert bare.to_transfer_function().kind == 'pressure'
+
+
+def _two_path(df):
+    """``H = e^{-2πif·0.1} + 0.6·e^{-2πif·0.13}`` over 100-400 Hz, one cell
+    at 150 m, on a grid of spacing ``df`` whose bins are multiples of it."""
+    freqs = np.arange(100.0, 400.0 + df / 2, df)
+    data = (np.exp(-2j * np.pi * freqs * 0.10)
+            + 0.6 * np.exp(-2j * np.pi * freqs * 0.13))
+    return freqs, data, Field(
+        data=data.reshape(1, 1, -1),
+        coords={'depth': np.array([10.0]), 'range': np.array([150.0]),
+                'frequency': freqs},
+        frequencies=freqs, phase_reference=PhaseReference.TRAVELLING_WAVE)
+
+
+@pytest.mark.parametrize('df', [1.0, 0.5])
+def test_the_tone_of_an_impulse_response_is_refused_and_its_transform_is_h(df):
+    """A band-limited impulse response is a transient: the tone estimator
+    returns 2·Δf·H(f) on it (2.0 × H at Δf = 1 Hz, 1.0 × at 0.5 Hz under
+    window=None, a record-dependent fraction under 'hann'), so
+    extract_tone refuses it, and the refusal's remedy returns H exactly."""
+    freqs, data, H = _two_path(df)
+    bare = H.to_time_trace(window=None, t_start=0.0)
+    assert bare.kind == 'impulse_response'
+    with pytest.raises(ConfigurationError,
+                       match='(?s)impulse response.*to_transfer_function'):
+        bare.extract_tone(200.0)
+    back = bare.to_transfer_function().at(frequency=200.0)
+    expected = data[np.argmin(np.abs(freqs - 200.0))]
+    assert abs(complex(back.data) / expected - 1.0) < 1e-12
+    assert (back.kind, back.unit) == ('pressure', 'Pa')
+
+
+def test_a_line_of_impulse_responses_transforms_to_a_line_of_h_in_db():
+    """A line of impulse responses (one per range, one shared time base)
+    is taken back to H by to_transfer_function, and that line draws in dB
+    like any H."""
+    H = _broadband(n_range=3)
+    f0 = float(_FREQS[_FREQS.size // 2])
+    ranges = H.coords['range']
+    traces = [H.to_time_trace(depth=10.0, range=float(r), t_start=0.0,
+                              window=None) for r in ranges]
+    line = Field(data=np.stack([t.data for t in traces]),
+                 coords={'range': ranges, 'time': traces[0].coords['time']},
+                 kind=traces[0].kind, unit=traces[0].unit,
+                 metadata=dict(traces[0].metadata))
+    assert line.kind == 'impulse_response'
+    tones = line.to_transfer_function().at(frequency=f0)
+    assert tones.kind == 'pressure'
+    fig, ax = tones.plot(value='dB')
+    assert ax.get_ylabel() == 'TL (dB)'
+    plt.close(fig)
 
 
 def test_ir_title_passthrough():
@@ -272,3 +356,19 @@ def test_geometry_on_a_1d_cut_is_rejected_not_ignored(kwargs):
     key = next(iter(kwargs))
     with pytest.raises(ConfigurationError, match=f'{key}='):
         _tl_field().at(depth=10.0).plot(**{key: real[key]})
+
+
+def test_the_field_plot_methods_draw_what_the_public_plotters_draw():
+    from uacpy.plot import (plot_impulse_response,
+                                     plot_transfer_function)
+    H = _broadband()
+    _, (mag_m, phase_m) = H.plot_transfer_function()
+    _, (mag_f, phase_f) = plot_transfer_function(H)
+    for by_method, by_plotter in ((mag_m, mag_f), (phase_m, phase_f)):
+        assert ([ln.get_xydata().tolist() for ln in by_method.lines]
+                == [ln.get_xydata().tolist() for ln in by_plotter.lines])
+    _, ax_m = H.plot_impulse_response(nfft=512)
+    _, ax_f = plot_impulse_response(H, nfft=512)
+    assert ([ln.get_xydata().tolist() for ln in ax_m.lines]
+            == [ln.get_xydata().tolist() for ln in ax_f.lines])
+    plt.close('all')

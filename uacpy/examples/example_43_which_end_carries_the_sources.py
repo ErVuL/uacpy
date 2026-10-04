@@ -37,12 +37,10 @@ The third is the one to distrust. It understates the physics and hides the
 solver residual inside itself, which is the kind of number that looks
 conservative and is merely confounded.
 
-Kraken with coupled modes throughout: the adiabatic approximation "assumes
-that all energy in a given mode transfers to the corresponding mode in the
-new environment, provided that environmental variations in range are
-gradual" (Etter, *Underwater Acoustic Modeling and Simulation*, 4.4.5), and
-a sill that cuts the steeper modes off leaves no corresponding mode to
-transfer to. uacpy's own KRAKEN notes put the coupled-mode reciprocity
+Kraken with coupled modes throughout, as in `example_42`, whose docstring
+measures both mode options against RAM on this section: neither is the
+reference (the coupled field closer point by point, the adiabatic one in
+km-averaged level). uacpy's own KRAKEN notes put the coupled-mode reciprocity
 residual at "about 1 dB", which is where the measurement below lands.
 
 Reciprocity also exchanges the ENDS' properties, not just their places, so
@@ -51,8 +49,8 @@ elements' receive directivity — the only route to it, since ``Receiver``
 carries no pattern and a modelled pressure has already summed the arrivals.
 
 Uses: Environment.plot(source_marker_range_m=) · Kraken(mode_coupling=) ·
-Bathymetry.eval · Source(beam_pattern=) as element directivity · a
-range-dependent section reversed about each range
+Bathymetry.eval · ResultStack.p · Source(beam_pattern=) as element directivity ·
+a range-dependent section reversed about each range
 """
 
 import os
@@ -116,16 +114,16 @@ for R in probe_ranges:
     rx_array = uacpy.Receiver(depths=elements, ranges=[float(R)])
     rx_target = uacpy.Receiver(depths=[60.0], ranges=[float(R)])
     # (a) sources on the array, receiver at the target: this is the one to use
-    # a multi-depth Source returns one slab per depth, so stack them:
-    p_a = np.array([np.asarray(f.data).ravel()[0]
-                    for _, f in kraken.run(env, array_as_sources,
-                                           rx_target)])
+    # a multi-depth Source returns one slab per depth; .p stacks their
+    # complex pressure as (n_el, 1, 1)
+    p_a = kraken.run(env, array_as_sources, rx_target).p.ravel()
     # (b) the mirror: source at the target depth, receivers on the array
     p_b = np.asarray(kraken.run(env, target, rx_array).data)[:, 0]
     # (c) the true reciprocal of (a): the section reversed ABOUT THIS RANGE,
     # sampled at the same node spacing so the comparison measures
     # reciprocity and not a difference in how finely each side is drawn.
-    walk = np.arange(0.0, R + 0.5 * step, step)
+    walk = np.arange(0.0, R + step, step)        # through R, past it if R
+                                                 # is off the node grid
     reversed_env = uacpy.Environment(
         name='reversed-about-R',
         bathymetry=list(zip(walk, env.bathymetry.eval(range=R - walk))),
@@ -137,9 +135,7 @@ for R in probe_ranges:
     physical.append(abs(tl_b - tl_c))
     naive.append(abs(tl_a - tl_b))
     # the control: on a flat bottom (a) and (b) must agree exactly
-    f_a = np.array([np.asarray(f.data).ravel()[0]
-                    for _, f in kraken.run(flat, array_as_sources,
-                                           rx_target)])
+    f_a = kraken.run(flat, array_as_sources, rx_target).p.ravel()
     f_b = np.asarray(kraken.run(flat, target, rx_array).data)[:, 0]
     flat_gap.append(abs(-10.0 * np.log10(np.mean(np.abs(f_a) ** 2))
                         + 10.0 * np.log10(np.mean(np.abs(f_b) ** 2))))
@@ -187,8 +183,7 @@ for label, response_dB in (
         depths=elements, frequencies=FREQ,
         beam_pattern=None if response_dB is None
         else np.column_stack([pattern_angles, response_dB]))
-    q = np.array([np.asarray(f.data).ravel()[0]
-                  for _, f in kraken.run(env, shaded, rx_probe)])
+    q = kraken.run(env, shaded, rx_probe).p.ravel()
     print(f"  {label:28s} element-mean TL "
           f"{-10.0 * np.log10(np.mean(np.abs(q) ** 2)):6.2f} dB")
 print("  the shallow modes carry the energy, so rejecting the steep ones "

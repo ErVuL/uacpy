@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from scipy.io import wavfile
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.io import read_wav, read_wav_metadata, write_wav
 
 
@@ -160,6 +160,9 @@ def test_an_unknown_metadata_key_raises(tmp_path):
     ({}, np.zeros(0), 'nothing to write'),
     ({}, np.array([1.0, np.nan]), 'NaN or inf'),
     ({}, np.array([1.0, np.inf]), 'NaN or inf'),
+    ({}, np.zeros(8, dtype=complex), 'signal is complex'),
+    ({}, np.zeros((3, 4800)), r'reads as \(n_channels, n\)'),
+    ({}, np.zeros((64, 65)), r'reads as \(n_channels, n\)'),
 ])
 def test_rejected_inputs(tmp_path, kwargs, signal, match):
     data = _tone() if signal is None else signal
@@ -167,10 +170,39 @@ def test_rejected_inputs(tmp_path, kwargs, signal, match):
         write_wav(tmp_path / 'rejected.wav', data, FS, **kwargs)
 
 
+@pytest.mark.parametrize('shape', [(4800, 3), (64, 64), (2, 64), (65, 65)])
+def test_a_layout_that_can_be_n_by_channels_is_written(tmp_path, shape):
+    """More channels than frames is refused only past 64 channels; 64
+    channels of 2 frames, or as many frames as channels, is a file."""
+    write_wav(tmp_path / 'ok.wav', np.zeros(shape), FS)
+    assert read_wav(tmp_path / 'ok.wav')[0].shape == shape
+
+
 @pytest.mark.parametrize('rate', [0, -48000])
 def test_a_non_positive_sample_rate_raises(tmp_path, rate):
     with pytest.raises(ConfigurationError, match='not positive'):
         write_wav(tmp_path / 'rate.wav', _tone(), rate)
+
+
+def test_a_non_integer_rate_warns_with_its_relative_error(tmp_path):
+    with pytest.warns(UserWarning, match=r'written as 48000 Hz.*8\.33e-06'):
+        write_wav(tmp_path / 'frac.wav', _tone(), 48000.4)
+    assert read_wav(tmp_path / 'frac.wav')[1] == 48000
+
+
+def test_an_integer_rate_writes_silently(tmp_path):
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        write_wav(tmp_path / 'whole.wav', _tone(), 48000.0)
+
+
+def test_the_rate_is_named_sample_rate(tmp_path):
+    """``sample_rate`` like every other callable in the package; ``fs`` is
+    not a name ``write_wav`` knows."""
+    write_wav(tmp_path / 'named.wav', _tone(), sample_rate=FS)
+    assert read_wav(tmp_path / 'named.wav')[1] == FS
+    with pytest.raises(TypeError, match="unexpected keyword argument 'fs'"):
+        write_wav(tmp_path / 'old.wav', _tone(), fs=FS)
 
 
 def test_the_written_file_is_byte_even(tmp_path):
@@ -248,7 +280,7 @@ def test_a_file_without_an_info_block_reads_as_no_metadata(tmp_path):
 def test_reading_something_that_is_not_a_wav_raises(tmp_path):
     (tmp_path / 'not.wav').write_bytes(b'ID3\x04\x00\x00\x00\x00\x00\x00junk')
 
-    with pytest.raises(ConfigurationError, match='not a RIFF/WAVE'):
+    with pytest.raises(FileFormatError, match='not a RIFF/WAVE'):
         read_wav(tmp_path / 'not.wav')
 
 
@@ -258,7 +290,7 @@ def test_a_truncated_wav_names_the_missing_chunk(tmp_path):
     # Keep the RIFF/WAVE header and the fmt chunk, drop the samples.
     (tmp_path / 'headless.wav').write_bytes(raw[:raw.index(b'data')])
 
-    with pytest.raises(ConfigurationError, match='data chunk missing'):
+    with pytest.raises(FileFormatError, match='data chunk missing'):
         read_wav(tmp_path / 'headless.wav')
 
 
@@ -298,7 +330,7 @@ def test_a_sixteen_byte_fmt_chunk_is_the_shortest_that_reads(tmp_path):
 def test_a_truncated_fmt_chunk_raises_the_typed_error(tmp_path, n_bytes):
     (tmp_path / 'short.wav').write_bytes(
         _riff(_PCM16_MONO_FMT[:n_bytes], struct.pack('<hh', 1000, -1000)))
-    with pytest.raises(ConfigurationError, match='fmt'):
+    with pytest.raises(FileFormatError, match='fmt'):
         read_wav(tmp_path / 'short.wav')
 
 
@@ -311,7 +343,7 @@ def test_a_data_chunk_that_is_not_whole_frames_raises_the_typed_error(
     fmt = struct.pack('<HHIIHH', 1, n_channels, 8000, 16000 * n_channels,
                       2 * n_channels, 16)
     (tmp_path / 'ragged.wav').write_bytes(_riff(fmt, b'\x01' * n_bytes))
-    with pytest.raises(ConfigurationError, match='data chunk'):
+    with pytest.raises(FileFormatError, match='data chunk'):
         read_wav(tmp_path / 'ragged.wav')
 
 
@@ -320,3 +352,58 @@ def test_a_data_chunk_of_whole_frames_reads(tmp_path):
     (tmp_path / 'frames.wav').write_bytes(_riff(fmt, b'\x01' * 8))
     samples, _rate = read_wav(tmp_path / 'frames.wav')
     assert samples.shape == (2, 2)
+
+
+def test_a_missing_path_is_the_arguments_fault(tmp_path):
+    with pytest.raises(ConfigurationError, match='no file'):
+        read_wav(tmp_path / 'absent.wav')
+    with pytest.raises(ConfigurationError, match='no file'):
+        read_wav_metadata(tmp_path / 'absent.wav')
+
+
+def _extensible_fmt(n_channels, rate, bits, sub_tag):
+    """A 40-byte WAVE_FORMAT_EXTENSIBLE ``fmt `` payload whose SubFormat GUID
+    leads with ``sub_tag``."""
+    block = n_channels * bits // 8
+    guid_tail = b'\x00\x00\x00\x00\x10\x00\x80\x00\x00\xaa\x00\x38\x9b\x71'
+    return (struct.pack('<HHIIHH', 0xFFFE, n_channels, rate, rate * block,
+                        block, bits)
+            + struct.pack('<HHI', 22, bits, 0)
+            + struct.pack('<H', sub_tag) + guid_tail)
+
+
+def test_an_extensible_header_reads_through_its_subformat(tmp_path):
+    """A 24-bit extensible file (SubFormat = PCM) reads as the plain PCM file
+    with the same samples."""
+    values = np.array([0, 1000, -1000, 8388607, -8388607])
+    data = b''.join(int(v).to_bytes(3, 'little', signed=True) for v in values)
+    (tmp_path / 'ext.wav').write_bytes(
+        _riff(_extensible_fmt(1, 8000, 24, 1), data))
+    samples, rate = read_wav(tmp_path / 'ext.wav')
+    assert rate == 8000.0
+    assert np.allclose(samples, values / (2.0 ** 23 - 1.0))
+
+
+def test_an_extensible_header_with_a_compressed_subformat_is_refused(tmp_path):
+    (tmp_path / 'adpcm.wav').write_bytes(
+        _riff(_extensible_fmt(1, 8000, 16, 2), b'\x00' * 8))
+    with pytest.raises(FileFormatError, match='format tag 2'):
+        read_wav(tmp_path / 'adpcm.wav')
+
+
+def test_a_data_chunk_cut_short_warns_and_keeps_the_whole_frames(tmp_path):
+    whole = _riff(_PCM16_MONO_FMT, struct.pack('<4h', 1, 2, 3, 4))
+    # Drop the last sample and a half: 8 declared bytes, 5 present.
+    (tmp_path / 'cut.wav').write_bytes(whole[:-3])
+    with pytest.warns(UserWarning, match='declares 8 bytes but the file holds 5'):
+        samples, _rate = read_wav(tmp_path / 'cut.wav')
+    assert np.allclose(samples * (2.0 ** 15 - 1.0), [1, 2])
+
+
+def test_a_complete_data_chunk_reads_without_a_warning(tmp_path):
+    (tmp_path / 'whole.wav').write_bytes(
+        _riff(_PCM16_MONO_FMT, struct.pack('<4h', 1, 2, 3, 4)))
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        samples, _rate = read_wav(tmp_path / 'whole.wav')
+    assert samples.size == 4

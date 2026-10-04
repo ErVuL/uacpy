@@ -5,9 +5,11 @@ import warnings
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
+from uacpy.data._geo import cell_half_diagonal_km, checked_offset
+from uacpy.data.sources import SOURCES, DataProvenance
 
 __all__ = ['open_netcdf', 'netcdf_lock', 'NetcdfGrid']
 
@@ -140,7 +142,7 @@ class NetcdfGrid:
         read safe at all — without it eight threads on one warm handle raise
         ``NetCDF: HDF error`` or segfault. ``reading`` covers what the lock
         cannot: a damaged chunk in a file the cache accepts still throws from
-        inside HDF5, and an untyped throw aborts the ``environment``
+        inside HDF5, and an untyped throw aborts the ``hamilton_fit``
         source-fallback chains, which catch ``DataFetchError`` and
         ``ConfigurationError`` only.
         """
@@ -166,9 +168,34 @@ class NetcdfGrid:
                 f"{type(self).__name__}: {axis} {value:g} is outside this "
                 f"grid's coverage ({lo:g} to {hi:g}); returning the nearest "
                 f"edge node's value, which was not sampled at the query.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
         return int(np.clip(round((value - first) / step), 0, n - 1))
+
+    def node(self, row, col):
+        """``(lat, lon)`` of node ``[row, col]``: the point that node's value
+        stands for, longitude wrapped into [-180, 180)."""
+        lon = self._lon0 + col * self._dlon
+        return (self._lat0 + row * self._dlat, ((lon + 180.0) % 360.0) - 180.0)
+
+    def node_provenance(self, source_id, lat, lon, *, who,
+                        max_distance_km=None, **fields):
+        """The ``DataProvenance`` of the node a ``(lat, lon)`` read lands on,
+        through the offset rule (:func:`uacpy.data._geo.checked_offset`): a
+        warning once that node is not the requested point's own cell (a query
+        clamped at the edge of a regional grid), a refusal past
+        ``max_distance_km``. ``fields`` go to the record as given."""
+        node = self.node(self.row(lat), self.col(lon))
+        square = abs(abs(self._dlat) - abs(self._dlon)) < 1e-12
+        prov = DataProvenance(source=SOURCES[source_id], data_point=node,
+                              requested_point=(float(lat), float(lon)),
+                              point_kind='cell',
+                              cell_size_deg=abs(self._dlat) if square else None,
+                              **fields)
+        return checked_offset(
+            prov, who=who, max_distance_km=max_distance_km,
+            warn_km=cell_half_diagonal_km(node[0], abs(self._dlat),
+                                          abs(self._dlon)))
 
     def row(self, lat):
         """Index of the node nearest ``lat``; latitude is bounded, so a value

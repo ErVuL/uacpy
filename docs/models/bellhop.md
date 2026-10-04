@@ -28,14 +28,19 @@ dz/ds = c·ζ            dζ/ds = −(1/c²)·∂c/∂z
 ```
 
 A pure ray field has zeros in shadow zones and infinities at caustics.
-`beam_type='B'` (the default) replaces each ray with a *geometric* **Gaussian
-beam**: the width still follows the spreading of the ray tube, but the
-cross-profile is Gaussian and the width is floored at `πλ` — the
-Weinberg–Keenan focal limit. That floor, not the Gaussian shape by itself, is
-what keeps caustics finite: the hat beam of `beam_type='G'` has a finite width
-too, no floor, and reproduces the ray-theoretic singularity. The Gaussian tails
-also leak energy into shadow zones. These beams interpolate the field between
-rays; they are not models of a physically propagating beam.
+`beam_type='G'` (the default, and BELLHOP's own) replaces each ray with a
+*geometric* **hat beam**: a finite width that follows the spreading of the
+ray tube, with no floor, so a caustic keeps its ray-theoretic singularity.
+`beam_type='B'` makes the cross-profile Gaussian and floors the width at `πλ`
+— the Weinberg–Keenan focal limit. That floor, not the Gaussian shape by
+itself, is what keeps caustics finite, and it is also what biases a shallow
+duct: when `πλ` is a sizeable part of the water depth the floored beams read
+too much loss — +2.55 dB against a wavenumber integral on 100 m at 200 Hz,
++3.35 dB on Pekeris at 100 Hz, where the same rays with hat beams read +0.32
+and −0.12 dB. Pass `beam_type='B'` where finite caustics matter (a
+convergence-zone or Munk-profile study). The Gaussian tails also leak energy
+into shadow zones. These beams interpolate the field between rays; they are
+not models of a physically propagating beam.
 
 **Validity is asymptotic, not a threshold.** Jensen (§3.4.2) is explicit that
 no a-priori criterion exists; the guideline is that the wavelength be
@@ -121,7 +126,7 @@ The table is the exact **plane-wave** reflection coefficient of the layered
 (elastic) stack, angle by angle — the layer stack itself is kept. Two things
 the reflection treatment cannot carry, table or native. BOUNCE is
 range-independent, so a routed bottom collapses to one representative column
-(you get a `UserWarning`). And a plane-wave `R(θ)` applied
+(you get a `FallbackWarning`). And a plane-wave `R(θ)` applied
 at the bounce point is specular: it misses beam and time displacement — real
 energy enters the sediment, refracts, and re-emerges downrange — and misses the
 head (lateral) wave generated near the critical angle. `Bellhop(beam_shift=True)`
@@ -189,9 +194,9 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | Name | Default | Meaning |
 |---|---|---|
 | `n_beams` | `0` | Number of rays. `0` lets Bellhop choose. |
-| `alpha` | `(-80, 80)` | Launch-angle fan, degrees. Narrow it to isolate paths. |
-| `beam_type` | `'B'` | Cross-beam profile. `'B'` geometric Gaussian and `'G'` geometric hat, both Cartesian; `'g'` the ray-centred hat; `'S'` Bucker simple Gaussian; `'C'`/`'R'` Červený beams in Cartesian / ray-centred coordinates. `'G'` is BELLHOP's own default. |
-| `step` | `0.0` | Ray step (m); `0` auto-selects. |
+| `launch_angles` | `(-80, 80)` | Launch-angle fan, degrees. Narrow it to isolate paths. |
+| `beam_type` | `'G'` | Cross-beam profile. `'G'` geometric hat and `'B'` geometric Gaussian, both Cartesian; `'g'` the ray-centred hat; `'S'` Bucker simple Gaussian; `'C'`/`'R'` Červený beams in Cartesian / ray-centred coordinates. `'G'` is BELLHOP's own default too; pass `'B'` for finite caustics. |
+| `ray_step` | `0.0` | Ray step (m); `0` auto-selects. |
 | `z_box`, `r_box` | `None` | Ray-trace bounding box; auto-fitted to the receiver grid. |
 
 **Numerics and environment**
@@ -199,7 +204,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | Name | Default | Meaning |
 |---|---|---|
 | `grid_type` | `'R'` | Receiver grid: `'R'` rectilinear (every depth × every range); `'I'` irregular — the i-th depth pairs with the i-th range (equal lengths). BELLHOP sorts both lists before pairing (`SourceReceiverPositions.f90:224`), so an `'I'` grid is always a monotone diagonal, shallow-near to deep-far; for arbitrary (depth, range) points run `'R'` and sample with `Field.at`. |
-| `interp_ssp` | `None` | SSP connection scheme: `'linear'`, `'pchip'`, `'cubic'`, `'quad'`, `'n2linear'`, `'analytic'`. `None` auto-picks `'quad'` for a range-dependent `env.ssp`, `'linear'` otherwise. |
+| `interp_ssp` | `None` | SSP connection scheme: `'linear'` (AT `C`), `'pchip'`, `'spline'`, `'quad'` (2-D `.ssp`), `'n2linear'`. `None` auto-picks `'quad'` for a range-dependent `env.ssp`, `'linear'` otherwise. `'analytic'` (AT's `'A'`, a hard-coded Munk curve that ignores `env.ssp`) raises `ConfigurationError`. |
 | `interp_bathymetry` | `'linear'` | `'linear'` or `'curvilinear'`. |
 | `interp_altimetry` | `'linear'` | as above, for the sea surface. |
 | `auto_bounce` | `True` | Route *layered* bottoms through BOUNCE (elastic half-spaces run natively). |
@@ -207,14 +212,14 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 **Červený beams only** (`beam_type='C'` or `'R'`)
 
 These are written to the env file only for the two Červený beam types. Setting
-any of them under another beam type — including the default `'B'` — emits a
-`UserWarning` and does nothing.
+any of them under another beam type — including the default `'G'` — emits a
+`FallbackWarning` and does nothing.
 
 | Name | Default | Meaning |
 |---|---|---|
 | `beam_width_type` | `'F'` | Beam-width law (`ReadEnvironmentBell.f90:178-181`): `'F'` space-filling, `'M'` minimum width, `'W'` WKB. |
 | `beam_curvature` | `'D'` | Curvature correction. |
-| `component` | `'P'` | Output component for displacement-receiver fields: `'P'` pressure, `'V'` vertical, `'H'` horizontal (`influence.f90:120-130`). |
+| `component` | `'P'` | Reserved: only `'P'` (pressure) returns a field. `'V'`/`'H'` select particle velocity in the ray-centred routine (`influence.f90:120-130`), which a `Field` cannot carry, so they raise `UnsupportedFeatureError` on `beam_type='R'` and are ignored with a warning on `'C'`. |
 
 **Broadband synthesis**
 
@@ -222,7 +227,9 @@ any of them under another beam type — including the default `'B'` — emits a
 |---|---|---|
 | `n_freqs` | `128` | Frequency bins synthesised from one arrivals run. |
 | `bandwidth_factor` | `0.5` | Band width as a fraction of centre frequency. |
-| `time_window`, `t_start` | `None` | Time-series window and start. |
+
+The TIME_SERIES record is placed per call, as on every engine:
+`run(..., output_duration=, t_start=)`.
 
 **Execution**
 
@@ -279,10 +286,10 @@ receiver grid.
 ### Ray paths
 
 ```python
-rays = Bellhop(n_beams=41, alpha=(-20.0, 20.0)).run(
+rays = Bellhop(n_beams=41, launch_angles=(-20.0, 20.0)).run(
     env, source, receiver, run_mode=RunMode.RAYS)
 fig, ax = rays.plot(env=env, show_receivers=False, figsize=WIDE,
-                    title='Bellhop — ray fan, alpha=(-20°, +20°)')
+                    title='Bellhop — ray fan, launch_angles=(-20°, +20°)')
 ```
 
 ![Bellhop ray fan](figures/bellhop_rays.png)
@@ -294,7 +301,7 @@ Rays are coloured by what they hit: **red** direct, **green** surface-reflected,
 
 ```python
 point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-eig = Bellhop(n_beams=4000, alpha=(-45.0, 45.0)).run(
+eig = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0)).run(
     env, source, point, run_mode=RunMode.EIGENRAYS)
 fig, ax = eig.top_n_by_miss(12).plot(
     env=env, figsize=WIDE,
@@ -305,12 +312,13 @@ fig, ax = eig.top_n_by_miss(12).plot(
 
 Eigenrays are the subset of the fan that lands near the receiver.
 `top_n_by_miss(n)` keeps the `n` that pass closest — unfiltered, this run
-returns 2639 of them, for the same beam-window reason as the arrivals below.
+returns 60 of them; with `beam_type='B'` it returns 2625, for the same
+beam-window reason as the arrivals below.
 
 ### Arrivals — the impulse structure
 
 ```python
-arr = Bellhop(n_beams=4000, alpha=(-45.0, 45.0)).run(
+arr = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0)).run(
     env, source, point, run_mode=RunMode.ARRIVALS)
 fig, ax = arr.plot(figsize=WIDE,
                    title='Bellhop — arrivals at (3 km, 60 m)')
@@ -319,14 +327,14 @@ fig, ax = arr.plot(figsize=WIDE,
 ![Bellhop arrivals](figures/bellhop_arrivals.png)
 
 Each marker is one *beam* contribution: its delay is the travel time, its
-height the amplitude, its colour the multipath class. With the default Gaussian
-beams (`beam_type='B'`) every physical path is resolved into a picket of
-neighbouring beams that fall inside the beam window — several hundred entries
-here (measured 554 on the Fortran binary, 555 on `cxx` and `cuda`) against 31
-for the same run with `beam_type='G'` — which is why the columns read solid
-rather than as individual stems. Use `beam_type='G'` (geometric hat beams) to
-get one arrival per path; that is what the BELLHOP user guide prescribes for
-arrivals and eigenrays. Either way this is the channel impulse response, and it
+height the amplitude, its colour the multipath class. The default hat beams
+(`beam_type='G'`) give one arrival per path — 30 here, on every backend —
+which is what the BELLHOP user guide prescribes for arrivals and eigenrays.
+With Gaussian beams (`beam_type='B'`)
+every physical path is resolved into a picket of neighbouring beams that fall inside the beam window — several
+hundred entries for the same run (measured 566 on the Fortran binary, 567 on
+`cxx` and `cuda`), and the columns read solid rather than as individual
+stems. Either way this is the channel impulse response, and it
 is what [`uacpy.comms`](../guide/comms.md) uses to simulate a modem link.
 
 **Read the level off `received_amplitudes`, not `amplitudes`.** BELLHOP keeps
@@ -352,9 +360,9 @@ merge rule only to files those backends left unmerged — always for `cuda`, for
 `cxx` only when `os.cpu_count() > 1` (`_arrivals_need_merge`), never for
 `fortran`, whose file is already merged and would not survive a second pass —
 so an `Arrivals` result holds the same *set* of records whichever backend
-produced the file: the `beam_type='G'` run above returns 31 records on
+produced the file: the `beam_type='G'` run above returns 30 records on
 `fortran`, `cxx` and `cuda` alike. `read_arr_file` itself defaults to
-`merge=False`, the file as written; `read_arr_file(path, merge=True)` applies
+`merge=False`, the file as written; `read_arr_file(filepath, merge=True)` applies
 the Fortran merge rule, and is what the model passes for a `cxx`/`cuda` file
 the backend left unmerged.
 
@@ -363,17 +371,17 @@ Three things that set does **not** guarantee:
 - **Not the same order.** The multithreaded binaries append in
   thread-completion order, and the merge rule normalises the record structure,
   not the sequence. On that same run, `fortran`'s first delay is 2.3029 s and
-  `cuda`'s is 2.0136 s — the same 31 delays, permuted. Align on `delay` before
+  `cuda`'s is 2.0136 s — the same 30 delays, permuted. Align on `delay` before
   comparing two backends record by record.
-- **Not a backend-proof count when the beam window admits a picket.** With the
-  default Gaussian beams the run measured 554 records on `fortran` against 555
+- **Not a backend-proof count when the beam window admits a picket.** With
+  Gaussian beams (`beam_type='B'`) the run measured 566 records on `fortran` against 567
   on `cxx` and `cuda`, and that count moves with the thread count.
 - **It does not hold the same numbers.** The merge normalises the record
   structure, not the arithmetic that filled it, and the two binaries compute
   that arithmetic differently in float32. Aligned on delay, `fortran` and
-  `cuda` disagreed on amplitude in 31 of 31 records (max 1.0e-07), delay in
-  24 of 31 (max 9.6e-07 s), receiver angle in 30 of 31 (max 5.7e-05°) and
-  source angle in 30 of 31 (max 4.6e-05°). Phase, the bounce counts and the
+  `cuda` disagreed on amplitude in 30 of 30 records (max 1.0e-07), delay in
+  23 of 30 (max 9.5e-07 s), receiver angle in 30 of 30 (max 5.7e-05°) and
+  source angle in 30 of 30 (max 4.5e-05°). Phase, the bounce counts and the
   receiver indices agreed exactly.
 
 So compare arrivals across backends with a float32-scale tolerance, never for
@@ -396,11 +404,27 @@ fig, _ = H.plot_transfer_function(
 
 Bellhop synthesises the whole band from **one** arrivals run by phasing the
 delays, rather than re-solving per frequency — which is why it is dramatically
-cheaper than a modal or spectral sweep for broadband work. The price is in the
-amplitudes: delays and volume attenuation are exact per frequency, but the beam
-amplitudes are computed once at the band centre `fc` and held flat, so they are
-only first-order correct near `fc` and degrade toward the band edges, worst at
-caustics. The example above spans 150–450 Hz — `fc = 300 Hz` at ±50 %, which is
+cheaper than a modal or spectral sweep for broadband work. The price is in
+everything but the delays. The delays are exact per frequency; the rest is taken
+from the one trace at the band centre `fc`:
+
+- **volume attenuation** — the attenuation phase `Im(τ)` is traced at `fc`,
+  where `2π·fc·Im(τ)` is minus the path integral of the water's `α(fc)` (Jensen et
+  al., *Computational Ocean Acoustics* §3.6.2; `Step.f90:73`). BROADBAND and
+  TIME_SERIES both rescale it to each frequency by the environment's law,
+  `α(f)/α(fc)`, which is exact for Thorp, Francois-Garrison and a constant
+  dB/λ (measured arrival by arrival against traces at `f`: within 0.0011 dB,
+  where scaling linearly in `f` missed by 2.7 dB at 20–60 kHz over 1 km).
+  A Biological layer does not separate in frequency and depth, so it is scaled
+  linearly in `f`; a run whose band and water column put that more than
+  0.05 dB/km off the law warns;
+- **beam amplitudes and caustic phases** — held flat, so only first-order correct
+  near `fc` and degrading toward the band edges, worst at caustics;
+- **the seabed reflection coefficient** — native half-spaces and a BOUNCE `.brc`
+  table (the route a layered bottom takes) are evaluated at `fc` alone. A
+  half-space with attenuation in dB/λ has a frequency-independent `R(θ)`, but a
+  layered seabed does not (see [Bounce](bounce.md)), so a layered-bottom
+  BROADBAND/TIME_SERIES run warns. The example above spans 150–450 Hz — `fc = 300 Hz` at ±50 %, which is
 the practical limit. For wider bands, run sub-bands at several `fc` and stitch.
 
 The phase panel is aliased, not noisy: at 192 bins over 300 Hz the spacing is
@@ -429,15 +453,16 @@ plots transparent. `np.nanmedian` and friends, not `np.median`.
 under-sampled field. If the TL image looks grainy, raise `n_beams` and confirm
 the picture stops changing.
 
-**`alpha` clips the field, not just the picture.** Narrowing the fan removes
+**`launch_angles` clips the field, not just the picture.** Narrowing the fan removes
 steep paths entirely — useful for isolating a path, wrong if you want total
 field.
 
-**Backend fallback is about binaries, not GPUs.** An explicit `backend='cuda'`
-falls back to fortran with a `UserWarning` when the `bellhopcuda` *binary* is
-missing. A binary that is present but has no usable GPU is not detected here,
-and the `backend=None` auto-pick never warns at all. Check `result.backend` to
-see what actually ran.
+**An explicit backend runs or raises.** `backend='cuda'` or `backend='cxx'`
+whose binary is not built raises `ExecutableNotFoundError`, naming the
+`./install.sh --bellhop …` flag that builds it; no other engine runs in its
+place. `backend=None` picks the first installed binary (CUDA → C++ → Fortran)
+by file presence: a `bellhopcuda` binary on a host with no usable GPU is
+picked and then fails. Check `result.backend` to see what actually ran.
 
 **The default backend is not run-to-run reproducible.** `result.backend` tells
 you *which* binary ran; it does not promise that binary returns the same
@@ -451,7 +476,11 @@ regression baseline, a published figure, a hash — pass
 `Bellhop(backend='fortran')`, whose `.shd` is byte-identical and whose field
 compares `array_equal` across runs. Note the two backends fail in *opposite*
 places, so pin the file you actually depend on: the fortran `.prt` is **not**
-byte-identical, because it carries a `CPU Time = …` stamp.
+byte-identical, because it carries a `CPU Time = …` stamp. The examples pass
+`backend='fortran'` for this reason, so their figures and printed numbers are
+the same on every run.
+
+Bellhop's measured agreement with closed forms and the published benchmarks, and its known limits there, are on the [validation page](validation.md).
 
 ---
 

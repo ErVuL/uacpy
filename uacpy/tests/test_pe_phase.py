@@ -1,4 +1,4 @@
-"""Unit tests for ``models/_pe_phase.py``.
+"""Unit tests for ``models/ram/_pe_phase.py``.
 
 Each test computes the engineering travelling-wave conversion via the helper
 and via an independent closed-form, then checks they match to machine
@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.models._pe_phase import (
+from uacpy.models.ram._pe_phase import (
     psi_to_travelling_wave,
     MPIRAMS, RAMS, RAMSURF,
 )
@@ -45,7 +45,8 @@ def test_mpirams_narrowband_matches_closed_form():
 
 
 def test_mpirams_broadband_matches_closed_form():
-    """``_run_broadband`` site: psif shape (n_z, n_f, n_r); range on axis 2."""
+    """``ram.mpirams.assemble_broadband_field`` site: psif shape (n_z, n_f,
+    n_r); range on axis 2."""
     g = _rng(1)
     psif = g.standard_normal((3, 2, 4)) + 1j * g.standard_normal((3, 2, 4))
     ranges = np.linspace(100.0, 1000.0, 4)
@@ -62,9 +63,9 @@ def test_mpirams_broadband_matches_closed_form():
 
 
 def test_rams_broadband_no_carrier_no_radial():
-    """``_run_collins_broadband`` site for ``rams0.5``: file already
-    carries ψ·exp(+i k0 r); conj plus the Hankel ``exp(-iπ/4)`` the
-    Collins codes never factor out (``rams0.5.f:270`` divides by √r
+    """``ram.collins.assemble_collins_band_field`` site for ``rams0.5``:
+    file already carries ψ·exp(+i k0 r); conj plus the Hankel ``exp(-iπ/4)``
+    the Collins codes never factor out (``rams0.5.f:270`` divides by √r
     only). No radial scaling here — the Collins binaries write that in
     already."""
     g = _rng(2)
@@ -78,8 +79,8 @@ def test_rams_broadband_no_carrier_no_radial():
 
 
 def test_ramsurf_broadband_carrier_applied():
-    """``_run_collins_broadband`` site for ``ramsurf1.5``: bare envelope
-    needs explicit carrier ``exp(-i k0 r)`` multiplied in."""
+    """``ram.collins.assemble_collins_band_field`` site for ``ramsurf1.5``:
+    bare envelope needs explicit carrier ``exp(-i k0 r)`` multiplied in."""
     g = _rng(3)
     H = g.standard_normal((4, 6, 8)) + 1j * g.standard_normal((4, 6, 8))
     freqs = np.linspace(50.0, 200.0, 8)

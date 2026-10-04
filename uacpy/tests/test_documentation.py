@@ -55,6 +55,10 @@ from uacpy.tests._doc_gate import (
     _section_span,
 )
 
+#: Every test here pins a repo convention (sources, docs, packaging), not
+#: runtime behaviour: ``-m "not convention"`` deselects the module.
+pytestmark = pytest.mark.convention
+
 DOCS_DIR = Path(uacpy.__file__).resolve().parent.parent / "docs"
 REPO_ROOT = Path(uacpy.__file__).resolve().parent.parent
 
@@ -222,12 +226,12 @@ def _documentation_text() -> str:
 def _model_classes() -> dict:
     """The models the DOCUMENTATION.md tables describe, by name.
 
-    Derived from ``uacpy.models.__all__``. The gates below compare the
-    documented rows against *this* set, so a hand-written list here would let
-    a newly-added wrapper ship with no matrix row and a green suite — it
-    would simply never enter the comparison."""
-    from uacpy.tests.conftest import concrete_model_classes
-    return concrete_model_classes()
+    Read from the engine registry. The gates below compare the documented
+    rows against *this* set, so a hand-written list here would let a
+    newly-added wrapper ship with no matrix row and a green suite — it would
+    simply never enter the comparison."""
+    from uacpy.models._registry import engine_classes
+    return {cls.__name__: cls for cls in engine_classes().values()}
 
 
 # ── structural markdown-table extraction ──────────────────────────────────
@@ -400,8 +404,8 @@ def test_capability_matrix_feature_flags_match_models() -> None:
     """Range-dep./Elastic/Altimetry columns match the ``_supports_*`` flags of
     a default-constructed instance (instances, not the class spec, because
     Bellhop resolves ``_supports_range_dependent_ssp`` per-instance from
-    ``interp_ssp`` — bellhop.py). Needs binaries: constructors resolve their
-    executable."""
+    ``interp_ssp`` in ``Bellhop.__init__``). Needs binaries: constructors
+    resolve their executable."""
     from uacpy.core.exceptions import ExecutableNotFoundError
 
     classes = _model_classes()
@@ -529,10 +533,8 @@ def _section_18_targets(heading: str, classes: dict):
     if "common plumbing" in low:
         return [(n, inspect.signature(c.__init__)) for n, c in classes.items()]
     if "run()" in low:
-        # ``_run_single``, not ``run``: ``run`` is the base class's
-        # template method, so reading it would check the §18 table against
-        # one shared signature instead of each wrapper's own.
-        return [(f"{n}.run", inspect.signature(c._run_single))
+        # One template method, so one signature shared by every wrapper.
+        return [(f"{n}.run", inspect.signature(c.run))
                 for n, c in classes.items()]
     if "source" in low and "receiver" in low:
         return "dotted"
@@ -992,6 +994,29 @@ _PAGE_CLASSES = {
     "oases.md": ("OAST", "OASN", "OASR", "OASP", "OASS", "OASSP"),
 }
 
+
+
+#: The pages under ``docs/models/`` that document no one engine: the index
+#: and the benchmark page.
+_MODEL_PAGES_WITHOUT_AN_ENGINE = {"README.md", "validation.md"}
+
+
+@requires_docs
+def test_every_engine_page_is_held_to_its_constructor():
+    """``_PAGE_CLASSES`` decides which pages the defaults gate reads: a
+    model page or a registered engine missing from it is a page nothing
+    checks."""
+    from uacpy.models._registry import ENGINES
+    pages = {p.name for p in (DOCS_DIR / "models").glob("*.md")
+             if p.name not in _MODEL_PAGES_WITHOUT_AN_ENGINE}
+    engines = {entry.class_name for entry in ENGINES.values()}
+    named = [n for names in _PAGE_CLASSES.values() for n in names]
+    assert set(_PAGE_CLASSES) == pages and sorted(named) == sorted(engines), (
+        f"_PAGE_CLASSES pages {sorted(_PAGE_CLASSES)} vs docs/models pages "
+        f"{sorted(pages)}; classes {sorted(named)} vs registered engines "
+        f"{sorted(engines)} (docs/DEV.md section 3, step 7)")
+
+
 _SCOPE_MARKER = re.compile(r"^\*\*`(\w+)`\*\*$")
 _TABLE_RULE = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 
@@ -1335,6 +1360,150 @@ def _documented_python_units():
             yield f"{path.relative_to(root)}:{line}", tree, page_bindings
 
 
+#: The namespaces a guide table's bare call name is looked up in; the
+#: public classes each lists contribute their methods.
+_TABLE_CALL_NAMESPACES = (
+    'uacpy', 'uacpy.acoustics', 'uacpy.sonar', 'uacpy.noise',
+    'uacpy.acoustic_signal', 'uacpy.comms', 'uacpy.metrics', 'uacpy.data',
+    'uacpy.plot', 'uacpy.io')
+_TABLE_CALL = re.compile(r"`([A-Za-z_][\w.]*)\(([^`]*)\)`")
+_TABLE_IDENT = re.compile(r"^[A-Za-z_]\w*$")
+
+
+def _table_call_candidates(dotted: str) -> list:
+    """Every callable a table's ``name(...)`` can mean: the object a dotted
+    ``uacpy.…`` path names, else each function and public-class method of
+    that name in :data:`_TABLE_CALL_NAMESPACES`."""
+    if dotted.startswith('uacpy.') and '.' in dotted:
+        module, _, attr = dotted.rpartition('.')
+        try:
+            obj = getattr(importlib.import_module(module), attr, None)
+        except ImportError:
+            obj = None
+        if callable(obj):
+            return [obj]
+    name = dotted.split('.')[-1]
+    found = []
+    for module_name in _TABLE_CALL_NAMESPACES:
+        module = importlib.import_module(module_name)
+        obj = getattr(module, name, None)
+        if callable(obj) and obj not in found:
+            found.append(obj)
+        for cls_name in getattr(module, '__all__', ()):
+            cls = getattr(module, cls_name, None)
+            meth = cls.__dict__.get(name) if inspect.isclass(cls) else None
+            if callable(meth) and meth not in found:
+                found.append(meth)
+    return found
+
+
+def _table_call_problems(sig: inspect.Signature, args: list):
+    """What a reader copying ``args`` into a call would trip on, or ``None``
+    when ``args`` holds values (a call such as ``m_sequence(10)``) rather
+    than parameter names.
+
+    A bare name before ``*`` must be positional in the code, and there must
+    be no more of them than the code's positional parameters; a ``name=``
+    must be a parameter. Defaults are compared only in a row written as a
+    signature (one holding a bare ``*``), since in a call ``name=value`` is
+    a value."""
+    params = [p for p in sig.parameters.values()
+              if p.name not in ('self', 'cls')]
+    by_name = {p.name: p for p in params}
+    takes_kwargs = any(p.kind == p.VAR_KEYWORD for p in params)
+    takes_args = any(p.kind == p.VAR_POSITIONAL for p in params)
+    n_positional = sum(p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+                       for p in params)
+    is_signature = '*' in args
+    problems, keyword_only, bare = [], False, 0
+    for arg in args:
+        if arg == '*':
+            keyword_only = True
+            continue
+        if arg.startswith('*'):
+            continue
+        name, eq, value = (part.strip() for part in arg.partition('='))
+        if not _TABLE_IDENT.match(name):
+            return None
+        param = by_name.get(name)
+        if not eq:
+            if keyword_only:
+                continue
+            bare += 1
+            if param is not None and param.kind == param.KEYWORD_ONLY:
+                problems.append(f"{name} is keyword-only")
+            continue
+        if param is None:
+            if not takes_kwargs:
+                problems.append(f"no parameter {name}")
+            continue
+        if value and is_signature:
+            try:
+                documented = ast.literal_eval(value)
+            except (ValueError, SyntaxError):
+                continue
+            if (param.default is not inspect.Parameter.empty
+                    and param.default != documented):
+                problems.append(f"{name} defaults to {param.default!r}, "
+                                f"not {documented!r}")
+    if bare > n_positional and not takes_args:
+        problems.append(f"{bare} positional arguments, the code takes "
+                        f"{n_positional}")
+    return problems
+
+
+def test_table_call_problems_reads_both_sides_of_each_rule() -> None:
+    def ts(radius_m, length_m, *, frequency_hz, angle_deg=0.0):
+        """A ts_cylinder-shaped signature."""
+    sig = inspect.signature(ts)
+    assert _table_call_problems(sig, ['radius_m', 'length_m', '*',
+                                      'frequency_hz', 'angle_deg=0.0']) == []
+    assert _table_call_problems(sig, ['radius_m', 'length_m', 'frequency_hz',
+                                      '*', 'angle_deg=0.0']) == [
+        'frequency_hz is keyword-only',
+        '3 positional arguments, the code takes 2']
+    assert _table_call_problems(sig, ['a', 'b', 'frequency_hz=']) == []
+    assert _table_call_problems(sig, ['a', 'b', '*', 'angle_deg=1.0']) == [
+        'angle_deg defaults to 0.0, not 1.0']
+    assert _table_call_problems(sig, ['a', 'b', 'angle_deg=1.0']) == []
+    assert _table_call_problems(sig, ['a', 'b', 'normalize=None']) == [
+        'no parameter normalize']
+    assert _table_call_problems(sig, ['10', '2']) is None
+
+
+@requires_docs
+def test_guide_table_calls_fit_the_signatures() -> None:
+    """A guide table's backticked ``name(...)`` is a call a reader copies:
+    ``ts_cylinder(radius_m, length_m, frequency_hz, *, ...)`` printed a
+    keyword-only argument as positional and the copied call raised
+    ``TypeError``. A row passes when any callable of that name accepts it."""
+    found = []
+    for page in sorted((DOCS_DIR / 'guide').glob('*.md')):
+        for no, line in enumerate(page.read_text(encoding='utf-8')
+                                  .splitlines(), 1):
+            if not line.lstrip().startswith('|'):
+                continue
+            for match in _TABLE_CALL.finditer(line):
+                inner = match.group(2)
+                if '…' in inner or '...' in inner:
+                    continue
+                args = [a.strip() for a in inner.split(',') if a.strip()]
+                verdicts = []
+                for fn in _table_call_candidates(match.group(1)):
+                    try:
+                        sig = inspect.signature(fn)
+                    except (TypeError, ValueError):
+                        continue
+                    verdicts.append(_table_call_problems(sig, args))
+                verdicts = [v for v in verdicts if v is not None]
+                if verdicts and all(verdicts):
+                    found.append(f"guide/{page.name}:{no} "
+                                 f"{match.group(1)}({inner}): "
+                                 + '; '.join(verdicts[0]))
+    assert not found, ("guide table rows a copied call would fail on:\n"
+                       + '\n'.join(found))
+
+
 @requires_docs
 def test_documented_samples_use_names_the_package_has() -> None:
     """Every ``uacpy.…`` name and keyword argument used by a documented sample
@@ -1424,11 +1593,6 @@ def test_documented_samples_use_names_the_package_has() -> None:
 #   tolerances and counts the guide pages quote from their figure scripts.
 # * Defaults stated anywhere other than a `Parameters` entry: a module
 #   docstring, a `Notes` section, or narrative in the body.
-#
-# NOTE: these two read `uacpy/` sources, not `docs/`, but the module-level
-# `pytestmark` above skips the whole file when `docs/` is absent, so they now
-# skip in that case as well. `docs/` is present in every source checkout and
-# `uacpy.tests` is excluded from the wheel, so nothing reaches them without it.
 
 
 PKG_DIR = Path(uacpy.__file__).resolve().parent
@@ -1740,20 +1904,20 @@ def test_c_high_factor_records_which_models_require_the_pad():
     k = omega/c_bottom inside the window. Without this note a later round
     'simplifies' the constant and breaks the model users are told to fall back
     to."""
-    src = (Path(uacpy.__file__).parent / 'core' / 'constants.py').read_text()
+    src = (Path(uacpy.__file__).parent / 'models' / '_window.py').read_text()
     block = src.split('C_LOW_FACTOR = 0.95')[0].split('C_HIGH_FACTOR')[-1]
     assert 'branch point' in block
     assert 'scooter.f90:67,123' in block
-    assert "SPARC._write_sparc_env" in block
+    assert "SPARC._resolve_engine_settings" in block
 
 
 def test_thorp_docstring_points_at_its_frequency_band():
-    """``help(_thorp_dB_per_km)`` gave T/S/pH/depth at length and said nothing
+    """``help(absorption_thorp)`` gave T/S/pH/depth at length and said nothing
     about frequency, while the guide has it —
     ``docs/guide/environment.md §6 "Two things the curve does not tell you"``.
     """
-    from uacpy.core.absorption import _thorp_dB_per_km
-    doc = _thorp_dB_per_km.__doc__
+    from uacpy.core.acoustics.attenuation import absorption_thorp
+    doc = absorption_thorp.__doc__
     assert 'docs/guide/environment.md §6 "Two things the curve does not tell you"' in doc
     assert '10 Hz' in doc
 
@@ -1781,8 +1945,8 @@ def test_documentation_collapse_section_points_at_the_guide():
 
 # Shared with test_determinism.py: the prose gates read normalised text
 # (whitespace collapsed) so re-wrapping a paragraph cannot fire them.
-# `_needs_docs` is redundant beside this module's own pytestmark and is
-# kept so the gates read the same in both files.
+# `_needs_docs` is the same skip as `requires_docs`, kept under this name so
+# the gates read the same in both files.
 _needs_docs = pytest.mark.skipif(
     not DOCS_DIR.is_dir(),
     reason="the docs tree is not present in an installed layout")
@@ -1800,15 +1964,15 @@ def test_the_bellhop_page_denies_that_arrivals_match_across_backends() -> None:
     record *set* and not the values in it.
 
     Measured with ``beam_type='G'`` on the page's own run, fortran against
-    cuda: the record count matched at 31 on fortran, cxx and cuda alike, but
+    cuda: the record count matched at 30 on fortran, cxx and cuda alike, but
     the two orders are a permutation of each other (fortran's first delay is
     2.3029 s against cuda's 2.0136 s), so the records must be aligned on
     ``delay`` before they can be compared at all. Aligned that way, amplitude
-    differed in 31 of 31 (max 1.0e-07), delay in 24 of 31 (max 9.6e-07 s),
-    receiver angle in 30 of 31 (max 5.7e-05 deg) and source angle in 30 of 31
-    (max 4.6e-05 deg); phase, the bounce counts and the receiver indices
+    differed in 30 of 30 (max 1.0e-07), delay in 23 of 30 (max 9.5e-07 s),
+    receiver angle in 30 of 30 (max 5.7e-05 deg) and source angle in 30 of 30
+    (max 4.5e-05 deg); phase, the bounce counts and the receiver indices
     agreed exactly. The count is not backend-proof for the default Gaussian
-    beams either: 554 records on fortran against 555 on cxx and cuda. The page
+    beams either: 566 records on fortran against 567 on cxx and cuda. The page
     has to say all of that, because a reproducibility statement rests on it.
     """
     text = _normalised(DOCS_DIR / "models" / "bellhop.md")
@@ -1840,7 +2004,7 @@ def test_the_bellhop_page_quotes_one_arrival_count_for_one_run() -> None:
     import re
 
     text = _normalised(DOCS_DIR / "models" / "bellhop.md")
-    intro = re.search(r"against (\d+) for the same run with", text)
+    intro = re.search(r"one arrival per path — (\d+) here", text)
     caveat = re.search(r"returns (\d+) records on", text)
     assert intro and caveat, (
         "the page no longer states the beam_type='G' arrival count in both "
@@ -1905,7 +2069,7 @@ def test_the_reference_states_what_run_with_bounce_derives_c_low_from() -> None:
     prose, so moving ``DEFAULT_C_MIN`` and leaving the sentence behind fails
     here.
     """
-    from uacpy.core.constants import DEFAULT_C_MIN
+    from uacpy.models._defaults import DEFAULT_C_MIN
 
     text = _normalised(REPO_ROOT / "DOCUMENTATION.md")
     section = text.split("run_with_bounce")[-1].split("### Kraken")[0]
@@ -2254,6 +2418,7 @@ class TestLinePinVerdict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 import doctest       # noqa: E402
+from uacpy.models.ram import _band as ram_band
 
 _IO_DIR = Path(uacpy.__file__).resolve().parent / 'io'
 
@@ -2399,9 +2564,8 @@ def test_the_readme_documentation_page_count_matches_the_docs_tree() -> None:
 def test_the_readme_figure_count_matches_the_figures_on_disk() -> None:
     """The other half of the same sentence counts the figures, and only the
     page halves were pinned — so it read 127 against 128 on disk. Counted from
-    the two generated-figure directories; the hero image at ``docs/`` root and
-    the scanned table under ``docs/other/`` are not generated and are excluded
-    by living outside them."""
+    the two generated-figure directories; the hero image at ``docs/`` root is
+    not generated and is excluded by living outside them."""
     drawn = sum(len(list((DOCS_DIR / part / "figures").glob("*.png")))
                 for part in ("guide", "models"))
     match = re.search(r"with\s+(\d+)\s+generated figures", _docs_bullet())
@@ -2431,9 +2595,11 @@ _NUMBER_WORDS = {'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
                  'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
                  'eleven': 11, 'twelve': 12}
 
-#: Public functions whose draw happens inside a private helper they call, so
-#: the AST sweep does not see it at their own definition.
-_DRAWS_THROUGH_A_HELPER = {'make_bandlimited_noise'}
+#: Public functions whose draw happens inside another function they call, so
+#: the AST sweep does not see it at their own definition: a private helper,
+#: or (``fetch_sea_surface``) ``generate_sea_surface``, the drawing function
+#: it forwards its ``rng`` to.
+_DRAWS_THROUGH_A_HELPER = {'make_bandlimited_noise', 'fetch_sea_surface'}
 
 
 def _reproducibility_table():
@@ -2518,11 +2684,12 @@ def test_the_page_counts_the_functions_a_run_has_to_pin() -> None:
     table = _reproducibility_table()
     unseeded = [n for n, (_, default) in table.items() if default == 'unseeded']
     total = re.search(r"\*\*Exactly (\w+) public functions draw at all\*\*", text)
-    pinned = re.search(r"\*\*Nine of the ten draw afresh unless you seed them\*\*",
-                       text)
+    pinned = re.search(r"\*\*(\w+) of the (\w+) draw afresh unless you seed "
+                       r"them\*\*", text)
     assert total is not None and pinned is not None, "§2 phrasing changed"
     assert _NUMBER_WORDS[total.group(1)] == len(table)
-    assert len(unseeded) == 9, len(unseeded)
+    assert _NUMBER_WORDS[pinned.group(1).lower()] == len(unseeded)
+    assert _NUMBER_WORDS[pinned.group(2)] == len(table)
 
 
 def test_a_fixed_default_seed_really_repeats_without_being_asked() -> None:
@@ -2536,7 +2703,7 @@ def test_a_fixed_default_seed_really_repeats_without_being_asked() -> None:
 
 def _resolve_public(name):
     """The public function ``name`` refers to, from the surfaces §2 names."""
-    for module in (uacpy, uacpy.acoustic_signal, uacpy.comms):
+    for module in (uacpy, uacpy.acoustic_signal, uacpy.comms, uacpy.data):
         function = getattr(module, name, None)
         if function is not None:
             return function
@@ -2564,15 +2731,17 @@ def test_every_enumerated_function_takes_the_seeding_argument_named() -> None:
 
 
 def test_an_unseeded_sea_surface_draws_afresh_and_a_seeded_one_repeats() -> None:
-    """The property §2's new row claims: the ninth function is unseeded by
-    default, and its ``seed=`` is effective."""
+    """The property §2's row claims: the sea-surface generator is unseeded
+    by default, and its ``rng=`` is effective."""
     import numpy as np
 
     assert not np.array_equal(uacpy.generate_sea_surface(1000.0, n_points=16),
                               uacpy.generate_sea_surface(1000.0, n_points=16))
     assert np.array_equal(
-        uacpy.generate_sea_surface(1000.0, n_points=16, seed=7),
-        uacpy.generate_sea_surface(1000.0, n_points=16, seed=7))
+        uacpy.generate_sea_surface(1000.0, n_points=16,
+                                   rng=np.random.default_rng(7)),
+        uacpy.generate_sea_surface(1000.0, n_points=16,
+                                   rng=np.random.default_rng(7)))
 
 
 # ── docs/guide/data.md against uacpy.data's export surface ───────────────
@@ -2700,7 +2869,7 @@ def test_every_public_plotter_is_documented():
     and ``save_animation`` -- 54 names checked out of 59 exported.
     """
     import types
-    import uacpy.visualization as viz
+    import uacpy.plot as viz
     text = (DOCS_DIR / "guide" / "plotting.md").read_text(encoding="utf-8")
     plotters = [n for n in viz.__all__
                 if not isinstance(getattr(viz, n), types.ModuleType)]
@@ -2865,3 +3034,503 @@ def test_the_data_package_scopes_its_cache_first_claim_to_one_source():
     # and the claim it contradicted is still on fetch_environment
     env_doc = inspect.getdoc(data_pkg.fetch_environment) or ''
     assert 'cache' in env_doc.lower()
+
+
+def test_the_reference_says_the_ifft_engines_choose_their_output_rate():
+    """The §18 ``sample_rate`` row describes the input waveform's rate and
+    sends the reader to ``result.sample_rate`` for the output's.
+
+    It read "Sample rate of ``source_waveform`` / the synthesised output",
+    which holds on Bellhop only: Kraken, Scooter and RAM inverse-FFT a
+    transfer function and return ``nfft·Δf`` of their grid (measured
+    2560 Hz for a 2000 Hz input), so a user who wrote a WAV or added noise at
+    the rate they passed mis-timed every sample.
+    """
+    text = _documentation_text()
+    row = next(line for line in text.splitlines()
+               if line.startswith("| `sample_rate` | Hz |"))
+    assert "synthesised output" not in row
+    assert "result.sample_rate" in row
+    assert "2560 Hz" in row and "Bellhop" in row
+
+
+def test_the_reference_calls_fc_over_q_the_half_bandwidth():
+    """``fc/Q`` is RAM's half-bandwidth: ``Q=2`` at 100 Hz sweeps 50-150 Hz.
+
+    Three places in DOCUMENTATION.md called ``fc/Q`` "bandwidth", which a
+    reader takes as the full width, so asking for a 100 Hz band around
+    100 Hz with ``Q=1`` bought 0-200 Hz. The code side is read from the
+    sweep builder itself, so the pin holds the sentence to the vector.
+    """
+    frq = ram_band.broadband_frequencies(100.0, 2.0, 1.0)
+    assert (frq.min(), frq.max()) == (50.0, 150.0)
+
+    text = _documentation_text()
+    assert "bandwidth = fc/Q" not in text
+    assert text.count("fc ± fc/q_factor") >= 3
+
+
+@pytest.mark.requires_binary
+def test_the_ram_parameter_reference_states_how_q_and_t_resolve():
+    """The §18 RAM ``q_factor``/``record_duration`` rows give the source-dependent resolution the
+    code applies, not a flat "2.0 broadband / 1e6 COHERENT_TL".
+
+    A single frequency with neither knob pinned collapses to one bin ``(1e6,
+    1.0)``; with the other knob pinned, a knob takes the default band's value
+    (``Q = 4``, its half-width; ``T = 127/(fc·0.5)``, its spacing). Both
+    branches are read from ``ram._band.resolve_broadband_grid`` here so a
+    change to either default fails against the sentence.
+    """
+    from uacpy import Source
+    from uacpy.models.ram import RAM
+    src = Source(depths=30.0, frequencies=100.0)
+    model = RAM()
+    assert ram_band.resolve_broadband_grid(src, knobs=model._knob_record(),
+                                           log=model._log)[1:3] == (1e6, 1.0)
+    model = RAM(record_duration=1.0)
+    assert ram_band.resolve_broadband_grid(src, knobs=model._knob_record(),
+                                           log=model._log)[1] == 4.0
+    model = RAM(q_factor=4.0)
+    assert ram_band.resolve_broadband_grid(src, knobs=model._knob_record(),
+                                           log=model._log)[2] == pytest.approx(
+        127.0 / (100.0 * 0.5))
+
+    text = _documentation_text()
+    section = text.split("### RAM parameters")[1].split("\n### ")[0]
+    q_row = next(l for l in section.splitlines() if l.startswith("| `q_factor` |"))
+    t_row = next(l for l in section.splitlines() if l.startswith("| `record_duration` |"))
+    assert "`1e6`" in q_row and "`4.0`" in q_row and "multi-frequency" in q_row
+    assert ("`1.0`" in t_row and "`127/(fc·0.5)`" in t_row
+            and "multi-frequency" in t_row)
+    dz_row = next(l for l in section.splitlines() if l.startswith("| `dz` |"))
+    assert "snapped to integer depth count" not in dz_row
+    assert "SEAFLOOR_CELL_OFFSET" in dz_row
+
+
+def test_the_bellhop_c_low_paragraph_states_the_rule_without_its_history():
+    """The ``run_with_bounce`` paragraph states what ``c_low=None`` resolves
+    to; it compared the rule with "the earlier rule" the code no longer has,
+    which describes a past implementation to a reader of the present one."""
+    assert "earlier rule" not in _documentation_text()
+
+
+@pytest.mark.requires_binary
+def test_the_supported_features_sample_prints_the_live_list():
+    """The ``Scooter().supported_features`` sample's output comment is the
+    list the property returns. It printed three of the five flags while the
+    same section named the other two a few lines below."""
+    import ast as _ast
+    from uacpy.models import Scooter
+    m = re.search(r"Scooter\(\)\.supported_features\n# (\[.*?\])",
+                  _documentation_text())
+    assert m, "the supported_features sample has moved"
+    assert _ast.literal_eval(m.group(1)) == list(Scooter().supported_features)
+
+
+def test_the_arrivals_statistics_are_not_documented_on_channel_taps():
+    """``coherence_bandwidth`` and ``channel_regime`` are ``Arrivals``
+    methods. The filtering-helpers block hung them off the ``channel_taps``
+    comment, where they read as ``ChannelTaps`` methods — which raise
+    ``AttributeError``."""
+    from uacpy.comms import ChannelTaps
+    from uacpy.core.results.rays import Arrivals
+    text = _documentation_text()
+    taps_line = next(l for l in text.splitlines()
+                     if l.startswith("arr.channel_taps("))
+    for name in ("coherence_bandwidth", "channel_regime"):
+        assert not hasattr(ChannelTaps, name)
+        assert hasattr(Arrivals, name)
+        assert name not in taps_line
+        assert re.search(rf"^arr\.{name}\(", text, re.M), name
+
+
+#: Every page that prints a ``pytest -m`` command a contributor copies.
+_MARKER_COMMAND_PAGES = ("README.md", "DOCUMENTATION.md", "docs/DEV.md")
+
+
+def test_every_documented_marker_expression_keeps_the_network_tests_out():
+    """A command-line ``-m`` REPLACES ``addopts``' ``-m 'not
+    requires_network'`` (pytest registers ``-m`` with ``action='store'``), so
+    a documented ``-m "not slow"`` ran the live NOAA/GMRT/EMODnet tests the
+    same README calls deselected by default. Every documented deselecting
+    expression carries the network clause itself; the one that selects the
+    network tests on purpose (``-m requires_network``) is unquoted and not
+    matched."""
+    import tomllib
+    addopts = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(
+        encoding="utf-8"))["tool"]["pytest"]["ini_options"]["addopts"]
+    assert "not requires_network" in addopts, (
+        "addopts no longer deselects the network tests; this gate's premise "
+        "has moved")
+    found, leaking = 0, []
+    for rel in _MARKER_COMMAND_PAGES:
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            continue
+        for expr in re.findall(r'-m "(not [^"]*)"',
+                               path.read_text(encoding="utf-8")):
+            found += 1
+            if "not requires_network" not in expr:
+                leaking.append((rel, expr))
+    assert found >= 8, "the documented marker commands have moved"
+    assert leaking == [], (
+        f"documented -m expressions that re-enable the live-network tests: "
+        f"{leaking}")
+
+
+def test_the_readme_mirror_sentence_names_only_fetchers_with_a_url():
+    """README's data-licence section said "UACPY exposes a ``base_url=`` on
+    each fetcher"; 23 of the ``uacpy.data`` callables take one. The sentence
+    names the families that do and the live fetchers that do not, and both
+    halves are checked against the signatures."""
+    import uacpy.data as data
+
+    def takes_url(name):
+        return any("url" in p for p in
+                   inspect.signature(getattr(data, name)).parameters)
+
+    text = _normalised(REPO_ROOT / "README.md")
+    assert "a `base_url=` on each fetcher" not in text
+    downloads = [n for n in data.__all__ if n.startswith("download_")
+                 and n.endswith("_db")]
+    assert downloads and all(takes_url(n) for n in downloads)
+    assert "every `download_*_db`" in text
+    for name in ("fetch_wind", "fetch_waves"):
+        assert f"`{name}`" in text and not takes_url(name), name
+    for name in ("fetch_bathy", "fetch_ssp", "fetch_argo_profile",
+                 "fetch_emodnet_substrate", "fetch_mars_sediment"):
+        assert takes_url(name), name
+
+
+def _top_level_plotters():
+    import uacpy as _u
+    return sorted(n for n in dir(_u)
+                  if n.startswith(("plot_", "compare_")) and callable(
+                      getattr(_u, n)))
+
+
+@requires_docs
+def test_no_plotter_is_re_exported_at_the_top_level():
+    """``uacpy.plot`` is every plotter's one public path: the top level
+    re-exports none, and both pages say so rather than naming top-level
+    copies."""
+    assert _top_level_plotters() == []
+    for text, where in (
+            (_normalised(DOCS_DIR / "guide" / "plotting.md"), "plotting.md"),
+            (" ".join(_documentation_text().split()), "DOCUMENTATION.md")):
+        assert not re.search(r"`uacpy\.(plot_|compare)", text), where
+        assert re.search(r"`uacpy\.plot` is (every plotter's|their) one "
+                         r"public path", text), where
+
+
+@requires_docs
+def test_the_plotting_carrier_table_names_only_carriers_that_plot():
+    """The carriers table listed ``Absorption`` as plotting α(f) with a
+    required ``frequencies`` argument; the absorption laws have no
+    ``.plot()`` (a plotter draws data, it never evaluates a law) and the
+    carrier that does, ``AbsorptionCoefficient``, holds its own frequencies.
+    Every class named in the table's first column has a ``plot`` method."""
+    import uacpy.core.absorption as absorption
+    text = (DOCS_DIR / "guide" / "plotting.md").read_text(encoding="utf-8")
+    table = text.split("| Carrier | `.plot()` draws |")[1].split("\n\n")[0]
+    names = re.findall(r"^\| `(\w+)` \|", table, re.M)
+    assert "AbsorptionCoefficient" in names and "Absorption" not in names
+    for name in names:
+        cls = getattr(uacpy, name, None) or getattr(absorption, name)
+        assert callable(getattr(cls, "plot", None)), name
+    assert not hasattr(absorption.Thorp, "plot")
+    sig = inspect.signature(absorption.AbsorptionCoefficient.plot)
+    assert "frequencies" not in sig.parameters
+
+
+@requires_docs
+def test_the_overlay_paragraph_names_every_plotter_taking_the_overlay():
+    """``plotting.md`` §2 lists which views take ``env=`` and which take
+    ``source=``/``receiver=``. The lists had dropped ``plot_field_difference``
+    and ``plot_overview`` (env) and the two sonar maps (source/receiver).
+    The sweep reads the signatures, so a plotter that gains an overlay
+    keyword without a mention fails here."""
+    import uacpy.visualization.plots as plots
+    text = _normalised(DOCS_DIR / "guide" / "plotting.md")
+    para = text.split("`env=` is accepted by every view that has one")[1]
+    env_part, geo_part = para.split("`source=` / `receiver=` are", 1)
+    geo_part = geo_part.split("The ray plotter draws")[0]
+    # plot_bottom_properties and plot_environment draw env itself;
+    # plot_mode_excitation's `source` is the array it evaluates, and the two
+    # map plotters' is a data label.
+    not_overlays = {"plot_bottom_properties", "plot_environment",
+                    "plot_mode_excitation", "plot_bathymetry_map",
+                    "plot_sea_ice_map"}
+    for name in plots.__all__:
+        fn = getattr(plots, name)
+        if name in not_overlays or not callable(fn) or inspect.ismodule(fn):
+            continue
+        params = inspect.signature(fn).parameters
+        if "env" in params:
+            assert f"`{name}`" in env_part, f"env= list omits {name}"
+        if "source" in params and "receiver" in params:
+            assert f"`{name}`" in geo_part, f"source=/receiver= omits {name}"
+
+
+@requires_docs
+def test_plot_field_statistics_is_described_as_two_bars_not_error_bars():
+    """``plot_field_statistics`` draws a Mean bar and a Std bar per field;
+    both pages called it "mean ± std", which reads as error bars."""
+    for text in ((DOCS_DIR / "guide" / "plotting.md").read_text(
+            encoding="utf-8"), _documentation_text()):
+        row = next(l for l in text.splitlines()
+                   if "plot_field_statistics(" in l and l.startswith("|"))
+        assert "±" not in row and "not error bars" in row
+
+
+@requires_docs
+def test_the_environment_guide_builds_its_ice_canopy_from_sea_ice():
+    """``environment.md`` §5 built its "ice canopy" from the ``chalk`` preset,
+    a 2400 m/s, 2.26 g/cm³ rock that would sink. The example now calls
+    ``uacpy.data.sea_ice_surface``, whose boundary is the ``SEA_ICE_*``
+    constants."""
+    from uacpy.data import sea_ice_surface, seaice_local
+    text = (DOCS_DIR / "guide" / "environment.md").read_text(encoding="utf-8")
+    section = text.split("## 5. `Surface`")[1].split("\n## ")[0]
+    assert "from_preset('chalk'" not in section
+    assert "sea_ice_surface(1.0)" in section
+    ice = sea_ice_surface(1.0)
+    assert (ice.sound_speed, ice.shear_speed, ice.density) == (
+        seaice_local.SEA_ICE_COMPRESSIONAL_SPEED,
+        seaice_local.SEA_ICE_SHEAR_SPEED, seaice_local.SEA_ICE_DENSITY)
+
+
+@requires_docs
+def test_the_metrics_section_counts_its_table():
+    """``utilities.md`` §2 opened "Three functions" above a four-row table,
+    and ended on a dangling "Call ``Field.resample_to`` yourself" sentence
+    after telling the reader to use ``tl_rmse_on_shared_ranges``."""
+    text = (DOCS_DIR / "guide" / "utilities.md").read_text(encoding="utf-8")
+    section = text.split("## 2. `uacpy.metrics`")[1].split("\n## ")[0]
+    rows = re.findall(r"^\| `tl_\w+\(", section, re.M)
+    words = {3: "Three", 4: "Four", 5: "Five"}
+    assert f"\n\n{words[len(rows)]} functions, one job" in section
+    assert "`Field.resample_to` yourself, and own it" not in section
+
+
+@requires_docs
+def test_the_logging_table_sends_warnings_to_stderr():
+    """``log_message`` writes DEBUG/INFO to stdout and WARN/ERROR to stderr;
+    the utilities table said stdout for all of it."""
+    import contextlib
+    import io
+    from uacpy._log import log_message
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        log_message("t", "probe", level="warning", verbose=True)
+    assert "probe" in err.getvalue() and out.getvalue() == ""
+    text = (DOCS_DIR / "guide" / "utilities.md").read_text(encoding="utf-8")
+    row = next(l for l in text.splitlines() if l.startswith("| **Status**"))
+    assert "stderr (WARN/ERROR)" in row
+
+
+@requires_docs
+def test_the_source_table_lists_every_constructor_argument():
+    """``source-receiver.md`` §1's ``Source(...)`` table omitted ``weights``
+    and ``source_level_dB``; it is checked against the live signature."""
+    text = (DOCS_DIR / "guide" / "source-receiver.md").read_text(
+        encoding="utf-8")
+    table = text.split("| `Source(...)` | Default | Meaning |")[1].split(
+        "\n\n")[0]
+    listed = set(re.findall(r"^\| `(\w+)` \|", table, re.M))
+    params = set(inspect.signature(uacpy.Source).parameters)
+    assert listed == params, (params - listed, listed - params)
+
+
+def test_the_default_seabed_is_not_called_sand():
+    """DOCUMENTATION §5 called the default seabed "sand-like"; it is
+    1600 / 1.5 / 0.5 and matches no preset (``sand`` is 1650 / 1.95 / 0.8).
+    The quoted numbers are the live defaults."""
+    from uacpy.core.boundary import BoundaryProperties
+    d = BoundaryProperties._ACOUSTIC_DEFAULTS
+    text = " ".join(_documentation_text().split())
+    assert "sand-like" not in text
+    assert (f"generic fluid half-space ({d['sound_speed']:g} m/s, "
+            f"{d['density']:g} g/cm³, {d['attenuation']:g} dB/λ") in text
+
+
+#: The guide pages that document ``uacpy.acoustic_signal``.
+_SIGNAL_GUIDE_PAGES = ("signal.md", "arrays.md")
+
+
+@requires_docs
+@pytest.mark.parametrize("page", _SIGNAL_GUIDE_PAGES)
+def test_signal_guide_calls_use_keywords_the_functions_take(page):
+    """Every inline call to a public ``uacpy.acoustic_signal`` function on the
+    signal guide pages passes only keywords its signature has.
+
+    ``signal.md`` taught ``welch(x, fs, method='constant_q', freq_min=20)`` as the
+    constant-Q estimator after ``method=`` had left ``welch`` — the page's own
+    example raised ``TypeError``. The check reads every code span, so a
+    keyword dropped from a signature fails against every page that uses it.
+    """
+    import uacpy.acoustic_signal as sig
+    text = (DOCS_DIR / "guide" / page).read_text(encoding="utf-8")
+    checked, bad = 0, []
+    for span in re.findall(r"`([^`\n]+)`", text):
+        for name, args in re.findall(r"\b(\w+)\(([^()]*)\)", span):
+            if name not in sig.__all__:
+                continue
+            params = inspect.signature(getattr(sig, name)).parameters
+            if any(p.kind is p.VAR_KEYWORD for p in params.values()):
+                continue
+            checked += 1
+            bad += [(name, k) for k in re.findall(r"(?:^|,)\s*(\w+)\s*=", args)
+                    if k not in params]
+    assert checked >= 10, "the call sweep found too few calls to mean anything"
+    assert bad == [], f"{page}: keywords the functions do not take: {bad}"
+
+
+@requires_docs
+@pytest.mark.parametrize("page", _SIGNAL_GUIDE_PAGES)
+def test_signal_guide_table_signatures_name_the_real_parameters(page):
+    """A reference-table signature names each positional parameter as the
+    function spells it, so the keyword form of the documented call works.
+
+    ``waveform_spectrum_at(waveform, sample_rate, frequencies)`` named a
+    parameter that is ``freqs``; three more rows wrote ``f`` for
+    ``frequencies`` and ``transmit`` for ``source_timeseries``."""
+    import uacpy.acoustic_signal as sig
+    text = (DOCS_DIR / "guide" / page).read_text(encoding="utf-8")
+    bad = []
+    for name, args in re.findall(r"^\| `(\w+)\(([^()`]*)\)`", text, re.M):
+        if name not in sig.__all__:
+            continue
+        params = inspect.signature(getattr(sig, name)).parameters
+        bad += [(name, a.strip()) for a in args.split(",")
+                if re.fullmatch(r"\s*\w+\s*", a) and a.strip() not in params]
+    assert bad == [], f"{page}: table parameters the functions lack: {bad}"
+
+
+@requires_docs
+def test_the_signal_guide_says_the_edge_bands_are_nan_without_a_warning():
+    """``decidecade_band_levels`` leaves its two edge bands ``nan`` and
+    deliberately does not warn (its docstring says why); the guide promised
+    "a one-time warning naming the support"."""
+    import warnings
+    import numpy as np
+    from uacpy.acoustic_signal import decidecade_band_levels
+    f = np.linspace(20.0, 11_000.0, 2000)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        levels = decidecade_band_levels(np.ones_like(f), frequencies=f)[1]
+    assert np.isnan(levels[0]) and np.isnan(levels[-1])
+    assert not any("support" in str(w.message) for w in caught)
+    text = _normalised(DOCS_DIR / "guide" / "signal.md")
+    assert "returned as `nan` with a one-time warning" not in text
+    assert "deliberately without a warning" in text
+
+
+@requires_docs
+def test_every_page_numbers_its_sections_in_reading_order():
+    """A page's ``## N.`` headings run in order. ``arrays.md`` opened with
+    "## 3a. Beamforming a whole field" ahead of "## 1.", so a reader met the
+    field beamformer before the manifold it is built from. A lettered section
+    (``3a``) sorts after its number."""
+    offenders = []
+    for page in sorted(DOCS_DIR.rglob("*.md")):
+        if "superpowers" in page.parts:
+            continue
+        numbers = [(int(n), letter) for n, letter in re.findall(
+            r"^## (\d+)([a-z]?)\. ", page.read_text(encoding="utf-8"), re.M)]
+        if numbers != sorted(numbers):
+            offenders.append((page.name, numbers))
+    assert offenders == []
+
+
+@requires_docs
+def test_the_arrays_table_gives_independent_beams_its_weights():
+    """The §-top reference row for ``independent_beams`` omitted ``weights=``,
+    which the "Shading costs looks" paragraph relies on (16.97 looks unshaded
+    against 5.42 under Hann)."""
+    from uacpy.acoustic_signal import independent_beams
+    assert "weights" in inspect.signature(independent_beams).parameters
+    text = (DOCS_DIR / "guide" / "arrays.md").read_text(encoding="utf-8")
+    row = next(l for l in text.splitlines()
+               if l.startswith("| `independent_beams("))
+    assert "weights=None" in row
+
+
+@requires_docs
+def test_the_guide_states_the_absolute_noise_level_it_measured():
+    """The guide quotes one number for ``psd_level_dB``: 60 dB re 1 µPa²/Hz
+    over 8-12 kHz at 48 kHz reads 59.995 dB on a Welch estimate over the
+    middle of the band. Measured here on that call, and the three noise
+    questions (relative, absolute band, absolute spectrum) are named."""
+    import numpy as np
+    from uacpy.acoustic_signal import make_bandlimited_noise, welch
+
+    _, n = make_bandlimited_noise(10000.0, 4000.0, 4.0, sample_rate=48000.0,
+                                  psd_level_dB=60.0,
+                                  rng=np.random.default_rng(0))
+    est = welch(n, 48000.0)
+    mid = (est.frequencies > 9000.0) & (est.frequencies < 11000.0)
+    level = 10 * np.log10(np.mean(est.power[mid]) / 1e-12)
+    assert round(level, 3) == 59.995, level
+
+    text = _normalised(DOCS_DIR / "guide" / "signal.md")
+    assert "reads 59.995 dB re 1 µPa²/Hz" in text
+    assert "Three questions, three functions." in text
+    assert "absolute in-band density" in _documentation_text()
+
+
+def test_the_reference_ties_plot_matched_field_to_the_sonar_surfaces_too():
+    """``plot_matched_field`` draws a ``sonar.bartlett``/``sonar.mvdr``
+    surface as it is, but DOCUMENTATION §9 tied it to ``Covariance`` alone,
+    so example 38 hand-built a ``Field`` and hand-drew the markers the
+    plotter draws. The sentence names both routes."""
+    text = " ".join(_documentation_text().split())
+    i = text.index("`plot_matched_field` (")
+    assert "`sonar.bartlett` / `sonar.mvdr`" in text[i:i + 400]
+
+
+def test_the_units_section_names_the_wind_speed_exceptions():
+    """§15 states "uacpy is SI throughout" while the Wenz and Chapman-Harris
+    fits are stated in knots. The section names every wind argument and its
+    unit, and each named argument is in the signature it is quoted from."""
+    import uacpy.noise as noise
+    import uacpy.sonar as sonar
+    text = " ".join(_documentation_text().split())
+    section = text.split("## 15. Units & Conventions")[1][:1500]
+    for fn, arg, quoted in (
+            (noise.WenzNoise, "wind_speed_kn", "WenzNoise(wind_speed_kn=)"),
+            (sonar.chapman_harris_surface, "wind_speed_kn",
+             "sonar.chapman_harris_surface(wind_speed_kn=)"),
+            (uacpy.generate_sea_surface, "wind_speed_kn",
+             "generate_sea_surface(wind_speed_kn=)"),
+            (sonar.apl_uw_surface_backscatter, "wind_speed_kn",
+             "sonar.apl_uw_surface_backscatter(wind_speed_kn=)")):
+        assert arg in inspect.signature(fn).parameters, (fn, arg)
+        assert f"`{quoted}`" in section, quoted
+
+
+#: Entry points whose docstrings carry a runnable ``Examples`` block. Every
+#: one needs no binary and no network, so doctest runs it here.
+_DOCTESTED_ENTRY_POINTS = (
+    ("uacpy.acoustic_signal", "welch"),
+    ("uacpy.acoustic_signal", "beamform_field"),
+    ("uacpy.noise", "WenzNoise"),
+    ("uacpy.sonar", "detection_range"),
+    ("uacpy.sonar", "passive_signal_excess"),
+)
+
+
+@pytest.mark.parametrize("module_name, name", _DOCTESTED_ENTRY_POINTS)
+def test_entry_point_docstring_examples_run(module_name, name):
+    """The ``Examples`` blocks that give ``help()`` a working call run as
+    written and print what they claim. A block that stops matching the
+    code fails here instead of misleading the reader."""
+    obj = getattr(importlib.import_module(module_name), name)
+    finder = doctest.DocTestFinder(recurse=False)
+    tests = finder.find(obj, name, globs={name: obj})
+    examples = sum(len(t.examples) for t in tests)
+    assert examples >= 1, f"{module_name}.{name} has no Examples block"
+    runner = doctest.DocTestRunner(optionflags=doctest.NORMALIZE_WHITESPACE)
+    for t in tests:
+        runner.run(t)
+    assert runner.failures == 0, f"{module_name}.{name}: doctest failed"

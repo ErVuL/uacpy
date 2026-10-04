@@ -15,34 +15,45 @@ RunMode.MODES · plot_modes_heatmap(mode_range=, normalize=)
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal.generate import ricker_wavelet
+from uacpy.acoustic_signal import ricker_wavelet
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
 
 # ── Stacked time series: Bellhop BROADBAND → Ricker source → p(t) ───────────
-env = uacpy.Environment(name='Pekeris waveguide', bathymetry=100, ssp=1500,
+env = uacpy.Environment(name='Isovelocity waveguide, rigid bottom',
+                        bathymetry=100, ssp=1500,
                         bottom=uacpy.BoundaryProperties(acoustic_type='rigid'))
 source = uacpy.Source(depths=50, frequencies=100)
 receiver = uacpy.Receiver(depths=np.array([50.0]),
                           ranges=np.linspace(500, 5000, 12))
 
-frequencies = np.linspace(50.0, 200.0, 600)
-transfer = uacpy.Bellhop().run(env, source, receiver,
+# 3-300 Hz holds the 100 Hz Ricker pulse down to -50 dB at both edges, so the
+# synthesis has no band edge to ring at; df stays 0.25 Hz (a 4 s record).
+frequencies = np.linspace(3.0, 300.0, 1189)
+transfer = uacpy.Bellhop(backend='fortran').run(env, source, receiver,
                                run_mode=uacpy.RunMode.BROADBAND,
                                frequencies=frequencies)
 fs = 1000.0
 pulse = ricker_wavelet(np.arange(int(0.04 * fs)) / fs,
                        float(source.frequencies[0]))
-waveform = transfer.synthesize_time_series(source_waveform=pulse,
-                                           sample_rate=fs)
+# A rigid bottom loses nothing, so the guide rings past any finite record and
+# the synthesis says the 4 s record wraps; that is this lossless guide, not
+# the plot, and the notice is printed.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    waveform = transfer.synthesize_time_series(source_waveform=pulse,
+                                               sample_rate=fs)
+for warning in caught:
+    print(f"  noted: {str(warning.message).split(': the record is')[0]}")
 print(f"  {transfer.data.shape[-1]} frequencies at "
       f"df={frequencies[1] - frequencies[0]:.3f} Hz → p(t) "
       f"{waveform.data.shape}, {waveform.times[-1]:.3f} s")
@@ -50,14 +61,14 @@ print(f"  {transfer.data.shape[-1]} frequencies at "
 # The synthesized field has {depth, range, time}; slice the single receiver
 # depth so plot_field sees a 2-D (range, time) field.
 traces = waveform.at(depth=50.0)
-fig, _ = uacpy.plot_field(traces, stacked=True,
+fig, _ = uacpy.plot.plot_field(traces, stacked=True,
                           title='Stacked impulse responses per range')
 fig.savefig(OUT / 'example_14_time_series_stacked.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
 # stacked=False falls back to the (range × time) heatmap.
-fig, _ = uacpy.plot_field(traces, title='Time-series heatmap (range × time)')
+fig, _ = uacpy.plot.plot_field(traces, title='Time-series heatmap (range × time)')
 fig.savefig(OUT / 'example_14_time_series_overlaid.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)

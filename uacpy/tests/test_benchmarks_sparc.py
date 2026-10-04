@@ -38,10 +38,6 @@ _ZR = np.array([35.0, 65.0])
 _RANGES = np.array([800.0, 1000.0, 1200.0])
 _T_MAX = 4.0                      # bins land on n/4 Hz
 _TARGET_BINS = np.array([36.0, 36.75, 37.5, 38.25, 39.0])
-# SPARC's 'PN+N' pulse against cans.f90's closed form carries a global
-# factor 2 in amplitude, measured and documented by
-# test_cross_model_broadband.test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband.
-_DOCUMENTED_GAIN_DB = 20.0 * np.log10(2.0)
 
 
 def rigid_bottom_modal_tl(z_s, z_r, ranges, f, depth, c):
@@ -83,19 +79,15 @@ def sparc_pseudo_gaussian(t, f):
 
 def test_sparc_deconvolved_spectrum_matches_the_rigid_guide_modal_sum():
     """SPARC's snapshot field, Fourier-transformed and divided by the
-    analytic source spectrum, must give the exact rigid-guide modal-sum TL at
-    every (depth, range, bin) cell up to the documented factor-2 pulse
-    convention — and that convention must stay at 6.02 dB, which is what
-    makes the test fail for a field off by a factor 2 (the gain would read
-    12 dB).
+    analytic source spectrum, gives the exact rigid-guide modal-sum TL at
+    every (depth, range, bin) cell, with no common gain: SPARC is on the
+    package's unit-source level (RA-WAVE-3), so a field at half the
+    pressure reads a 6.02 dB gain and fails.
 
-    Measured over 2 depths x 3 ranges x 5 bins (30 cells): SPARC − closed
-    form runs +5.18 .. +6.25 dB with median +5.81 dB; after removing that
-    common gain, |Δ| median 0.15 dB, p90 0.30 dB, max 0.63 dB. Bounds are
-    3.3x and 2.6x those; the gain window of ±1.0 dB around 6.02 dB is the
-    one the Kraken-tied test uses. Kraken at the same bins reads the closed
-    form 0.18 dB low (median), so the closed form — not Kraken — is the
-    reference here.
+    Measured over 2 depths x 3 ranges x 5 bins (30 cells): common gain
+    +0.02 dB; |Δ| median 0.17 dB, p90 0.33 dB, max 0.61 dB. The gain bound
+    of ±0.5 dB is 12 times below the 6.02 dB a half-pressure field reads;
+    the spread bounds are about 3x and 2.4x the measured ones.
     """
     from uacpy.models import SPARC
     env = Environment(name='sparc-rigid-guide', bathymetry=_DEPTH, ssp=_C,
@@ -103,8 +95,8 @@ def test_sparc_deconvolved_spectrum_matches_the_rigid_guide_modal_sum():
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         ts = SPARC(verbose=False, pulse_type='PN+N', output_mode='S',
-                   n_t_out=2048, t_max=_T_MAX, f_min=5.0, f_max=75.0,
-                   rmax_safety_margin=7.0, timeout=600.0).run(
+                   n_time_samples=2048, time_max=_T_MAX, freq_min=5.0, freq_max=75.0,
+                   rmax_factor=7.0, timeout=600.0).run(
             env, Source(depths=_ZS, frequencies=_FC),
             Receiver(depths=_ZR, ranges=_RANGES), run_mode=RunMode.TIME_SERIES)
     times = np.asarray(ts.coords['time'], dtype=float)
@@ -128,11 +120,75 @@ def test_sparc_deconvolved_spectrum_matches_the_rigid_guide_modal_sum():
     diff = tl_sparc - ana
     assert np.all(np.isfinite(diff)), (tl_sparc, ana)
     gain = float(np.median(diff))
-    assert gain == pytest.approx(_DOCUMENTED_GAIN_DB, abs=1.0), (
-        f"SPARC common gain {gain:.2f} dB moved away from the documented "
-        f"factor-2 pulse convention ({_DOCUMENTED_GAIN_DB:.2f} dB)")
-    resid = np.abs(diff - gain)
-    assert np.median(resid) < 0.5, (
-        f"gain-removed median |dTL|={np.median(resid):.2f} dB\n{diff}")
-    assert np.percentile(resid, 90) < 0.8, (
-        f"gain-removed p90 |dTL|={np.percentile(resid, 90):.2f} dB\n{diff}")
+    assert gain == pytest.approx(0.0, abs=0.5), (
+        f"SPARC sits {gain:.2f} dB off the unit-source modal sum")
+    assert np.median(np.abs(diff)) < 0.5, (
+        f"median |dTL|={np.median(np.abs(diff)):.2f} dB\n{diff}")
+    assert np.percentile(np.abs(diff), 90) < 0.8, (
+        f"p90 |dTL|={np.percentile(np.abs(diff), 90):.2f} dB\n{diff}")
+
+
+# ── p(t) against the exact image sum ──────────────────────────────────────
+
+_IMG_DEPTH, _IMG_ZS, _IMG_ZR, _IMG_RANGE = 100.0, 50.0, 50.0, 250.0
+_IMG_FS, _IMG_FP, _IMG_T0 = 4000.0, 100.0, 0.02
+
+
+def _image_ricker(t):
+    """A 100 Hz Ricker centred at 20 ms, zero outside [0, 0.1] s."""
+    a = (np.pi * _IMG_FP * (t - _IMG_T0)) ** 2
+    return (1.0 - 2.0 * a) * np.exp(-a) * ((t >= 0.0) & (t <= 0.1))
+
+
+def rigid_guide_image_sum(t, z_s, z_r, r, depth, c, n_images=60):
+    """Exact p(t) of a unit point source (amplitude 1 at 1 m) radiating
+    ``_image_ricker`` in an isovelocity guide, pressure-release at the
+    surface and rigid at the bottom: the sum over the images at
+    ``±z_s + 4nD`` and ``2D ∓ z_s + 4nD`` (``n = -n_images .. n_images``),
+    signed ``+``, ``-``, ``+``, ``-``, of ``s(t − R/c) / R``."""
+    out = np.zeros_like(t)
+    for n in range(-n_images, n_images + 1):
+        for z, sign in ((z_s + 4 * n * depth, 1.0),
+                        (-z_s + 4 * n * depth, -1.0),
+                        (2 * depth - z_s + 4 * n * depth, 1.0),
+                        (2 * depth + z_s + 4 * n * depth, -1.0)):
+            dist = np.hypot(r, z_r - z)
+            out += sign * _image_ricker(t - dist / c) / dist
+    return out
+
+
+@pytest.mark.parametrize('output_mode', ['R', 'D', 'S'])
+def test_sparc_p_of_t_is_the_unit_source_image_sum(output_mode):
+    """RA-WAVE-3: SPARC's p(t) for the caller's own waveform is the exact
+    image sum of a unit point source, on every output mode — not half of
+    it. ``sparc.f90:529-535`` forces the march with the bare load
+    ``deltat2·S(t)`` (JKPS eq. 8.36's ``−S(t)δ(z − z_s)``, whose field is
+    ``s(t − R/c)/(2R)``) where Scooter forces with ``2/rhoSz``
+    (``scooter.f90:662-663``); the wrapper applies the 2.
+
+    Measured (100 m guide, z_s = z_r = 50 m, r = 250 m, 'FN+N' 5-400 Hz):
+    least-squares gain 0.9946 (-0.05 dB), correlation 0.9981 on R, D and S;
+    the unscaled march reads 0.4973 (-6.07 dB). The ±0.3 dB gain bound sits
+    20 times inside that 6.02 dB.
+    """
+    from uacpy.models import SPARC
+    env = Environment(name='sparc-image-sum', bathymetry=_IMG_DEPTH,
+                      ssp=_C, water_density=1.0,
+                      bottom=BoundaryProperties(acoustic_type='rigid'))
+    waveform = _image_ricker(np.arange(int(0.1 * _IMG_FS)) / _IMG_FS)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        result = SPARC(verbose=False, pulse_type='FN+N', freq_min=5.0,
+                       freq_max=400.0, n_time_samples=2048, time_max=0.4,
+                       output_mode=output_mode).run(
+            env, Source(depths=_IMG_ZS, frequencies=_IMG_FP),
+            Receiver(depths=[_IMG_ZR], ranges=[_IMG_RANGE]),
+            run_mode=RunMode.TIME_SERIES, source_waveform=waveform,
+            sample_rate=_IMG_FS)
+    t = np.asarray(result.coords['time'], dtype=float)
+    p = np.asarray(result.data, dtype=float)[0, 0]
+    ref = rigid_guide_image_sum(t, _IMG_ZS, _IMG_ZR, _IMG_RANGE, _IMG_DEPTH,
+                                _C)
+    gain = float(np.dot(p, ref) / np.dot(ref, ref))
+    assert 20.0 * np.log10(gain) == pytest.approx(0.0, abs=0.3), gain
+    assert np.corrcoef(p, ref)[0, 1] > 0.99

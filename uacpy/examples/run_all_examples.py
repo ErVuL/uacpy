@@ -5,8 +5,9 @@ Unlike the pytest smoke tests (which gate on markers — ``slow`` /
 ``requires_binary`` / ``requires_network``), this runs **all** examples in
 this directory unconditionally, so it's the "exercise everything on my
 machine" tool. Each example runs as an isolated subprocess with a headless
-matplotlib backend; figures/animations land in ``output/`` (each example's
-own ``OUTPUT_DIR``).
+matplotlib backend; figures/animations land in ``output/`` beside the
+examples, or in ``$UACPY_EXAMPLE_OUTPUT`` when it is set (each example's
+``OUT``).
 
 Usage
 -----

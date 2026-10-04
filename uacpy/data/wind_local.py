@@ -19,11 +19,11 @@ import numpy as np
 from uacpy._log import log_message
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate, normalize_lon
-from uacpy.data._http import curl_download
-from uacpy.data._time import parse_date
+from uacpy.core.geo import as_coordinate, normalize_lon
+from uacpy.data._http import fetch_file
+from uacpy.core.geo import parse_date
 
-__all__ = ['download_wind_db', 'wind_speed', 'climatology_period']
+__all__ = ['download_wind_db', 'wind_speed', 'wind_cell', 'climatology_period']
 
 WIND_FILE = 'wind_climatology.npz'
 #: The published climatology this fetcher caches: NOAA/NCEI's own blended
@@ -62,6 +62,18 @@ def download_wind_db(cache_dir=None, *, url: Optional[str] = None,
     the same ``windspeed`` variable on the same ``(month, zlev, lat, lon)``
     grid, and :data:`NBS_CLIMATOLOGY_YEARS` still names the period recorded
     in the cache.
+
+    Parameters
+    ----------
+    cache_dir : str or Path, optional
+        Directory to write into; ``None`` is the dataset's own directory under
+        the cache root (:func:`dataset_root`).
+    url : str, optional
+        The one address to fetch; ``None`` is :data:`NBS_CLIMATOLOGY_URL`.
+    timeout : float, optional
+        Network timeout in seconds. Default 300.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
     """
     from uacpy.data._netcdf import netcdf_lock, open_netcdf
 
@@ -72,12 +84,7 @@ def download_wind_db(cache_dir=None, *, url: Optional[str] = None,
     out = dest / WIND_FILE
     raw = dest / _NBS_RAW_FILE
     address = url or NBS_CLIMATOLOGY_URL
-    if not curl_download(address, raw, timeout=timeout, verbose=verbose):
-        raise DataFetchError(
-            f"Could not download {address}.",
-            remediation="Retry — the transfer resumes where it stopped — or "
-                        "pass url= for a mirror of the same file.",
-        )
+    fetch_file(address, raw, source='wind', timeout=timeout, verbose=verbose)
     try:
         with netcdf_lock, contextlib.closing(open_netcdf(str(raw))) as ds:
             # ``ds.variables[name]``, the accessor every other netCDF reader
@@ -99,8 +106,9 @@ def download_wind_db(cache_dir=None, *, url: Optional[str] = None,
         raise DataFetchError(
             f"Published climatology has shape {speed.shape}, expected "
             f"(12, {lat.size}, {lon.size}).",
-            remediation="The upstream file layout changed; pass years= to "
-                        "build from monthly fields while this is fixed.",
+            remediation="The upstream file layout changed. Pass url= for a "
+                        "copy that keeps windspeed on a (month, zlev, lat, "
+                        "lon) grid, and report the change.",
         )
     with _cache.atomic_write(out) as part:
         # A file object, not the path: np.savez_compressed appends '.npz' to a
@@ -109,7 +117,7 @@ def download_wind_db(cache_dir=None, *, url: Optional[str] = None,
             np.savez_compressed(
                 fh, lat=lat, lon=lon, speed=speed,
                 years=np.asarray(NBS_CLIMATOLOGY_YEARS, dtype=np.int32))
-    _CLIM.clear()
+    _cache.invalidate_grids()
     log_message('wind', f"wind climatology cached → {out}", verbose=verbose)
     return out
 
@@ -140,8 +148,21 @@ class _Climatology:
         self._dlat = float(self.lat[1] - self.lat[0])
         self._dlon = float(self.lon[1] - self.lon[0])
 
+    def node(self, lat, lon):
+        """``(lat, lon)`` of the cell :meth:`at` reads for a query, longitude
+        in [-180, 180)."""
+        row, col = self._cell(lat, lon)
+        node_lon = self._lon0 + col * self._dlon
+        return (self._lat0 + row * self._dlat,
+                ((node_lon + 180.0) % 360.0) - 180.0)
+
     def at(self, lat, lon, month):
         """Climatological speed (m/s) at the nearest cell for ``month`` (1-12)."""
+        row, col = self._cell(lat, lon)
+        return float(self.speed[month - 1, row, col])
+
+    def _cell(self, lat, lon):
+        """``(row, col)`` of the cell nearest ``(lat, lon)``."""
         row = int(np.clip(round((lat - self._lat0) / self._dlat),
                           0, self.lat.size - 1))
         # NBS serves longitude on [0, 360) (0 → 359.75 at 0.25°) and the cache
@@ -152,7 +173,7 @@ class _Climatology:
         # west of the origin belongs to column 0, not the last column
         # (same rule as _netcdf.NetcdfGrid.col).
         col = int(round((lon - self._lon0) / self._dlon)) % self.lon.size
-        return float(self.speed[month - 1, row, col])
+        return row, col
 
 
 def _clim():
@@ -168,7 +189,7 @@ def _clim():
 def climatology_period():
     """Reference period of the installed climatology, or ``None``.
 
-    A string such as ``'2013-2022 (climatology)'`` for the provenance
+    A string such as ``'1991-2020 (climatology)'`` for the provenance
     ``data_date``. ``None`` where the cache predates the ``years`` key or was
     written without one — the grid is still usable, its vintage is simply not
     recorded.
@@ -177,6 +198,13 @@ def climatology_period():
     if not years:
         return None
     return f"{min(years)}-{max(years)} (climatology)"
+
+
+def wind_cell(point):
+    """``(lat, lon)`` of the climatology cell :func:`wind_speed` reads for
+    ``point``: the point its value stands for."""
+    lat, lon = as_coordinate(point)
+    return _clim().node(lat, lon)
 
 
 def wind_speed(point, *, date):

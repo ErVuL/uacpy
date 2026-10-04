@@ -44,7 +44,12 @@ RANGE_M = 4000.0
 DEPTH_M = 36.0
 FC = 50.0
 F_LO, F_HI = 25.0, 75.0
-N_FREQ = 51                 # df = 1 Hz, well-resolved arrivals
+# df = 0.5 Hz, so the synthesised record is 1/df = 2 s long. The arrival
+# train at 4 km runs from ~2.35 s to past 2.89 s (Bellhop and RAM put the
+# envelope maximum at 2.888-2.891 s); a 2 Hz grid gives a 0.5 s record that
+# the auto window places at [2.273, 2.773] s, which ends before that
+# maximum, so the envelope argmax lands on the truncated record edge.
+N_FREQ = 101
 
 
 def _src_rcv():
@@ -90,7 +95,7 @@ def _scooter_bb(env, src, rcv):
 
 
 def _ram_bb(env, src, rcv):
-    return RAM(verbose=False, Q=2.0, T=4.0, dr=2.0, dz=0.25).run(
+    return RAM(verbose=False, q_factor=2.0, record_duration=4.0, dr=2.0, dz=0.25).run(
         env, src, rcv, run_mode=RunMode.BROADBAND,
     )
 
@@ -105,7 +110,7 @@ _RUNNERS = {
 
 # |H(fc)| agreement with Scooter, one bound per model rather than a single
 # gate sized for the loosest of them: Kraken agrees to 0.29 dB here and a
-# shared 6 dB bound spends all of that sensitivity on Bellhop's account.
+# bound shared with Bellhop spends that sensitivity on Bellhop's account.
 # Each number below is the difference measured at this cell (RANGE_M,
 # DEPTH_M, FC) followed by the multiple of it the bound allows.
 _H_FC_TOLERANCE_DB = {
@@ -114,14 +119,17 @@ _H_FC_TOLERANCE_DB = {
     # and still catches a factor-2 amplitude convention (6.02 dB) by 3.8x in
     # the nearer of the two directions.
     'Kraken': 1.5,
-    # Measured -1.970 dB, and left loose deliberately. This fixture is
-    # D/lambda = 3.33 (100 m water column at 50 Hz), below the D/lambda >= 5
-    # floor uacpy's own model-validity table sets for ray theory — the run
-    # emits exactly that warning. Bellhop's disagreement here is a
-    # validity-regime gap, not numerical error with a bound to tighten, so
-    # 6.0 dB is a sanity bound (3.0x the measurement) and Bellhop is the
-    # only model in this gate that needs one that loose.
-    'Bellhop': 6.0,
+    # Judged on the band median of |dH| (``_BAND_MEDIAN_JUDGED``), not at
+    # fc: fc sits in a Scooter null (-76.3 dB against -64.0 / -61.6 dB at
+    # fc -/+ 2 Hz), where Bellhop at D/lambda = 3.33 (100 m water column at
+    # 50 Hz, below the D/lambda >= 5 ray-theory floor of uacpy's validity
+    # table) reads +6.50 dB and a downward factor-2 error would land at
+    # +0.48 dB. Band median measured 1.980 dB with the default hat beams
+    # (1.998 / 1.910 at 2000 / 8000 beams; Gaussian beams 1.98-1.99).
+    # 3.0 dB is 1.50x the worst measurement and catches a factor-2
+    # amplitude convention in both directions: the band median becomes
+    # 6.67 dB (x2) or 5.70 dB (/2), 1.9x outside the bound at the nearer.
+    'Bellhop': 3.0,
     # Measured +1.415 dB. 3.5 dB is 2.5x it — more headroom than Kraken gets
     # because RAM is the only model here whose accuracy is set by
     # user-facing marching parameters (``_ram_bb`` pins dr=2.0, dz=0.25), so
@@ -130,6 +138,12 @@ _H_FC_TOLERANCE_DB = {
     # nearer direction.
     'RAM': 3.5,
 }
+
+# Models judged on the median |dH| over the whole band rather than at fc.
+# Kraken and RAM agree with Scooter at fc to 0.29 / 1.42 dB despite the null
+# there, and their fc bounds catch a factor-2 either way; Bellhop's fc value
+# sits on the null.
+_BAND_MEDIAN_JUDGED = {'Bellhop'}
 
 # Every model compared against the Scooter reference needs its own bound;
 # adding a runner without one must fail here rather than quietly inherit a
@@ -221,7 +235,8 @@ def _runner_param(label):
 def test_broadband_transfer_function_magnitude(label):
     """|H(fc)| at the test cell is finite, positive, and within the model's
     own ``_H_FC_TOLERANCE_DB`` bound of the Scooter reference (Scooter is the
-    wavenumber-integration ground truth on Pekeris)."""
+    wavenumber-integration ground truth on Pekeris) — at fc, or as the band
+    median of |dH| for the models in ``_BAND_MEDIAN_JUDGED``."""
     env = _pekeris_env()
     src, rcv = _src_rcv()
     tf = _RUNNERS[label](env, src, rcv)
@@ -235,10 +250,20 @@ def test_broadband_transfer_function_magnitude(label):
 
     ref = _RUNNERS['Scooter'](env, src, rcv)
     ref_freqs = np.asarray(ref.frequencies)
+    tolerance_dB = _H_FC_TOLERANCE_DB[label]
+    if label in _BAND_MEDIAN_JUDGED:
+        np.testing.assert_allclose(freqs, ref_freqs)
+        band_dB = 20.0 * np.log10(np.abs(np.asarray(tf.data)[0, 0])
+                                  / np.abs(np.asarray(ref.data)[0, 0]))
+        median_dB = float(np.median(np.abs(band_dB)))
+        assert median_dB <= tolerance_dB, (
+            f'{label} vs Scooter over the band: median |dH| {median_dB:.2f} '
+            f'dB > {tolerance_dB} dB'
+        )
+        return
     j_fc = int(np.argmin(np.abs(ref_freqs - FC)))
     Href = np.abs(np.asarray(ref.data)[0, 0, j_fc])
     diff_dB = 20.0 * np.log10(Hfc / Href)
-    tolerance_dB = _H_FC_TOLERANCE_DB[label]
     assert abs(diff_dB) <= tolerance_dB, (
         f'{label} vs Scooter at fc: |H| differs by {diff_dB:.2f} dB '
         f'> {tolerance_dB} dB'
@@ -292,11 +317,14 @@ def test_broadband_peak_times_agree_across_models():
     for label, runner in _RUNNERS.items():
         tf = runner(env, src, rcv)
         ts = tf.synthesize_time_series(pulse, sample_rate=fs)
+        times = np.asarray(ts.times)
         peaks[label] = _envelope_peak_time(
-            np.asarray(ts.data[0, 0]),
-            np.asarray(ts.times),
-            win,
-        )
+            np.asarray(ts.data[0, 0]), times, win)
+        # A peak on the record's first or last sample is the truncated
+        # (wrapped) record edge, not an arrival.
+        assert peaks[label] not in (float(times[0]), float(times[-1])), (
+            f'{label}: envelope peak {peaks[label]:.4f} s sits on the record '
+            f'edge [{times[0]:.4f}, {times[-1]:.4f}] s')
 
     spread = max(peaks.values()) - min(peaks.values())
     assert spread <= 0.100, (
@@ -327,23 +355,26 @@ def test_single_frequency_broadband_auto_expands_the_band(model_cls):
     for BROADBAND a single-element frequency
     is a *centre* frequency, auto-expanded to ``fc·(1 ± bandwidth/2)`` — 128
     uniform bins over ``[0.75·fc, 1.25·fc]`` with the shared defaults
-    (base.py ``_resolve_broadband_frequencies``) — while a multi-element
+    (``_band.broadband_band``, through ``_requested_frequencies``) — while a multi-element
     vector IS the band, verbatim. Resolver-level, one shared code path per
     engine; nothing runs."""
-    from uacpy.core.constants import (
-        DEFAULT_BROADBAND_BANDWIDTH_FACTOR, DEFAULT_BROADBAND_N_FREQS)
+    from uacpy.models._defaults import (
+        DEFAULT_BROADBAND_BANDWIDTH_FACTOR, DEFAULT_BROADBAND_N_FREQS,
+    )
     assert DEFAULT_BROADBAND_N_FREQS == 128
     assert DEFAULT_BROADBAND_BANDWIDTH_FACTOR == 0.5
     model = model_cls(verbose=False)
-    freqs = model._resolve_broadband_frequencies(
-        Source(depths=DEPTH_M, frequencies=200.0), None)
+    freqs = model._requested_frequencies(
+        RunMode.BROADBAND, Source(depths=DEPTH_M, frequencies=200.0), None,
+        None).frequencies
     assert freqs.shape == (128,)
     assert freqs[0] == pytest.approx(200.0 * 0.75)
     assert freqs[-1] == pytest.approx(200.0 * 1.25)
     assert np.allclose(np.diff(freqs), freqs[1] - freqs[0])
-    band = model._resolve_broadband_frequencies(
+    band = model._requested_frequencies(
+        RunMode.BROADBAND,
         Source(depths=DEPTH_M, frequencies=np.array([50.0, 60.0, 70.0])),
-        None)
+        None, None).frequencies
     np.testing.assert_array_equal(band, [50.0, 60.0, 70.0])
 
 
@@ -357,13 +388,13 @@ def _sparc_pseudo_gaussian(t: np.ndarray, f: float) -> np.ndarray:
 
 
 @pytest.mark.slow
-def test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband():
-    """sparc.md §7 "calibrates tighter": with ``pulse_type='PN+N'`` — no
-    per-wavenumber
-    band-pass, which is what the scalar deconvolution cannot undo — SPARC's
-    p(t) calibrates to ~±1.5 dB against Kraken. SPARC appears in no other
-    cross-model comparison, so this is the one place its absolute level is
-    tied to another engine.
+def test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband_at_0_dB():
+    """With ``pulse_type='PN+N'`` — no per-wavenumber band-pass, which is
+    what the scalar deconvolution cannot undo — SPARC's deconvolved p(t)
+    reads Kraken's broadband TL cell by cell, with no common gain: both are
+    on the package's unit-source level (RA-WAVE-3). SPARC appears in no
+    other cross-model comparison, so this is the one place its absolute
+    level is tied to another engine.
 
     The comparison deconvolves the received spectrum by the analytic
     pseudo-Gaussian source spectrum on the same grid:
@@ -377,13 +408,15 @@ def test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband():
       (slowest group speed ≈ 594 m/s) has fully arrived inside the record;
     * ``Kraken(c_high=10000)``: near-cutoff rigid-guide modes run to
       ~5.5 km/s phase speed, which the default 1.05× window would discard;
-    * ``rmax_safety_margin=7``: the Δk range sum is periodic with period
+    * ``rmax_factor=7``: the Δk range sum is periodic with period
       RMax, and in a *lossless* rigid guide the nearest periodic image
       (RMax − r) arrives undamped — the margin pushes its first arrival
       (≈ 5.1 s) past the 4 s record instead of into it.
 
-    The ±1.5 dB gate is the doc's own measured figure, applied to the
-    median over 9 cells so one interference null cannot decide the test.
+    Measured over the 9 cells: common gain +0.00 dB, |ΔTL| median 0.19,
+    max 0.29 dB. The gain bound of ±0.5 dB is 12 times below the 6.02 dB a
+    half-pressure field reads; the per-cell bound of 1 dB is 3.4x the
+    measured maximum.
     """
     env = Environment(
         name='sparc-vs-kraken', bathymetry=100.0, ssp=1500.0,
@@ -391,10 +424,10 @@ def test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband():
     fc = 37.5
     z_src, z_rcv = 20.0, 65.0
     ranges = np.array([800.0, 1000.0, 1200.0])
-    t_max = 4.0                       # bins at n/4 Hz — targets land exactly
+    time_max = 4.0                       # bins at n/4 Hz — targets land exactly
     ts = SPARC(verbose=False, pulse_type='PN+N', output_mode='R',
-               n_t_out=2048, t_max=t_max, f_min=5.0, f_max=75.0,
-               rmax_safety_margin=7.0, timeout=600.0).run(
+               n_time_samples=2048, time_max=time_max, freq_min=5.0, freq_max=75.0,
+               rmax_factor=7.0, timeout=600.0).run(
         env, Source(depths=z_src, frequencies=fc),
         Receiver(depths=np.array([z_rcv]), ranges=ranges),
         run_mode=RunMode.TIME_SERIES)
@@ -420,19 +453,131 @@ def test_sparc_pn_n_pulse_deconvolves_onto_kraken_broadband():
 
     diff = tl_sparc - tl_kraken
     assert np.all(np.isfinite(diff)), (tl_sparc, tl_kraken)
-    # Measured: SPARC sits a uniform ~6.06 dB above Kraken here — within
-    # 0.5 dB of 20*log10(2), i.e. a global factor-2 amplitude convention
-    # between SPARC's injected 'PN+N' pulse and the cans.f90 closed form
-    # used for the deconvolution. The gain-removed residual is what
-    # sparc.md's ±1.5 dB describes, so the pin is: (a) the per-cell spread
-    # about the common gain stays inside ±1.5 dB, and (b) the common gain
-    # itself stays at the factor-2 value so a future convention change
-    # fails loudly here rather than silently shifting.
     gain = np.median(diff)
-    assert np.median(np.abs(diff - gain)) <= 1.5, (
-        f"gain-removed median |dTL| = {np.median(np.abs(diff - gain)):.2f} "
-        f"dB exceeds the ±1.5 dB sparc.md quotes for 'PN+N' vs Kraken\n"
+    assert gain == pytest.approx(0.0, abs=0.5), (
+        f"SPARC sits {gain:.2f} dB off Kraken's unit-source level\n"
         f"SPARC:\n{tl_sparc}\nKraken:\n{tl_kraken}")
-    assert gain == pytest.approx(20.0 * np.log10(2.0), abs=1.0), (
-        f"SPARC-vs-Kraken common gain {gain:.2f} dB moved away from the "
-        f"documented-by-measurement 6.02 dB factor-2 offset")
+    assert np.max(np.abs(diff)) <= 1.0, (
+        f"max |dTL| = {np.max(np.abs(diff)):.2f} dB\n"
+        f"SPARC:\n{tl_sparc}\nKraken:\n{tl_kraken}")
+
+
+# ── A synthesised record that cuts through the arrival train says so ─────────
+
+_WRAP_NOTICE = 'synthesised record'
+
+
+def _wrap_notices(fn):
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        fn()
+    return [str(w.message) for w in caught if _WRAP_NOTICE in str(w.message)]
+
+
+@pytest.mark.parametrize('n_freq, fires', [(26, True), (51, False)])
+def test_a_record_ending_inside_the_arrival_train_is_announced(n_freq, fires):
+    """The auto window opens max(T/10, 4/B) before r/c_max = 2.353 s
+    (c_max 1700 m/s at 4 km, B = 50 Hz). At Δf = 2 Hz Kraken's 0.5 s record
+    opens 0.08 s early, at [2.273, 2.773] s, ending before the 2.887 s main
+    arrival: its end holds energy at -1.8 dB and the train wraps. At
+    Δf = 1 Hz the 1 s record opens 0.1 s early, at [2.253, 3.253] s, holds
+    the train (edges at -55 / -44 dB) and nothing is said."""
+    import warnings
+    env = _pekeris_env()
+    src, rcv = _src_rcv()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        tf = Kraken(verbose=False).run(
+            env, src, rcv, frequencies=np.linspace(F_LO, F_HI, n_freq),
+            run_mode=RunMode.BROADBAND)
+    said = _wrap_notices(lambda: tf.synthesize_time_series(
+        _gaussian_pulse(FC, 4096.0), sample_rate=4096.0))
+    assert bool(said) is fires, said
+    if fires:
+        assert '[2.273, 2.773] s' in said[0]
+        assert '1/Δf = 0.5 s' in said[0] and 't_start=' in said[0]
+
+
+def test_bellhop_at_its_default_window_is_silent():
+    # Bellhop's own TIME_SERIES trace (delay-and-sum, not periodic) and its
+    # default BROADBAND grid synthesised through the shared path.
+    import warnings
+    env = _pekeris_env()
+    src, rcv = _src_rcv()
+    fs = 4096.0
+    pulse = _gaussian_pulse(FC, fs)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        tf = Bellhop(verbose=False).run(env, src, rcv,
+                                        run_mode=RunMode.BROADBAND)
+    assert not _wrap_notices(lambda: tf.synthesize_time_series(
+        pulse, sample_rate=fs))
+    assert not _wrap_notices(lambda: Bellhop(verbose=False).run(
+        env, src, rcv, run_mode=RunMode.TIME_SERIES,
+        source_waveform=pulse, sample_rate=fs))
+
+
+class TestRecordEdgeNoticeOnASyntheticArrival:
+    """One arrival ``H = e^{-2πifτ}`` at 3 km with ``c_max = 1500`` m/s and
+    1/Δf = 4 s over B = 100 Hz: the auto window opens max(T/10, 4/B) =
+    0.4 s before r/c_max = 2 s, i.e. [1.6, 5.6) s. An arrival mid-record is
+    silent, one straddling the record end is reported, and the same record
+    placed by a caller's t_start is not judged."""
+
+    @staticmethod
+    def _field(tau):
+        from uacpy.core.results import Field, PhaseReference, SoundSpeeds
+        freqs = np.arange(50.0, 150.0 + 0.125, 0.25)
+        return Field(
+            data=np.exp(-2j * np.pi * freqs * tau)[None, None, :],
+            coords={'depth': np.array([50.0]), 'range': np.array([3000.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([50.0]),
+            frequencies=freqs, speeds=SoundSpeeds(water_max=1500.0),
+            phase_reference=PhaseReference.TRAVELLING_WAVE)
+
+    def _said(self, tau, **kw):
+        return _wrap_notices(lambda: self._field(tau).synthesize_time_series(
+            _gaussian_pulse(100.0, 1024.0), sample_rate=1024.0, **kw))
+
+    def test_an_arrival_mid_record_is_silent(self):
+        assert not self._said(2.0)
+
+    def test_an_arrival_straddling_the_record_end_is_reported(self):
+        # The 0.2 s pulse is centred 0.1 s after tau, so tau = 5.45 s puts
+        # its peak 0.05 s before the record end at 5.6 s and its span
+        # [5.45, 5.65] s across it.
+        said = self._said(5.45)
+        assert said and '[1.6, 5.599] s' in said[0], said
+        assert '1/Δf = 4 s' in said[0], said
+
+    def test_a_record_placed_by_the_caller_is_not_judged(self):
+        assert not self._said(5.45, t_start=1.6)
+
+    @staticmethod
+    def _short_record_said(df):
+        from uacpy.core.results import Field, PhaseReference, SoundSpeeds
+        freqs = np.arange(50.0, 150.0 + df / 2.0, df)
+        tf = Field(
+            data=np.exp(-2j * np.pi * freqs * 2.1)[None, None, :],
+            coords={'depth': np.array([50.0]), 'range': np.array([3000.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([50.0]),
+            frequencies=freqs, speeds=SoundSpeeds(water_max=1500.0),
+            phase_reference=PhaseReference.TRAVELLING_WAVE)
+        return _wrap_notices(lambda: tf.synthesize_time_series(
+            _gaussian_pulse(100.0, 1024.0), sample_rate=1024.0))
+
+    def test_a_record_a_lone_arrival_already_crosses_is_not_judged(self):
+        # Edges are judged when T(1 - 0.05) - lead > the 0.2 s pulse, with
+        # lead = max(T/10, 4/B) = 0.04 s here: T > 0.2526 s, Δf < 3.96 Hz.
+        # At Δf = 4 Hz (T = 0.25 s) a lone arrival at tau = 2.1 s peaks on
+        # the record end, which measures the grid against the pulse (the
+        # DFT-period and derived-grid notices' business), not the channel.
+        assert not self._short_record_said(4.0)
+
+    def test_a_record_just_longer_than_the_bound_is_judged(self):
+        # Δf = 3.75 Hz (T = 0.267 s): the same arrival is reported.
+        said = self._short_record_said(3.75)
+        assert said and '[1.96, 2.227] s' in said[0], said

@@ -9,17 +9,23 @@ A package split by plot kind. Every public ``plot_*`` (and the
 
 from typing import Optional
 
+from uacpy.core.absorption import AbsorptionCoefficient
+from uacpy.core.altimetry import Altimetry
+from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.core.results import (
-    Field, Arrivals, Rays, Modes,
-    Covariance, Replicas, ReflectionCoefficient, ResultStack,
+    Result, Field, Arrivals, Rays, Modes,
+    Covariance, Replicas, ReflectionCoefficient, GreensFunction,
+    ResultStack,
 )
 
 from uacpy.visualization.plots.fields import (
     plot_field, plot_signal_excess, plot_detection_probability,
     compare, compare_models, plot_field_difference,
     plot_field_statistics, shared_colorbar, _plot_field_stack,
+    plot_transfer_function, plot_impulse_response,
 )
 from uacpy.visualization.plots.animation import (
     animate_field, save_animation, plot_time_snapshots,
@@ -35,6 +41,7 @@ from uacpy.visualization.plots.rays_modes import (
     _plot_replicas,
 )
 from uacpy.visualization.plots.environment import (
+    plot_environment, plot_ssp, plot_range_profile,
     plot_bottom_properties, plot_bottom_loss, plot_absorption,
 )
 from uacpy.visualization.plots.maps import (
@@ -61,17 +68,19 @@ from uacpy.visualization.plots.noise import (
 )
 
 
-#: Which plotter draws each :class:`~uacpy.core.results.Result`, and whether
-#: that view can draw an environment. One row per result type, in isinstance
-#: order (no subclass pairs today, so declaration order is free).
+#: Which plotter draws each :class:`~uacpy.core.results.Result` and each
+#: carrier that draws itself, and whether that view can draw an environment.
+#: One row per type, in isinstance order (no subclass pairs today, so
+#: declaration order is free). :func:`plot_result` draws the result rows and
+#: :func:`plot_carrier` the carrier rows; every ``.plot()`` reaches one of
+#: the two.
 #:
-#: A table rather than a ladder because the ladder stated the same knowledge
-#: twice inside one function: the branches said which plotter, and a second
-#: tuple below them re-listed the results that refuse ``env=``, as the exact
-#: complement of the branches that accept it. Adding a result type and
-#: forgetting the tuple left ``env=`` accepted and silently ignored — the
-#: defect the refusal exists to prevent, arriving by omission. Both answers
-#: now come off the same row.
+#: A table rather than an if/elif ladder, so each result type states both
+#: answers on one row: which plotter draws it and whether that view takes
+#: ``env=``. Kept in two places — the branches and a separate list of the
+#: types that refuse ``env=`` — a type added to one and forgotten in the
+#: other would accept ``env=`` and silently ignore it, the defect the
+#: refusal exists to prevent.
 #:
 #: ``ResultStack`` is not here: it dispatches on the type of the slabs it
 #: holds, not on its own, so it is handled before the lookup.
@@ -84,7 +93,29 @@ _PLOTTERS = (
     (Covariance,              _plot_covariance,             False),
     (Replicas,                _plot_replicas,               False),
     (ReflectionCoefficient,   _plot_reflection_coefficient, False),
+    (GreensFunction,          plot_greens_function,         False),
+    # carriers: each is drawn on its own, never over an environment
+    (Environment,             plot_environment,             False),
+    (SoundSpeedProfile,       plot_ssp,                     False),
+    (Bathymetry,              plot_range_profile,           False),
+    (Altimetry,               plot_range_profile,           False),
+    (AbsorptionCoefficient,   plot_absorption,              False),
 )
+
+
+#: The sonar maps a ``(depth, range)`` Field of these kinds is drawn with: the
+#: signal-excess map with its SE = 0 dB detection boundary, the
+#: detection-probability map with its ``P_D`` contours labelled by value and
+#: its title. ``plot_field`` draws neither, so ``se.plot()`` and
+#: ``plot_signal_excess(se)`` would otherwise be two different pictures of
+#: one field.
+_SONAR_MAP_PLOTTERS = {
+    'signal_excess': plot_signal_excess,
+    'probability_of_detection': plot_detection_probability,
+}
+#: A ``plot_field`` keyword the sonar map does not take (``value=``,
+#: ``stacked=``, ``vmin=``) is refused by that plotter's own signature; call
+#: ``plot_field`` directly for those views.
 
 
 def plot_result(result, env: Optional[Environment] = None, **kwargs):
@@ -92,7 +123,22 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
 
     A result carries no carriers, so ``env`` is only ever what the caller
     passes: supply it to draw the seabed and span the full water column.
+    A carrier is drawn by :func:`plot_carrier`.
+
+    Parameters
+    ----------
+    result : Result or ResultStack
+        The result to draw.
+    env : Environment, optional
+        Draws the seabed and spans the full water column.
+    **kwargs
+        Keywords of the plotter the result's type selects.
     """
+    if not isinstance(result, (Result, ResultStack)):
+        raise ConfigurationError(
+            f"plot_result: {type(result).__name__} is not a Result; draw "
+            f"a carrier with plot_carrier, or call its own .plot()."
+        )
     if isinstance(result, ResultStack):
         if issubclass(result.slab_type, Field):
             return _plot_field_stack(result, env=env, **kwargs)
@@ -100,6 +146,10 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
             f"plot_result: this ResultStack holds {result.slab_type.__name__} "
             "slabs — pick one with stack[i] or stack.at(...) before plotting."
         )
+    if (isinstance(result, Field)
+            and list(result.coords) == ['depth', 'range']
+            and result.kind in _SONAR_MAP_PLOTTERS):
+        return _SONAR_MAP_PLOTTERS[result.kind](result, env=env, **kwargs)
     for result_type, plotter, draws_env in _PLOTTERS:
         if not isinstance(result, result_type):
             continue
@@ -118,12 +168,49 @@ def plot_result(result, env: Optional[Environment] = None, **kwargs):
             )
         return plotter(result, **kwargs)
     raise ConfigurationError(
-        f"plot_result: no plotter registered for {type(result).__name__}"
+        f"plot_result: no plotter registered for {type(result).__name__}."
+    )
+
+
+def plot_carrier(carrier, **kwargs):
+    """Draw a carrier with the plotter its type is registered with: an
+    :class:`~uacpy.core.environment.Environment` with
+    :func:`plot_environment`, a
+    :class:`~uacpy.core.ssp.SoundSpeedProfile` with :func:`plot_ssp`, a
+    :class:`~uacpy.core.bathymetry.Bathymetry` or
+    :class:`~uacpy.core.altimetry.Altimetry` with :func:`plot_range_profile`,
+    an :class:`~uacpy.core.absorption.AbsorptionCoefficient` with
+    :func:`plot_absorption`. Used by each carrier's ``.plot()``; ``kwargs``
+    reach the plotter. A result is drawn by :func:`plot_result`.
+
+    Parameters
+    ----------
+    carrier : Environment, SoundSpeedProfile, Bathymetry, Altimetry or AbsorptionCoefficient
+        The carrier to draw.
+    **kwargs
+        Keywords of the plotter its type is registered with.
+    """
+    if isinstance(carrier, (Result, ResultStack)):
+        raise ConfigurationError(
+            f"plot_carrier: {type(carrier).__name__} is a Result; draw it "
+            f"with plot_result, or call its own .plot()."
+        )
+    for carrier_type, plotter, _draws_env in _PLOTTERS:
+        if isinstance(carrier, carrier_type):
+            return plotter(carrier, **kwargs)
+    raise ConfigurationError(
+        f"plot_carrier: no plotter registered for {type(carrier).__name__}."
     )
 
 
 __all__ = [
     'plot_result',
+    'plot_carrier',
+    'plot_environment',
+    'plot_ssp',
+    'plot_range_profile',
+    'plot_transfer_function',
+    'plot_impulse_response',
     'plot_field',
     'plot_signal_excess',
     'plot_detection_probability',

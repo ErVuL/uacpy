@@ -14,6 +14,7 @@ mapped polygons raises ``DataFetchError`` so a caller's 'auto' bottom can fall
 through to the global grain-size DB.
 """
 
+import dataclasses
 import json
 from typing import Optional, Union
 
@@ -21,18 +22,20 @@ import numpy as np
 
 from uacpy._log import log_message
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.core.environment import BoundaryProperties, Bottom
+from uacpy.core.environment import BoundaryProperties
 from uacpy.data import _cache
-from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.core.geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data._http import http_get
+from uacpy.data.sediment import SeabedSample
+from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.data.seabed import (
     EMODNET_WFS_URL, EMODNET_LAYER, _bottom_from_folk5,
 )
-from uacpy.data.sediment import range_dependent_bottom_along, water_sound_speed_at
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 
-__all__ = ['download_emodnet_db', 'fetch_seabed_local', 'fetch_bottom_local',
-           'fetch_bottom_local_transect']
+__all__ = ['download_emodnet_db', 'fetch_emodnet_substrate_local',
+           'fetch_bottom_emodnet_local']
 
 INDEX_FILE = 'seabed_substrate.npz'
 #: The pre-npz pickled index, refused by :func:`uacpy.data._cache.require_npz`.
@@ -40,8 +43,6 @@ RETIRED_INDEX_FILE = 'seabed_substrate.pkl'
 _PAGE = 5000                        # WFS GetFeature page size (startIndex/count)
 # The layer has no primary key, so GeoServer needs an explicit sort to page.
 _SORT_BY = 'objectid'
-_INDEX = {}                         # cache_root -> (STRtree, codes ndarray)
-_cache.register_cache(_INDEX.clear)
 
 
 def _shapely():
@@ -79,6 +80,19 @@ def download_emodnet_db(cache_dir=None, *, base_url: str = EMODNET_WFS_URL,
     :data:`uacpy.data.seabed.EMODNET_WFS_URL`), the same keyword the live
     fetchers in :mod:`uacpy.data.seabed` take, so a mirror of the service
     builds the same index.
+
+    Parameters
+    ----------
+    cache_dir : str or Path, optional
+        Directory to write into; ``None`` is the dataset's own directory under
+        the cache root (:func:`dataset_root`).
+    base_url : str, optional
+        The WFS endpoint every page is requested from. Default the EMODnet
+        Geology server.
+    timeout : float, optional
+        Network timeout in seconds. Default 300.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
     """
     shapely = _shapely()
     dest = _cache.prepare_download(
@@ -126,7 +140,7 @@ def download_emodnet_db(cache_dir=None, *, base_url: str = EMODNET_WFS_URL,
                 wkb=np.frombuffer(b''.join(wkb), dtype=np.uint8),
                 offsets=np.cumsum([0] + [len(b) for b in wkb], dtype=np.int64),
             )
-    _INDEX.clear()                            # force rebuild of the spatial index
+    _cache.invalidate_grids()
     log_message('seabed', f"EMODnet seabed substrate: {len(codes)} polygons → {out}",
                 verbose=verbose)
     return out
@@ -152,22 +166,36 @@ def _build_index():
     return (shapely.STRtree(geoms), codes)
 
 
+@_cache.per_root_memo
 def _index():
     """Build (or reuse) the STRtree + Folk-code array from the local index.
 
-    Built through :func:`uacpy.data._cache.memoize`: the polygons cost ~620 MB
-    to load, and threads racing the unguarded memo used to build one copy each
-    and keep the last.
+    Built through :func:`uacpy.data._cache.per_root_memo`: the polygons cost ~620 MB
+    to load, so threads racing a cold memo build one copy between them rather
+    than one each.
     """
-    return _cache.memoize(_INDEX, str(_cache.cache_root()), _build_index)
+    return _build_index()
 
 
-def fetch_seabed_local(point: Coordinate) -> dict:
+def fetch_emodnet_substrate_local(point: Coordinate, *,
+                                  max_distance_km: Optional[float] = None
+                                  ) -> SeabedSample:
     """Offline EMODnet seabed-substrate record at a ``(lat, lon)`` point.
 
-    Returns ``{'folk_5cl', 'source'}``. Raises ``DataFetchError`` outside the
-    mapped European-seas polygons.
+    Returns a :class:`~uacpy.data.SeabedSample`: the ``folk_5cl`` code as
+    ``folk_class`` (scheme ``'folk5'``) and the ``'emodnet'`` provenance
+    with the requested point as its data point (the polygon contains it).
+    Raises ``DataFetchError`` outside the mapped European-seas polygons.
+
+    Parameters
+    ----------
+    point : (lat, lon)
+        Site coordinates in decimal degrees.
+    max_distance_km : float, optional
+        The offset rule's refusal distance (km). The polygon read contains
+        ``point``, so the offset is 0 km and every limit passes.
     """
+    limit = checked_max_distance(max_distance_km, 'fetch_emodnet_substrate_local')
     shapely = _shapely()
     lat, lon = as_coordinate(point)
     tree, codes = _index()
@@ -182,66 +210,50 @@ def fetch_seabed_local(point: Coordinate) -> dict:
     # STRtree.query returns matches in no guaranteed order (it varies across
     # shapely versions), so a point on a shared polygon boundary must resolve
     # by a deterministic rule: the lowest polygon index wins.
-    return {'folk_5cl': int(codes[hits.min()]),
-            'source': 'EMODnet Geology seabed substrate 1:1M (offline)'}
+    return SeabedSample(
+        grain_size_phi=None, material=None,
+        folk_class=int(codes[hits.min()]), folk_class_scheme='folk5',
+        sample_point=None, distance_km=None,
+        provenance=checked_offset(
+            DataProvenance(source=SOURCES['emodnet'], data_point=(lat, lon),
+                           requested_point=(lat, lon)),
+            who='fetch_emodnet_substrate_local', warn_km=0.0,
+            max_distance_km=limit))
 
 
-def fetch_bottom_local(point: Coordinate, *, roughness: float = 0.0,
-                       water_sound_speed: Optional[float] = None,
-                       model: str = DEFAULT_GRAIN_SIZE_MODEL,
-                       environment: Optional[str] = None,
-                       timeout=None, verbose: Union[bool, str] = False
-                       ) -> BoundaryProperties:
+def fetch_bottom_emodnet_local(point: Coordinate, *, roughness: float = 0.0,
+                               water_sound_speed: Optional[float] = None,
+                               model: str = DEFAULT_GRAIN_SIZE_MODEL,
+                               hamilton_fit: Optional[str] = None,
+                               timeout=None, verbose: Union[bool, str] = False,
+                               max_distance_km: Optional[float] = None,
+                               ) -> BoundaryProperties:
     """Model-ready bottom from the offline EMODnet polygon at ``(lat, lon)``.
 
-    This is the EMODnet seabed-substrate provider of the ``fetch_bottom_local``
-    protocol name that ``fetch_environment`` resolves per provider module
-    (``bottom_sources='emodnet'``); the package-level
-    ``uacpy.data.fetch_bottom_local`` is :mod:`uacpy.data.sediment_db`'s
-    grain-size provider, not this function.
+    The cached twin of the live
+    :func:`uacpy.data.seabed.fetch_bottom_emodnet` (EMODnet WFS);
+    ``fetch_environment`` tries it first for ``bottom_sources='emodnet'``.
+    The NCEI grain-size sample provider is
+    :func:`uacpy.data.sediment_db.fetch_bottom_grainsize`, a different dataset.
 
     ``timeout`` is accepted (and ignored — this backend is offline) for signature
     uniformity with the network bottom fetchers. ``water_sound_speed`` (m/s)
     scales the grain-size velocity ratio to the in-situ near-seabed water;
     ``None`` uses the Hamilton reference. ``model`` picks the grain-size
-    relations (``'hamilton'`` or ``'apl-uw'``).
+    relations (``'hamilton'`` or ``'apl-uw'``). ``max_distance_km`` is as in
+    :func:`fetch_emodnet_substrate_local`.
     """
+    from uacpy.core.sediment import canonical_grain_size_selection
+    model, hamilton_fit = canonical_grain_size_selection(
+        model, hamilton_fit, who='fetch_bottom_emodnet_local')
     lat, lon = as_coordinate(point)
-    sub = fetch_seabed_local(point)
-    bottom = _bottom_from_folk5(sub['folk_5cl'], lat, lon, roughness=roughness,
+    sub = fetch_emodnet_substrate_local(point, max_distance_km=max_distance_km)
+    bottom = _bottom_from_folk5(sub.folk_class, lat, lon, roughness=roughness,
                                 water_sound_speed=water_sound_speed,
-                                model=model, environment=environment)
+                                model=model, hamilton_fit=hamilton_fit)
     log_message(
-        'seabed', f"EMODnet (offline) folk_5cl={sub['folk_5cl']} at "
+        'seabed', f"EMODnet (offline) folk_5cl={sub.folk_class} at "
         f"{lat:.3f}, {lon:.3f} → {bottom.acoustic_type} "
         f"c_p={bottom.sound_speed:.0f} m/s", verbose=verbose,
     )
-    return bottom
-
-
-def fetch_bottom_local_transect(start: Coordinate, end: Coordinate, *,
-                                n_points=6, max_points=None,
-                                roughness: float = 0.0,
-                                water_sound_speed: Optional[float] = None,
-                                model: str = DEFAULT_GRAIN_SIZE_MODEL,
-                                environment: Optional[str] = None,
-                                timeout=None, verbose: Union[bool, str] = False
-                                ) -> Bottom:
-    """Range-dependent bottom from the offline EMODnet polygons along a transect.
-
-    The EMODnet provider of the ``fetch_bottom_local_transect`` protocol name;
-    the package-level ``uacpy.data.fetch_bottom_local_transect`` is
-    :mod:`uacpy.data.sediment_db`'s. ``water_sound_speed`` also takes a
-    ``(lat, lon) -> m/s`` callable, so each column scales to the water over
-    its own seafloor. ``timeout``/``verbose`` are accepted (and ignored —
-    this backend is offline) for signature uniformity with the network
-    bottom fetchers.
-    """
-    return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom_local(
-            (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model, environment=environment),
-        start, end, n_points, source_label='EMODnet (offline)',
-        max_points=max_points,
-    )
+    return dataclasses.replace(bottom, data_sources=(sub.provenance,))

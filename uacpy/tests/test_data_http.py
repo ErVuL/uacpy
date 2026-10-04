@@ -1,5 +1,6 @@
 """Tests for the shared HTTP layer retry/backoff (uacpy.data._http)."""
 
+import errno
 import pathlib
 import urllib.error
 import urllib.request
@@ -8,7 +9,7 @@ import pytest
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _http
-from uacpy.data._http import raise_substantive
+from uacpy.data._chain import raise_substantive
 
 
 class _FakeResp:
@@ -146,7 +147,8 @@ class TestAHostThatDoesNotResolveFailsAtOnce:
         from uacpy.data._http import http_get
         from uacpy.core.exceptions import DataFetchError
         t0 = time.monotonic()
-        with pytest.raises(DataFetchError) as info:
+        with pytest.raises(DataFetchError,
+                           match='Could not resolve the host') as info:
             http_get('http://no-such-host.invalid/grid.nc', timeout=5.0,
                      source='test')
         elapsed = time.monotonic() - t0
@@ -202,6 +204,30 @@ def test_both_classifiers_discriminate_through_the_shared_walker():
     assert _is_connection_refused(refused)
     assert not _is_connection_refused(timed_out)
     assert not _is_permanent_dns_failure(refused)
+
+
+@pytest.mark.parametrize('failure, attempts', [
+    # The connection never opened: urlopen wraps it in URLError.
+    (lambda: urllib.error.URLError(TimeoutError('timed out')), 1),
+    (lambda: urllib.error.URLError(OSError(errno.ETIMEDOUT, 'timed out')), 1),
+    # The connection opened and the response was slow: the ladder stands.
+    (lambda: TimeoutError('timed out'), _http._MAX_RETRIES + 1),
+], ids=['connect-timeout', 'connect-etimedout', 'read-timeout'])
+def test_a_connection_that_does_not_open_costs_one_timeout(
+        monkeypatch, failure, attempts):
+    """A host that drops packets would otherwise cost 5 timeouts plus
+    18.5 s of back-off per URL; only the connect phase skips the ladder."""
+    calls = []
+
+    def urlopen(request, timeout=None):
+        calls.append(timeout)
+        raise failure()
+
+    monkeypatch.setattr(_http.urllib.request, 'urlopen', urlopen)
+    monkeypatch.setattr(_http.time, 'sleep', lambda s: None)
+    with pytest.raises(DataFetchError, match='Could not reach'):
+        _http.http_get('http://192.0.2.1/x', timeout=120.0)
+    assert len(calls) == attempts
 
 
 # ── curl_download resumes a broken transfer ────────────────────────────────
@@ -335,11 +361,11 @@ _ADDRESS_OVERRIDES = [
     ('uacpy.data.glodap_local', 'download_glodap_db', 'url',
      [('uacpy.data._http', 'curl_download')]),
     ('uacpy.data.diesing_local', 'download_diesing_db', 'url',
-     [('uacpy.data.diesing_local', 'http_get')]),
+     [('uacpy.data._http', 'curl_download')]),
     ('uacpy.data.sediment_db', 'download_sediment_db', 'url',
      [('uacpy.data.sediment_db', 'http_get')]),
     ('uacpy.data.wind_local', 'download_wind_db', 'url',
-     [('uacpy.data.wind_local', 'curl_download')]),
+     [('uacpy.data._http', 'curl_download')]),
     ('uacpy.data.emodnet_local', 'download_emodnet_db', 'base_url',
      [('uacpy.data.emodnet_local', 'http_get')]),
     ('uacpy.data.seaice_local', 'download_seaice_db', 'base_url',
@@ -396,7 +422,9 @@ def test_every_downloader_fetches_the_address_it_is_given(
     if func_name == 'download_emodnet_db':
         pytest.importorskip('shapely')
 
-    with pytest.raises((_Recorded, DataFetchError)):
+    with pytest.raises(
+            (_Recorded, DataFetchError),
+            match=r'https://mirror\.invalid/|No NSIDC sea-ice grids'):
         getattr(module, func_name)(
             cache_dir=str(tmp_path / func_name),
             **{keyword: f'{_MIRROR}/{func_name}.bin'})
@@ -473,10 +501,110 @@ def test_curl_is_told_which_schemes_a_redirect_may_use(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_http.shutil, 'which', lambda _: '/usr/bin/curl')
     monkeypatch.setattr(_http.subprocess, 'run', run)
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match='stop after argv capture'):
         _http.curl_download('https://example.invalid/g.nc', tmp_path / 'g.nc',
                             timeout=5.0, verbose=False)
     argv = log[0]
     assert '--proto-redir' in argv
     assert argv[argv.index('--proto-redir') + 1] == '=http,https'
     assert argv[argv.index('--proto') + 1] == '=http,https'
+
+
+
+# ── one invalidation rule for every cache filler ──────────────────────────
+
+
+def _download_functions():
+    """``(module, function)`` for every ``download_*_db`` in ``uacpy.data``."""
+    import ast
+    from pathlib import Path
+    root = Path(_http.__file__).parent
+    for path in sorted(root.glob('*.py')):
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        for node in tree.body:
+            if (isinstance(node, ast.FunctionDef)
+                    and node.name.startswith('download_')
+                    and node.name.endswith('_db')):
+                yield path.stem, node
+
+
+def test_every_download_drops_every_data_memo():
+    """A download ends with ``_cache.invalidate_grids()`` (directly, or
+    through ``download_grid_file``, which calls it), so the next read of any
+    backend reopens what is on disk: one rule, rather than each fetcher
+    clearing only its own memo."""
+    import ast
+    found, missing = [], []
+    for module, node in _download_functions():
+        found.append(node.name)
+        calls = {ast.unparse(c.func) for c in ast.walk(node)
+                 if isinstance(c, ast.Call)}
+        if not calls & {'_cache.invalidate_grids', 'download_grid_file'}:
+            missing.append(f'{module}.{node.name}')
+    assert len(found) >= 9, found
+    assert not missing, missing
+
+
+def _archive(kind, member, body):
+    """The bytes of a zip or tar.gz holding ``body`` as ``member`` beside an
+    unrelated file."""
+    import io
+    import tarfile
+    import zipfile
+    buf = io.BytesIO()
+    if kind == 'zip':
+        with zipfile.ZipFile(buf, 'w') as zf:
+            zf.writestr('README.txt', b'x')
+            zf.writestr('nested/' + member, body)
+    else:
+        with tarfile.open(fileobj=buf, mode='w:gz') as tf:
+            for name, data in (('README.txt', b'x'), ('nested/' + member, body)):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize('kind', ['zip', 'tar'])
+def test_download_member_writes_the_named_member_of_either_archive(
+        kind, tmp_path, monkeypatch):
+    """The member is found by its base name at any depth of a zip or a
+    tar.gz, written to ``out``, and the staged archive is deleted."""
+    blob = _archive(kind, 'grid.nc', b'THE-GRID')
+    monkeypatch.setattr(_http, 'curl_download', lambda *a, **kw: False)
+    monkeypatch.setattr(_http, 'http_get', lambda url, **kw: blob)
+    out = _http.download_member('demo', 'https://example.invalid/a',
+                                'grid.nc', tmp_path / 'grid.nc')
+    assert out.read_bytes() == b'THE-GRID'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['grid.nc']
+
+
+@pytest.mark.parametrize('kind', ['zip', 'tar'])
+def test_download_member_refuses_an_archive_without_the_member(
+        kind, tmp_path, monkeypatch):
+    blob = _archive(kind, 'other.nc', b'x')
+    monkeypatch.setattr(_http, 'curl_download', lambda *a, **kw: False)
+    monkeypatch.setattr(_http, 'http_get', lambda url, **kw: blob)
+    with pytest.raises(DataFetchError, match='demo archive has no grid.nc'):
+        _http.download_member('demo', 'https://example.invalid/a',
+                              'grid.nc', tmp_path / 'grid.nc')
+    assert not (tmp_path / 'grid.nc').exists()
+
+
+def test_a_download_drops_the_memos_of_every_backend(tmp_path, monkeypatch):
+    """Filling one dataset drops what every other backend holds too: the
+    diesing download empties the sediment and EMODnet memos."""
+    from uacpy.data import diesing_local, emodnet_local, sediment_db
+    blob = _archive('zip', diesing_local.RASTER_FILE, b'FAKE')
+    monkeypatch.setattr(_http, 'curl_download', lambda *a, **kw: False)
+    monkeypatch.setattr(_http, 'http_get', lambda url, **kw: blob)
+    memos = [diesing_local._model.memo, sediment_db._samples.memo,
+             emodnet_local._index.memo]
+    try:
+        for memo in memos:
+            memo['sentinel-root'] = object()
+        diesing_local.download_diesing_db(cache_dir=str(tmp_path))
+        assert [dict(m) for m in memos] == [{}, {}, {}]
+    finally:
+        for memo in memos:
+            memo.pop('sentinel-root', None)

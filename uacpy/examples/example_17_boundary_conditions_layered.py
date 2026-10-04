@@ -8,7 +8,7 @@ range. Bellhop takes the surface cases, RAM the bottom ones.
 
 Uses: env.altimetry from generate_sea_surface · an elastic `surface=` ·
 SedimentLayer / SeabedColumn · SeabedColumn.from_presets ·
-Bottom.from_columns · env.has_range_dependent_layered_bottom ·
+Bottom.from_columns · env.bottom.is_range_dependent / is_layered ·
 plot.shared_colorbar
 """
 
@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.core.environment import generate_sea_surface
+from uacpy import generate_sea_surface
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -37,7 +37,7 @@ rock = uacpy.BoundaryProperties(acoustic_type='half-space', sound_speed=2500,
 
 # Ice: angles here follow the ocean-acoustics convention, θ from the
 # HORIZONTAL (grazing), so a critical angle is arccos(c1/c2), not arcsin
-# (Jensen, Kuperman, Porter & Schmidt, 2nd ed., §1.4). Ice cp = 3500 m/s gives
+# (Jensen, Kuperman, Porter & Schmidt, 2nd ed., §1.6.1). Ice cp = 3500 m/s gives
 # a compressional critical grazing angle of arccos(1480/3500) = 65.0°, but ice
 # also has shear, and cs = 1800 m/s > c_water makes the SHEAR angle
 # arccos(1480/1800) = 34.7° the binding one. Shallow-water modes sit at small
@@ -58,20 +58,20 @@ scenarios = {
     'Flat surface (Bellhop)': (
         uacpy.Environment(name='vacuum_surface', bathymetry=100,
                           ssp=isovelocity, bottom=sand),
-        uacpy.Bellhop()),
+        uacpy.Bellhop(backend='fortran')),
     'Rough sea, 15 m/s (Bellhop)': (
         uacpy.Environment(
             name='rough_surface', bathymetry=100, ssp=isovelocity, bottom=sand,
-            altimetry=generate_sea_surface(max_range=10000,
-                                           wind_speed_mps=15,
-                                           n_points=300, seed=42)),
-        uacpy.Bellhop()),
+            altimetry=generate_sea_surface(
+                rmax_m=10000, wind_speed_kn=30,
+                rng=np.random.default_rng(42))),
+        uacpy.Bellhop(backend='fortran')),
     'Ice surface (Bellhop)': (
         uacpy.Environment(
             name='ice_surface', bathymetry=100,
             ssp=uacpy.SoundSpeedProfile.from_pairs([(0, 1480), (100, 1480)]),
             surface=ice, bottom=sand),
-        uacpy.Bellhop()),
+        uacpy.Bellhop(backend='fortran')),
     'Single-layer bottom (RAM)': (
         uacpy.Environment(
             name='single_layer_bottom', bathymetry=100, ssp=isovelocity,
@@ -79,7 +79,7 @@ scenarios = {
                 layers=[uacpy.SedimentLayer(thickness=10.0, sound_speed=1550,
                                             density=1.3, attenuation=0.8)],
                 halfspace=rock)),
-        uacpy.RAM(accuracy=1e-1)),
+        uacpy.RAM()),
     'Multi-layer bottom (RAM)': (
         uacpy.Environment(
             name='multi_layer_bottom', bathymetry=100, ssp=isovelocity,
@@ -91,11 +91,11 @@ scenarios = {
                         uacpy.SedimentLayer(thickness=30.0, sound_speed=1800,
                                             density=2.0, attenuation=0.2)],
                 halfspace=rock)),
-        uacpy.RAM(accuracy=1e-1)),
+        uacpy.RAM()),
     'Preset layered bottom (RAM)': (
         uacpy.Environment(name='preset_layered_bottom', bathymetry=100,
                           ssp=isovelocity, bottom=preset_column),
-        uacpy.RAM(accuracy=1e-1)),
+        uacpy.RAM()),
     'Range-dep layered (RAM)': (
         uacpy.Environment(
             name='rd_layered_bottom', bathymetry=100, ssp=isovelocity,
@@ -121,7 +121,7 @@ scenarios = {
                         acoustic_type='half-space', sound_speed=2500,
                         density=2.5, attenuation=0.05))],
                 ranges=np.array([0, 10000]))),
-        uacpy.RAM(accuracy=1e-1)),
+        uacpy.RAM()),
 }
 
 fields = {label: model.run(env, source, receiver)
@@ -139,7 +139,7 @@ vmax = 5 * round(min(140, np.nanpercentile(every_tl, 95)) / 5)
 fig, axes = plt.subplots(2, 4, figsize=(22, 11))
 for index, (label, field) in enumerate(fields.items()):
     ax = axes.flat[index]
-    uacpy.plot_field(field, ax, env=scenarios[label][0], show_colorbar=False,
+    uacpy.plot.plot_field(field, ax, env=scenarios[label][0], show_colorbar=False,
                      vmin=vmin, vmax=vmax, title=label)
     if index % 4:                     # depth label on the left column only
         ax.set_ylabel('')
@@ -157,7 +157,7 @@ plt.close(fig)
 
 rd_env = scenarios['Range-dep layered (RAM)'][0]
 print(f"  range-dependent layered bottom: "
-      f"{rd_env.has_range_dependent_layered_bottom}")
+      f"{rd_env.bottom.is_range_dependent and rd_env.bottom.is_layered}")
 fig, _ = rd_env.plot()
 fig.savefig(OUT / 'example_17_rd_layered_structure.png', dpi=150,
             bbox_inches='tight')

@@ -30,6 +30,19 @@ from uacpy.tests._cache_builders import (
     _FILL, _write_crust1, _write_gebco, _write_globsed, _write_sediment,
     _write_woa,
 )
+from uacpy.tests.conftest import recorded_warnings
+
+
+@pytest.fixture(autouse=True)
+def _no_live_dry_point_check(monkeypatch):
+    """fetch_ssp / fetch_ts_profile / fetch_bottom first ask whether the
+    point is dry, from the GEBCO grid or else OpenTopoData; these tests are
+    about the fetchers behind that check, so it never reaches the network."""
+    from uacpy.data import bathymetry, environment
+    monkeypatch.setattr(bathymetry, '_refuse_a_dry_point',
+                        lambda point, **kw: None)
+    monkeypatch.setattr(environment, '_refuse_a_dry_point',
+                        lambda point, **kw: None)
 
 
 def _write_emodnet(cache):
@@ -59,8 +72,8 @@ def cache(tmp_path, monkeypatch):
     # Module-level open-once caches are keyed by path; clear for isolation.
     _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
-    sediment_db._SAMPLES.clear()
-    emodnet_local._INDEX.clear()
+    sediment_db._samples.memo.clear()
+    emodnet_local._index.memo.clear()
     _write_gebco(root, land_at=(0.0, 0.0))
     _write_woa(root, periods=('00', '03'))
     _write_sediment(root)
@@ -80,7 +93,7 @@ def seismic_cache(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     _cache.invalidate_grids()
     woa23_local._DATASETS.clear()
-    crust1_local._MODEL.clear()
+    crust1_local._model.memo.clear()
     _cache.invalidate_grids()
     _write_gebco(root)
     _write_woa(root, periods=('00', '03'))
@@ -94,6 +107,32 @@ def seismic_cache(tmp_path, monkeypatch):
 def test_cache_root_honors_env(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'x'))
     assert _cache.cache_root() == tmp_path / 'x'
+
+
+@pytest.mark.parametrize('call', [
+    lambda: _cache.dataset_root('woa'),
+    lambda: _cache.require('woa'),
+    lambda: _cache.is_installed('woa'),
+    lambda: _cache.prepare_download('woa', 'x', cache_dir='.'),
+])
+def test_an_unknown_dataset_name_is_a_configuration_error(call):
+    with pytest.raises(ConfigurationError, match="unknown dataset 'woa'") as info:
+        call()
+    assert 'woa23' in info.value.remediation
+    assert _cache.dataset_root('woa23').name == 'woa23'
+
+
+def test_the_bathy_grid_counts_are_whole_numbers_of_at_least_two(cache):
+    with pytest.raises(ConfigurationError, match='n_lat=2.5'):
+        data.fetch_bathy_grid((45, 46), (-7, -6), n_lat=2.5, n_lon=3,
+                              source='local')
+    with pytest.raises(ConfigurationError, match='n_lon must be >= 2'):
+        data.fetch_bathy_grid((45, 46), (-7, -6), n_lat=2, n_lon=1,
+                              source='local')
+    grid = data.fetch_bathy_grid((45, 46), (-7, -6), n_lat=2, n_lon=2,
+                                 source='local')
+    assert grid.lats.size == grid.lons.size == 2
+    assert grid.provenance.source.id == 'gebco'
 
 
 def test_require_missing_names_install_flag(tmp_path, monkeypatch):
@@ -235,19 +274,148 @@ def test_bathymetry_bad_source_raises():
         data.fetch_bathy((1.0, 2.0), source='nope')
 
 
+# ── the bathymetry fetchers take the fetch_environment chain spec ─────────
+
+
+def _refuse_live_bathymetry(monkeypatch):
+    """The live bathymetry backends answer with a failure, so a chain has
+    to fall through them to the installed GEBCO grid."""
+    from uacpy.data import emodnet_bathy_live, gmrt_live
+
+    def refuse(*args, **kwargs):
+        raise DataFetchError('live bathymetry refused in this test')
+
+    for module in (gmrt_live, emodnet_bathy_live):
+        monkeypatch.setattr(module, 'point_depth', refuse)
+        monkeypatch.setattr(module, 'depths_along', refuse)
+
+
+def test_fetch_bathy_auto_falls_through_to_the_installed_grid(cache,
+                                                              monkeypatch):
+    _refuse_live_bathymetry(monkeypatch)
+    assert data.fetch_bathy((12.0, 34.0), source='auto') == 1500.0
+
+
+def test_fetch_bathy_takes_a_sequence_of_sources(cache, monkeypatch):
+    _refuse_live_bathymetry(monkeypatch)
+    assert data.fetch_bathy((12.0, 34.0), source=('gmrt', 'gebco')) == 1500.0
+
+
+def test_fetch_bathy_transect_takes_a_sequence_of_sources(cache,
+                                                         monkeypatch):
+    _refuse_live_bathymetry(monkeypatch)
+    chained = data.fetch_bathy_transect(
+        (1.0, 1.0), (2.0, 2.0), n_points=4, source=['emodnet_dtm', 'gebco'])
+    single = data.fetch_bathy_transect(
+        (1.0, 1.0), (2.0, 2.0), n_points=4, source='local')
+    np.testing.assert_array_equal(chained, single)
+
+
+def test_a_bathymetry_chain_refuses_an_unknown_source_before_fetching():
+    with pytest.raises(ConfigurationError,
+                       match="fetch_bathy: unknown bathymetry source 'nope'"):
+        data.fetch_bathy((1.0, 2.0), source=('gebco', 'nope'))
+    with pytest.raises(ConfigurationError,
+                       match="preset for the whole source= value"):
+        data.fetch_bathy((1.0, 2.0), source=('auto', 'gebco'))
+
+
+def test_fetch_bathy_grid_takes_one_source_only():
+    with pytest.raises(ConfigurationError,
+                       match='bathymetry source must be one of'):
+        data.fetch_bathy_grid((0.0, 1.0), (0.0, 1.0), source='auto')
+
+
 # ── WOA23 local ─────────────────────────────────────────────────────────────
 
 def test_woa_local_ssp(cache):
     prof = sound_speed.fetch_ssp((30.5, -40.5), source='local')
     assert prof.depths.tolist() == [0.0, 50.0, 100.0, 500.0, 1000.0]
-    assert np.all((1450 < prof.data[:, 0]) & (prof.data[:, 0] < 1560))
+    assert np.all((1450 < prof.sound_speed[:, 0])
+                  & (prof.sound_speed[:, 0] < 1560))
+
+
+# ── the sound-speed fetchers take the fetch_environment chain spec ────────
+
+
+def _same_profile(a, b):
+    np.testing.assert_array_equal(a.depths, b.depths)
+    np.testing.assert_array_equal(a.sound_speed, b.sound_speed)
+    assert [s.source.id for s in a.data_sources] == \
+        [s.source.id for s in b.data_sources]
+
+
+def test_fetch_ssp_auto_without_a_date_answers_from_woa23(cache):
+    """Argo and Copernicus need a date, so without one ``'auto'`` falls
+    through them to WOA23, cache first."""
+    _same_profile(sound_speed.fetch_ssp((30.5, -40.5), source='auto'),
+                  sound_speed.fetch_ssp((30.5, -40.5), source='local'))
+
+
+def test_fetch_ssp_takes_a_sequence_of_sources(cache, monkeypatch):
+    """The WOA-only knobs (``month``, ``decade``) reach WOA23 inside a
+    chain as they do on its own."""
+    _same_profile(
+        sound_speed.fetch_ssp((30.5, -40.5), month=3,
+                              source=['argo', 'woa23']),
+        sound_speed.fetch_ssp((30.5, -40.5), month=3, source='woa23'))
+    seen = []
+    backend = sound_speed._fetch_ssp_backend
+
+    def spy(point, **kwargs):
+        seen.append(kwargs)
+        return backend(point, **kwargs)
+
+    monkeypatch.setattr(sound_speed, '_fetch_ssp_backend', spy)
+    sound_speed.fetch_ssp((30.5, -40.5), month=3, decade='decav',
+                          source=['argo', 'woa23'])
+    assert [(kw['month'], kw['decade']) for kw in seen] == [(3, 'decav')]
+
+
+def test_a_time_specific_ssp_source_alone_needs_a_date():
+    with pytest.raises(ConfigurationError,
+                       match=r"fetch_ssp: source='copernicus' requires date="):
+        sound_speed.fetch_ssp((30.5, -40.5), source='copernicus')
+
+
+def test_an_ssp_chain_refuses_an_unknown_source_before_fetching():
+    with pytest.raises(ConfigurationError,
+                       match="fetch_ssp: unknown ssp source 'nope'"):
+        sound_speed.fetch_ssp((30.5, -40.5), source=('woa23', 'nope'))
+    with pytest.raises(ConfigurationError,
+                       match="preset for the whole source= value"):
+        sound_speed.fetch_ssp((30.5, -40.5), source=('local', 'woa23'))
+
+
+def test_fetch_ssp_transect_passes_over_a_source_with_no_transect(cache):
+    chained = sound_speed.fetch_ssp_transect(
+        (30.5, -40.5), (31.5, -39.5), n_points=2, source=('argo', 'woa23'))
+    single = sound_speed.fetch_ssp_transect(
+        (30.5, -40.5), (31.5, -39.5), n_points=2, source='local')
+    np.testing.assert_array_equal(chained.sound_speed, single.sound_speed)
+    with pytest.raises(ConfigurationError,
+                       match="fetch_ssp_transect: source 'argo' has no transect"):
+        sound_speed.fetch_ssp_transect((30.5, -40.5), (31.5, -39.5),
+                                       n_points=2, source='argo',
+                                       date='2024-06-01')
+
+
+def test_the_transect_plans_are_exported():
+    from uacpy.data import bathymetry
+    assert data.ssp_transect_plan is sound_speed.ssp_transect_plan
+    assert data.bathy_transect_plan is bathymetry.bathy_transect_plan
+    assert {'ssp_transect_plan', 'bathy_transect_plan'} <= set(data.__all__)
 
 
 def test_woa_local_ts_column(cache):
     # The local column feeds the *same* UNESCO conversion as OPeNDAP; check the
     # raw T/S surface values come through untouched.
-    z, t, s = sound_speed.fetch_ts_profile((30.5, -40.5), source='local')
+    ts = sound_speed.fetch_ts_profile((30.5, -40.5), source='local')
+    z, t, s = ts.depths, ts.temperature, ts.salinity
     assert t[0] == 18.0 and s[0] == 36.0 and z[0] == 0.0
+    assert ts.temperature_kind == 'in_situ'
+    assert ts.provenance.source.id == 'woa23'
+    assert ts.provenance.data_point is not None
 
 
 def test_woa_local_reads_fill_through_the_mask(tmp_path, monkeypatch):
@@ -273,7 +441,8 @@ def test_woa_local_reads_fill_through_the_mask(tmp_path, monkeypatch):
                                   -999.0)
         v[0, :, 120, 139] = np.ma.masked_equal(np.asarray(vals), -999.0)
         ds.close()
-    z, t, s = sound_speed.fetch_ts_profile((30.5, -40.5), source='local')
+    ts = sound_speed.fetch_ts_profile((30.5, -40.5), source='local')
+    z, t, s = ts.depths, ts.temperature, ts.salinity
     assert z.tolist() == [0.0, 50.0, 100.0]        # truncated at the fill
     assert t.min() > 0.0 and s.min() > 0.0         # no -999 admitted as data
 
@@ -291,8 +460,10 @@ def test_woa_close_releases_the_handles(cache):
 
 def test_sediment_sample_and_bottom(cache):
     s = sediment_db.fetch_sediment_sample((30.51, -40.51))
-    assert s['phi'] == 3.0 and s['distance_km'] < 5.0
-    bp = sediment_db.fetch_bottom_local((30.51, -40.51))
+    assert s.grain_size_phi == 3.0 and s.distance_km < 5.0
+    assert s.sample_point == s.provenance.data_point          # (lat, lon)
+    assert s.sample_point[0] == pytest.approx(30.51, abs=0.05)
+    bp = sediment_db.fetch_bottom_grainsize((30.51, -40.51))
     assert bp.acoustic_type == 'half-space' and bp.grain_size_phi == 3.0
 
 
@@ -302,8 +473,21 @@ def test_sediment_deck41_lithology_path(cache):
     # sample, both inside the 250 km default reach. The class next door wins —
     # preferring the measurement whatever the separation would answer from a
     # different sediment province 101x farther away.
-    bp = sediment_db.fetch_bottom_local((44.01, 8.01))
+    bp = sediment_db.fetch_bottom_grainsize((44.01, 8.01))
     assert bp.grain_size_phi == 1.5            # 'Sand' → ϕ 1.5
+
+
+def test_a_hand_placed_deck41_that_is_not_utf8_lets_the_chain_fall_through(
+        cache):
+    """A latin-1 ``deck41.csv`` is a typed refusal of the grain-size source,
+    so a chain reaches its next source rather than aborting."""
+    (cache / 'sediment' / 'deck41.csv').write_bytes(
+        b'latitude,longitude,lithology\n44.0,8.0,sand \xe9pais\n')
+    with pytest.raises(DataFetchError, match='not UTF-8'):
+        sediment_db.fetch_bottom_grainsize((44.01, 8.01))
+    bp = data.fetch_bottom((44.01, 8.01), source=['grainsize', 'pelagic'],
+                           depth=100.0)
+    assert bp.data_sources[0].source.id == 'pelagic'
 
 
 def test_download_sediment_db_normalizes(tmp_path, monkeypatch):
@@ -341,8 +525,8 @@ def test_sediment_too_far_raises(cache):
 
 
 def test_sediment_transect(cache):
-    rdb = sediment_db.fetch_bottom_local_transect(
-        (30.5, -40.5), (43.0, 7.0), n_points=4)
+    rdb = data.fetch_bottom_transect(
+        (30.5, -40.5), (43.0, 7.0), source='grainsize', n_points=4)
     assert rdb.halfspace_sound_speed.shape == (4,)
 
 
@@ -386,10 +570,11 @@ def test_cache_preset_never_hits_network(tmp_path, monkeypatch):
     assert [s.source.id for s in env.data_sources] == ['pelagic']
     # 3000 m is above the CCD at this latitude → calcareous ooze (ϕ 7.5), and
     # ϕ 7.5 goes through the Hamilton & Bachman (T) density regression,
-    # (2.374 − 0.175·7.5 + 0.008·7.5²)/1.026 × 1.030 = 1.5174 g/cm³. (The table
-    # this replaced interpolated its 7.13 and 8.80 rows to 1.4831; the fit runs
+    # (2.374 − 0.175·7.5 + 0.008·7.5²)/1.026 × 1.027 = 1.5130 g/cm³, the ratio
+    # carried back to the package's one water density. (The table this
+    # replaced interpolated its 7.13 and 8.80 rows to 1.4831; the fit runs
     # above its own class means over 5.4–7.2 ϕ, by up to 0.071 g/cm³.)
-    assert env.bottom.columns[0].halfspace.density == pytest.approx(1.517, abs=1e-3)
+    assert env.bottom.columns[0].halfspace.density == pytest.approx(1.513, abs=1e-3)
 
 
 def test_pelagic_without_a_supplied_depth_needs_the_cache(tmp_path,
@@ -404,6 +589,25 @@ def test_pelagic_without_a_supplied_depth_needs_the_cache(tmp_path,
         AssertionError("cache_only pelagic hit the live API")))
     with pytest.raises(ConfigurationError, match='install.sh --data'):
         pelagic.fetch_bottom_pelagic((30.5, -40.5), cache_only=True)
+
+
+def test_pelagic_cites_gebco_only_when_it_fetched_the_depth(cache):
+    given = pelagic.fetch_bottom_pelagic((10.0, 20.0), depth=4000.0)
+    fetched = pelagic.fetch_bottom_pelagic((10.0, 20.0), cache_only=True)
+    assert [p.source.id for p in given.data_sources] == ['pelagic']
+    assert [p.source.id for p in fetched.data_sources] == ['pelagic', 'gebco']
+
+
+def test_a_direct_crust1_fetch_cites_crust1_and_globsed(seismic_cache):
+    point = crust1_local.fetch_bottom_crust1((30.5, -40.5))
+    transect = crust1_local.fetch_bottom_crust1_transect(
+        (30.5, -40.5), (30.5, -39.5), n_points=2)
+    assert [p.source.id for p in point.data_sources] == ['crust1', 'globsed']
+    # A transect keeps each column's pair, at its range.
+    assert [(p.source.id, p.range_m) for p in transect.data_sources] == [
+        (s, r) for r in transect.ranges for s in ('crust1', 'globsed')]
+    bare = crust1_local.fetch_bottom_crust1((30.5, -40.5), use_globsed=False)
+    assert [p.source.id for p in bare.data_sources] == ['crust1']
 
 
 def test_cache_preset_ssp_no_cache_raises(tmp_path, monkeypatch):
@@ -424,25 +628,34 @@ def test_fetch_environment_crust1_pulls_globsed(seismic_cache):
     assert env.bottom.columns[0].total_thickness() == pytest.approx(500.0)
 
 
+def _ice_reading(conc_at):
+    """A stand-in for ``seaice_local._sea_ice_reading``: ``conc_at(point)``
+    with the point's own ``'seaice'`` record (no cell read, so no offset)."""
+    from uacpy.data import seaice_local
+    return lambda pt, date, month, who: (
+        conc_at(pt), seaice_local._provenance(tuple(float(v) for v in pt)),
+        0.0)
+
+
 def test_fetch_environment_sea_ice(cache, monkeypatch):
     # surface_sources='seaice' sets the surface from the climatological
     # concentration; an ice-covered point gets an elastic canopy + provenance.
     from uacpy.data import seaice_local
-    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
-                        lambda pt, date=None, *, month=None: 0.85)
+    monkeypatch.setattr(seaice_local, '_sea_ice_reading',
+                        _ice_reading(lambda pt: 0.85))
     env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
                                  bottom_sources='grainsize',
                                  surface_sources='seaice')
     assert env.surface.acoustic_type == 'half-space'
-    assert env.surface.shear_speed == 1800.0 and env.has_elastic_surface
+    assert env.surface.shear_speed == 1800.0 and env.surface.is_elastic
     assert 'seaice' in [s.source.id for s in env.data_sources]
 
 
 def test_fetch_environment_sea_ice_open_water(cache, monkeypatch):
     # Below the ice-edge → free surface untouched, no 'seaice' provenance.
     from uacpy.data import seaice_local
-    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
-                        lambda pt, date=None, *, month=None: 0.0)
+    monkeypatch.setattr(seaice_local, '_sea_ice_reading',
+                        _ice_reading(lambda pt: 0.0))
     env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
                                  bottom_sources='grainsize',
                                  surface_sources='auto')
@@ -461,33 +674,33 @@ def test_fetch_environment_sea_ice_transect_classifies_each_zone(monkeypatch):
     # The waypoints at 85, 83.33, 81.67, 80°N each classify from their own
     # zone: canopy, canopy, open water, open water.
     from uacpy.data import seaice_local
-    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
-                        lambda pt, date=None, *, month=None:
-                        0.9 if pt[0] >= 83.0 else 0.0)
+    monkeypatch.setattr(seaice_local, '_sea_ice_reading',
+                        _ice_reading(lambda pt: 0.9 if pt[0] >= 83.0 else 0.0))
     env = data.fetch_environment((85.0, 0.0), transect_to=(80.0, 0.0),
                                  date='2026-03-15', bathymetry=3000.0,
                                  ssp=1500.0, surface_sources='seaice',
                                  surface_n_points=4)
-    assert [bp.acoustic_type for bp in env.surface.properties] == \
+    assert [bp.acoustic_type for bp in env.surface.nodes] == \
         ['half-space', 'half-space', 'vacuum', 'vacuum']
     assert env.surface.at(range=0.0).shear_speed == 1800.0
-    assert [s.source.id for s in env.data_sources] == ['seaice']
+    assert {s.source.id for s in env.data_sources} == {'seaice'}
+    assert [s.range_m for s in env.data_sources] == list(env.surface.ranges)
 
 
 def test_fetch_environment_sea_ice_straddles_the_ice_edge_threshold(monkeypatch):
     # 15.1 % — just above the NSIDC 15 % ice-edge → elastic canopy with
     # 'seaice' provenance.
     from uacpy.data import seaice_local
-    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
-                        lambda pt, date=None, *, month=None: 0.151)
+    monkeypatch.setattr(seaice_local, '_sea_ice_reading',
+                        _ice_reading(lambda pt: 0.151))
     env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
                                  bathymetry=3000.0, ssp=1500.0,
                                  surface_sources='seaice')
     assert env.surface.acoustic_type == 'half-space'
     assert 'seaice' in [s.source.id for s in env.data_sources]
     # 14.9 % — just below → the free surface stands, no 'seaice' provenance.
-    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
-                        lambda pt, date=None, *, month=None: 0.149)
+    monkeypatch.setattr(seaice_local, '_sea_ice_reading',
+                        _ice_reading(lambda pt: 0.149))
     env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
                                  bathymetry=3000.0, ssp=1500.0,
                                  surface_sources='seaice')
@@ -500,8 +713,8 @@ def test_fetch_environment_sea_ice_canopy_full_property_set(monkeypatch):
     # elastic half-space, c_p 3500 m/s, c_s 1800 m/s, ρ 0.9 g/cm³,
     # α_p 0.4 dB/λ, α_s 1.0 dB/λ, roughness 0, no grain size.
     from uacpy.data import seaice_local
-    monkeypatch.setattr(seaice_local, 'fetch_sea_ice_concentration',
-                        lambda pt, date=None, *, month=None: 0.85)
+    monkeypatch.setattr(seaice_local, '_sea_ice_reading',
+                        _ice_reading(lambda pt: 0.85))
     env = data.fetch_environment((30.5, -40.5), date='2026-03-15',
                                  bathymetry=3000.0, ssp=1500.0,
                                  surface_sources='seaice')
@@ -514,18 +727,20 @@ def test_fetch_environment_sea_ice_canopy_full_property_set(monkeypatch):
 
 def test_offline_emodnet_local_bottom(cache):
     pytest.importorskip('shapely')
-    bp = emodnet_local.fetch_bottom_local((55.0, 2.5))     # inside the polygon
+    bp = emodnet_local.fetch_bottom_emodnet_local((55.0, 2.5))     # inside the polygon
     assert bp.acoustic_type == 'half-space' and bp.grain_size_phi == 2.0
+    assert [(p.source.id, p.requested_point) for p in bp.data_sources] == [
+        ('emodnet', (55.0, 2.5))]
     with pytest.raises(DataFetchError, match='European seas only'):
-        emodnet_local.fetch_seabed_local((30.5, -40.5))    # outside it
+        emodnet_local.fetch_emodnet_substrate_local((30.5, -40.5))    # outside it
 
 
 def test_offline_emodnet_missing_names_flag(tmp_path, monkeypatch):
     pytest.importorskip('shapely')
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    emodnet_local._INDEX.clear()
+    emodnet_local._index.memo.clear()
     with pytest.raises(ConfigurationError, match='install.sh --data emodnet'):
-        emodnet_local.fetch_bottom_local((56.0, 3.0))
+        emodnet_local.fetch_bottom_emodnet_local((56.0, 3.0))
 
 
 def test_every_backend_memo_is_registered_for_invalidation():
@@ -552,8 +767,8 @@ def test_invalidate_grids_empties_every_registered_memo():
     # a memo without registering it.
     from uacpy.data import (crust1_local, diesing_local, emodnet_local,
                             sediment_db, seaice_local, wind_local, woa23_local)
-    memos = [_cache._GRIDS, crust1_local._MODEL, diesing_local._MODEL,
-             emodnet_local._INDEX, sediment_db._SAMPLES, seaice_local._MODEL,
+    memos = [_cache._GRIDS, crust1_local._model.memo, diesing_local._model.memo,
+             emodnet_local._index.memo, sediment_db._samples.memo, seaice_local._model.memo,
              wind_local._CLIM, woa23_local._DATASETS]
 
     class _Handle:                     # WOA23 closes its handles before dropping
@@ -586,11 +801,11 @@ class TestParseDateUsesUTC:
          _dt.date(2024, 7, 1)),
     ])
     def test_tz_aware_datetime_resolves_in_utc(self, value, expected):
-        from uacpy.data._time import parse_date
+        from uacpy.core.geo import parse_date
         assert parse_date(value) == expected
 
     def test_tz_aware_iso_string_resolves_in_utc(self):
-        from uacpy.data._time import parse_date
+        from uacpy.core.geo import parse_date
         assert parse_date('2024-01-01T01:00:00+05:00') == _dt.date(2023, 12, 31)
 
     @pytest.mark.parametrize('value,expected', [
@@ -601,7 +816,7 @@ class TestParseDateUsesUTC:
     def test_naive_and_plain_dates_are_unchanged(self, value, expected):
         # The discriminating counterpart: a naive value has no offset to
         # apply and must not move.
-        from uacpy.data._time import parse_date
+        from uacpy.core.geo import parse_date
         assert parse_date(value) == expected
 
 
@@ -651,11 +866,13 @@ class TestNpzReadsCloseTheirFile:
             return len(os.listdir('/proc/self/fd'))
 
         for _ in range(3):                      # warm the import/stat caches
-            with pytest.raises(Exception):
+            with pytest.raises(_cache.UnreadableCacheError,
+                               match='is present but unreadable'):
                 _Climatology(bad)
         before = open_count()
         for _ in range(5):
-            with pytest.raises(Exception):
+            with pytest.raises(_cache.UnreadableCacheError,
+                               match='is present but unreadable'):
                 _Climatology(bad)
         assert open_count() == before
 
@@ -681,8 +898,7 @@ def test_grid_samples_the_newest_cached_gebco_and_warns_naming_it(
     _write_gebco_like(root / 'GEBCO_2024.nc', -1000.0)
     _write_gebco_like(root / 'GEBCO_2025.nc', -2000.0)
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
+    with recorded_warnings() as rec:
         depth = gebco_local.point_depth((0.0, 0.0))
     assert depth == 2000.0                       # the GEBCO_2025.nc value
     hits = [w for w in rec if '2 grids' in str(w.message)]
@@ -690,13 +906,30 @@ def test_grid_samples_the_newest_cached_gebco_and_warns_naming_it(
     assert 'GEBCO_2025.nc' in str(hits[0].message)
 
 
+def test_a_non_release_file_is_neither_sampled_nor_cited_as_gebco(
+        tmp_path, monkeypatch):
+    root = tmp_path / 'gebco'
+    root.mkdir(parents=True)
+    _write_gebco_like(root / 'GEBCO_2025.nc', -2000.0)
+    _write_gebco_like(root / 'my_bathy.nc', -10.0)        # sorts after 'G'
+    _write_gebco_like(root / 'gebco_2023.nc', -500.0)     # lower case, older
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    with pytest.warns(UserWarning, match='my_bathy.nc .* not sampled'):
+        assert gebco_local.point_depth((0.0, 0.0)) == 2000.0
+        assert gebco_local.grid_name() == 'GEBCO_2025'
+    (root / 'GEBCO_2025.nc').unlink()
+    (root / 'gebco_2023.nc').unlink()
+    with pytest.warns(UserWarning, match='my_bathy.nc'), \
+            pytest.raises(ConfigurationError, match='not found'):
+        gebco_local.grid_name()
+
+
 def test_grid_with_a_single_cached_gebco_does_not_warn(tmp_path, monkeypatch):
     root = tmp_path / 'gebco'
     root.mkdir(parents=True)
     _write_gebco_like(root / 'GEBCO_2025.nc', -1500.0)
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
+    with recorded_warnings() as rec:
         depth = gebco_local.point_depth((0.0, 0.0))
     assert depth == 1500.0
     assert not [w for w in rec if 'grids are cached' in str(w.message)]
@@ -838,11 +1071,242 @@ class TestCorruptNetcdfCacheRaisesTheTypedError:
 
 @pytest.mark.parametrize('module_name,func_name', [
     ('uacpy.data.crust1_local', 'fetch_bottom_crust1_transect'),
-    ('uacpy.data.diesing_local', 'fetch_bottom_diesing_transect'),
-    ('uacpy.data.emodnet_local', 'fetch_bottom_local_transect'),
-    ('uacpy.data.sediment_db', 'fetch_bottom_local_transect'),
+    ('uacpy.data.diesing_local', 'fetch_bottom_diesing'),
+    ('uacpy.data.emodnet_local', 'fetch_bottom_emodnet_local'),
+    ('uacpy.data.sediment_db', 'fetch_bottom_grainsize'),
 ], ids=['crust1', 'diesing', 'emodnet', 'sediment_db'])
-def test_offline_transect_fetchers_document_their_ignored_parameters(
+def test_offline_bottom_fetchers_document_their_ignored_parameters(
         module_name, func_name):
     mod = importlib.import_module(module_name)
     assert 'accepted (and ignored' in getattr(mod, func_name).__doc__
+
+
+def test_the_per_layer_defaults_are_cache_first(cache, monkeypatch):
+    """DATA-10: fetch_bathy / fetch_ssp default to the catalogue ids 'gebco' /
+    'woa23', which read the installed grids before any network call — the
+    same resolution fetch_environment makes."""
+    from uacpy.data import bathymetry
+    monkeypatch.setattr(bathymetry, '_fetch_depths', lambda *a, **k: (
+        pytest.fail("the installed GEBCO grid was bypassed for the API")))
+    monkeypatch.setattr(sound_speed, 'http_get', lambda *a, **k: (
+        pytest.fail("the installed WOA23 grids were bypassed for THREDDS")))
+    assert data.fetch_bathy((12.0, 34.0)) == 1500.0
+    assert sound_speed.fetch_ssp((30.5, -40.5)).depths[0] == 0.0
+
+
+#: What a cached twin can raise, and whether its live twin is asked next: an
+#: absent or unreadable cache leaves the question open; a read answer ("no
+#: coverage", "on land") does not, the live twin serving the same dataset.
+_LOCAL_FAILURES = [
+    (ConfigurationError('Offline data not found'), True),
+    (_cache.UnreadableCacheError('present but unreadable'), True),
+    (DataFetchError('reports land here'), False),
+]
+_LOCAL_FAILURE_IDS = ['absent', 'unreadable', 'answered']
+
+
+@pytest.mark.parametrize('local_exc,asks_live', _LOCAL_FAILURES,
+                         ids=_LOCAL_FAILURE_IDS)
+def test_the_gebco_source_asks_the_api_only_on_a_cache_miss(
+        monkeypatch, local_exc, asks_live):
+    from uacpy.data import bathymetry
+    asked = []
+
+    def fake_backend(point, *, backend, **kw):
+        asked.append(backend)
+        if backend == 'local':
+            raise local_exc
+        return 1234.0
+
+    monkeypatch.setattr(bathymetry, '_fetch_bathy_backend', fake_backend)
+    if asks_live:
+        assert bathymetry.fetch_bathy((1.0, 2.0)) == 1234.0
+        assert asked == ['local', 'api']
+    else:
+        with pytest.raises(DataFetchError, match='reports land'):
+            bathymetry.fetch_bathy((1.0, 2.0))
+        assert asked == ['local']
+
+
+@pytest.mark.parametrize('local_exc,asks_live', _LOCAL_FAILURES,
+                         ids=_LOCAL_FAILURE_IDS)
+def test_the_woa23_source_asks_thredds_only_on_a_cache_miss(
+        monkeypatch, local_exc, asks_live):
+    asked = []
+
+    def fake_backend(point, *, backend, **kw):
+        asked.append(backend)
+        if backend == 'local':
+            raise local_exc
+        return 'live profile'
+
+    monkeypatch.setattr(sound_speed, '_fetch_ssp_backend', fake_backend)
+    if asks_live:
+        assert sound_speed.fetch_ssp((1.0, 2.0)) == 'live profile'
+        assert asked == ['local', 'opendap']
+    else:
+        with pytest.raises(DataFetchError, match='reports land'):
+            sound_speed.fetch_ssp((1.0, 2.0))
+        assert asked == ['local']
+
+
+@pytest.mark.parametrize('local_exc,asks_live', _LOCAL_FAILURES,
+                         ids=_LOCAL_FAILURE_IDS)
+def test_fetch_environment_asks_a_sources_live_twin_only_on_a_cache_miss(
+        local_exc, asks_live):
+    """A read answer ends that source and the chain moves to the next one;
+    a cache miss moves to the same source's live backend."""
+    from uacpy.data import environment as env_mod
+    asked = []
+
+    def call(token):
+        asked.append(token)
+        if token[1] == 'local':
+            raise local_exc
+        return 'value'
+
+    order = [('gebco', 'local'), ('gebco', 'api'), ('gmrt', 'gmrt')]
+    result, token = env_mod._resolve_cached(call, order, axis='bathymetry')
+    assert result == 'value'
+    expected = ([('gebco', 'local'), ('gebco', 'api')] if asks_live
+                else [('gebco', 'local'), ('gmrt', 'gmrt')])
+    assert asked == expected
+
+
+@pytest.mark.parametrize('local_exc,asks_live', _LOCAL_FAILURES,
+                         ids=_LOCAL_FAILURE_IDS)
+def test_a_bottom_providers_live_twin_is_asked_only_on_a_cache_miss(
+        monkeypatch, local_exc, asks_live):
+    import dataclasses
+    from uacpy.data import environment as env_mod
+    asked = []
+
+    def resolve(cached):
+        def fetch(*a, **kw):
+            asked.append(cached)
+            if cached:
+                raise local_exc
+            return 'live bottom'
+        return fetch, fetch
+
+    provider = dataclasses.replace(env_mod._BOTTOM_BY_ID['emodnet'],
+                                   resolve=resolve)
+    monkeypatch.setitem(env_mod._BOTTOM_BY_ID, 'emodnet', provider)
+    monkeypatch.setitem(env_mod._BOTTOM_BY_ID, 'pelagic', dataclasses.replace(
+        env_mod._BOTTOM_BY_ID['pelagic'],
+        resolve=lambda cached: ((lambda *a, **k: 'pelagic bottom'),) * 2))
+    bottom, name = env_mod._fetch_bottom(('emodnet', 'pelagic'), (1.0, 2.0),
+                                         transect=False)
+    if asks_live:
+        assert (bottom, name, asked) == ('live bottom', 'emodnet',
+                                         [True, False])
+    else:
+        assert (bottom, name, asked) == ('pelagic bottom', 'pelagic', [True])
+
+
+def test_the_backend_tokens_are_not_public_source_names():
+    with pytest.raises(ConfigurationError, match="bathymetry source"):
+        data.fetch_bathy((1.0, 2.0), source='api')
+    with pytest.raises(ConfigurationError,
+                       match="fetch_ssp: unknown ssp source 'opendap'"):
+        sound_speed.fetch_ssp((1.0, 2.0), source='opendap')
+
+
+# ── dict results carry a DataProvenance, not a text label ──────────────────
+
+def _dict_waves(monkeypatch):
+    from uacpy.data import ww3_live
+    from uacpy.data.sources import SOURCES, DataProvenance
+    monkeypatch.setattr(ww3_live, 'hs_at', lambda point, **kw: (
+        1.5, DataProvenance(source=SOURCES['ww3'],
+                            requested_point=tuple(point))))
+    record = data.fetch_waves((50.0, 0.0), date='2020-01-01', source='ww3')
+    return vars(record), 'ww3'
+
+
+def _dict_argo(monkeypatch):
+    from uacpy.data import argo
+    csv = (",".join(argo._COLUMNS) + "\n" + "," * (len(argo._COLUMNS) - 1)
+           + "\n"
+           "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,5,20,36,1,1,1,1,"
+           "R,NaN,NaN,NaN,,,\n"
+           "4900001,1,A,2024-06-04T00:00:00Z,30.1,-40.1,100,15,36.2,1,1,1,1,"
+           "R,NaN,NaN,NaN,,,\n")
+    monkeypatch.setattr(argo, 'http_get', lambda url, **kw: csv)
+    profile = data.fetch_argo_profile((30.0, -40.0), date='2024-06-04')
+    return vars(profile), 'argo'
+
+
+def _dict_substrate(monkeypatch):
+    import json
+    from uacpy.data import seabed
+    body = json.dumps({'features': [{'properties': {
+        'folk_5cl': 2, 'folk_5cl_txt': '2. Sand'}}]})
+    monkeypatch.setattr(seabed, 'http_get', lambda url, **kw: body)
+    return vars(data.fetch_emodnet_substrate((56.0, 3.0))), 'emodnet'
+
+
+def _dict_seabed_local(monkeypatch):
+    pytest.importorskip('shapely')
+    return vars(data.fetch_emodnet_substrate_local((55.0, 2.5))), 'emodnet'
+
+
+def _dict_sediment_sample(monkeypatch):
+    return vars(data.fetch_sediment_sample((30.51, -40.51))), 'grainsize'
+
+
+def _dict_lithology(monkeypatch):
+    from uacpy.data import diesing_local
+    monkeypatch.setattr(diesing_local, '_class_code',
+                        lambda lat, lon: (1, None))
+    return vars(data.fetch_seafloor_lithology((0.0, -150.0))), 'diesing'
+
+
+def _dict_crust1(monkeypatch):
+    column = (np.array([0, -4, -4, -5, -5, -5, -10, -20, -30], float),
+              np.array([1.5, 3.8, 2.0, 0, 0, 5.0, 6.5, 7.1, 8.1]),
+              np.array([0, 1.9, 0.6, 0, 0, 2.7, 3.7, 4.0, 4.5]),
+              np.array([1.02, 0.9, 1.9, 0, 0, 2.6, 2.8, 3.0, 3.3]))
+    monkeypatch.setattr(crust1_local, '_column', lambda lat, lon: column)
+    return vars(data.fetch_crust1_profile((30.5, -40.5))), 'crust1'
+
+
+def _dict_mars(monkeypatch):
+    from uacpy.data import mars
+    feature = {'geometry': {'coordinates': [151.31, -34.0, -50]},
+               'properties': {'MEAN_GRAIN_SIZE': 500.0}}
+    monkeypatch.setattr(mars, '_query_bbox', lambda *a, **kw: [feature])
+    return vars(data.fetch_mars_sediment((-34.0, 151.3))), 'mars'
+
+
+@pytest.mark.parametrize('fetch', [
+    _dict_waves, _dict_argo, _dict_substrate, _dict_seabed_local,
+    _dict_sediment_sample, _dict_lithology, _dict_crust1, _dict_mars,
+], ids=lambda f: f.__name__[len('_dict_'):])
+def test_every_dict_fetcher_carries_a_data_provenance(fetch, cache,
+                                                      monkeypatch):
+    result, source_id = fetch(monkeypatch)
+    assert isinstance(result['provenance'], data.DataProvenance)
+    assert result['provenance'].source.id == source_id
+    assert result['provenance'].requested_point is not None
+    assert 'source' not in result and 'dataset' not in result
+
+
+@pytest.mark.parametrize('bottom_fetch, dict_fetch, point', [
+    ('fetch_bottom_grainsize', 'fetch_sediment_sample', (30.51, -40.51)),
+    ('fetch_bottom_emodnet_local', 'fetch_emodnet_substrate_local', (55.0, 2.5)),
+])
+def test_a_bottom_cites_the_record_of_the_sample_it_was_built_from(
+        bottom_fetch, dict_fetch, point, cache, monkeypatch):
+    pytest.importorskip('shapely')
+    records = []
+    module = importlib.import_module(getattr(data, dict_fetch).__module__)
+    original = getattr(module, dict_fetch)
+
+    def spy(*a, **kw):
+        records.append(original(*a, **kw))
+        return records[-1]
+    monkeypatch.setattr(module, dict_fetch, spy)
+    bottom = getattr(module, bottom_fetch)(point)
+    assert bottom.data_sources == (records[0].provenance,)
+    assert bottom.data_sources[0] is records[0].provenance

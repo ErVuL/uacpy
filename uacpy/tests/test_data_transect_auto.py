@@ -14,6 +14,17 @@ from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError
 
 
+@pytest.fixture(autouse=True)
+def _no_installed_cache(monkeypatch, tmp_path):
+    """The per-layer fetchers are cache-first; the stubbed network paths
+    these tests check must not be pre-empted by the workspace's installed
+    grids. A test that wants a cache points UACPY_DATA_CACHE at its own."""
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'no_cache'))
+    from uacpy.data import _cache
+    _cache.invalidate_grids()
+
+
+
 # ── the reduction primitive ─────────────────────────────────────────────────
 
 def test_run_representatives_anchor_and_monotonic():
@@ -77,7 +88,7 @@ def test_ssp_plan_auto_collapses_to_distinct_cells():
 
 
 def test_ssp_plan_auto_anchors_full_span():
-    from uacpy.data._geo import geodesic_waypoints
+    from uacpy.core.geo import geodesic_waypoints
     a, b = (10.0, 0.0), (10.0, 5.0)
     _, _, dense = geodesic_waypoints(a, b, 200)
     p = ss.ssp_transect_plan(a, b, n_points='auto')
@@ -92,7 +103,7 @@ def test_ssp_plan_explicit_and_cap():
     p2 = ss.ssp_transect_plan((0.0, -60.0), (0.0, 60.0),
                               n_points='auto', max_points=12)
     assert p2['n_points'] <= 12
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match='n_points must be >= 2'):
         ss.ssp_transect_plan((0.0, 0.0), (0.0, 1.0), n_points=1)
 
 
@@ -116,9 +127,9 @@ def test_ssp_fetch_auto_fetches_once_per_cell(monkeypatch):
         calls.append(cell)
         c0 = 1500.0 + 10.0 * cell
         return SoundSpeedProfile(depths=np.array([0.0, 100.0]),
-                                 data=np.array([[c0], [c0 + 20.0]]))
+                                 sound_speed=np.array([[c0], [c0 + 20.0]]))
 
-    monkeypatch.setattr(ss, 'fetch_ssp', fake_fetch_ssp)
+    monkeypatch.setattr(ss, '_fetch_ssp_backend', fake_fetch_ssp)
     a, b = (10.0, -2.5), (10.0, 3.5)
     plan = ss.ssp_transect_plan(a, b, n_points='auto')
     prof = ss.fetch_ssp_transect(a, b, n_points='auto')
@@ -181,6 +192,16 @@ def test_bathy_plan_reports_the_uncapped_native_count(monkeypatch):
                                   max_points=50)
 
 
+def test_the_bathy_cap_warning_quotes_the_spacing_of_n_minus_1_intervals(
+        monkeypatch):
+    monkeypatch.setattr(bath, '_fetch_depths',
+                        lambda points, **kw: np.full(len(points), 1500.0))
+    a, b = (0.0, -40.0), (0.0, 40.0)
+    spacing_km = bath.transect_length(a, b) / 1000.0 / (50 - 1)
+    with pytest.warns(UserWarning, match=rf"~{spacing_km:.1f} km spacing"):
+        bath.fetch_bathy_transect(a, b, n_points='auto', max_points=50)
+
+
 def test_bathy_plan_rejects_a_degenerate_count():
     with pytest.raises(ConfigurationError, match='n_points'):
         bath.bathy_transect_plan((0.0, 0.0), (1.0, 1.0), n_points=1)
@@ -194,7 +215,7 @@ def test_module_all_covers_what_the_package_reexports():
     from uacpy.data import seaice_local
     expected = {
         bath: ['fetch_bathy', 'fetch_bathy_transect', 'bathy_transect_plan',
-               'fetch_bathy_grid', 'transect_length'],
+               'fetch_bathy_grid', 'transect_length', 'transect_waypoints'],
         ss: ['fetch_ssp', 'fetch_ssp_transect', 'ssp_transect_plan',
              'fetch_ts_profile', 'assemble_range_dependent',
              'extend_ssp_below_data'],
@@ -229,7 +250,7 @@ def test_max_points_two_plans_a_transect():
 
 
 def test_range_dependent_bottom_refuses_a_one_point_budget():
-    from uacpy.core.bottom import BoundaryProperties
+    from uacpy.core.boundary import BoundaryProperties
     from uacpy.data.sediment import range_dependent_bottom_along
     with pytest.raises(ConfigurationError, match='max_points'):
         range_dependent_bottom_along(
@@ -306,7 +327,8 @@ def test_every_transect_rejects_a_bad_n_points_the_same_way(
     and an untyped ``TypeError`` at four, and 'x' was an untyped ``ValueError``
     at seven of them."""
     mod = importlib.import_module(module_name)
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError,
+                       match='n_points must be >= 2|is not a sample count'):
         getattr(mod, func_name)((45.0, -30.0), (46.0, -30.0),
                                 n_points=bad, **kwargs)
 
@@ -316,7 +338,9 @@ def test_range_dependent_bottom_rejects_a_bad_n_points():
     from uacpy.core.environment import BoundaryProperties
     from uacpy.data.sediment import range_dependent_bottom_along
     for bad in (1, 0, -3, 2.7, 'x', None):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(
+                ConfigurationError,
+                match='n_points must be >= 2|is not a sample count'):
             range_dependent_bottom_along(
                 lambda lat, lon: BoundaryProperties.from_grain_size(3.0),
                 (0.0, 0.0), (1.0, 0.0), bad, source_label='test')

@@ -30,7 +30,7 @@ aspect of the ocean:
 | `bottom` | `Bottom` | seabed acoustic properties | 1600 m/s / 1.5 g/cm³ / 0.5 dB/λ half-space |
 | `surface` | `Surface` | top-boundary acoustic properties | vacuum (pressure release) |
 | `altimetry` | `Altimetry` or `None` | sea-surface **shape** vs range | `None` (flat, z = 0) |
-| `absorption` | `Absorption` or `None` | water-column volume attenuation | `None` |
+| `absorption` | `Absorption`, `AbsorptionCoefficient` or `None` | water-column volume attenuation | `None` |
 | `water_density` | `float` (g/cm³) | sea-water density every deck writes for the water column | 1.027 |
 
 Only `bathymetry` is required. Every other argument has a physically sensible
@@ -78,7 +78,8 @@ env = uacpy.Environment(
         ranges=[0.0, 20_000.0],
     ),
     altimetry=uacpy.generate_sea_surface(
-        20_000.0, wind_speed_mps=15.0, n_points=1200, seed=0),
+        20_000.0, wind_speed_kn=30.0, n_points=1200,
+        rng=np.random.default_rng(0)),
 )
 source = uacpy.Source(depths=40.0, frequencies=150.0)
 receiver = uacpy.Receiver(depths=np.linspace(40.0, 320.0, 8), ranges=18_000.0)
@@ -104,7 +105,7 @@ you would plot on its own has a `.plot()` — see [plotting](plotting.md).
 
 ```python
 env.depth        # 380.0 — read-only, maximum of env.bathymetry.depths
-env.max_range    # 20000.0 — largest range coordinate across every carrier
+env.range_max    # 20000.0 — largest range coordinate across every carrier
 ```
 
 **`bathymetry` is the sole seafloor source.** No other carrier declares where
@@ -133,22 +134,53 @@ uacpy.Environment(bathymetry=100.0, ssp=[(0, 1500), (200, 1480)]).depth
 | Call | Returns |
 |---|---|
 | `env.depth` | max seafloor depth (m) |
-| `env.max_range` | range extent across all carriers (m) |
-| `env.get_sound_speed(depth, range=0.0)` | `c` at depth(s), linear in depth |
-| `env.get_representative_depth(method)` | `'max'`/`'median'`/`'mean'`/`'min'`/`'initial'` |
+| `env.range_max` | range extent across all carriers (m) |
+| `env.ssp.sound_speed_at(depths, range=0.0, method='linear')` | `c` at depth(s) |
+| `env.bathymetry.collapse_range(method)` | `'max'`/`'median'`/`'mean'`/`'min'`/`'initial'` |
 | `env.is_range_dependent` | does *anything* vary with range? |
-| `env.has_range_dependent_bathymetry` / `..._ssp` / `..._bottom` | per-axis |
-| `env.has_layered_bottom` / `has_range_dependent_layered_bottom` | bottom shape |
-| `env.has_elastic_bottom` / `has_elastic_surface` | is there shear? |
+| `env.bathymetry.is_range_dependent` / `env.ssp.is_range_dependent` / `env.bottom.is_range_dependent` / `env.surface.is_range_dependent` | per-axis: more than one range node |
+| `env.bathymetry.varies_with_range` | do the depths change with range? |
+| `env.bottom.is_layered` | are there sediment layers? |
+| `env.bottom.is_elastic` / `env.surface.is_elastic` | is there shear? |
 | `env.copy()` | deep copy — every carrier duplicated |
 
-`get_sound_speed` is always **linear** in depth regardless of the interpolation
+`ssp.sound_speed_at` interpolates linearly unless you pass `method=`, whatever
 scheme a model will use, and warns if you ask outside the profile (the value is
 held flat at the nearest endpoint, never fabricated).
 
-The `has_*` predicates are the same ones the collapse machinery reads in
+The carriers' `is_*` predicates are the same ones the collapse machinery reads in
 [§7](#7-collapse-policy), so they tell you in advance what a model will complain
 about.
+
+### Saving an environment
+
+An environment saves two ways, and reads back through its constructor, so a
+loaded one passes every check a new one does and runs exactly as the one saved:
+
+```python
+np.savez('env.npz', **env.to_dict())                       # plain arrays
+env = uacpy.Environment.from_dict(dict(np.load('env.npz', allow_pickle=True)))
+
+env.to_netcdf('env.nc')                                     # one group per carrier
+env = uacpy.Environment.from_netcdf('env.nc')
+```
+
+`to_dict()` nests every carrier's own `to_dict()` under its public class name;
+the provenance is written by source id (`'gebco'`, `'woa23'`, …) with the fetch's
+actual date and point, and restored from the catalogue. The NetCDF file has one
+group per carrier — `bathymetry`, `ssp`, `altimetry`, `bottom`, `surface`,
+`absorption` — each the carrier's `to_xarray()`: the gridded values (the sound
+speed on `(depth, range)`, the seafloor depth and the surface height on
+`range`, α on `(depth, frequency)`) as variables with CF `units`, every other
+field as JSON in the group's `uacpy_fields` attribute. It needs a NetCDF engine
+that writes groups (netCDF4 or h5netcdf, through the `uacpy[xarray]` extra).
+
+Every carrier has the same calls on its own: `to_dict()` / `from_dict()`, and
+`to_xarray()` / `from_xarray()`. `Bottom`, `SeabedColumn` and `Surface` also
+have `to_dataframe()`: one row per layer, then the half-space, with its `top`
+and `bottom` below the seafloor (one row per range node for a surface);
+`Receiver.grid()` gives the `(Z, R)` depth and range of every receiver,
+depth-first like a `(depth, range)` Field.
 
 ---
 
@@ -190,14 +222,16 @@ and inside the native model file formats.
 
 `generate_sea_surface` draws a Pierson–Moskowitz realisation and returns an
 `(n_points, 2)` array of `(range, height)`, ready to hand to
-`Environment(altimetry=...)`:
+`Environment(altimetry=...)`; `Altimetry.from_sea_state` takes the same
+arguments and returns the `Altimetry` carrier itself:
 
 ```python
 from figure_scripts._common import sloping_shelf   # 100 m shelf → 400 m over 20 km
 
 env, _, _ = sloping_shelf()
 altimetry = uacpy.Altimetry.coerce(uacpy.generate_sea_surface(
-    2000.0, wind_speed_mps=12.0, n_points=800, seed=7))
+    2000.0, wind_speed_kn=24.0, n_points=800,
+    rng=np.random.default_rng(7)))
 
 altimetry.plot(title='Altimetry — sea-surface height, positive up')
 env.bathymetry.plot(title='Bathymetry — seafloor depth, positive down')
@@ -207,16 +241,21 @@ env.bathymetry.plot(title='Bathymetry — seafloor depth, positive down')
 
 The two panels are the same kind of object with opposite sign conventions:
 the altimetry axis points up and crosses zero, the bathymetry axis points down
-and cannot. `wind_speed_mps` is the wind at 19.5 m (the Pierson–Moskowitz
-convention); significant wave height is `Hs ≈ 0.021·U²`, so 12 m/s gives
-`Hs ≈ 3 m` — consistent with the ±2 m excursions above. Pass `seed=` for a
-reproducible realisation.
+and cannot. `wind_speed_kn` is the wind at 19.5 m (the Pierson–Moskowitz
+convention), in knots; significant wave height is `Hs ≈ 0.021·U²` with `U`
+in m/s, so 24 kn (12.3 m/s) gives `Hs ≈ 3 m` — consistent with the ±2 m
+excursions above. Pass
+`rng=np.random.default_rng(seed)` for a reproducible realisation.
 
 **Altimetry is surface *shape*, `Surface` is surface *properties*.** A rough
 sea surface that is still pressure-release is `altimetry=`; an ice canopy with
 its own sound speed and shear is `surface=`. They are independent, and models
 support them independently — [Bellhop](../models/bellhop.md) and
-[RAM](../models/ram.md) are the only two that take altimetry natively.
+[RAM](../models/ram.md) are the only two that take altimetry natively, and
+RAM only its depressions: `ramsurf` clamps every crest above `z = 0` to the
+mean sea level (with a `FallbackWarning`), which flattens about half of a
+two-sided surface such as `generate_sea_surface`'s. A two-sided wave field
+needs Bellhop.
 
 ---
 
@@ -234,7 +273,8 @@ range-independent case.
 | `SoundSpeedProfile.from_isovelocity(depth_max, sound_speed=1500.0)` | constant column |
 | `SoundSpeedProfile.from_munk(depth_max, n_points=101)` | deep-water canonical profile |
 | `SoundSpeedProfile.from_temperature_salinity(depths, T, S)` | from in-situ `T(z)` and `S(z)` |
-| `SoundSpeedProfile.from_2d(depths, ranges, matrix)` | range-dependent `c(z, r)` |
+| `SoundSpeedProfile.from_2d(depths, ranges, matrix)` | range-dependent `c(z, r)` on one shared depth axis |
+| `SoundSpeedProfile.from_casts(ranges, casts, *, depths=None)` | range-dependent from casts on their own depth grids: sorted, repeated depths averaged, interpolated onto the union of depths, a short cast holding its deepest value |
 
 `Environment(ssp=…)` coerces the shorthands for you: `None` → isovelocity at
 1500 m/s spanning the water column, a scalar → isovelocity at that speed, a
@@ -271,19 +311,19 @@ canonical deep-water profile with its axis at 1300 m (dashed) and `c_min` =
 `from_munk` is analytic, so those numbers are fixed by the formula, not by the
 `depth_max` you request; `n_points` only sets the sampling.
 
-### Shape declares, the model interpolates
+### The kind declares, the model interpolates
 
 This split matters and is easy to trip over:
 
 - The **carrier** declares what its samples *are*, via
-  `SoundSpeedProfile(shape=…)`: `'measured'` (default), `'isovelocity'`,
+  `SoundSpeedProfile(kind=…)`: `'measured'` (default), `'isovelocity'`,
   `'munk'`, `'analytic'` or `'n2linear'`.
 - The **model** decides how to *connect* those samples, via
   `Model(interp_ssp=…)`: `'linear'`, `'pchip'`, `'cubic'`, `'quad'`,
   `'n2linear'`, `'analytic'`, or `None` for auto.
 
-`shape` is informational metadata with exactly one exception:
-`shape='isovelocity'` forces constant interpolation, because any connection
+`kind` is informational metadata with exactly one exception:
+`kind='isovelocity'` forces constant interpolation, because any connection
 scheme over constant data is constant anyway. Every other value leaves the
 choice to the model.
 
@@ -330,7 +370,7 @@ profiles:
 ssp.at(depth=50.0, range=10_000.0)   # nearest sample on both axes
 ssp.eval(depth=50.0, range=10_000.0) # interpolated, method='linear'|'nearest'|'cubic'
 ssp.isel(depth=0, range=-1)          # positional
-ssp.collapse('mean')                 # 2-D → 1-D: 'r0' | 'rmax' | 'mean' | 'median'
+ssp.collapse_range('mean')           # 2-D → 1-D: 'r0' | 'rmax' | 'mean' | 'median'
 
 ssp.at(depth=50.0)                   # ConfigurationError on a 2-D profile
 ```
@@ -411,7 +451,7 @@ Predicates tell you which of the four you have: `bottom.is_layered`,
 
 Nine class-typical materials, keyed by name:
 
-| | `c_p` (m/s) | `ρ` (g/cm³) | `α_p` (dB/λ) | `c_s` (m/s) | `α_s` (dB/λ) | `ϕ` |
+| | `c_p` (m/s) | `ρ_b/ρ_w` | `α_p` (dB/λ) | `c_s` (m/s) | `α_s` (dB/λ) | `ϕ` |
 |---|--:|--:|--:|--:|--:|--:|
 | `clay` | 1500 | 1.5 | 0.2 | 80 | 1.0 | 8.8 |
 | `silt` | 1575 | 1.7 | 1.0 | 80 | 1.5 | 5.4 |
@@ -421,7 +461,16 @@ Nine class-typical materials, keyed by name:
 | `chalk` | 2400 | 2.2 | 0.2 | 1000 | 0.5 | — |
 | `limestone` | 3000 | 2.4 | 0.1 | 1500 | 0.2 | — |
 | `basalt` | 5250 | 2.7 | 0.1 | 2500 | 0.2 | — |
-| `granite` | 5750 | 2.65 | 0.1 | 3000 | 0.2 | — |
+| `granite` | 5750 | 2.58 (2.65 g/cm³) | 0.1 | 3000 | 0.2 | — |
+
+The density column is Table 1.3's **ratio** `ρ_b/ρ_w`, which is what the table
+prints and what propagation depends on. The stored `density` (g/cm³) is that
+ratio times the package's one water density, 1.027 g/cm³
+(`uacpy.DEFAULT_WATER_DENSITY_G_CM3`, what every deck writes for the water) —
+so `get_material('sand')['density']` is 1.951, and a run in default water sees
+exactly the tabulated 1.9. With `Environment(water_density=1.0)` the ratio
+rises by 2.7 %; to reproduce a textbook curve drawn against `ρ_w = 1`, pass the
+ratio itself (`density=1.9`). Granite is Ainslie's absolute 2.65 g/cm³.
 
 Each entry also carries `porosity` (%) and `roughness` (m). `list_materials()`
 returns the names, `get_material(name)` a copy of the dict. `ϕ` is the mean
@@ -515,7 +564,7 @@ column.layer_depths(seafloor_depth=100.0) # [(100.0, 110.0), (110.0, 135.0)]
 
 bottom.halfspace_at(range=2000.0)         # nearest column's half-space (step)
 bottom.halfspace_at(range=2000.0, interp='linear')  # opt-in blend, pure half-spaces only
-bottom.max_total_thickness()
+bottom.total_thickness_max()
 bottom.all_sound_speeds()                 # every real c_p in the seabed
 ```
 
@@ -536,16 +585,24 @@ and `interp='linear'` asks for it explicitly.
 surface, which is right for open water.
 
 ```python
-# Uniform ice canopy
-uacpy.Environment(bathymetry=200.0,
-                  surface=uacpy.BoundaryProperties.from_preset('chalk', elastic=True))
+from uacpy.data import sea_ice_surface
+
+# Uniform ice canopy: 3500 m/s, shear 1800 m/s, 0.9 g/cm³ (the SEA_ICE_*
+# constants, Jensen et al.); the argument is the ice concentration, 0-1
+ice = sea_ice_surface(1.0)
+uacpy.Environment(bathymetry=200.0, surface=ice)
 
 # Marginal ice zone: open water inshore, ice past 5 km
 uacpy.Environment(bathymetry=200.0, surface=[
     (0.0, uacpy.BoundaryProperties(acoustic_type='vacuum')),
-    (5000.0, uacpy.BoundaryProperties.from_preset('chalk', elastic=True)),
+    (5000.0, ice),
 ])
 ```
+
+`sea_ice_surface` returns `None` below the 15 % ice edge (open water), and
+`fetch_sea_ice_surface(point, date=…)` builds the same boundary from the
+concentration observed at a site. A rock preset is not ice: `chalk` is
+2400 m/s at 2.26 g/cm³, a canopy that would sink.
 
 A uniform `Surface` delegates attribute reads to its single node, so
 `env.surface.acoustic_type` and friends work without indexing. Like `Bottom`,
@@ -566,17 +623,17 @@ it with a warning naming what was dropped.
 
 What `Surface` and `altimetry` between them do **not** carry is a bubble layer.
 Wind-driven bubbles change the sound speed in the top few metres — a void
-fraction of only 1e-6 drops `bubble_sound_speed` by 15.5 m/s (1539.1 → 1523.6 at
-its default reference) — and add an excess attenuation no boundary property
+fraction of only 1e-6 drops `bubble_sound_speed` by 14.4 m/s (1500.0 → 1485.6 at
+its default, the nominal 1500 m/s; Wood's low-frequency limit) — and add an excess attenuation no boundary property
 reproduces. `uacpy.core.acoustics` has `bubble_sound_speed`, `bubble_resonance`
 and `bubble_surface_loss` for quantifying this by hand, but none of the three
 feeds an `Environment`: they are calculators, not carriers. Note also that
-`bubble_surface_loss` returns a per-bounce amplitude multiplier in `(0, 1]` and
-takes its angle in **radians**, unlike `bottom_loss_curve`.
+`bubble_surface_loss` returns a per-bounce amplitude multiplier in `(0, 1]`,
+at a grazing angle in degrees (`grazing_deg`) like `bottom_loss_curve`.
 
-`uacpy.core.acoustics.critical_angle(c_bottom, c_water=1500.0)` is the
+`uacpy.acoustics.critical_angle(bottom_sound_speed, water_sound_speed=1500.0)` is the
 companion scalar — **seabed speed first** — returning the grazing angle
-`arccos(c_water/c_bottom)` in degrees below which a faster seabed totally
+`arccos(water_sound_speed/bottom_sound_speed)` in degrees below which a faster seabed totally
 reflects, and `nan` when the seabed is the slower of the two so there is no
 critical angle to report (`critical_angle(1800, 1500)` is 33.6°;
 `critical_angle(1500, 1800)` is `nan`). It is the same ratio-of-speeds angle as
@@ -593,7 +650,7 @@ column absorbs the same energy whichever model runs over it. So it lives on
 `env.absorption`, and each model writer reads it to emit the right native
 parameters.
 
-**There is no default, and the models that can use one now say so.** The
+**There is no default, and the models that can use one say so.** The
 Acoustics Toolbox adds volume attenuation only when the option string asks
 for it (`misc/AttenMod.f90:35-38`; the `SELECT CASE` at `:84` has no default
 branch), so `absorption=None` is lossless water. That is the right default —
@@ -602,14 +659,27 @@ reproducing the engine's own answer for the same deck — but it is easy to
 leave in place by accident: at 40 kHz over a kilometre Thorp puts the
 omission at 12.9 dB, and at 20 kHz over 5 km a Kraken run measured 21.3 dB
 against Francois-Garrison. Bellhop,
-Kraken, Scooter, SPARC and RAM therefore warn when the omission is worth
-more than a decibel over the track. Bounce does not, although the option
+Kraken, Scooter, RAM and the OASES programs therefore warn when the omission is worth
+more than a decibel over the track. SPARC does not: its march is lossless
+whatever the environment says (`sparc.f90:221` keeps the real part of the
+sound speed only), so it warns instead when an absorption or a seabed
+attenuation is set, since neither is applied (see
+[SPARC](../models/sparc.md#the-march-is-lossless)). Bounce does not, although the option
 letter reaches its engine: it tabulates a reflection coefficient at an
 interface, and its `receiver` is read only for `range_max`, which sizes the
 table's angular resolution, so the notice would quote that knob as a
-propagation distance. The OASES family does not warn either, because it does
-not carry `env.absorption` at all — it substitutes its own empirical law —
-and already says so when one is set. RAM carries it as a dB-per-wavelength
+propagation distance. OASES takes it as each water layer's attenuation in
+dB per wavelength, exact at the deck frequency; a multi-frequency deck (OASP,
+OASSP, an OAST or OASN sweep) carries one value per layer for the whole
+band, so across it the loss grows linearly in frequency. The value is
+evaluated at the minimax anchor: the frequency in the band whose line
+`α(f_a)·f/f_a` departs least, at its worst, from the law over the band and
+the water column (`uacpy.core.absorption.minimax_anchor_frequency`; the band
+centre when the law is already linear in frequency). The run warns when even
+that line departs from the law by more than 0.05 dB/km. With `absorption=None` its water is written
+lossless rather than left at the zero OASES would replace with its own
+Skretting-Leroy law. OASR's water is a lossless half-space, and it says so
+when an absorption is set. RAM carries it as a dB-per-wavelength
 profile on every backend (see [RAM](../models/ram.md), *Environment
 support*): the same `alpha(f, z)` the other wrappers hand their engines,
 evaluated per bin on a broadband sweep.
@@ -617,36 +687,48 @@ evaluated per bin on a broadband sweep.
 | Class | Parameters | Depth-dependent |
 |---|---|---|
 | `Thorp()` | none | no |
-| `FrancoisGarrison(temperature_c, salinity_psu, pH, z_bar_m, ph_scale='nbs')` | four required, plus the scale `pH` is on | yes |
+| `FrancoisGarrison(temperature=10, salinity=35, pH=8, ph_scale='nbs', depths=None)` | the water (reference water by default) and the scale `pH` is on; arrays over `depths` for a T/S profile | yes |
 | `Biological(layers=[(z_top, z_bottom, f0, Q, a0), …])` | per-layer resonance | yes, by layer |
 | `ConstantAbsorption(value_dB_per_wavelength)` | one | no |
 
 ```python
 freqs = np.logspace(1, 5.7, 400)
 
-uacpy.absorption_thorp(freqs).plot(label='Thorp')
-uacpy.absorption_francois_garrison(freqs, temperature_c=20.0,
-                                   salinity_psu=35.0, pH=8.0,
-                                   z_bar_m=50.0).plot()
-uacpy.absorption_francois_garrison(freqs, temperature_c=4.0,
-                                   salinity_psu=35.0, pH=8.0,
-                                   z_bar_m=3000.0).plot()
-uacpy.absorption_constant(freqs, value_dB_per_wavelength=1.0e-4).plot()
-uacpy.absorption_biological(freqs, layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)],
-                            depths=50.0).plot()
+fig, ax = uacpy.Thorp().table(freqs).plot(label='Thorp')
+uacpy.FrancoisGarrison(temperature=20.0, salinity=35.0,
+                       pH=8.0).table(freqs, depths=50.0).plot(ax=ax)
+uacpy.FrancoisGarrison(temperature=4.0, salinity=35.0,
+                       pH=8.0).table(freqs, depths=3000.0).plot(ax=ax)
+uacpy.ConstantAbsorption(value_dB_per_wavelength=1.0e-4).table(freqs).plot(ax=ax)
+uacpy.Biological(layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)]).table(
+    freqs, depths=50.0).plot(ax=ax)
 ```
 
 ![Absorption models](figures/env_absorption.png)
 
-Evaluating and drawing are separate steps. `model.alpha(frequencies)` returns
-an `AbsorptionCoefficient` — α in stated units, carrying the frequency axis and
-the model that made it — and the carrier draws itself. `depths=` takes a scalar
-(evaluate there, one curve) or a sequence (a depth axis, drawn as an α(f, z)
-heatmap); without it, each model uses its own reference depth, which for
-Francois–Garrison is its `z_bar_m`. Every model has both spellings — `absorption_thorp`,
-`absorption_francois_garrison`, `absorption_biological` and
-`absorption_constant` are the function forms of the four classes, and return
-the same carrier.
+**One object per law.** The law is the thing you build, hand to an
+environment, save and load; `law.table(frequencies, depths=None)` evaluates it
+into an `AbsorptionCoefficient` — α in stated units (`.data`, read-only
+through `.values()`), carrying the frequency axis and the law that made it
+(`.model`, `.parameters`) — and the carrier draws itself. `depths=` takes a
+scalar (evaluate there, one curve) or a sequence (a depth axis, drawn as an
+α(f, z) heatmap); without it, a law is drawn at the surface (0 m), and a
+Francois–Garrison profile on its own depths. `FrancoisGarrison` takes the
+water as `temperature`, `salinity` and `pH`, the names and the
+reference-water defaults (10 °C, 35 PSU, pH 8) of
+`absorption_francois_garrison`, so `FrancoisGarrison().table(f)` is that
+formula's surface curve like `Thorp().table(f)` is Thorp's. The law has no
+depth of its own: the formula's depth (pressure) term varies down the
+column, so every evaluation — `table`, `alpha_dB_per_m`, every engine —
+takes the depth it is evaluated at, and every engine sees the same α(z). The
+carrier's
+`.parameters` records the values used (`FrancoisGarrison(**a.parameters)` is
+the law again). The formulas under them take and return plain arrays in
+dB/km, named `absorption_<model>` like `sound_speed_mackenzie` —
+`uacpy.acoustics.absorption_thorp(f, depth=None)`,
+`uacpy.acoustics.absorption_francois_garrison(f, temperature, salinity, pH,
+depth)` and `uacpy.acoustics.absorption_biological(f, f0_hz, Q, a0)`, one
+biological layer's resonance.
 
 Reading the curves:
 
@@ -679,18 +761,135 @@ Reading the curves:
   CO2SYS uses (+0.10 at 4 °C, +0.15 at 25 °C at S = 35), which raises the
   absorption below 1 kHz by about 20 %; `fetch_environment(...,
   with_absorption=True)` does this for the pH it fetches. A hand-typed
-  `pH=8.0` stays on NBS. `uacpy.core.absorption.ph_to_nbs` is the conversion
-  on its own.
+  `pH=8.0` stays on NBS. `uacpy.acoustics.ph_to_nbs` is the conversion on its
+  own.
 - **ConstantAbsorption** is flat in dB/**wavelength**, which is a slope-1 line
   in dB/km on log-log: `α[dB/m] = α[dB/λ]·f/c`. It is a calibration knob, not a
   physical model.
 - **Biological** is a Lorentzian fish-bladder resonance per layer, applied only
   within `[z_top, z_bottom]`. The peak at `f0` is `a0·Q²` (here
-  0.02 × 4² = 0.32 dB/km) and the tail settles at `a0`.
+  0.02 × 4² = 0.32 dB/km), and far above `f0` it settles at
+  `a0·Q²/(Q² + 1)` (0.0188 dB/km here, 0.94·`a0`). The Acoustics
+  Toolbox engines (Bellhop, Kraken, Scooter, SPARC) evaluate the law only at
+  sound-speed-profile nodes (`misc/AttenMod.f90:103-104`) and interpolate
+  between them, so their deck writers add a node on every layer edge inside
+  the water column and one 0.01 m outside it; without those nodes a layer
+  that holds no SSP node would be lossless. Only a piecewise-linear profile
+  (`interp_ssp='linear'` or `'n2linear'`) takes the extra nodes unchanged:
+  under `'pchip'` or `'spline'` a layer edge inside the column is refused
+  with a `ConfigurationError`, because the spline rings on the step in the
+  imaginary sound speed and PCHIP reshapes the profile around the added
+  nodes. RAM samples the layer edges itself and OASES averages the law over
+  each water layer, so neither needs the nodes.
+
+### Absorption from real water: a profile or a table
+
+One `T S pH` row describes one water. A stratified column is several:
+on a mid-latitude column (22 °C at the surface, 4 °C at 2 km) a single row
+is off by tens of percent at the ends of the column. So the temperature,
+salinity and pH of Francois–Garrison each take, mixed freely, a number, a
+1-D array on the shared `depths=`, or `(depth, value)` pairs on depths of
+their own (the convention of `SoundSpeedProfile.from_pairs`). Each property
+is kept on its own depth axis and interpolated separately at the depth
+evaluated (linear between its samples, its end values held beyond them; the
+formula's depth term takes the depth asked). This is the one water-property
+rule every T/S/pH input in uacpy follows — the `sound_speed_*` and
+`absorption_*` formulas and `SoundSpeedProfile.from_temperature_salinity`
+too, which with pairs builds its profile on their depths (see
+[utilities](utilities.md#sound-speed)). Build the law, look at its table,
+then hand the law to the environment.
+
+```python
+z = np.array([0.0, 30.0, 60.0, 200.0])        # m
+T = np.array([22.0, 21.0, 12.0, 10.0])        # °C: a summer thermocline
+S = np.array([35.0, 35.0, 34.8, 34.9])        # psu
+freqs = np.logspace(3, 5, 60)
+
+water = uacpy.FrancoisGarrison(temperature=T, salinity=S, depths=z,
+                               pH=[(0.0, 8.1), (500.0, 8.0)])   # pairs
+water           # FrancoisGarrison(T 10–22 °C (4 depths), S 34.8–35 psu (4 depths), pH 8–8.1 (2 depths))
+table = water.table(freqs, depths=z)
+table           # AbsorptionCoefficient(francois_garrison, T 10–22 °C (4 depths), ...)
+table.plot()    # the α(f, z) heatmap
+
+env = uacpy.Environment(bathymetry=200.0, ssp=1510.0, bottom='sand',
+                        absorption=water)
+field = uacpy.Kraken().run(env, uacpy.Source(depths=20.0, frequencies=10000.0),
+                           uacpy.Receiver(depths=[20.0, 100.0],
+                                          ranges=np.linspace(500.0, 5000.0, 10)))
+```
+
+`uacpy.data.fetch_environment(point, with_absorption=True)` builds the same
+profile from the site's fetched T/S column
+(`FrancoisGarrison.from_temperature_salinity`, whose `collapse_to_depth=`
+keeps one row instead), with the cached GLODAP pH column as `(depth, pH)`
+pairs on its own levels (one value at the column's mid-depth on the
+Copernicus BGC branch).
+
+What the environment does with a table:
+
+- The table a law computed (`law.table(f)`, its `.model` set) is refused —
+  `Environment(absorption=...)` takes the law itself, one object per law.
+- A measured α(f, z) with no law behind it, built directly as
+  `AbsorptionCoefficient(frequencies=f, data=alpha, units='dB/km',
+  depths=z)` (`model=None`) with `data` shaped depth × frequency, is used
+  as tabulated: linear in depth between its rows, linear in `log f` between
+  its frequencies. A run at a frequency outside the table is refused
+  (`ConfigurationError`): a table has no law to extrapolate with. Rows that
+  stop short of the water column are held at the end row, and the
+  environment says so (`ValidityWarning`). `env.absorption` prints as the
+  table, and the environment's repr shows `absorption=tabulated`.
+
+How each engine carries Francois–Garrison (one row or a profile) or a table
+(no Fortran change):
+
+- **Acoustics Toolbox, one frequency per deck** (Bellhop, Kraken, KrakenC,
+  Scooter, SPARC, Bounce): `TopOpt(4)` is blank and every water SSP row's
+  `alphaI` holds α at the deck frequency in
+  dB per local wavelength, `α(f, z)·c(z)/f`, which the solver turns back
+  into the same loss at that row's own sound speed. The law is sampled at
+  the SSP nodes and interpolated between them — a fetched environment's
+  profile comes from the same column, so its nodes are the T/S samples. A
+  broadband deck (`TopOpt(6)='B'`) re-applies those rows at every
+  frequency, linear in `f`, and warns (`NumericsWarning`) when that line
+  departs from the law by 0.05 dB/km or more somewhere in the band. Under
+  a range-dependent Bellhop profile (`'Q'`) the imaginary sound speed comes
+  from the `.env` rows alone (`Bellhop/sspMod.f90:520`), the range-0
+  column, so the range-0 α(z) is used at every range; the writer says so
+  (`FallbackWarning`) when the profile's speeds leave that column.
+- **Acoustics Toolbox, several frequencies per deck** (Kraken and Scooter
+  broadband, `TopOpt(6)='B'`): one Francois–Garrison water row is written as
+  AT's `'F'` row instead, exact in frequency, with `z_bar` at mid-water
+  column: AT evaluates the formula there and applies it at every depth
+  (`misc/AttenMod.f90:148-160`), and — unlike the water rows — in the
+  sediment layers and half-spaces too (`CRCI`, `misc/AttenMod.f90:84-110`).
+  The writer says so (`FallbackWarning`) when that one depth departs from the
+  formula at depth by 0.05 dB/km or more somewhere in the band and the
+  column (5-15 kHz in 20 °C water: 0.046 dB/km over 500 m, 0.055 over
+  600 m). A profile or a table stays in the frozen rows, with the band
+  check above.
+- **Bellhop broadband / time series** trace once, at the carrier: a profile
+  or a table does not scale from one frequency by one ratio, so the
+  synthesis applies it linearly in frequency and gives the same warning. One
+  Francois–Garrison row is scaled by its ratio `α(f)/α(fc)` at the surface,
+  which the pressure terms bend with depth (0.058 dB/km at most over
+  5-15 kHz in a 5 km column, against 0.54 for the linear line); the same
+  check measures that bend and warns past 0.05 dB/km.
+- **RAM** samples the law on its own grid and at every profile or table
+  row, per frequency bin.
+- **OASES** averages α over each water layer, as for every law.
+- **Kraken's modal loss** (`Modes.with_attenuation`) evaluates the law at the
+  mode depths.
+
+A Francois–Garrison on the reference water (10 °C, 35 psu) assigned over an
+environment's own water — `env.absorption = FrancoisGarrison(10, 35, 8)`
+replacing a fetched profile — gives a `ProvenanceWarning` naming both waters
+and the fix when they differ by more than 2 °C or 1 psu.
 
 Units throughout the public API are **dB/wavelength** for material attenuation
-and dB/km for the plotted volume curves; `uacpy.core.absorption.convert_attenuation_units`
-converts between dB/km, dB/m, dB/λ, Nepers/m, `Q` and `L`.
+and dB/km for the plotted volume curves; `uacpy.acoustics.convert_attenuation_units`
+converts between the unit strings `'dB/km'`, `'dB/m'`, `'dB/wavelength'`, `'Nepers/m'`,
+`'Q'` and `'L'` — spelled exactly so (the tables' `dB/λ` is `'dB/wavelength'`).
 
 ---
 
@@ -714,14 +913,14 @@ third.
 
 Before writing any input file, every model runs your environment through a
 projection step that checks each feature against its own capability flags and
-**collapses** anything it cannot take natively — emitting one `UserWarning` per
+**collapses** anything it cannot take natively — emitting one `FallbackWarning` per
 dropped feature, naming the feature, the method used, and the keyword that
 overrides it.
 
 ```
-UserWarning: Scooter does not support range-dependent bathymetry;
-collapsed to 300.0 m (method='max', range 100.0–300.0 m).
-Override via `collapse={'bathymetry': 'min'|'median'|'mean'|'max'|'initial'}`.
+FallbackWarning: Scooter does not support range-dependent bathymetry;
+collapsed to 380.0 m (method='max', range 90.0–380.0 m). Override via
+`collapse={'bathymetry': 'max'|'median'|'mean'|'min'|'initial'}`.
 ```
 
 Your `env` is never mutated — the model works on a copy.
@@ -767,9 +966,13 @@ it, and `altimetry` only supports `'drop'`.
 
 The bottom has two orthogonal axes and they collapse in a fixed order: the
 range axis first (to one column, layers intact), then the layer axis if needed.
-For a model that takes range dependence but not layers — Bellhop — that leaves
-a *range-dependent half-space* bottom rather than a single column, which is
-strictly more information than collapsing the other way round.
+For a model that takes range dependence but not layers that leaves a
+*range-dependent half-space* bottom rather than a single column, which is
+strictly more information than collapsing the other way round. Bellhop does
+that only with `auto_bounce=False`; by default it routes a layered seabed
+through BOUNCE, which keeps the layer stack and collapses the range axis to
+one column (`bottom_range='median'`) — the opposite trade
+([Bellhop](../models/bellhop.md) §3).
 
 ### Some defaults are per model
 
@@ -779,9 +982,9 @@ over both.
 
 | Model | Overrides |
 |---|---|
-| [Kraken](../models/kraken.md), [Scooter](../models/scooter.md), [SPARC](../models/sparc.md), [OASES](../models/oases.md) except OASR | `ssp='mean'`, `bottom_range='median'` |
+| [Scooter](../models/scooter.md), [SPARC](../models/sparc.md), [OASES](../models/oases.md) except OASR | `ssp='mean'`, `bottom_range='median'` |
 | [Bounce](../models/bounce.md), OASR | `bottom_range='median'` — the reflection-only engines leave the SSP on the global default |
-| [Bellhop](../models/bellhop.md), [RAM](../models/ram.md) | none — they take range dependence natively |
+| [Bellhop](../models/bellhop.md), [RAM](../models/ram.md), [Kraken](../models/kraken.md) | none — they take range dependence natively (Kraken segments bathymetry, SSP and bottom on its field path; `compute_modes` samples r = 0) |
 
 The pattern: a modal or spectral solver reduces a 2-D profile by averaging
 rather than by picking the source-end cast, because its answer depends on the
@@ -792,8 +995,10 @@ whole path.
 ```python
 env, source, _ = shelf_break()   # the §1 environment: RD layered bottom, rough surface
 
-# Bellhop takes range dependence and the rough surface natively. It has no
-# layered bottom, so every column is flattened to its half-space.
+# Bellhop(auto_bounce=False) takes range dependence and the rough surface
+# natively. It reads no layered bottom, so every column is flattened to its
+# half-space. (The default Bellhop() keeps the layers through BOUNCE and
+# collapses the range axis instead.)
 bellhop_view = env.copy()
 bellhop_view.bottom = env.bottom.collapse(layers='halfspace')
 
@@ -801,20 +1006,20 @@ bellhop_view.bottom = env.bottom.collapse(layers='halfspace')
 # the sea surface all go, but the layer stack survives intact.
 scooter_view = env.copy()
 scooter_view.bathymetry = uacpy.Bathymetry.coerce(
-    env.get_representative_depth('max'))
-scooter_view.bottom = env.bottom.select_range('median')
+    env.bathymetry.collapse_range('max'))
+scooter_view.bottom = env.bottom.collapse_range('median')
 scooter_view.altimetry = None
 ```
 
 ![Collapse](figures/env_collapse.png)
 
 One environment, three views. The reduced panels are built with the **public**
-carrier reductions — `Bottom.collapse(layers=…)`, `Bottom.select_range(…)`,
-`Environment.get_representative_depth(…)` — at each model's documented default
+carrier reductions — `Bottom.collapse(layers=…)`, `Bottom.collapse_range(…)`,
+`Bathymetry.collapse_range(…)` — at each model's documented default
 method, so each panel reproduces exactly what that model hands its writer.
 
 The averaging reductions have one boundary-type rule: `'mean'` / `'median'` on
-`Bottom.select_range` and `Surface.collapse` average only across columns/nodes
+`Bottom.collapse_range` and `Surface.collapse_range` average only across columns/nodes
 that share a single `acoustic_type` (blending, say, a vacuum node into a sand
 half-space would fold placeholders into the numbers). Over uniform `'file'` /
 `'precalc'` columns — where each column *is* a reflection-coefficient table,
@@ -823,9 +1028,11 @@ reducing only the roughness (the one genuine number those columns carry), and
 **raise** when the files differ: tables cannot be blended, so pick a column
 with `'r0'` / `'rmax'` instead.
 
-Bellhop keeps the slope, the two seabed columns and the rough surface, and
-loses only the sand and silt layers: past 10 km the fill turns to the pale
-chalk half-space that was underneath. Scooter keeps the layers and loses
+`Bellhop(auto_bounce=False)` keeps the slope, the two seabed columns and the
+rough surface, and loses only the sand and silt layers: past 10 km the fill
+turns to the pale chalk half-space that was underneath. The default `Bellhop()`
+keeps the slope and the surface too, but hands its seabed to BOUNCE, which
+keeps the layers of the median column and drops the range axis. Scooter keeps the layers and loses
 everything range-dependent — a flat 380 m column (`bathymetry='max'`) carrying
 the silt-over-chalk stack picked by `bottom_range='median'`, under a flat
 surface.
@@ -846,9 +1053,9 @@ comparison impossible to trust.
 plausible-looking field that answers a different question. The warning is the
 feature: it names what was dropped, so you can decide whether that mattered.
 
-**Refusing would be worse.** A first look at a shelf-break problem with Kraken
-is genuinely useful even though Kraken must collapse the seabed's range axis to
-get there. Turning that into a hard error would force you to hand-build a
+**Refusing would be worse.** A first look at a shelf-break problem with Scooter
+is genuinely useful even though Scooter must collapse the bathymetry, SSP and
+seabed range axes to get there. Turning that into a hard error would force you to hand-build a
 reduced environment — exactly the reduction the library just did for you, only
 undocumented and unwarned.
 
@@ -868,7 +1075,10 @@ shows what each model takes natively.
 **Units are SI, without exception.** Metres for depth, range and thickness;
 m/s for every sound speed; g/cm³ for density; dB/wavelength for material
 attenuation; Hz for frequency. Kilometres exist only on plot axes and inside
-native file formats.
+native file formats. The two classic slips warn at construction with a
+`ValidityWarning` that quotes the value meant: a sound speed under 10 m/s
+(typed in km/s) on a profile or a seabed, and a seabed density over 20
+(typed in kg/m³).
 
 **Depth is positive down, altimetry positive up.** Range is measured from the
 source, which sits at `r = 0`.
@@ -885,7 +1095,7 @@ cross-engine comparison because every engine agreed. `env.water_density`
 rows of every deck that has one — Acoustics Toolbox and Bellhop SSP rows,
 OASES water layers — and the engines that fix the water at 1 and read seabed densities
 as ratios (the four RAM codes, and BOUNCE, whose `R` is referenced to a unit
-density) receive each seabed density divided by it. `uacpy.core.acoustics.density(T, S) / 1000` gives the value for a measured
+density) receive each seabed density divided by it. `uacpy.acoustics.density(T, S) / 1000` gives the value for a measured
 column, and `fetch_environment` sets it from the same T/S row that builds its
 Francois-Garrison absorption. Textbook benchmarks take ρw = 1 by convention:
 pass `water_density=1.0` to reproduce one.

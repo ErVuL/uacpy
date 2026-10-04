@@ -58,25 +58,25 @@ def write_ramin(
     filepath: Union[str, Path],
     *,
     kind: str,
-    fc: float,
+    frequency: float,
     zs: float,
     zr_line: float,
-    rmax: float,
+    rmax_march: float,
     dr: float,
     ndr: int,
     zmax: float,
     dz: float,
-    ndz: int,
+    depth_decimation: int,
     zmplt: float,
     c0: float,
-    np_pade: int,
+    n_pade: int,
     bathymetry: Sequence[Tuple[float, float]],
     range_segments: Sequence[dict],
     surface: Optional[Sequence[Tuple[float, float]]] = None,
-    ns_stab: int = 1,
-    rs_stab: float = 0.0,
-    irot: int = 1,
-    theta: float = 60.0,
+    n_stability: int = 1,
+    stability_range_m: float = 0.0,
+    rams_rotation: int = 1,
+    rams_rotation_angle: float = 60.0,
     title: str = "uacpy ram.in",
 ) -> None:
     """
@@ -98,23 +98,23 @@ def write_ramin(
         blocks per range (shear speed + shear attenuation). ``'ramgeo'``
         is the fluid, flat-surface form — row-5 ``(ns, rs)``, no surface
         block, no shear blocks (i.e. ``'ramsurf'`` without the surface).
-    fc, zs, zr_line : float
+    frequency, zs, zr_line : float
         Centre frequency (Hz), source depth (m), receiver depth (m) at
         which ``tl.line`` is written.
-    rmax, dr, ndr : float, float, int
+    rmax_march, dr, ndr : float, float, int
         Domain range (m), range step (m), output stride (every ``ndr``
         steps).
-    zmax, dz, ndz, zmplt : float, float, int, float
+    zmax, dz, depth_decimation, zmplt : float, float, int, float
         Computational depth (m), depth step (m), output stride, plot
         depth (m).
-    c0, np_pade : float, int
+    c0, n_pade : float, int
         Reference sound speed (m/s) and number of Padé coefficients.
     bathymetry : list of (range, depth)
         Seafloor profile vs range, in metres. Linearly interpolated by the
         binary, which self-extends past the last point by repeating its
         depth out to ``2*rmax`` (``ramsurf1.5.f:95-96``,
         ``ramgeo1.5.f:115-116``) or ``rmax + 2*dr`` (``rams0.5.f:116-117``),
-        so the profile need not reach ``rmax``.
+        so the profile need not reach ``rmax_march``.
     range_segments : list of dict
         One entry per range section, in order. The first entry's
         ``range`` is ignored (initial profile); subsequent entries write
@@ -140,10 +140,11 @@ def write_ramin(
         ``depth`` ≥ 0 means how far below z=0 the pressure-release
         surface sits at that range. Self-extends to ``2*rmax`` like the
         bathymetry (``ramsurf1.5.f:87-88``).
-    ns_stab, rs_stab : int, float
-        Row-5 stability fields (``ramsurf`` only).
-    irot, theta : int, float
-        Row-5 elastic stability fields (``rams`` only). ``theta`` is the
+    n_stability, stability_range_m : int, float
+        Row-5 stability fields (``ramgeo`` and ``ramsurf``; ``rams`` takes
+        ``irot, theta`` in their place).
+    rams_rotation, rams_rotation_angle : int, float
+        Row-5 elastic stability fields (``rams`` only). ``rams_rotation_angle`` is the
         Padé rotation angle in degrees (0 < theta < 90).
     title : str
         Header line (row 1). Free text, ignored by the binary.
@@ -151,17 +152,17 @@ def write_ramin(
     kind = kind.lower()
     if kind not in ('rams', 'ramsurf', 'ramgeo'):
         raise ConfigurationError(
-            f"kind must be 'rams', 'ramsurf' or 'ramgeo'; got {kind!r}"
+            f"kind must be 'rams', 'ramsurf' or 'ramgeo'; got {kind!r}."
         )
     # Same reason as the profile-block guard: `surface` may be an ndarray.
     if kind == 'ramsurf' and (surface is None or len(surface) == 0):
-        raise ConfigurationError("kind='ramsurf' requires a surface profile")
+        raise ConfigurationError("kind='ramsurf' requires a surface profile.")
     if kind == 'rams':
         for seg in range_segments:
             if 'bottom_cs' not in seg or 'bottom_attns' not in seg:
                 raise ConfigurationError(
                     "kind='rams' requires bottom_cs and bottom_attns "
-                    "in every range segment"
+                    "in every range segment."
                 )
     with_water_attn = [seg.get('water_attn') is not None
                        for seg in range_segments]
@@ -183,14 +184,15 @@ def write_ramin(
         # Every float is written at 12 significant digits (list-directed
         # Fortran reads take any real spelling). ``dz`` is the critical one:
         # the binaries place the seafloor at ``iz = int(1 + zb/dz)``
-        # (``ramgeo1.5.f:133``, ``ramsurf1.5.f:118``, ``rams0.5.f:135``), a
-        # truncation with a cliff exactly at integer ``zb/dz`` — a deck value
-        # rounded above ``h/n`` moves the seafloor node a whole cell up.
+        # (``ramgeo1.5.f:133``, ``ramsurf1.5.f:118``) or ``iz = int(zb/dz)``
+        # (``rams0.5.f:135``), a truncation with a cliff exactly at integer
+        # ``zb/dz`` either way — a deck value rounded above ``h/n`` moves the
+        # seafloor node a whole cell up.
         fh.write(f"{title}\n")
-        fh.write(f"{float(fc):.12g} {float(zs):.12g} {float(zr_line):.12g}\n")
-        fh.write(f"{float(rmax):.12g} {float(dr):.12g} {int(ndr)}\n")
+        fh.write(f"{float(frequency):.12g} {float(zs):.12g} {float(zr_line):.12g}\n")
+        fh.write(f"{float(rmax_march):.12g} {float(dr):.12g} {int(ndr)}\n")
         fh.write(
-            f"{float(zmax):.12g} {float(dz):.12g} {int(ndz)} {float(zmplt):.12g}\n"
+            f"{float(zmax):.12g} {float(dz):.12g} {int(depth_decimation)} {float(zmplt):.12g}\n"
         )
         # A fifth number announces the water-attenuation block: the patched
         # readers take row 5 as a string and try five items, falling back
@@ -199,11 +201,11 @@ def write_ramin(
         tail = ' 1' if iattw else ''
         if kind == 'rams':
             fh.write(
-                f"{float(c0):.12g} {int(np_pade)} {int(irot)} {float(theta):.12g}{tail}\n"
+                f"{float(c0):.12g} {int(n_pade)} {int(rams_rotation)} {float(rams_rotation_angle):.12g}{tail}\n"
             )
         else:
             fh.write(
-                f"{float(c0):.12g} {int(np_pade)} {int(ns_stab)} {float(rs_stab):.12g}{tail}\n"
+                f"{float(c0):.12g} {int(n_pade)} {int(n_stability)} {float(stability_range_m):.12g}{tail}\n"
             )
 
         if kind == 'ramsurf':

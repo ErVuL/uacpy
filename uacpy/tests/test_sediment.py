@@ -30,13 +30,11 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.materials import MATERIALS
 from uacpy.core.sediment import (
     DEFAULT_GRAIN_SIZE_MODEL, GRAIN_SIZE_MODEL_RANGES, GRAIN_SIZE_MODELS,
-    GRAIN_SIZE_SOURCE_RANGES, _MODEL_WATER_REFERENCE, _apl_density_ratio,
-    _apl_velocity_ratio, _hamilton_kp, grain_size_to_geoacoustics,
+    GRAIN_SIZE_SOURCE_RANGES, _MODEL_WATER_REFERENCE, apl_uw_density_ratio,
+    apl_uw_sound_speed_ratio, hamilton_attenuation, grain_size_to_geoacoustics,
 )
 from uacpy.data import sediment
-from uacpy.sonar.bottom_scattering import (_grain_size_alpha_over_f,
-                                           _grain_size_density_ratio,
-                                           _grain_size_speed_ratio)
+from uacpy.tests.conftest import recorded_warnings
 
 
 def test_the_regression_reproduces_the_class_means_it_was_fitted_to():
@@ -53,8 +51,10 @@ def test_the_regression_reproduces_the_class_means_it_was_fitted_to():
     for phi, rho_row, ratio_row in _HB_TABLE:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            got = sediment.grain_size_to_geoacoustics(phi)
-        gap = (got['sound_speed'] - ratio_row * 1510.0, got['density'] - rho_row)
+            got = grain_size_to_geoacoustics(phi)
+        gap = (got['sound_speed']
+               - ratio_row * _MODEL_WATER_REFERENCE['hamilton'][0],
+               got['density'] - rho_row)
         if phi >= 1.0:
             dc.append(gap[0])
             drho.append(gap[1])
@@ -79,13 +79,13 @@ def test_the_class_mean_table_is_kept_as_data():
 
 def test_velocity_ratio_dips_below_water_for_mud():
     # Fine muds are slower than seawater (velocity ratio < 1).
-    fine = sediment.grain_size_to_geoacoustics(8.5, water_sound_speed=1500.0)
+    fine = grain_size_to_geoacoustics(8.5, water_sound_speed=1500.0)
     assert fine['sound_speed'] < 1500.0
 
 
 def test_monotonic_speed_and_density():
-    coarse = sediment.grain_size_to_geoacoustics(1.0)
-    fine = sediment.grain_size_to_geoacoustics(8.0)
+    coarse = grain_size_to_geoacoustics(1.0)
+    fine = grain_size_to_geoacoustics(8.0)
     assert coarse['sound_speed'] > fine['sound_speed']
     assert coarse['density'] > fine['density']
 
@@ -94,14 +94,14 @@ def test_attenuation_peaks_at_four_and_a_half_phi():
     # Hamilton's k_p attenuation peaks at the 4.5 ϕ branch join — coarse silt
     # in TR 9407 Table 2 — and the dB/λ speed factor does not move it.
     phis = np.linspace(0.5, 8.5, 33)
-    alpha = [sediment.grain_size_to_geoacoustics(p)['attenuation'] for p in phis]
+    alpha = [grain_size_to_geoacoustics(p)['attenuation'] for p in phis]
     peak_phi = phis[int(np.argmax(alpha))]
     assert peak_phi == pytest.approx(4.5, abs=0.13)   # half the 0.25 ϕ step
 
 
 def test_water_referencing_scales_speed():
-    warm = sediment.grain_size_to_geoacoustics(2.5, water_sound_speed=1540.0)
-    cold = sediment.grain_size_to_geoacoustics(2.5, water_sound_speed=1480.0)
+    warm = grain_size_to_geoacoustics(2.5, water_sound_speed=1540.0)
+    cold = grain_size_to_geoacoustics(2.5, water_sound_speed=1480.0)
     assert warm['sound_speed'] > cold['sound_speed']
 
 
@@ -110,10 +110,10 @@ def test_a_phi_past_the_regressions_domain_is_held_at_it_and_says_so():
     # 9 ϕ and there is no environment-free answer beyond it — so ϕ is held at
     # the edge, and the call names the quantities that came from there.
     with pytest.warns(UserWarning, match='sound_speed and density'):
-        g = sediment.grain_size_to_geoacoustics(12.0)
+        g = grain_size_to_geoacoustics(12.0)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        edge = sediment.grain_size_to_geoacoustics(9.0)
+        edge = grain_size_to_geoacoustics(9.0)
     assert g['sound_speed'] == pytest.approx(edge['sound_speed'])
     assert g['density'] == pytest.approx(edge['density'])
 
@@ -122,30 +122,30 @@ def test_out_of_range_phi_warns_when_the_clamp_moves_the_answer():
     # APL-UW's polynomials do extrapolate, so clamping ϕ = 12 to 9 substitutes
     # a different sediment and says so.
     with pytest.warns(UserWarning, match='clamped'):
-        g = sediment.grain_size_to_geoacoustics(12.0, model='apl-uw')
+        g = grain_size_to_geoacoustics(12.0, model='apl-uw')
     assert g['sound_speed'] == pytest.approx(
-        sediment.grain_size_to_geoacoustics(9.0, model='apl-uw')['sound_speed'])
+        grain_size_to_geoacoustics(9.0, model='apl-uw')['sound_speed'])
 
 
 def test_unknown_model_raises():
     with pytest.raises(ConfigurationError, match='model'):
-        sediment.grain_size_to_geoacoustics(3.0, model='nonsense')
+        grain_size_to_geoacoustics(3.0, model='nonsense')
 
 
 def test_apl_uw_model():
     # APL-UW TR 9407 high-frequency variant: valid output, attenuation peaking
     # at the same 4.5 ϕ join, and (per IV-8) lower density/speed than Hamilton
     # at intermediate Mz.
-    a = sediment.grain_size_to_geoacoustics(2.0, model='apl-uw')
-    h = sediment.grain_size_to_geoacoustics(2.0, model='hamilton')
+    a = grain_size_to_geoacoustics(2.0, model='apl-uw')
+    h = grain_size_to_geoacoustics(2.0, model='hamilton')
     assert 1400 < a['sound_speed'] < 1800
     assert a['density'] < h['density']            # APL-UW runs lower at mid-Mz
     phis = np.linspace(-1, 9, 41)
-    alpha = [sediment.grain_size_to_geoacoustics(p, model='apl-uw')['attenuation']
+    alpha = [grain_size_to_geoacoustics(p, model='apl-uw')['attenuation']
              for p in phis]
     assert phis[int(np.argmax(alpha))] == pytest.approx(4.5, abs=0.13)
     # APL-UW covers coarse (gravel ϕ≈−1) without warning
-    coarse = sediment.grain_size_to_geoacoustics(-1.0, model='apl-uw')
+    coarse = grain_size_to_geoacoustics(-1.0, model='apl-uw')
     assert coarse['sound_speed'] > a['sound_speed']
 
 
@@ -190,13 +190,14 @@ def test_bottom_from_class_fluid_drops_both_shear_fields():
     assert bp.sound_speed == pytest.approx(MATERIALS['limestone']['sound_speed'])
 
 
-def test_grain_size_none_water_uses_hamilton_reference():
-    """``water_sound_speed=None`` means "use Hamilton's own reference water"
-    (1510 m/s, 1.030 g/cm³), so it must agree exactly with passing those two
-    values explicitly — ``None`` is a default, not a separate code path."""
-    explicit = sediment.grain_size_to_geoacoustics(1.0, water_sound_speed=1510.0,
-                                                   water_density=1.030)
-    default = sediment.grain_size_to_geoacoustics(1.0)
+def test_grain_size_none_water_uses_the_package_water():
+    """``water_sound_speed=None`` means "use the package's one water" (the
+    nominal 1500 m/s and 1.027 g/cm³), so it must agree exactly with passing
+    those two values explicitly — ``None`` is a default, not a separate code
+    path."""
+    explicit = grain_size_to_geoacoustics(1.0, water_sound_speed=1500.0,
+                                          water_density=1.027)
+    default = grain_size_to_geoacoustics(1.0)
     assert default['sound_speed'] == pytest.approx(explicit['sound_speed'])
     assert default['density'] == pytest.approx(explicit['density'])
 
@@ -204,13 +205,13 @@ def test_grain_size_none_water_uses_hamilton_reference():
 def test_grain_size_scales_with_in_situ_water_speed():
     """Sediment cp is a velocity *ratio* to the overlying water, so a
     colder/warmer in-situ water speed must shift the bottom cp proportionally
-    instead of always referencing 1510 m/s."""
-    cold = sediment.grain_size_to_geoacoustics(1.0, water_sound_speed=1450.0)
-    warm = sediment.grain_size_to_geoacoustics(1.0, water_sound_speed=1540.0)
-    ref = sediment.grain_size_to_geoacoustics(1.0)  # 1510 m/s reference
+    instead of always referencing the default 1500 m/s."""
+    cold = grain_size_to_geoacoustics(1.0, water_sound_speed=1450.0)
+    warm = grain_size_to_geoacoustics(1.0, water_sound_speed=1540.0)
+    ref = grain_size_to_geoacoustics(1.0)  # 1500 m/s default
     assert cold['sound_speed'] < ref['sound_speed'] < warm['sound_speed']
     # Ratio is preserved: cp scales linearly with the water speed.
-    ratio = ref['sound_speed'] / 1510.0
+    ratio = ref['sound_speed'] / 1500.0
     assert warm['sound_speed'] == pytest.approx(ratio * 1540.0, rel=1e-6)
 
 
@@ -258,7 +259,9 @@ def test_range_dependent_bottom_preserves_provenance():
         point_bottom, (0.0, 0.0), (0.0, 0.1), 3, source_label='test')
     for col in bottom.columns:
         assert [p.source.id for p in col.data_sources] == ['grainsize']
-    assert [p.source.id for p in bottom.data_sources] == ['grainsize']
+    # One record per column, each at its column's range.
+    assert [(p.source.id, p.range_m) for p in bottom.data_sources] == [
+        ('grainsize', float(r)) for r in bottom.ranges]
 
 
 def _phi_bottom(phi, water_sound_speed):
@@ -360,16 +363,20 @@ def test_deck41_rock_routes_to_limestone_material(monkeypatch):
     index and comes back as the limestone material preset (~3000 m/s), the
     same route the EMODnet substrate path uses — never the coarse-sand
     clamp (~1813 m/s) a phi of -5 used to produce."""
-    from uacpy.data import sediment_db
+    from uacpy.data import SeabedSample, sediment_db
+    from uacpy.data.sources import SOURCES, DataProvenance
     sentinel = sediment_db._phi_from_lithology('rock')
     assert sentinel is not None
     assert sentinel <= sediment_db._PHI_CLASS_SENTINEL_MAX
     monkeypatch.setattr(
         sediment_db, 'fetch_sediment_sample',
-        lambda point, max_distance_km=None: {
-            'phi': None, 'material': 'limestone', 'distance_km': 1.0,
-            'latitude': 0.0, 'longitude': 0.0})
-    b = sediment_db.fetch_bottom_local((0.0, 0.0))
+        lambda point, max_distance_km=None: SeabedSample(
+            grain_size_phi=None, material='limestone', folk_class=None,
+            folk_class_scheme=None, sample_point=(0.0, 0.0), distance_km=1.0,
+            provenance=DataProvenance(source=SOURCES['deck41'],
+                                      data_point=(0.0, 0.0),
+                                      requested_point=(0.0, 0.0))))
+    b = sediment_db.fetch_bottom_grainsize((0.0, 0.0))
     assert b.sound_speed >= 2500.0
 
 
@@ -395,13 +402,13 @@ def test_deck41_gravel_classes_take_the_gravel_preset(tmp_path, monkeypatch):
         '10.0,20.0,gravel\n11.0,21.0,gravel and coarser\n')
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     _cache.invalidate_grids()
-    sediment_db._SAMPLES.clear()
-    coarse_sand = sediment.grain_size_to_geoacoustics(0.92)['sound_speed']
+    sediment_db._samples.memo.clear()
+    coarse_sand = grain_size_to_geoacoustics(0.92)['sound_speed']
     for point in ((10.0, 20.0), (11.0, 21.0)):
-        assert sediment_db.fetch_sediment_sample(point)['material'] == 'gravel'
+        assert sediment_db.fetch_sediment_sample(point).material == 'gravel'
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            bottom = sediment_db.fetch_bottom_local(point)
+            bottom = sediment_db.fetch_bottom_grainsize(point)
         assert bottom.sound_speed == MATERIALS['gravel']['sound_speed']
         assert bottom.density == MATERIALS['gravel']['density']
         assert bottom.attenuation == MATERIALS['gravel']['attenuation']
@@ -447,9 +454,9 @@ def sediment_cache(tmp_path, monkeypatch):
     (root / 'sediment' / 'deck41.csv').write_text(
         'latitude,longitude,lithology\n50.001,0.0,clay\n60.0,0.0,clay\n')
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    sediment_db._SAMPLES.clear()
+    sediment_db._samples.memo.clear()
     yield root
-    sediment_db._SAMPLES.clear()
+    sediment_db._samples.memo.clear()
 
 
 def test_a_quantitative_sample_beats_a_nearer_lithology_class(sediment_cache):
@@ -458,8 +465,8 @@ def test_a_quantitative_sample_beats_a_nearer_lithology_class(sediment_cache):
     distance alone and never returned the better sample."""
     from uacpy.data.sediment_db import fetch_sediment_sample
     sample = fetch_sediment_sample((50.001, 0.0))
-    assert sample['phi'] == pytest.approx(5.5)
-    assert sample['distance_km'] == pytest.approx(0.111, abs=1e-3)
+    assert sample.grain_size_phi == pytest.approx(5.5)
+    assert sample.distance_km == pytest.approx(0.111, abs=1e-3)
 
 
 def test_a_far_quantitative_sample_loses_to_a_near_lithology_class(tmp_path,
@@ -479,13 +486,13 @@ def test_a_far_quantitative_sample_loses_to_a_near_lithology_class(tmp_path,
     (root / 'sediment' / 'deck41.csv').write_text(
         'latitude,longitude,lithology\n44.0,8.0,Sand\n')
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
-    sediment_db._SAMPLES.clear()
+    sediment_db._samples.memo.clear()
     try:
         sample = sediment_db.fetch_sediment_sample((44.01, 8.01))
-        assert sample['phi'] == pytest.approx(1.5)          # 'Sand'
-        assert sample['distance_km'] == pytest.approx(1.37, abs=0.01)
+        assert sample.grain_size_phi == pytest.approx(1.5)          # 'Sand'
+        assert sample.distance_km == pytest.approx(1.37, abs=0.01)
     finally:
-        sediment_db._SAMPLES.clear()
+        sediment_db._samples.memo.clear()
 
 
 def test_the_grain_size_preference_turns_over_between_the_two_anchors():
@@ -508,7 +515,7 @@ def test_lithology_answers_where_grain_size_is_out_of_reach(sediment_cache):
     from uacpy.data.sediment_db import fetch_sediment_sample
     # 'clay' maps to ϕ 9.0; the grain-size sample is >1000 km away here.
     sample = fetch_sediment_sample((59.9, 0.0), max_distance_km=50.0)
-    assert sample['phi'] == pytest.approx(9.0)
+    assert sample.grain_size_phi == pytest.approx(9.0)
 
 
 def test_the_out_of_reach_message_quotes_the_nearest_of_the_two(sediment_cache):
@@ -520,7 +527,7 @@ def test_the_out_of_reach_message_quotes_the_nearest_of_the_two(sediment_cache):
 def test_range_dependent_bottom_carries_grain_size_per_column():
     """``from_halfspaces`` builds from the geoacoustic arrays alone, so ϕ has
     to be copied onto the rebuilt columns like the provenance beside it."""
-    from uacpy.core.bottom import BoundaryProperties
+    from uacpy.core.boundary import BoundaryProperties
     from uacpy.data.sediment import range_dependent_bottom_along
     bottom = range_dependent_bottom_along(
         lambda lat, lon: BoundaryProperties.from_grain_size(
@@ -612,7 +619,7 @@ class TestALithologySampleCitesDeck41:
             '-20.05,-140.05,rock\n')
         monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
         _cache.invalidate_grids()
-        sediment_db._SAMPLES.clear()
+        sediment_db._samples.memo.clear()
         return sediment_db
 
     @pytest.mark.parametrize('point, expected', [
@@ -623,7 +630,8 @@ class TestALithologySampleCitesDeck41:
     def test_the_sample_names_the_index_it_came_from(self, point, expected,
                                                      tmp_path, monkeypatch):
         dB = self._cache(tmp_path, monkeypatch)
-        assert dB.fetch_sediment_sample(point)['dataset'] == expected
+        assert (dB.fetch_sediment_sample(point).provenance.source.id
+                == expected)
 
     @pytest.mark.parametrize('point, expected', [
         ((-20.0, -140.0), 'deck41'),
@@ -632,7 +640,7 @@ class TestALithologySampleCitesDeck41:
     def test_the_bottom_provenance_cites_that_index(self, point, expected,
                                                     tmp_path, monkeypatch):
         dB = self._cache(tmp_path, monkeypatch)
-        bottom = dB.fetch_bottom_local(point)
+        bottom = dB.fetch_bottom_grainsize(point)
         assert bottom.data_sources[0].source.id == expected
 
 
@@ -708,8 +716,7 @@ class TestEachQuantityIsReportedAgainstItsOwnSource:
         for outside, inside in ((lo - 1e-9, lo), (hi + 1e-9, hi)):
             with pytest.warns(UserWarning, match=quantity):
                 grain_size_to_geoacoustics(outside, model=model)
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always')
+            with recorded_warnings() as caught:
                 grain_size_to_geoacoustics(inside, model=model)
             assert not [w for w in caught if quantity in str(w.message)], (
                 f"{model} {quantity} announced at ϕ={inside}, inside its own "
@@ -741,47 +748,76 @@ class TestEachQuantityIsReportedAgainstItsOwnSource:
             # nothing extends the abyssal families the way TR 9407 extends (T)
             assert fit['evaluated_range'] == fit['published_range']
             with pytest.warns(UserWarning, match='7 to 10 ϕ'):
-                sand = grain_size_to_geoacoustics(2.0, environment=abyssal)
+                sand = grain_size_to_geoacoustics(2.0, hamilton_fit=abyssal)
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                edge = grain_size_to_geoacoustics(7.0, environment=abyssal)
+                edge = grain_size_to_geoacoustics(7.0, hamilton_fit=abyssal)
             assert sand['sound_speed'] == pytest.approx(edge['sound_speed'])
             with warnings.catch_warnings():
                 warnings.simplefilter('error')
-                grain_size_to_geoacoustics(9.5, environment=abyssal)
+                grain_size_to_geoacoustics(9.5, hamilton_fit=abyssal)
 
-    def test_the_abyssal_fits_land_nearer_the_measured_abyssal_rows(self):
+    def test_carried_to_the_lab_water_the_fits_are_the_papers_numbers(self):
+        """At the laboratory water the ratios were formed against
+        (``water_density=_HB_T_REF_RHOW``, recovered from TR 9407's rescaled
+        coefficients), uacpy's densities are Hamilton & Bachman's absolute
+        regressions. The paper prints the three at 8 ϕ (the Fig. 5 discussion): "continental
+        terrace, 1.49 g/cm3; abyssal plains, 1.41 g/cm3; abyssal hill, 1.37
+        g/cm3"."""
+        from uacpy.core.sediment import _HB_T_REF_RHOW
+        for environment, printed in (('continental-terrace', 1.49),
+                                     ('abyssal-plain', 1.41),
+                                     ('abyssal-hill', 1.37)):
+            rho = grain_size_to_geoacoustics(
+                8.0, hamilton_fit=environment,
+                water_density=_HB_T_REF_RHOW)['density']
+            assert rho == pytest.approx(printed, abs=0.005), environment
+
+    def test_each_measured_abyssal_row_sits_within_its_own_fits_scatter(self):
         """What the selector is for. Hamilton & Bachman's Table IV measures
-        abyssal clay directly; the continental-terrace fit a deep-ocean caller
-        gets by default sits well above it, and each abyssal fit is nearer its
-        own measured rows. Densities are comparable directly (both are
-        saturated bulk density at the reference water); the velocities are not,
-        the paper's being in-situ-corrected absolutes."""
-        measured = [('abyssal-plain', 9.53, 1.352),
-                    ('abyssal-hill', 9.43, 1.414),
-                    ('abyssal-hill', 8.76, 1.344)]
-        for environment, phi, rho in measured:
+        abyssal sediments directly; each row sits within its own fit's
+        standard error of estimate (0.09 hill, 0.11 plain), and on the silty
+        clay and the plain clay the abyssal fit is much nearer than the
+        continental-terrace one a deep-ocean caller gets by default.
+
+        Not on the hill clay at 9.43 ϕ: the paper's own hill regression gives
+        1.374 against the measured 1.414, while the terrace fit, held at the
+        edge of its 1-9 ϕ domain, lands 0.033 away by coincidence. That row
+        read "nearer" only while uacpy scaled both by an uncited 1.03 water
+        (0.0345 vs 0.0386); at the paper's numbers it is not, and the test
+        states the paper rather than the old scale."""
+        from uacpy.core.sediment import GRAIN_SIZE_ENVIRONMENTS, _HB_T_REF_RHOW
+        measured = [('abyssal-plain', 9.53, 1.352, True),
+                    ('abyssal-hill', 9.43, 1.414, False),
+                    ('abyssal-hill', 8.76, 1.344, True)]
+        for environment, phi, rho, nearer in measured:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                terrace = grain_size_to_geoacoustics(phi)['density']
+                terrace = grain_size_to_geoacoustics(
+                    phi, water_density=_HB_T_REF_RHOW)['density']
                 own = grain_size_to_geoacoustics(
-                    phi, environment=environment)['density']
-            assert abs(own - rho) < abs(terrace - rho), environment
-            assert abs(own - rho) < 0.05
+                    phi, hamilton_fit=environment,
+                    water_density=_HB_T_REF_RHOW)['density']
+            sigma = GRAIN_SIZE_ENVIRONMENTS[environment]['sigma_density']
+            assert abs(own - rho) < sigma, environment
+            assert (abs(own - rho) < abs(terrace - rho)) is nearer, (
+                environment, phi)
+            if nearer:
+                assert abs(terrace - rho) > 3 * abs(own - rho)
 
     def test_a_density_outside_a_fits_range_is_announced_not_absorbed(self):
         """The inverse has the same duty as the forward direction. Its
-        no-solution branch is the one that matters: below the terrace
-        quadratic's minimum there is no root at all, which is 45.5 % of the
-        Graw grid's ocean cells, so returning the fine end quietly would be the
-        flat hold again in a new place. Both ends, and the other side."""
+        held branch is the one that matters: below the terrace relation's
+        9 ϕ end (1.448 g/cm³ against the default water) it has no root in the
+        range it is evaluated over, which is 59.9 % of the Graw grid's ocean
+        cells, so returning the fine end quietly would be the flat hold again
+        in a new place. Both ends, and the other side."""
         from uacpy.core.sediment import (grain_size_from_density,
                                          GRAIN_SIZE_ENVIRONMENTS)
         fit = GRAIN_SIZE_ENVIRONMENTS['continental-terrace']
         lo, hi = fit['evaluated_range']
         for phi in (lo, 0.0, 4.0, hi):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter('always')
+            with recorded_warnings() as caught:
                 rho = grain_size_to_geoacoustics(float(phi))['density']
                 assert grain_size_from_density(rho) == pytest.approx(phi)
             # Silent *about the density*; at -1 ϕ the forward call still
@@ -801,18 +837,18 @@ class TestEachQuantityIsReportedAgainstItsOwnSource:
             grain_size_from_density(1.35)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            phi = grain_size_from_density(1.35, environment='abyssal-plain')
+            phi = grain_size_from_density(1.35, hamilton_fit='abyssal-plain')
         assert 7.0 <= phi <= 10.0
 
     def test_an_unknown_environment_and_an_apl_uw_environment_are_refused(self):
         """TR 9407 publishes one set of relations, not one per environment, so
         asking it for an abyssal fit is asking for something that does not
         exist — better refused than silently ignored."""
-        with pytest.raises(ConfigurationError, match='unknown environment'):
-            grain_size_to_geoacoustics(5.0, environment='abyss')
+        with pytest.raises(ConfigurationError, match='unknown hamilton_fit'):
+            grain_size_to_geoacoustics(5.0, hamilton_fit='abyss')
         with pytest.raises(ConfigurationError, match='has no'):
             grain_size_to_geoacoustics(8.0, model='apl-uw',
-                                       environment='abyssal-hill')
+                                       hamilton_fit='abyssal-hill')
         # The default is accepted by both, so nothing moves for a caller who
         # never names one.
         with warnings.catch_warnings():
@@ -820,7 +856,7 @@ class TestEachQuantityIsReportedAgainstItsOwnSource:
             assert (grain_size_to_geoacoustics(4.0, model='apl-uw')
                     == grain_size_to_geoacoustics(
                         4.0, model='apl-uw',
-                        environment='continental-terrace'))
+                        hamilton_fit='continental-terrace'))
 
     def test_the_velocity_and_density_interval_rests_on_two_documents(self):
         """-1 to 9 ϕ is not one citation. **1 to 9** is Hamilton & Bachman's own
@@ -845,7 +881,7 @@ class TestEachQuantityIsReportedAgainstItsOwnSource:
         exactly 2.6, 4.5 and 6.0 ϕ. There is nothing left to differ: the two
         models' k_p is the same object, and the join belongs to the branch
         above it, as ``ReadEnvironmentBell.f90:509-518`` reads it."""
-        from uacpy.core.sediment import _hamilton_kp
+        from uacpy.core.sediment import hamilton_attenuation
         water = dict(water_sound_speed=1500.0, water_density=1.0)
         for phi in np.linspace(-1.0, 9.0, 1001):
             with warnings.catch_warnings():
@@ -860,9 +896,9 @@ class TestEachQuantityIsReportedAgainstItsOwnSource:
         # The tie: at a join the value is continuous with the branch *above*
         # and steps away from the branch below, which is AT's reading.
         for join in (2.6, 4.5, 6.0):
-            assert _hamilton_kp(join) == pytest.approx(
-                _hamilton_kp(join + 1e-9), abs=1e-7)
-            assert abs(_hamilton_kp(join) - _hamilton_kp(join - 1e-9)) > 1e-4
+            assert hamilton_attenuation(join) == pytest.approx(
+                hamilton_attenuation(join + 1e-9), abs=1e-7)
+            assert abs(hamilton_attenuation(join) - hamilton_attenuation(join - 1e-9)) > 1e-4
 
     def test_the_apl_uw_branches_are_the_terrace_fit_rescaled(self):
         """TR 9407 p. IV-8: "The density and sound speed ratios agree with
@@ -872,16 +908,16 @@ class TestEachQuantityIsReportedAgainstItsOwnSource:
         implements the printed digits and ``'apl-uw'`` exists to reproduce AT.
         This ties the two so a correction to either cannot leave the other
         stale — the residual is the rounding of TR 9407's own 4-to-6 digits."""
-        from uacpy.core.sediment import (_apl_density_ratio,
-                                         _apl_velocity_ratio, _HB_T_DENSITY,
+        from uacpy.core.sediment import (apl_uw_density_ratio,
+                                         apl_uw_sound_speed_ratio, _HB_T_DENSITY,
                                          _HB_T_REF_CW, _HB_T_REF_RHOW,
                                          _HB_T_VELOCITY)
         for mz in np.linspace(-1.0, 0.999, 200):
             rescaled_nu = np.polyval(_HB_T_VELOCITY[::-1], mz) / _HB_T_REF_CW
             rescaled_rho = np.polyval(_HB_T_DENSITY[::-1], mz) / _HB_T_REF_RHOW
-            assert _apl_velocity_ratio(mz) == pytest.approx(rescaled_nu,
+            assert apl_uw_sound_speed_ratio(mz) == pytest.approx(rescaled_nu,
                                                             abs=2e-5), mz
-            assert _apl_density_ratio(mz) == pytest.approx(rescaled_rho,
+            assert apl_uw_density_ratio(mz) == pytest.approx(rescaled_rho,
                                                            abs=7e-5), mz
 
     @pytest.mark.parametrize('phi', [-1.0, -0.5, 0.0, 0.5, 0.999])
@@ -932,9 +968,9 @@ def test_hamilton_honours_its_own_attenuation_range_to_nine_and_a_half_phi():
     attenuation not."""
     with warnings.catch_warnings():
         warnings.simplefilter('error')
-        edge = sediment.grain_size_to_geoacoustics(9.0, model='hamilton')
+        edge = grain_size_to_geoacoustics(9.0, model='hamilton')
     with pytest.warns(UserWarning) as record:
-        clay = sediment.grain_size_to_geoacoustics(9.5, model='hamilton')
+        clay = grain_size_to_geoacoustics(9.5, model='hamilton')
     message = str(record[0].message)
     assert 'sound_speed and density' in message
     assert 'attenuation' not in message
@@ -965,60 +1001,41 @@ _SHARED_RANGE = (-1.0, 9.0)
 _BRANCH_JOINS = (2.6, 4.5, 6.0)
 
 
-class TestCoreAndSonarEvaluateOneRelation:
-    """Neither implementation is a copy to be deleted, and they must not drift.
+class TestTheScatteringModelReadsTheSedimentRelations:
+    """TR 9407's grain-size parameterisation (Eqs. 2, 3, 5) is the sediment
+    model's: ``BottomParameters.from_grain_size`` evaluates
+    ``uacpy.core.sediment``'s relations and holds no copy of its own, so the
+    scattering model and the Acoustics-Toolbox ``'G'`` bottom cannot drift
+    apart."""
 
-    Each exists to reproduce a different published artefact -- the
-    Acoustics-Toolbox ``'G'`` bottom on one side, TR 9407's scattering tables
-    on the other -- and coupling them would put a propagation-side edit in the
-    path of a scattering-side fidelity test. A failure here is not a bug in
-    whichever module was edited last: it means the two have parted, and that
-    has to become a decision. It should never be made to pass by loosening a
-    tolerance.
-    """
+    @pytest.mark.parametrize('mz', np.linspace(*_SHARED_RANGE, 41))
+    def test_the_ratios_are_the_sediment_models(self, mz):
+        from uacpy.sonar.bottom_scattering import BottomParameters
+        params = BottomParameters.from_grain_size(float(mz))
+        assert params.density_ratio == apl_uw_density_ratio(float(mz))
+        assert params.speed_ratio == apl_uw_sound_speed_ratio(float(mz))
 
-    @pytest.mark.parametrize('relation, core_fn, sonar_fn', [
-        ('attenuation', _hamilton_kp, _grain_size_alpha_over_f),
-        ('speed ratio', _apl_velocity_ratio, _grain_size_speed_ratio),
-        ('density ratio', _apl_density_ratio, _grain_size_density_ratio),
-    ])
-    def test_one_relation_however_many_modules_write_it_down(
-            self, relation, core_fn, sonar_fn):
-        grid = np.linspace(*_SHARED_RANGE, 4001)
-        worst, where = 0.0, None
-        for mz in grid:
-            gap = abs(core_fn(float(mz)) - sonar_fn(float(mz)))
-            if gap > worst:
-                worst, where = gap, float(mz)
-        assert worst < 1e-12, (
-            f"{relation}: uacpy.core.sediment and uacpy.sonar."
-            f"bottom_scattering differ by {worst:.3e} at Mz={where}. They "
-            f"implement the same published regression; if they must now "
-            f"differ, say which artefact each reproduces and record the split "
-            f"here rather than widening this bound.")
+    def test_the_loss_parameter_reads_hamiltons_attenuation(self, monkeypatch):
+        import uacpy.sonar.bottom_scattering as bs
+        monkeypatch.setattr(bs, 'hamilton_attenuation', lambda mz: 1.0)
+        expected = (1.0 * 1.1 * (bs.TABLE_WATER_SOUND_SPEED / 1000.0)
+                    * np.log(10.0) / (40.0 * np.pi))
+        assert bs._grain_size_loss_parameter(2.0, 1.1) == pytest.approx(
+            expected, rel=1e-15)
 
-    def test_the_branch_joins_are_tied_the_same_way_on_both_sides(self):
-        """The place they came closest to parting, and did.
-
-        Hamilton's Fig. 3 caption gives the branch ranges as "0 to 2.6 phi",
-        "2.6 to 4.5 phi" and so on, sharing each endpoint between two branches
-        and settling nothing, so a tie-break is an implementation choice. The
-        two sides once made it differently -- ``<=`` in core against ``<`` in
-        sonar -- and returned different attenuations at exactly these three phi
-        from identical coefficients. Both now read the join as belonging to the
-        branch **above** it, which is how ``ReadEnvironmentBell.f90:509-518``
-        reads it (``ELSE IF( Mz >= 2.6 .AND. Mz < 4.5 )``) and therefore what
-        the Acoustics-Toolbox ``'G'`` bottom does.
-        """
+    def test_the_branch_joins_belong_to_the_branch_above(self):
+        """Hamilton's Fig. 3 caption gives the branch ranges as "0 to 2.6
+        phi", "2.6 to 4.5 phi" and so on, sharing each endpoint between two
+        branches and settling nothing, so a tie-break is an implementation
+        choice. The join belongs to the branch **above** it, which is how
+        ``ReadEnvironmentBell.f90:509-518`` reads it (``ELSE IF( Mz >= 2.6
+        .AND. Mz < 4.5 )``) and therefore what the Acoustics-Toolbox ``'G'``
+        bottom does."""
         for join in _BRANCH_JOINS:
-            assert _hamilton_kp(join) == pytest.approx(
-                _grain_size_alpha_over_f(join), abs=1e-12), join
-            # Continuous with the branch above, stepping away from the one
-            # below: the tie itself, not merely the agreement.
-            for evaluate in (_hamilton_kp, _grain_size_alpha_over_f):
-                assert evaluate(join) == pytest.approx(evaluate(join + 1e-9),
-                                                       abs=1e-7)
-                assert abs(evaluate(join) - evaluate(join - 1e-9)) > 1e-4
+            assert hamilton_attenuation(join) == pytest.approx(
+                hamilton_attenuation(join + 1e-9), abs=1e-7)
+            assert abs(hamilton_attenuation(join)
+                       - hamilton_attenuation(join - 1e-9)) > 1e-4
 
 
 #: Ainslie, *Principles of Sonar Performance Modelling* (2010) Table 4.17,
@@ -1116,9 +1133,8 @@ class TestBothModelsReproduceAPublishedCompilation:
 
         The comparison is between RATIOS, because that is what the tables print
         and what the two models hold in common; each carries its output back to
-        a different seawater (1510 m/s / 1.03 against the Acoustics-Toolbox
-        1500 / 1.0), so the absolute values differ by that factor by
-        construction. The attenuation is in dB/lambda, proportional to the
+        the package's one seawater, and dividing it out keeps the comparison
+        independent of that choice. The attenuation is in dB/lambda, proportional to the
         sound speed, so it is compared with the same factor divided out -- and
         then it too is one relation: Hamilton (1972)'s k_p on both sides.
         """
@@ -1150,6 +1166,22 @@ class TestBothModelsReproduceAPublishedCompilation:
             -1.0, model='hamilton')['attenuation']
         assert at_minus_one / at_zero == pytest.approx(0.91 / 0.87, rel=5e-3)
 
+    @pytest.mark.parametrize('phi, held', [(-0.5, True), (0.0, False)])
+    def test_the_warning_names_k_p_as_what_holds_its_end_value(self, phi,
+                                                               held):
+        """Below 0 phi the dB/lambda returned is not its 0 phi value (0.8930
+        against 0.8733 at -0.5): only k_p is held, so the warning names k_p.
+        At 0 phi every source covers the grain size and nothing warns."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            grain_size_to_geoacoustics(phi, model='hamilton')
+        messages = [str(w.message) for w in caught]
+        if held:
+            assert any("attenuation's k_p comes from data covering 0 to "
+                       "9.5 ϕ, so it is its ϕ=0 value" in m for m in messages)
+        else:
+            assert not any('data covering' in m for m in messages)
+
     def test_each_model_carries_its_ratios_back_to_its_own_seawater(self):
         """The reference the tests above divide out, pinned where it shows.
 
@@ -1164,8 +1196,10 @@ class TestBothModelsReproduceAPublishedCompilation:
         Changing either is allowed. Doing it silently is not: nothing else in
         this class, and nothing in either published table, can see it.
         """
-        assert _MODEL_WATER_REFERENCE['apl-uw'] == (1500.0, 1.0)
-        assert _MODEL_WATER_REFERENCE['hamilton'] == (1510.0, 1.03)
+        # Both carry the package's one water: the nominal 1500 m/s and the
+        # 1.027 g/cm3 every deck divides the seabed density by.
+        assert _MODEL_WATER_REFERENCE['apl-uw'] == (1500.0, 1.027)
+        assert _MODEL_WATER_REFERENCE['hamilton'] == (1500.0, 1.027)
 
 
 class TestTheDefaultModelHasOneHome:
@@ -1254,3 +1288,137 @@ class TestTheDefaultModelHasOneHome:
         assert not disagreeing, (
             "these entry points do not read DEFAULT_GRAIN_SIZE_MODEL = "
             f"{DEFAULT_GRAIN_SIZE_MODEL!r}:\n  " + "\n  ".join(disagreeing))
+
+
+class TestTheDocumentedNumbersAreTheComputedOnes:
+    """The figures the sediment docs quote, recomputed from the code.
+
+    Each was once written from memory or against an older default water and
+    went stale: Ainslie's Table 4.18 named as Hamilton & Bachman's when it is
+    Bachman (1985), the continental-terrace floor quoted at its out-of-range
+    vertex rather than at the 9 ϕ end the inverse actually holds at, and a
+    sample count attached to the wrong number.
+    """
+
+    #: Ainslie (2010) Table 4.18 at 9 ϕ: Bachman's (1985) bulk density ratio.
+    AINSLIE_418_DENSITY_9PHI = 1.353
+
+    def test_table_4_18_is_bachman_1985_and_the_quoted_gap_holds(self):
+        import uacpy.core.sediment as sediment
+        doc = sediment.__doc__
+        assert 'Bachman, 1985' in doc
+        assert "Hamilton's and Bachman's" not in doc
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            rho = grain_size_to_geoacoustics(9.0, water_density=1.0)['density']
+        gap = 100.0 * (rho / self.AINSLIE_418_DENSITY_9PHI - 1.0)
+        assert f"'hamilton' {rho:.3f}" in doc
+        assert f"+{gap:.1f} %" in doc
+
+    def test_the_terrace_floor_is_quoted_at_its_9_phi_end(self):
+        from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+        from uacpy.core.sediment import (GRAIN_SIZE_ENVIRONMENTS, _density_span,
+                                         grain_size_from_density)
+        import uacpy.data.graw_local as graw_local
+        fit = GRAIN_SIZE_ENVIRONMENTS['continental-terrace']
+        floor = min(_density_span(fit, DEFAULT_WATER_DENSITY_G_CM3))
+        text = f"{floor:.3f} g/cm³"
+        assert text in grain_size_from_density.__doc__
+        assert text in graw_local.__doc__ or text in inspect.getsource(graw_local)
+        assert '1.423' not in grain_size_from_density.__doc__
+        # Between the parabola's vertex and the 9 ϕ end a root exists, but
+        # past 9 ϕ, so the inverse holds there too: the floor is the end.
+        with pytest.warns(UserWarning):
+            assert grain_size_from_density(floor - 0.01) == pytest.approx(9.0)
+
+    def test_the_silty_sand_figure_carries_its_own_sample_count(self):
+        doc = grain_size_to_geoacoustics.__doc__
+        assert 'on 340 laboratory samples' not in doc
+        assert '4.24 ϕ, 40' in doc
+
+
+
+# ── named choices are matched without regard to case ──────────────────────
+
+_CANONICALISED_ENTRY_POINTS = [
+    ('uacpy/core/sediment.py', 'grain_size_to_geoacoustics', 'canonical_grain_size_selection'),
+    ('uacpy/core/sediment.py', 'grain_size_from_density', 'canonical_choice'),
+    ('uacpy/core/boundary.py', 'BoundaryProperties.from_grain_size', 'canonical_grain_size_selection'),
+    ('uacpy/core/bottom.py', 'Bottom.from_grain_size', 'canonical_grain_size_selection'),
+    ('uacpy/data/sediment.py', 'bottom_from_grain_size', 'canonical_grain_size_selection'),
+    ('uacpy/data/diesing_local.py', 'fetch_bottom_diesing', 'canonical_grain_size_selection'),
+    ('uacpy/data/emodnet_local.py', 'fetch_bottom_emodnet_local', 'canonical_grain_size_selection'),
+    ('uacpy/data/graw_local.py', 'fetch_bottom_graw', 'canonical_grain_size_selection'),
+    ('uacpy/data/mars.py', 'fetch_bottom_mars', 'canonical_grain_size_selection'),
+    ('uacpy/data/pelagic.py', 'fetch_bottom_pelagic', 'canonical_grain_size_selection'),
+    ('uacpy/data/seabed.py', 'fetch_bottom_emodnet', 'canonical_grain_size_selection'),
+    ('uacpy/data/sediment_db.py', 'fetch_bottom_grainsize', 'canonical_grain_size_selection'),
+    ('uacpy/data/environment.py', 'fetch_bottom', 'canonical_grain_size_selection'),
+    ('uacpy/data/environment.py', 'fetch_bottom_transect', 'canonical_grain_size_selection'),
+    ('uacpy/data/environment.py', 'fetch_environment', 'canonical_grain_size_selection'),
+    ('uacpy/data/environment.py', 'fetch_environment', 'canonical_formula'),
+    ('uacpy/core/acoustics/seawater.py', 'sound_speed_at_depth', 'canonical_formula'),
+    ('uacpy/core/ssp.py', 'SoundSpeedProfile.__post_init__', 'canonical_formula'),
+    ('uacpy/core/ssp.py', 'SoundSpeedProfile.from_temperature_salinity', 'canonical_formula'),
+    ('uacpy/data/sound_speed.py', 'fetch_ssp', 'canonical_formula'),
+    ('uacpy/data/sound_speed.py', 'fetch_ssp_transect', 'canonical_formula'),
+    ('uacpy/data/argo.py', 'fetch_ssp_argo', 'canonical_formula'),
+    ('uacpy/data/copernicus.py', 'fetch_ssp_operational', 'canonical_formula'),
+    ('uacpy/data/copernicus.py', 'fetch_ssp_transect_operational', 'canonical_formula'),
+]
+
+
+@pytest.mark.parametrize('path, qualname, call', _CANONICALISED_ENTRY_POINTS)
+def test_every_entry_point_canonicalises_its_named_choice_before_using_it(
+        path, qualname, call):
+    """``bottom_model='Hamilton'`` and ``formula='TEOS10'`` were refused
+    where ``ssp_sources='WOA23'`` was accepted. Each entry point now passes
+    the string through the one canonicaliser before anything stores or
+    compares it."""
+    import ast
+    from pathlib import Path
+    tree = ast.parse((Path(uacpy.__file__).parent.parent / path).read_text())
+    node = tree
+    for part in qualname.split('.'):
+        node = next(n for n in ast.iter_child_nodes(node)
+                    if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+                    and n.name == part)
+    called = {getattr(n.func, 'id', getattr(n.func, 'attr', None))
+              for n in ast.walk(node) if isinstance(n, ast.Call)}
+    assert call in called
+
+
+@pytest.mark.parametrize('spelled', ['hamilton', 'Hamilton', 'HAMILTON'])
+def test_a_grain_size_model_is_one_model_in_any_case(spelled):
+    from uacpy.core.sediment import grain_size_to_geoacoustics
+    from uacpy.data import bottom_from_grain_size
+    want = grain_size_to_geoacoustics(2.0, model='hamilton')
+    assert grain_size_to_geoacoustics(
+        2.0, model=spelled, hamilton_fit='Continental-Terrace') == want
+    assert bottom_from_grain_size(2.0, model=spelled).sound_speed == \
+        pytest.approx(want['sound_speed'])
+
+
+@pytest.mark.parametrize('spelled, refused', [('TEOS10', False),
+                                              ('Unesco', False),
+                                              ('teos-10', True)])
+def test_a_sound_speed_formula_is_one_formula_in_any_case(spelled, refused):
+    from uacpy.core.acoustics import sound_speed_at_depth
+    if refused:
+        with pytest.raises(ConfigurationError, match="unknown formula 'teos-10'"):
+            sound_speed_at_depth(10.0, 35.0, 100.0, formula=spelled)
+        return
+    lower = spelled.lower()
+    assert sound_speed_at_depth(10.0, 35.0, 100.0, formula=spelled) == \
+        sound_speed_at_depth(10.0, 35.0, 100.0, formula=lower)
+    ssp = uacpy.SoundSpeedProfile(depths=[0.0, 100.0],
+                                  sound_speed=[1500.0, 1490.0], formula=spelled)
+    assert ssp.formula == lower
+
+
+def test_a_unit_string_stays_exact():
+    """Case carries meaning in a unit ('dB' is a decibel; 'Q' and 'L' are
+    loss measures), so the converter does not fold it."""
+    from uacpy.acoustics import convert_attenuation_units
+    with pytest.raises(ConfigurationError, match='unknown unit'):
+        convert_attenuation_units(1.0, 1000.0, 'DB/KM', 'dB/m')

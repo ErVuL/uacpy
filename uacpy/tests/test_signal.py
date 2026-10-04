@@ -22,17 +22,15 @@ import warnings
 import numpy as np
 import pytest
 
-from uacpy.acoustic_signal.system import FRF
+from uacpy.acoustic_signal.frf import FRF
 from uacpy.acoustic_signal.generate import (
     gaussian_pulse, hfm_chirp, lfm_chirp, ricker_wavelet, tone_burst,
 )
 from uacpy.acoustic_signal.generate import (
-    add_noise, fourier_synthesis, make_bandlimited_noise, make_noise_waveform,
-    synthesize_noise_from_psd,
+    make_bandlimited_noise, synthesize_noise_from_psd,
 )
-from uacpy.comms.modulate import (
-    fsk_demodulate as _fsk_demodulate,
-    fsk_modulate as _fsk_modulate,
+from uacpy.comms.constellations import (
+    fsk_demodulate as _fsk_demodulate, fsk_modulate as _fsk_modulate,
 )
 from uacpy.core.exceptions import ConfigurationError
 
@@ -41,27 +39,21 @@ NAN = float('nan')
 BAD_SCALARS = [0.0, -100.0, np.nan, np.inf]
 from uacpy.acoustic_signal.detect import (ambiguity_function,
                                           pulse_compression)
-from uacpy.acoustic_signal.estimate import (probabilistic_welch,
-    welch)
+from uacpy.acoustic_signal.spectral import probabilistic_welch, welch
 from uacpy.acoustic_signal.generate import bpsk_modulate
-from uacpy.acoustic_signal.estimate import (cwt, instantaneous_frequency,
-                                            spectrogram)
-from uacpy.acoustic_signal.arrays import (
-    fk_transform,
-    radon_transform as _radon_transform,
+from uacpy.acoustic_signal.timefreq import (
+    cwt, instantaneous_frequency, spectrogram,
+)
+from uacpy.acoustic_signal.gathers import (
+    fk_transform, radon_transform as _radon_transform,
     taup_transform as _taup_transform,
 )
-from uacpy.acoustic_signal.estimate import (
-    cepstrum as _cepstrum,
-    envelope as _envelope,
+from uacpy.acoustic_signal.timefreq import (
+    cepstrum as _cepstrum, envelope as _envelope,
     wigner_ville as _wigner_ville,
 )
-from uacpy.acoustic_signal.estimate import (
-    constant_q as _constant_q_spectrum,
-)
-from uacpy.acoustic_signal.system import (
-    warp_signal as _warp_signal,
-)
+from uacpy.acoustic_signal.spectral import constant_q as _constant_q_spectrum
+from uacpy.acoustic_signal.dispersion import warp_signal as _warp_signal
 
 
 def _band_exposure(data, sample_rate, **options):
@@ -70,7 +62,7 @@ def _band_exposure(data, sample_rate, **options):
     is Pa²·s per band and whose ``bands`` are the ``(low, centre, high)``
     edges those values sit on.
     """
-    from uacpy.acoustic_signal.estimate import sound_exposure
+    from uacpy.acoustic_signal.spectral import sound_exposure
     return sound_exposure(data, sample_rate, **options)
 
 
@@ -99,8 +91,8 @@ class TestGenerators:
         assert s[400] == pytest.approx(np.exp(-1.0), rel=1e-12)
 
     def test_lfm_chirp_sweeps_fmin_to_fmax(self):
-        fs, fmin, fmax, T = 20_000.0, 500.0, 1500.0, 0.2
-        t, s = lfm_chirp(fmin=fmin, fmax=fmax, duration=T, sample_rate=fs)
+        fs, freq_start, freq_end, T = 20_000.0, 500.0, 1500.0, 0.2
+        t, s = lfm_chirp(freq_start=freq_start, freq_end=freq_end, duration=T, sample_rate=fs)
         assert len(t) == len(s)
         f_inst = self._instantaneous_frequency(s, 1.0 / fs)
         tm = 0.5 * (t[:-1] + t[1:])
@@ -109,8 +101,8 @@ class TestGenerators:
         # < 1e-4 Hz at both ends, so 1 Hz on a 1000 Hz sweep is generous.
         interior = (tm > 0.1 * T) & (tm < 0.9 * T)
         slope, intercept = np.polyfit(tm[interior], f_inst[interior], 1)
-        assert intercept == pytest.approx(fmin, abs=1.0)
-        assert slope * T + intercept == pytest.approx(fmax, abs=1.0)
+        assert intercept == pytest.approx(freq_start, abs=1.0)
+        assert slope * T + intercept == pytest.approx(freq_end, abs=1.0)
 
     @pytest.mark.parametrize("chirp", [lfm_chirp, hfm_chirp])
     @pytest.mark.parametrize("T,fs", [(0.29, 100.0), (0.007, 44100.0),
@@ -121,28 +113,28 @@ class TestGenerators:
         # round(T * fs) and the spacing is 1/fs (tone_burst's rule), so the
         # waveform played back at sample_rate lasts T and sweeps at the
         # requested rate.
-        t, s = chirp(5.0, 20.0, T, fs)
+        t, s = chirp(5.0, 20.0, T, sample_rate=fs)
         assert t.size == s.size == round(T * fs)
         assert t[0] == 0.0
         assert np.allclose(np.diff(t), 1.0 / fs, rtol=1e-12, atol=0.0)
 
     def test_hfm_chirp_frequency_is_hyperbolic_in_time(self):
         # HFM == linear *period* modulation: 1/f_inst(t) is linear in t,
-        # running from 1/fmin to 1/fmax (Abraham §8.3.6's pulse).
-        fs, fmin, fmax, T = 20_000.0, 500.0, 1500.0, 0.2
-        t, s = hfm_chirp(fmin=fmin, fmax=fmax, duration=T, sample_rate=fs)
+        # running from 1/freq_min to 1/freq_max (Abraham §8.3.6's pulse).
+        fs, freq_start, freq_end, T = 20_000.0, 500.0, 1500.0, 0.2
+        t, s = hfm_chirp(freq_start=freq_start, freq_end=freq_end, duration=T, sample_rate=fs)
         period = 1.0 / self._instantaneous_frequency(s, 1.0 / fs)
         tm = 0.5 * (t[:-1] + t[1:])
         interior = (tm > 0.1 * T) & (tm < 0.9 * T)
         slope, intercept = np.polyfit(tm[interior], period[interior], 1)
         # Endpoint errors measured at 7e-8 s (P(0)) and 3e-8 s (P(T));
         # 1e-5 s against a 1.3e-3 s period span is generous.
-        assert intercept == pytest.approx(1.0 / fmin, abs=1e-5)
-        assert slope * T + intercept == pytest.approx(1.0 / fmax, abs=1e-5)
+        assert intercept == pytest.approx(1.0 / freq_start, abs=1e-5)
+        assert slope * T + intercept == pytest.approx(1.0 / freq_end, abs=1e-5)
         # Discriminating half: the period really is linear (residual < 2 %
         # of the span; an LFM period fitted the same way leaves ~20 %).
         resid = period[interior] - (slope * tm[interior] + intercept)
-        assert np.max(np.abs(resid)) < 0.02 * (1.0 / fmin - 1.0 / fmax)
+        assert np.max(np.abs(resid)) < 0.02 * (1.0 / freq_start - 1.0 / freq_end)
 
     def test_ricker_wavelet_peaks_at_requested_frequency(self):
         time = np.linspace(0, 0.1, 1024)
@@ -197,18 +189,16 @@ class TestGenerators:
 class TestProcessing:
     """Processing helpers don't blow up on synthetic signals."""
 
-    def test_add_noise_adds_band_limited_noise(self):
-        """The added term is noise inside the requested band.
+    def test_noise_at_a_level_is_band_limited(self):
+        """The noise ``psd_level_dB`` asks for sits inside the requested band.
 
-        A silent input makes the output the noise term alone, so the band
-        occupancy and the sample-to-sample correlation both describe the noise
-        directly. Variance alone cannot tell noise from any other waveform.
+        Band occupancy and the sample-to-sample correlation both describe
+        the noise directly; variance alone cannot tell noise from any other
+        waveform.
         """
         fs, fc, bw = 48_000.0, 10_000.0, 10_000.0
-        y = np.asarray(add_noise(
-            np.zeros(8192), sample_rate=fs, source_level=0.0,
-            noise_level=40.0, fc=fc, bandwidth=bw,
-        )).ravel()
+        _, y = make_bandlimited_noise(fc, bw, 8192 / fs, sample_rate=fs,
+                                      psd_level_dB=40.0)
 
         freqs = np.fft.rfftfreq(y.size, 1.0 / fs)
         power = np.abs(np.fft.rfft(y)) ** 2
@@ -219,28 +209,37 @@ class TestProcessing:
         # Any monotone or otherwise smooth waveform correlates ~1 at lag 1.
         assert abs(np.corrcoef(y[:-1], y[1:])[0, 1]) < 0.7
 
-    def test_add_noise_realisations_are_seeded_and_per_receiver(self):
-        """``rng`` selects the realisation, and receivers are independent.
+    def test_noise_realisations_are_seeded_and_per_channel(self):
+        """``rng`` selects the realisation, and channels are independent.
 
-        The docstring's array-gain contract needs zero cross-channel
-        correlation, so a shared realisation across columns is a defect.
+        Array-gain checks need zero cross-channel correlation, so a shared
+        realisation across columns is a defect.
         """
-        fs = 48_000.0
-        kw = dict(source_level=0.0, noise_level=40.0, fc=10_000.0,
-                  bandwidth=10_000.0)
-        x = np.zeros(4096)
-        first = np.asarray(add_noise(x, sample_rate=fs, **kw,
-                                     rng=np.random.default_rng(3)))
-        again = np.asarray(add_noise(x, sample_rate=fs, **kw,
-                                     rng=np.random.default_rng(3)))
-        other = np.asarray(add_noise(x, sample_rate=fs, **kw,
-                                     rng=np.random.default_rng(4)))
+        kw = dict(fc=10_000.0, bandwidth=10_000.0, duration=4096 / 48_000.0,
+                  sample_rate=48_000.0, psd_level_dB=40.0)
+        first = make_bandlimited_noise(**kw, rng=np.random.default_rng(3))[1]
+        again = make_bandlimited_noise(**kw, rng=np.random.default_rng(3))[1]
+        other = make_bandlimited_noise(**kw, rng=np.random.default_rng(4))[1]
         assert np.array_equal(first, again)
         assert not np.array_equal(first, other)
 
-        block = np.asarray(add_noise(np.zeros((4096, 4)), sample_rate=fs, **kw))
+        block = make_bandlimited_noise(**kw, n_channels=4)[1]
+        assert block.shape == (4096, 4)
         corr = np.corrcoef(block.T)
         assert np.max(np.abs(corr[~np.eye(4, dtype=bool)])) < 0.2
+
+    @pytest.mark.parametrize('bad', [0, -1, 1.5])
+    def test_n_channels_must_be_a_positive_integer(self, bad):
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='n_channels'):
+            make_bandlimited_noise(1000.0, 500.0, 0.1, sample_rate=10_000.0,
+                                   n_channels=bad)
+
+    def test_one_channel_is_one_dimensional_and_two_is_a_column_pair(self):
+        kw = dict(fc=1000.0, bandwidth=500.0, duration=0.1,
+                  sample_rate=10_000.0)
+        assert make_bandlimited_noise(**kw, n_channels=1)[1].shape == (1000,)
+        assert make_bandlimited_noise(**kw, n_channels=2)[1].shape == (1000, 2)
 
     def test_make_bandlimited_noise_runs(self):
         # Returns (time, signal) like the other generators.
@@ -254,42 +253,15 @@ class TestProcessing:
         assert np.all(np.isfinite(n))
         assert t[0] == 0.0 and np.allclose(np.diff(t), 1.0 / fs)
 
-    def test_make_noise_waveform_is_1d_with_consistent_length(self):
-        fs, dur = 10_000.0, 0.1
-        t, n = make_noise_waveform(
-            fc=1000.0, bandwidth=500.0, duration=dur, sample_rate=fs)
-        # Returns (time, signal) like the tonal generators (tone_burst, …);
-        # 1-D, length int(duration*fs), with the time axis the same length
-        # (no carrier/noise mismatch from arange-vs-int float drift).
-        assert n.ndim == 1
-        assert n.shape == t.shape == (int(dur * fs),)
-        assert np.all(np.isfinite(n))
-        assert t[0] == 0.0 and np.allclose(np.diff(t), 1.0 / fs)
-
-    def test_both_band_noise_generators_take_one_shared_kwargs_dict(self):
-        """``make_noise_waveform`` and ``make_bandlimited_noise`` are siblings:
-        same argument order, same return shape, same purpose. They spell the
-        band and the length ``bandwidth`` and ``duration``, so one kwargs dict
-        drives both and a caller can swap one for the other in place."""
-        import inspect
-        kw = dict(fc=1000.0, bandwidth=500.0,
-                  duration=0.1, sample_rate=10_000.0)
-
-        t_w, n_w = make_noise_waveform(**kw)
-        t_b, n_b = make_bandlimited_noise(**kw)
-        assert n_w.shape == n_b.shape == t_w.shape == t_b.shape == (1000,)
-
-        assert (list(inspect.signature(make_noise_waveform).parameters)
-                == list(inspect.signature(make_bandlimited_noise).parameters)
-                == ['fc', 'bandwidth', 'duration', 'sample_rate', 'rng'])
-
-    def test_make_noise_waveform_unresolvable_duration_raises(self):
-        """``duration*bandwidth < 1`` gives a zero-length white-noise draw,
-        which scipy.signal.resample cannot consume. Reject it up front."""
-        from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError):
-            make_noise_waveform(fc=1000.0, bandwidth=500.0, duration=1e-4,
-                                sample_rate=10_000.0)
+    def test_without_a_level_the_noise_is_unit_rms(self):
+        """``psd_level_dB=None`` is the unit-RMS contract, per channel."""
+        kw = dict(fc=1000.0, bandwidth=200.0, duration=1.0,
+                  sample_rate=8000.0)
+        assert np.std(make_bandlimited_noise(
+            **kw, rng=np.random.default_rng(0))[1]) == pytest.approx(1.0)
+        assert np.std(make_bandlimited_noise(
+            **kw, n_channels=3, rng=np.random.default_rng(0))[1],
+            axis=0) == pytest.approx(np.ones(3))
 
     def test_noise_generators_are_reproducible_from_a_seeded_rng(self):
         """Every noise generator takes an ``rng=``, like the ``uacpy.comms``
@@ -304,18 +276,13 @@ class TestProcessing:
         c = make_bandlimited_noise(**kw, rng=np.random.default_rng(8))[1]
         assert np.array_equal(a, b) and not np.array_equal(a, c)
 
+        lkw = dict(kw, psd_level_dB=80.0, n_channels=2)
         assert np.array_equal(
-            make_noise_waveform(**kw, rng=np.random.default_rng(7))[1],
-            make_noise_waveform(**kw, rng=np.random.default_rng(7))[1])
-
-        nkw = dict(sample_rate=fs, source_level=120.0, noise_level=80.0,
-                   fc=1000.0, bandwidth=200.0)
-        assert np.array_equal(
-            add_noise(np.zeros(1024), **nkw, rng=np.random.default_rng(7)),
-            add_noise(np.zeros(1024), **nkw, rng=np.random.default_rng(7)))
+            make_bandlimited_noise(**lkw, rng=np.random.default_rng(7))[1],
+            make_bandlimited_noise(**lkw, rng=np.random.default_rng(7))[1])
 
         f = np.logspace(1, 3, 32)
-        pkw = dict(duration=0.05, n_fft=1024, sample_rate=fs)
+        pkw = dict(duration=0.05, nfft=1024, sample_rate=fs)
         assert np.array_equal(
             synthesize_noise_from_psd(1e-6 / (1 + (f / 100) ** 2), f, **pkw,
                                       rng=np.random.default_rng(7))[1],
@@ -325,7 +292,7 @@ class TestProcessing:
 
 class TestDecidecadeBands:
     def test_standard_iso_centre_frequencies_and_ratio(self):
-        from uacpy.acoustic_signal.estimate import decidecade_bands
+        from uacpy.acoustic_signal.bands import decidecade_bands
         lo, c, hi = decidecade_bands(100, 10000)
         # base-10 ratio 10^(1/10)
         assert c[1] / c[0] == pytest.approx(10 ** 0.1, rel=1e-6)
@@ -339,12 +306,13 @@ class TestDecidecadeBands:
         edges included. Integrating only the interior grid points under-reports
         by up to 2.6 dB on the low bands of this grid, and a band-to-band
         *difference* test cannot see it."""
-        from uacpy.acoustic_signal.estimate import (decidecade_bands,
-                                                 decidecade_band_levels)
+        from uacpy.acoustic_signal.bands import (
+            decidecade_bands, decidecade_band_levels,
+        )
         from uacpy.core.constants import REFERENCE_PRESSURE_WATER as REF
         f = np.linspace(1, 20000, 40000)
         psd = np.full_like(f, 1e-12)
-        c, lv = decidecade_band_levels(psd, f)
+        c, lv = decidecade_band_levels(psd, frequencies=f)
         lo, _, hi = decidecade_bands(f.min(), f.max())
         exact = 10 * np.log10(1e-12 * (hi - lo) / REF ** 2)
         covered = (lo >= f.min()) & (hi <= f.max()) & np.isfinite(lv)
@@ -352,27 +320,28 @@ class TestDecidecadeBands:
         np.testing.assert_allclose(lv[covered], exact[covered], atol=0.01)
 
     def test_white_noise_band_levels_rise_1db_per_band(self):
-        from uacpy.acoustic_signal.estimate import decidecade_band_levels
+        from uacpy.acoustic_signal.bands import decidecade_band_levels
         f = np.linspace(1, 20000, 40000)
         psd = np.ones_like(f) * 1e-12               # flat Pa²/Hz
-        c, lv = decidecade_band_levels(psd, f)
+        c, lv = decidecade_band_levels(psd, frequencies=f)
         step = np.diff(lv[(c > 200) & (c < 5000)])
         assert np.allclose(step, 1.0, atol=0.05)    # each band 10^0.1 wider -> +1 dB
 
     def test_bands_validate_input(self):
-        from uacpy.acoustic_signal.estimate import decidecade_bands
+        from uacpy.acoustic_signal.bands import decidecade_bands
         from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='need 0 < freq_min < freq_max'):
             decidecade_bands(1000, 100)
 
     def test_coarse_grid_falls_back_not_nan(self):
         # A coarse, log-spaced grid leaves low bands with one sample; instead of
         # a silent NaN they get a rectangular estimate and a single warning.
-        from uacpy.acoustic_signal.estimate import decidecade_band_levels
+        from uacpy.acoustic_signal.bands import decidecade_band_levels
         f = np.logspace(np.log10(10), np.log10(2000), 25)
         psd = np.ones_like(f) * 1e-12
         with pytest.warns(UserWarning, match="too coarse"):
-            c, lv = decidecade_band_levels(psd, f)
+            c, lv = decidecade_band_levels(psd, frequencies=f)
         # coarse-grid bands still resolve a finite level
         assert np.any(np.isfinite(lv[c < 100]))
 
@@ -386,7 +355,8 @@ def test_acoustic_signal_is_importable():
 def test_signal_symbols_resolve():
     import uacpy
     for name in ('lfm_chirp', 'hfm_chirp', 'tone_burst', 'gaussian_pulse',
-                 'ricker_wavelet', 'add_noise', 'make_bandlimited_noise',
+                 'ricker_wavelet', 'make_bandlimited_noise',
+                 'synthesize_time_series',
                  'welch', 'welch',
                  'probabilistic_welch',
                  'probabilistic_welch',
@@ -406,28 +376,28 @@ class TestSEL:
         fs = 48000
         t = np.arange(fs) / fs
         x = 2.0 * np.sin(2 * np.pi * 1000.0 * t)   # exposure = A^2/2 * T = 2.0
-        sel = _band_exposure(x, fs, band_type='third_octave', fmin=10,
-                             fmax=20000, nperseg=fs).power
+        sel = _band_exposure(x, fs, band_type='octave', freq_min=10,
+                             freq_max=20000, nperseg=fs).power
         assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
 
     def test_impulse_not_annihilated(self):
         fs = 48000
         imp = np.zeros(fs)
         imp[0] = 10.0   # a Hann-windowed single segment would zero this out
-        sel = _band_exposure(imp, fs, band_type='linear', fmin=1.0,
-                             fmax=fs / 2, num_bands=240, nperseg=fs).power
+        sel = _band_exposure(imp, fs, band_type='linear', freq_min=1.0,
+                             freq_max=fs / 2, n_bands=240, nperseg=fs).power
         # full-band exposure ≈ Σx²/fs (only the excluded DC bin is dropped)
         assert sel.sum() == pytest.approx(np.sum(imp ** 2) / fs, rel=1e-3)
 
     def test_coarse_bands_do_not_double_count_bins(self):
-        # 1-Hz FFT bins (nfft=fs) against sub-bin-wide low third-octave bands:
+        # 1-Hz FFT bins (nfft=fs) against the narrow low decidecade bands:
         # each bin must contribute to exactly one band, so a flat tone's total
         # exposure is conserved (no bin double-counted across overlapping bands).
         fs = 1000
         t = np.arange(fs) / fs
         x = np.sin(2 * np.pi * 50.0 * t)
-        sel = _band_exposure(x, fs, band_type='third_octave', fmin=8.9125,
-                             fmax=400, nperseg=fs).power
+        sel = _band_exposure(x, fs, band_type='decidecade', freq_min=8.9125,
+                             freq_max=400, nperseg=fs).power
         assert sel.sum() == pytest.approx(np.sum(x ** 2) / fs, rel=1e-6)
 
 
@@ -436,14 +406,18 @@ def test_degenerate_input_guards_raise_configurationerror():
     ConfigurationError, not a raw ValueError/ZeroDivisionError."""
     from uacpy.core.exceptions import ConfigurationError
     from uacpy.acoustic_signal import cwt, tone_burst
-    with pytest.raises(ConfigurationError):       # sel: empty data
+    with pytest.raises(ConfigurationError,
+                       match='data is empty'):       # sel: empty data
         _band_exposure(np.array([]), 48000.0)
-    with pytest.raises(ConfigurationError):       # sel: zero integration_time
+    with pytest.raises(ConfigurationError,
+                       match='integration_time must be > 0 s'):       # sel: zero integration_time
         _band_exposure(np.ones(2000), 48000.0, integration_time=0.0)
-    with pytest.raises(ConfigurationError):       # cwt: signal too short (n<8)
+    with pytest.raises(ConfigurationError,
+                       match='signal too short'):       # cwt: signal too short (n<8)
         cwt(np.ones(5), 8000.0)
-    with pytest.raises(ConfigurationError):       # tone_burst: frequency 0
-        tone_burst(0.0, 5, 1000.0)
+    with pytest.raises(ConfigurationError,
+                       match='frequency must be > 0 Hz'):       # tone_burst: frequency 0
+        tone_burst(0.0, 5, sample_rate=1000.0)
 
 
 class TestBandLimitedNoiseLandsInTheRequestedBand:
@@ -467,7 +441,7 @@ class TestBandLimitedNoiseLandsInTheRequestedBand:
 
     @staticmethod
     def _spectrum(fc, bw, fs, seed):
-        _t, n = make_bandlimited_noise(fc, bw, 2.0, fs,
+        _t, n = make_bandlimited_noise(fc, bw, 2.0, sample_rate=fs,
                                        rng=np.random.default_rng(seed))
         freqs = np.fft.rfftfreq(n.size, 1.0 / fs)
         power = np.abs(np.fft.rfft(n)) ** 2
@@ -493,31 +467,75 @@ class TestBandLimitedNoiseLandsInTheRequestedBand:
             assert frac > 0.8, f"{frac:.1%} in band at fs={fs:g}"
             assert 50.0 <= peak <= 150.0
 
-    def test_add_noise_realises_the_requested_level_in_band(self):
-        """Pre-fix this read 5.2 dB against a requested 40 dB, because the
-        level was scaled from the same relocated design and so was internally
-        self-consistent — which is why nothing downstream noticed."""
+    def test_the_requested_level_is_realised_in_band_in_pa(self):
+        """``psd_level_dB`` is the in-band density in dB re 1 µPa²/Hz of a
+        record in Pa. A design relocated in normalised frequency read 5.2 dB
+        against a requested 40 dB and was internally self-consistent, so
+        only a measured level catches it."""
         fs, fc, bw, level = self.FS, 100.0, 100.0, 40.0
-        y = np.asarray(add_noise(np.zeros(int(2 * fs)), fs, 0.0, level, fc, bw,
-                                 rng=np.random.default_rng(0))).ravel()
+        _, y = make_bandlimited_noise(fc, bw, 2.0, sample_rate=fs, psd_level_dB=level,
+                                      rng=np.random.default_rng(0))
         freqs = np.fft.rfftfreq(y.size, 1.0 / fs)
         psd = np.abs(np.fft.rfft(y)) ** 2 * 2.0 / (fs * y.size)
         in_band = (freqs >= fc - bw / 2) & (freqs <= fc + bw / 2)
-        assert 10 * np.log10(psd[in_band].mean()) == pytest.approx(level, abs=3.0)
+        assert 10 * np.log10(psd[in_band].mean() / 1e-12) == pytest.approx(
+            level, abs=3.0)
 
     @pytest.mark.parametrize('fc,bw,fs', [(10.0, 100.0, 48_000.0),
                                           (23_990.0, 100.0, 48_000.0),
                                           (100.0, 100.0, 150.0)])
     def test_an_unrealisable_band_is_refused_not_moved(self, fc, bw, fs):
         from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError, match='not realisable'):
-            make_bandlimited_noise(fc, bw, 0.5, fs)
+        with pytest.raises(ConfigurationError,
+                           match='make_bandlimited_noise: band .* not realisable'):
+            make_bandlimited_noise(fc, bw, 0.5, sample_rate=fs)
+        with pytest.raises(ConfigurationError,
+                           match='make_bandlimited_noise: band .* not realisable'):
+            make_bandlimited_noise(fc, bw, 0.5, sample_rate=fs, psd_level_dB=40.0)
+
+    def test_the_package_dir_lists_public_names_and_no_loader_internals(self):
+        """``dir(uacpy.acoustic_signal)`` is the index a user tab-completes:
+        every public name, and not the stdlib ``importlib`` or the loader's
+        private tables; the sub-modules stay importable as attributes and
+        out of ``__all__``."""
+        import types
+        import uacpy.acoustic_signal as sig
+        listed = set(dir(sig))
+        assert set(sig.__all__) <= listed
+        assert not {'importlib', '_importlib', '_EXPORTS', '_SUBMODULES',
+                    '_SUBMODULE_NAMES'} & listed
+        for name in sig._SUBMODULE_NAMES:
+            assert name not in sig.__all__
+            assert isinstance(getattr(sig, name), types.ModuleType)
+
+    def test_duration_noise_generators_match_the_chirp_sample_count(self):
+        """For ``duration = n/fs`` every duration-based generator returns the
+        ``n`` samples ``lfm_chirp`` returns; ``int(duration*fs)`` is ``n - 1``
+        for about 8 % of lengths at 48 kHz, and ``signal + noise`` then
+        raises a broadcast error."""
+        from uacpy.acoustic_signal.generate import (
+            lfm_chirp, synthesize_noise_from_psd)
+        fs = 48_000.0
+        # The lengths where int((n/fs)*fs) == n - 1, found rather than listed.
+        short = [n for n in range(1000, 2000) if int((n / fs) * fs) == n - 1]
+        assert len(short) >= 10
+        f = np.logspace(1, 3, 32)
+        for n in short[:10]:
+            dur = n / fs
+            assert lfm_chirp(1000.0, 2000.0, dur, sample_rate=fs)[1].size == n
+            assert make_bandlimited_noise(5000.0, 1000.0, dur, sample_rate=fs,
+                                          rng=np.random.default_rng(0)
+                                          )[1].size == n
+            assert synthesize_noise_from_psd(
+                1e-6 / (1 + (f / 100) ** 2), f, duration=dur, nfft=1024,
+                sample_rate=fs, rng=np.random.default_rng(0))[1].size == n
 
     @pytest.mark.parametrize('fc,bw,fs', [(12_000.0, 5.0, 96_000.0),
                                           (12_002.9, 5.0, 96_000.0),
                                           (3_000.0, 2.0, 96_000.0)])
     def test_the_neb_of_a_narrow_band_matches_a_converged_grid(self, fc, bw, fs):
-        """The noise-equivalent bandwidth sets ``add_noise``'s level, so a
+        """The noise-equivalent bandwidth sets the absolute level of
+        ``make_bandlimited_noise(psd_level_dB=...)``, so a
         quadrature error in it is a level error of the same size in dB.
 
         A uniform ``n_freq``-point grid over the whole ``[0, Nyquist]`` samples
@@ -531,7 +549,7 @@ class TestBandLimitedNoiseLandsInTheRequestedBand:
         from uacpy.acoustic_signal.generate import (
             _bandpass_design, _noise_equivalent_bandwidth)
 
-        sos = _bandpass_design(fc, bw, fs)
+        sos = _bandpass_design(fc, bw, fs, who='test')
         # Reference: 2e6 points over fifty bandwidths of skirt each side.
         w = np.linspace(max(0.0, fc - bw / 2 - 50 * bw),
                         min(fs / 2, fc + bw / 2 + 50 * bw), 2_000_001)
@@ -544,7 +562,7 @@ class TestBandLimitedNoiseLandsInTheRequestedBand:
         assert abs(error_dB) < 0.05, (
             f"NEB of the {bw:g} Hz band at fc={fc:g} Hz, fs={fs:g} Hz is "
             f"{neb:.6g} Hz against a converged {reference:.6g} Hz: "
-            f"{error_dB:+.3f} dB, which ``add_noise`` turns into the same "
+            f"{error_dB:+.3f} dB, which ``psd_level_dB`` turns into the same "
             f"level error")
 
     def test_a_wide_band_neb_is_unchanged_by_the_focused_grid(self):
@@ -556,7 +574,7 @@ class TestBandLimitedNoiseLandsInTheRequestedBand:
             _bandpass_design, _noise_equivalent_bandwidth)
 
         fs, fc, bw = 96_000.0, 12_000.0, 1_000.0
-        sos = _bandpass_design(fc, bw, fs)
+        sos = _bandpass_design(fc, bw, fs, who='test')
         f, h = sosfreqz(sos, worN=8192, fs=fs)
         power = np.abs(h) ** 4
         full_band = float(np.trapezoid(power, f) / power.max())
@@ -574,17 +592,18 @@ class TestDecidecadePartialBandsAreNaN:
     fine and stayed silent for the two that were wrong."""
 
     @staticmethod
-    def _flat(fmin=1.0, fmax=25000.0, df=0.25):
-        f = np.arange(fmin, fmax, df)
+    def _flat(freq_min=1.0, freq_max=25000.0, df=0.25):
+        f = np.arange(freq_min, freq_max, df)
         return f, np.ones_like(f)
 
     def test_fully_covered_bands_are_exact_and_partial_ones_are_nan(self):
-        from uacpy.acoustic_signal.estimate import (decidecade_band_levels,
-                                                 decidecade_bands)
+        from uacpy.acoustic_signal.bands import (
+            decidecade_band_levels, decidecade_bands,
+        )
         f, psd_flat = self._flat()
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            _, levels = decidecade_band_levels(psd_flat, f)
+            _, levels = decidecade_band_levels(psd_flat, frequencies=f)
         lo, _, hi = decidecade_bands(f.min(), f.max())
         covered = (lo >= f.min()) & (hi <= f.max())
         exact = 10.0 * np.log10((hi - lo) / 1e-6 ** 2)
@@ -599,12 +618,13 @@ class TestDecidecadePartialBandsAreNaN:
         decidecade band edges — which no rfftfreq grid does. Their ``nan``
         level is the diagnostic; a warning about them fires on every
         well-formed call and cannot distinguish a short grid from a call."""
-        from uacpy.acoustic_signal.estimate import (decidecade_band_levels,
-                                                 decidecade_bands)
+        from uacpy.acoustic_signal.bands import (
+            decidecade_band_levels, decidecade_bands,
+        )
         f, psd_flat = self._flat()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter('always')
-            _, levels = decidecade_band_levels(psd_flat, f)
+            _, levels = decidecade_band_levels(psd_flat, frequencies=f)
         assert not any('extend past' in str(c.message) for c in caught)
         lo, _, hi = decidecade_bands(f.min(), f.max())
         partial = (lo < f.min()) | (hi > f.max())
@@ -614,21 +634,22 @@ class TestDecidecadePartialBandsAreNaN:
     def test_the_coarse_grid_warning_fires(self):
         """The negative control: the warning that qualifies *finite* levels is
         left in place."""
-        from uacpy.acoustic_signal.estimate import decidecade_band_levels
+        from uacpy.acoustic_signal.bands import decidecade_band_levels
         f = np.logspace(np.log10(10), np.log10(2000), 25)
         with pytest.warns(UserWarning, match='too coarse'):
-            decidecade_band_levels(np.ones_like(f) * 1e-12, f)
+            decidecade_band_levels(np.ones_like(f) * 1e-12, frequencies=f)
 
     def test_arrays_stay_parallel_with_decidecade_bands(self):
         # Shape contract: callers index the levels against a separately
         # computed decidecade_bands() with one mask, so dropping unsupported
         # bands would break them. nan keeps the arrays the same length.
-        from uacpy.acoustic_signal.estimate import (decidecade_band_levels,
-                                                 decidecade_bands)
+        from uacpy.acoustic_signal.bands import (
+            decidecade_band_levels, decidecade_bands,
+        )
         f, psd_flat = self._flat()
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            centres, levels = decidecade_band_levels(psd_flat, f)
+            centres, levels = decidecade_band_levels(psd_flat, frequencies=f)
         lo, ctr, hi = decidecade_bands(f.min(), f.max())
         assert centres.shape == levels.shape == ctr.shape
 
@@ -639,48 +660,57 @@ class TestWaveformDegenerateInputs:
 
     def test_hfm_chirp_degenerate_parameters_raise(self):
         from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError):   # equal bounds divide by zero
-            hfm_chirp(1000.0, 1000.0, 0.1, 8000.0)
-        with pytest.raises(ConfigurationError):   # zero lower bound
-            hfm_chirp(0.0, 500.0, 0.1, 8000.0)
-        with pytest.raises(ConfigurationError):   # zero upper bound
-            hfm_chirp(500.0, 0.0, 0.1, 8000.0)
-        with pytest.raises(ConfigurationError):   # non-positive duration
-            hfm_chirp(100.0, 500.0, 0.0, 8000.0)
+        with pytest.raises(ConfigurationError,
+                           match='freq_start and freq_end must differ'):   # equal bounds divide by zero
+            hfm_chirp(1000.0, 1000.0, 0.1, sample_rate=8000.0)
+        with pytest.raises(ConfigurationError,
+                           match='freq_start must be > 0 Hz'):   # zero lower bound
+            hfm_chirp(0.0, 500.0, 0.1, sample_rate=8000.0)
+        with pytest.raises(ConfigurationError,
+                           match='freq_end must be > 0 Hz'):   # zero upper bound
+            hfm_chirp(500.0, 0.0, 0.1, sample_rate=8000.0)
+        with pytest.raises(ConfigurationError,
+                           match='duration must be > 0 s'):   # non-positive duration
+            hfm_chirp(100.0, 500.0, 0.0, sample_rate=8000.0)
 
     def test_hfm_chirp_down_sweep_allowed(self):
-        t, s = hfm_chirp(2000.0, 100.0, 0.1, 8000.0)
+        t, s = hfm_chirp(2000.0, 100.0, 0.1, sample_rate=8000.0)
         assert len(t) == len(s) > 0 and np.all(np.isfinite(s))
 
     def test_chirps_raise_instead_of_returning_empty(self):
         from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError):
-            lfm_chirp(100.0, 500.0, -1.0, 8000.0)
-        with pytest.raises(ConfigurationError):   # under one sample long
-            lfm_chirp(100.0, 500.0, 1e-6, 8000.0)
-        with pytest.raises(ConfigurationError):
-            tone_burst(100.0, 0, 8000.0)
+        with pytest.raises(ConfigurationError, match='duration must be > 0 s'):
+            lfm_chirp(100.0, 500.0, -1.0, sample_rate=8000.0)
+        with pytest.raises(ConfigurationError,
+                           match='must cover at least one sample'):   # under one sample long
+            lfm_chirp(100.0, 500.0, 1e-6, sample_rate=8000.0)
+        with pytest.raises(ConfigurationError, match='n_cycles must be > 0'):
+            tone_burst(100.0, 0, sample_rate=8000.0)
 
     def test_lfm_equal_bounds_is_a_pure_tone(self):
-        t, s = lfm_chirp(500.0, 500.0, 0.1, 8000.0)
+        t, s = lfm_chirp(500.0, 500.0, 0.1, sample_rate=8000.0)
         np.testing.assert_allclose(s, np.sin(2 * np.pi * 500.0 * t))
 
     def test_pulses_reject_degenerate_parameters(self):
         from uacpy.core.exceptions import ConfigurationError
         from uacpy.acoustic_signal.generate import nwave, sparc_pulse
         time = np.linspace(0.0, 0.1, 64)
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='nwave: frequency must be > 0'):
             nwave(time, 0.0)
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='gaussian_pulse: duration must be > 0'):
             gaussian_pulse(time, 0.05, 0.0)
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='ricker_wavelet: frequency must be > 0'):
             ricker_wavelet(time, 0.0)
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='sparc_pulse: frequency must be > 0'):
             sparc_pulse(time, 0.0, "R")
 
     def test_the_generators_use_the_shared_signal_layer_scalar_guard(self):
         """Every waveform scalar goes through
-        ``_signal_validate.require_positive_finite_scalar`` — the same guard
+        ``_validate.require_positive_finite_scalar`` — the same guard
         the other ``acoustic_signal`` modules apply — so the message names the
         parameter's unit and a non-finite value is refused, not only a
         non-positive one. A private copy of the check inside ``generate``
@@ -691,17 +721,17 @@ class TestWaveformDegenerateInputs:
         time = np.linspace(0.0, 0.1, 64)
         for call, pattern in (
                 (lambda: sparc_pulse(time, np.inf, "R"),
-                 r"sparc_pulse: omega must be > 0 rad/s and finite"),
+                 r"sparc_pulse: frequency must be > 0 Hz and finite"),
                 (lambda: ricker_wavelet(time, np.inf),
                  r"ricker_wavelet: frequency must be > 0 Hz and finite"),
                 (lambda: gaussian_pulse(time, 0.05, np.nan),
                  r"gaussian_pulse: duration must be > 0 s and finite"),
-                (lambda: lfm_chirp(100.0, 500.0, np.inf, 8000.0),
+                (lambda: lfm_chirp(100.0, 500.0, np.inf, sample_rate=8000.0),
                  r"lfm_chirp: duration must be > 0 s and finite"),
-                (lambda: tone_burst(100.0, np.inf, 8000.0),
+                (lambda: tone_burst(100.0, np.inf, sample_rate=8000.0),
                  r"tone_burst: n_cycles must be > 0 cycles and finite"),
-                (lambda: hfm_chirp(100.0, np.inf, 0.1, 8000.0),
-                 r"hfm_chirp: fmax must be > 0 Hz and finite"),
+                (lambda: hfm_chirp(100.0, np.inf, 0.1, sample_rate=8000.0),
+                 r"hfm_chirp: freq_end must be > 0 Hz and finite"),
                 (lambda: nwave(time, np.inf),
                  r"nwave: frequency must be > 0 Hz and finite"),
         ):
@@ -714,12 +744,12 @@ class TestWaveformDegenerateInputs:
         assert ricker_wavelet(tl, 100.0).shape == (4,)
         assert gaussian_pulse(tl, 0.002, 0.001).shape == (4,)
         assert nwave(tl, 100.0).shape == (4,)
-        assert sparc_pulse(tl, 2 * np.pi * 100.0, "R")[0].shape == (4,)
+        assert sparc_pulse(tl, 100.0, "R")[0].shape == (4,)
 
 
 def test_synthesize_noise_returns_the_rate_the_time_axis_uses():
     """The returned sample rate is the float rate the time axis was built
-    from, also when the default 2*Fxx[-1] is not an integer."""
+    from, also when the default 2*frequencies[-1] is not an integer."""
     from uacpy.acoustic_signal.generate import synthesize_noise_from_psd
     f = np.array([1.0, 10.3])
     t, x, fs = synthesize_noise_from_psd(
@@ -729,15 +759,50 @@ def test_synthesize_noise_returns_the_rate_the_time_axis_uses():
     assert abs(1.0 / (t[1] - t[0]) - fs) < 1e-9
 
 
-def test_mseq_polarity_matches_dsss_m_sequence():
-    """Both m-sequence generators use the standard BPSK mapping
-    s = 1 - 2*bit (bit 0 -> +1, bit 1 -> -1): a full period sums to -1
-    (2**(m-1) ones map to -1), and despreading with either family's code
-    keeps the symbol sign."""
-    from uacpy.acoustic_signal.generate import mseq
-    from uacpy.comms.modulate import m_sequence, spread, despread
-    s = mseq(5)
-    d = m_sequence(5, [5, 2])
+class TestSynthesizeNoiseNamesTheBandAboveNyquist:
+    """A flat 1e-4 Pa²/Hz target over 10 Hz - 20 kHz synthesised at 8 kHz
+    keeps only the band up to 4 kHz: 0.399 Pa² of the 1.999 asked for."""
+
+    f = np.array([10.0, 20000.0])
+    p = np.array([1e-4, 1e-4])
+
+    def test_a_target_straddling_nyquist_warns_with_the_fraction_lost(self):
+        from uacpy.acoustic_signal.generate import synthesize_noise_from_psd
+        with pytest.warns(UserWarning, match=r"\(80 % of the band power\)"):
+            _, x, _ = synthesize_noise_from_psd(
+                self.p, self.f, duration=4.0, sample_rate=8000.0,
+                rng=np.random.default_rng(0))
+        assert np.var(x) == pytest.approx(1e-4 * 3990.0, rel=0.05)
+
+    def test_a_target_ending_at_nyquist_is_silent(self):
+        from uacpy.acoustic_signal.generate import synthesize_noise_from_psd
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            synthesize_noise_from_psd(self.p, np.array([10.0, 4000.0]),
+                                      duration=0.5, sample_rate=8000.0,
+                                      rng=np.random.default_rng(0))
+
+    def test_a_target_entirely_above_nyquist_raises(self):
+        from uacpy.acoustic_signal.generate import synthesize_noise_from_psd
+        with pytest.raises(ConfigurationError, match="entirely at or above"):
+            synthesize_noise_from_psd(self.p, np.array([4000.0, 20000.0]),
+                                      sample_rate=8000.0)
+
+    @pytest.mark.parametrize("rate", [-8000.0, 0.0, np.nan])
+    def test_a_bad_sample_rate_is_named(self, rate):
+        from uacpy.acoustic_signal.generate import synthesize_noise_from_psd
+        with pytest.raises(ConfigurationError, match="sample_rate must be"):
+            synthesize_noise_from_psd(self.p, self.f, sample_rate=rate)
+
+
+def test_m_sequence_polarity_and_autocorrelation():
+    """The standard BPSK mapping s = 1 - 2*bit (bit 0 -> +1, bit 1 -> -1): a
+    full period sums to -1 (2**(m-1) ones map to -1), and despreading with
+    the same code keeps the symbol sign."""
+    from uacpy.acoustic_signal.generate import m_sequence
+    from uacpy.comms.coding import spread, despread
+    s = m_sequence(5)
+    d = m_sequence(5, [5, 3])
     assert s.sum() == -1 and d.sum() == -1
     # two-valued periodic autocorrelation survives the mapping
     ac = np.array([np.dot(s, np.roll(s, k)) for k in range(1, 31)])
@@ -753,26 +818,23 @@ def test_more_degenerate_inputs_raise_typed_errors():
     from uacpy.core.exceptions import ConfigurationError
     from uacpy.acoustic_signal.generate import bpsk_modulate
     from uacpy.acoustic_signal.generate import synthesize_noise_from_psd
-    from uacpy.acoustic_signal.system import FRF
-    with pytest.raises(ConfigurationError):       # chip rate of zero
-        bpsk_modulate(np.array([1, -1]), 100.0, 1000.0, 0.0)
-    with pytest.raises(ConfigurationError):       # zero-length realisation
+    from uacpy.acoustic_signal.frf import lsfir
+    with pytest.raises(ConfigurationError,
+                       match='chips_per_sec must be > 0'):       # chip rate of zero
+        bpsk_modulate(np.array([1, -1]), 100.0, sample_rate=1000.0, chips_per_sec=0.0)
+    with pytest.raises(ConfigurationError,
+                       match='must cover at least one sample'):       # zero-length realisation
         synthesize_noise_from_psd(np.ones(8), np.linspace(10, 100, 8),
                                   duration=0)
-    with pytest.raises(ConfigurationError):       # tone at/above Nyquist
-        tone_burst(1000.0, 1, 400.0)
+    with pytest.raises(ConfigurationError,
+                       match='is at or above the Nyquist frequency'):       # tone at/above Nyquist
+        tone_burst(1000.0, 1, sample_rate=400.0)
     rng = np.random.default_rng(5)
     u = rng.standard_normal(64)
     y = np.convolve(u, [1.0, 0.5], mode="full")[:64]
-    with pytest.raises(ConfigurationError, match="m .*must be <= N"):
-        FRF().compute_lsfir(y, u, 1000.0, m=100, N=64)
-
-
-def test_add_noise_accepts_a_plain_list():
-    out = add_noise([0.0] * 1000, 1000.0, 100.0, 50.0, 100.0, 50.0,
-                    rng=np.random.default_rng(6))
-    assert isinstance(out, np.ndarray) and out.shape == (1000,)
-    assert np.all(np.isfinite(out)) and np.std(out) > 0
+    with pytest.raises(ConfigurationError,
+                       match=r"FIR order \(100\) must be <= n_samples"):
+        lsfir(u, y, 1000.0, order=100)
 
 
 class TestSparcPulseLibraryShapes:
@@ -783,7 +845,7 @@ class TestSparcPulseLibraryShapes:
     def test_all_eleven_shapes_accepted(self, code):
         from uacpy.acoustic_signal.generate import sparc_pulse
         t = np.linspace(-0.05, 0.1, 512)
-        s, title = sparc_pulse(t, 2 * np.pi * 100.0, code)
+        s, title = sparc_pulse(t, 100.0, code)
         assert s.shape == t.shape
         assert np.all(np.isfinite(s))
         assert isinstance(title, str) and title
@@ -797,7 +859,7 @@ class TestSparcPulseLibraryShapes:
         from uacpy.core.exceptions import ConfigurationError
         from uacpy.acoustic_signal.generate import sparc_pulse
         with pytest.raises(ConfigurationError, match='Unknown pulse type'):
-            sparc_pulse(np.linspace(0, 0.1, 64), 2 * np.pi * 100.0, 'Z')
+            sparc_pulse(np.linspace(0, 0.1, 64), 100.0, 'Z')
 
     def test_nwave_is_gated_to_one_period(self):
         from uacpy.acoustic_signal.generate import nwave
@@ -814,37 +876,41 @@ class TestSparcPulseLibraryShapes:
             atol=1e-12)
 
 
-class TestMseqBounds:
-    """``mseq`` order bounds and chip alphabet."""
+class TestMSequenceBounds:
+    """``m_sequence`` register bounds and chip alphabet."""
 
-    def test_mseq_rejects_out_of_range_order(self):
+    def test_m_sequence_rejects_an_out_of_range_register(self):
         from uacpy.core.exceptions import ConfigurationError
-        from uacpy.acoustic_signal.generate import mseq
-        for bad in (0, 1, 16, -3):
-            with pytest.raises(ConfigurationError, match='between 2 and 15'):
-                mseq(bad)
+        from uacpy.acoustic_signal.generate import m_sequence
+        for bad in (0, 1, -3, 2.5):
+            with pytest.raises(ConfigurationError, match='integer >= 2'):
+                m_sequence(bad)
+        # The preset table ends at 15; a longer register needs its taps.
+        with pytest.raises(ConfigurationError, match='preset table covers'):
+            m_sequence(16)
+        assert m_sequence(16, [16, 15, 13, 4]).size == 2 ** 16 - 1
 
-    def test_mseq_chips_are_plus_minus_one_with_full_length(self):
-        from uacpy.acoustic_signal.generate import mseq
+    def test_m_sequence_chips_are_plus_minus_one_with_full_length(self):
+        from uacpy.acoustic_signal.generate import m_sequence
         for m in (2, 7, 15):
-            s = mseq(m)
+            s = m_sequence(m)
             assert len(s) == 2 ** m - 1
             assert set(np.unique(s)) == {-1.0, 1.0}
 
 
 class TestMakeMseqProbe:
     """Structure of the channel-sounding probe (docs/guide/signal.md §8):
-    0.2 s zero leader, whole BPSK'd ``mseq(10)`` periods at chip rate
-    ``(fmax − fmin)/2`` on carrier ``(fmin + fmax)/2``, normalised to 0.95
-    full scale and zero-filled to exactly ``round(T_tot·fs)`` samples."""
+    0.2 s zero leader, whole BPSK'd ``m_sequence(10)`` periods at chip rate
+    ``(freq_max − freq_min)/2`` on carrier ``(freq_min + freq_max)/2``, normalised to 0.95
+    full scale and zero-filled to exactly ``round(duration·fs)`` samples."""
 
     FS = 10_000.0
     FMIN, FMAX = 1000.0, 2000.0    # fc = 1500 Hz, 500 chips/s → 20 smp/chip
-    N_PERIOD = 1023 * 20           # mseq(10) → 1023 chips
+    N_PERIOD = 1023 * 20           # m_sequence(10) → 1023 chips
 
-    def _probe(self, T_tot=5.0):
+    def _probe(self, duration=5.0):
         from uacpy.acoustic_signal.generate import make_mseq_probe
-        return make_mseq_probe(self.FMIN, self.FMAX, self.FS, T_tot)
+        return make_mseq_probe(self.FMIN, self.FMAX, sample_rate=self.FS, duration=duration)
 
     def test_length_is_exactly_the_requested_duration(self):
         assert self._probe().size == 50_000     # round(5.0 * 10 kHz)
@@ -870,8 +936,8 @@ class TestMakeMseqProbe:
         freqs = np.fft.rfftfreq(probe.size, 1.0 / self.FS)
         power = np.abs(np.fft.rfft(probe)) ** 2
         in_band = (freqs >= self.FMIN) & (freqs <= self.FMAX)
-        # Chip rate (fmax − fmin)/2 puts the BPSK main lobe (first sinc
-        # nulls) exactly on [fmin, fmax]; measured in-band fraction 0.91.
+        # Chip rate (freq_max − freq_min)/2 puts the BPSK main lobe (first sinc
+        # nulls) exactly on [freq_min, freq_max]; measured in-band fraction 0.91.
         assert power[in_band].sum() / power.sum() > 0.85
         assert self.FMIN <= freqs[int(np.argmax(power))] <= self.FMAX
 
@@ -879,102 +945,111 @@ class TestMakeMseqProbe:
         from uacpy.core.exceptions import ConfigurationError
         # One period lasts 2.046 s, so 1 s cannot hold leader + period.
         with pytest.raises(ConfigurationError, match='too short'):
-            self._probe(T_tot=1.0)
+            self._probe(duration=1.0)
 
 
-class TestFourierSynthesis:
-    """AT ``stack.m`` translation: raw-DFT synthesis on the input frequency
-    grid with the one-sided spectrum doubled, plus the baseband warning a
-    grid starting above DC earns (docs/guide/signal.md §9).
+class TestSynthesizeTimeSeriesOnArrays:
+    """``acoustic_signal.synthesize_time_series``: a waveform through
+    ``H(f)`` on plain arrays, the density route ``Field.synthesize_time_series``
+    runs."""
 
-    The warning used to say an offset band start "introduces a phase ramp"
-    and to advise passing ``Tstart``. Neither is what happens: the IFFT puts
-    bin 0 at DC, so the trace is the complex envelope demodulated by
-    ``frequencies[0]``, and ``Tstart`` is a time-origin shift that leaves the
-    spectrum exactly where it is. Because the branch was an ``elif`` on
-    ``Tstart``, following the advice only silenced the warning.
-    """
+    FS = 8000.0
 
-    def test_single_bin_synthesises_the_expected_cosine(self):
-        N, df = 64, 10.0
-        freqs = np.arange(N) * df           # grid starts at DC: no warning
-        H = np.zeros(N, dtype=complex)
-        H[8] = 3.0                          # one 80 Hz bin, real amplitude
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', UserWarning)
-            t, x = fourier_synthesis(H, freqs)
-        assert t[0] == 0.0 and t.size == x.size == N
-        # 2·Re{ifft}: a single one-sided bin of amplitude A comes back as
-        # (2A/N)·cos(2π f t) on the DFT time grid, exact to machine eps.
-        np.testing.assert_allclose(
-            x, (2.0 * 3.0 / N) * np.cos(2 * np.pi * 80.0 * t), atol=1e-12)
+    def _setup(self, f0):
+        from uacpy.acoustic_signal import tone_burst
+        _, s = tone_burst(1000.0, 10, sample_rate=self.FS)
+        f = np.arange(f0, 3000.0, 1.0)
+        return s, f
 
-    @staticmethod
-    def _offset_gaussian_band():
-        """A 100-300 Hz grid carrying a Gaussian centred at 150 Hz.
+    @pytest.mark.parametrize('f0', [25.0, 25.3])
+    def test_a_delayed_arrival_lands_at_its_delay_with_its_amplitude(self, f0):
+        """``H = A·exp(-2πifτ)`` returns ``A·s(t - τ)``: the continuous
+        Hann-burst evaluated at ``t - τ`` matches to 1e-3, on a band that
+        starts on a multiple of Δf and on one that does not."""
+        from uacpy.acoustic_signal import synthesize_time_series
+        s, f = self._setup(f0)
+        n = s.size
+        tau, amp = 0.5, 0.01
+        t, p = synthesize_time_series(amp * np.exp(-2j * np.pi * f * tau), frequencies=f,
+                                      source_waveform=s, sample_rate=self.FS)
+        tq = t - tau
+        w = np.where((tq >= 0) & (tq <= (n - 1) / self.FS),
+                     0.5 - 0.5 * np.cos(2 * np.pi * tq * self.FS / (n - 1)),
+                     0.0)
+        ideal = amp * np.sin(2 * np.pi * 1000.0 * tq) * w
+        assert np.linalg.norm(p - ideal) / np.linalg.norm(ideal) < 1e-3
 
-        The grid is twice as wide as it needs to be so that the demodulated
-        carrier (150 - 100 = 50 Hz) sits well inside the output Nyquist of
-        ``Nfreq*df/2`` = 100.5 Hz. On a 100-200 Hz grid the same carrier lands
-        on the last rfft bin, where the reading depends on the carrier's phase
-        rather than its amplitude, so ``Tstart=0.5`` alone reads 40 Hz there.
-        """
-        freqs = np.arange(100.0, 300.5, 1.0)
-        return freqs, np.exp(-(freqs - 150.0) ** 2 / (2 * 10.0 ** 2)).astype(complex)
+    def test_it_is_the_core_the_field_method_runs(self):
+        """The Field method adds a start time and a re-wrap, nothing to the
+        trace: at the same ``t_start`` the two are bit-identical."""
+        from uacpy.acoustic_signal import synthesize_time_series
+        from uacpy.core.results import Field, SoundSpeeds
+        s, f = self._setup(25.3)
+        H = 0.01 * np.exp(-2j * np.pi * f * 0.5)
+        field = Field(data=H[None, None, :],
+                      coords={'depth': np.array([10.0]),
+                              'range': np.array([750.0]), 'frequency': f},
+                      speeds=SoundSpeeds(water_max=1500.0))
+        trace = field.synthesize_time_series(s, self.FS, t_start=0.0)
+        t, p = synthesize_time_series(H, frequencies=f, source_waveform=s, sample_rate=self.FS)
+        assert np.array_equal(trace.coords['time'], t)
+        assert np.array_equal(trace.data[0, 0], p)
 
-    def test_offset_band_warns_that_the_output_is_demodulated_to_baseband(self):
-        """The warning must name the effect that is actually there. The raw
-        IFFT places bin 0 at DC, so the 150 Hz peak of this band comes back at
-        150 - 100 = 50 Hz: the trace is the complex envelope, not a phase-ramped
-        passband waveform."""
-        freqs, H = self._offset_gaussian_band()
-        with pytest.warns(UserWarning, match='demodulated by frequencies'):
-            t, x = fourier_synthesis(H, freqs)
-        spectrum = np.abs(np.fft.rfft(x))
-        peak = np.fft.rfftfreq(x.size, t[1] - t[0])[np.argmax(spectrum)]
-        assert peak == pytest.approx(50.0, abs=1.0), (
-            f"band peaks at 150 Hz on a grid starting at 100 Hz; the output "
-            f"peaks at {peak:.3g} Hz, so it is not demodulated by "
-            f"frequencies[0] as the warning states")
-        # And the rate is the grid's own, Nfreq*df, not the input Nyquist.
-        assert 1.0 / (t[1] - t[0]) == pytest.approx(freqs.size * 1.0)
+    def test_the_frequency_axis_can_be_any_axis(self):
+        from uacpy.acoustic_signal import synthesize_time_series
+        s, f = self._setup(25.0)
+        H = np.exp(-2j * np.pi * f * 0.3)
+        _, one = synthesize_time_series(H, frequencies=f, source_waveform=s, sample_rate=self.FS)
+        _, last = synthesize_time_series(np.stack([H, 2 * H]), frequencies=f, source_waveform=s, sample_rate=self.FS)
+        _, first = synthesize_time_series(np.stack([H, 2 * H]).T, frequencies=f, source_waveform=s,
+                                          sample_rate=self.FS, axis=0)
+        assert last.shape == (2, one.size) and first.shape == (one.size, 2)
+        np.testing.assert_array_equal(last[1], 2 * one)
+        np.testing.assert_array_equal(first[:, 0], one)
 
-    def test_tstart_anchors_the_time_axis_without_moving_the_spectrum(self):
-        """``Tstart`` is a time-origin shift: it anchors ``t[0]`` and rotates
-        the phase, and the trace stays demodulated by ``frequencies[0]``. So it
-        cannot be the remedy the old message advised, and it must not switch
-        the warning off."""
-        freqs, H = self._offset_gaussian_band()
-        with pytest.warns(UserWarning, match='demodulated by frequencies'):
-            t, x = fourier_synthesis(H, freqs, Tstart=0.5)
-        assert t[0] == pytest.approx(0.5)
-        assert x.shape == freqs.shape
-        peak = np.fft.rfftfreq(x.size, t[1] - t[0])[
-            np.argmax(np.abs(np.fft.rfft(x)))]
-        assert peak == pytest.approx(50.0, abs=1.0), (
-            f"Tstart moved the spectral peak to {peak:.3g} Hz; it is a "
-            f"time-origin shift and must not re-modulate")
+    def test_t_start_moves_the_record(self):
+        from uacpy.acoustic_signal import synthesize_time_series
+        s, f = self._setup(25.0)
+        H = np.exp(-2j * np.pi * f * 0.3)
+        t, _ = synthesize_time_series(H, frequencies=f, source_waveform=s, sample_rate=self.FS, t_start=0.25)
+        assert t[0] == 0.25
 
-    def test_a_grid_starting_at_dc_stays_silent(self):
-        """Only an offset grid earns the warning — a grid that starts at DC
-        needs no demodulation caveat."""
-        freqs = np.arange(0.0, 100.0, 10.0)
-        H = np.ones(freqs.size, dtype=complex)
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', UserWarning)
-            fourier_synthesis(H, freqs, Tstart=0.5)
-            fourier_synthesis(H, freqs)
+    @pytest.mark.parametrize('bad,match', [
+        ('complex', 'must be a real pressure pulse'),
+        ('2d', 'must be a 1-D signal')])
+    def test_the_waveform_is_a_real_one_dimensional_signal(self, bad, match):
+        from uacpy.acoustic_signal import synthesize_time_series
+        s, f = self._setup(25.0)
+        wf = s.astype(complex) if bad == 'complex' else np.stack([s, s])
+        with pytest.raises(ConfigurationError, match=match):
+            synthesize_time_series(np.ones(f.size, complex), frequencies=f, source_waveform=wf, sample_rate=self.FS)
+
+    def test_a_mismatched_axis_is_refused(self):
+        from uacpy.acoustic_signal import synthesize_time_series
+        s, f = self._setup(25.0)
+        with pytest.raises(ConfigurationError, match='frequencies has'):
+            synthesize_time_series(np.ones(f.size - 1, complex), frequencies=f, source_waveform=s,
+                                   sample_rate=self.FS)
+
+    def test_a_nan_bin_makes_the_trace_nan_and_warns(self):
+        from uacpy.acoustic_signal import synthesize_time_series
+        s, f = self._setup(25.0)
+        H = np.ones((2, f.size), complex)
+        H[1, 10] = np.nan
+        with pytest.warns(UserWarning, match='1 of 2 cell'):
+            _, p = synthesize_time_series(H, frequencies=f, source_waveform=s, sample_rate=self.FS)
+        assert np.all(np.isfinite(p[0])) and np.all(np.isnan(p[1]))
 
 
 class TestLfmChirpRefusesNegativeSweepBounds:
-    @pytest.mark.parametrize("fmin,fmax", [(-500.0, 1000.0), (1000.0, -500.0),
+    @pytest.mark.parametrize("freq_start,freq_end", [(-500.0, 1000.0), (1000.0, -500.0),
                                            (NAN, 1000.0)])
-    def test_a_bound_below_zero_raises(self, fmin, fmax):
+    def test_a_bound_below_zero_raises(self, freq_start, freq_end):
         with pytest.raises(ConfigurationError, match="finite frequency >= 0"):
-            lfm_chirp(fmin, fmax, 0.1, 10000.0)
+            lfm_chirp(freq_start, freq_end, 0.1, sample_rate=10000.0)
 
     def test_a_zero_start_frequency_is_accepted(self):
-        _t, s = lfm_chirp(0.0, 1000.0, 0.1, 10000.0)
+        _t, s = lfm_chirp(0.0, 1000.0, 0.1, sample_rate=10000.0)
         assert np.all(np.isfinite(s))
 
 
@@ -983,18 +1058,18 @@ def _flat_psd():
     return 1e-6 / (1.0 + (frequencies / 100.0) ** 2), frequencies
 
 
-def test_small_n_fft_warning_names_the_default_it_falls_back_to():
+def test_small_nfft_warning_names_the_default_it_falls_back_to():
     """The behaviour is deliberate and documented: below 16 the argument is
     discarded for the 65536 default, not clamped up to 16. The message has to
-    say that, or a reader takes it as ``n_fft=16``."""
+    say that, or a reader takes it as ``nfft=16``."""
     Pxx, frequencies = _flat_psd()
     with pytest.warns(UserWarning,
                       match=r'below the minimum 16; using the default 65536'):
         _, small, _ = synthesize_noise_from_psd(
-            Pxx, frequencies, duration=0.05, n_fft=8, sample_rate=4000.0,
+            Pxx, frequencies, duration=0.05, nfft=8, sample_rate=4000.0,
             rng=np.random.default_rng(0))
     _, default, _ = synthesize_noise_from_psd(
-        Pxx, frequencies, duration=0.05, n_fft=65536, sample_rate=4000.0,
+        Pxx, frequencies, duration=0.05, nfft=65536, sample_rate=4000.0,
         rng=np.random.default_rng(0))
     np.testing.assert_array_equal(small, default)
 
@@ -1002,12 +1077,12 @@ def test_small_n_fft_warning_names_the_default_it_falls_back_to():
 class TestBpskModulateBipolarChips:
     def test_zero_one_bits_raise_a_typed_error(self):
         with pytest.raises(ConfigurationError, match='chip'):
-            bpsk_modulate(np.array([0, 1, 1, 0]), 100.0, 1000.0, 100.0)
+            bpsk_modulate(np.array([0, 1, 1, 0]), 100.0, sample_rate=1000.0, chips_per_sec=100.0)
 
     def test_bipolar_chips_emit_one_signed_carrier_block_per_chip(self):
         chips = np.array([1, -1, 1, 1, -1, 1])
         fc, fs, cps = 100.0, 1000.0, 100.0
-        s = bpsk_modulate(chips, fc, fs, cps)
+        s = bpsk_modulate(chips, fc, sample_rate=fs, chips_per_sec=cps)
         tone = np.sin(2 * np.pi * fc * np.arange(int(fs / cps)) / fs)
         np.testing.assert_allclose(
             s, np.concatenate([c * tone for c in chips]), atol=1e-12)
@@ -1017,11 +1092,11 @@ class TestWelchMasksDegenerateDenominators:
     def test_zero_input_masks_h1_and_coherence_to_nan_with_warning(self):
         rng = np.random.default_rng(0)
         frf = FRF()
-        with pytest.warns(UserWarning, match="compute_welch"):
-            _, tf = frf.compute(np.zeros(2048), rng.standard_normal(2048),
-                                1000.0, method="welch", nperseg=256)
-        assert np.isnan(tf).all()
-        assert np.isnan(frf.coh).all()
+        with pytest.warns(UserWarning, match="frf_welch"):
+            result = frf.compute(np.zeros(2048), rng.standard_normal(2048),
+                                 1000.0, method="welch", nperseg=256)
+        assert np.isnan(result.transfer_function).all()
+        assert np.isnan(result.coherence).all()
 
     def test_zero_output_masks_h2_to_nan_with_warning(self):
         rng = np.random.default_rng(1)
@@ -1037,12 +1112,13 @@ class TestWelchMasksDegenerateDenominators:
         y = np.convolve(x, [1.0, 0.4])[:4096]
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            frf1 = FRF()
-            _, tf1 = frf1.compute(x, y, 1000.0, method="welch", nperseg=512)
-            frf2 = FRF(estimator="H2")
-            _, tf2 = frf2.compute(x, y, 1000.0, method="welch", nperseg=512)
-        assert np.isfinite(tf1).all() and np.isfinite(tf2).all()
-        assert np.isfinite(frf1.coh).all()
+            result1 = FRF().compute(x, y, 1000.0, method="welch",
+                                    nperseg=512)
+            _, tf2 = FRF(estimator="H2").compute(x, y, 1000.0,
+                                                 method="welch", nperseg=512)
+        assert np.isfinite(result1.transfer_function).all()
+        assert np.isfinite(tf2).all()
+        assert np.isfinite(result1.coherence).all()
 
 
 class TestSampleRateGuards:
@@ -1058,7 +1134,7 @@ class TestSampleRateGuards:
         with pytest.raises(ConfigurationError,
                            match="probabilistic_welch: "
                                  "sample_rate must be > 0 Hz"):
-            probabilistic_welch(np.ones(64), bad, seg_duration=0.1)
+            probabilistic_welch(np.ones(64), bad, segment_duration=0.1)
 
     @pytest.mark.parametrize("bad", BAD_SCALARS)
     def test_pulse_compression_rejects_bad_sample_rate(self, bad):
@@ -1124,7 +1200,7 @@ class TestSampleRateFiniteness:
         with pytest.raises(ConfigurationError,
                            match="bpsk_modulate: sample_rate must be > 0 Hz "
                                  "and finite"):
-            bpsk_modulate(np.array([1, -1]), 100.0, bad, 100.0)
+            bpsk_modulate(np.array([1, -1]), 100.0, sample_rate=bad, chips_per_sec=100.0)
 
     def test_bpsk_modulate_rejects_infinite_chip_rate(self):
         # chips_per_sec=inf gave samples_per_chip = 0 and a silently empty
@@ -1132,44 +1208,49 @@ class TestSampleRateFiniteness:
         with pytest.raises(ConfigurationError,
                            match="bpsk_modulate: chips_per_sec must be > 0 "
                                  "chips/s and finite"):
-            bpsk_modulate(np.array([1, -1]), 100.0, 1000.0, np.inf)
+            bpsk_modulate(np.array([1, -1]), 100.0, sample_rate=1000.0, chips_per_sec=np.inf)
 
 
-class TestAddNoiseMatchesTheRecordLengthExactly:
-    """``add_noise`` draws its noise by sample count, not by a duration.
+class TestBandlimitedNoiseMatchesTheRecordLengthExactly:
+    """``make_bandlimited_noise`` sizes its record as
+    ``round(duration*sample_rate)``, so ``duration = n/fs`` gives ``n``.
 
     ``int((n/fs)*fs)`` is ``n - 1`` for 7.02 % of lengths at 44100 Hz, 6.14 %
     at 48000 Hz and 5.16 % at 9600 Hz — always one short, never one long — so
-    a length routed through seconds and back produces a noise vector the
-    record cannot be added to.
+    a count routed through ``int`` produces a noise vector the record cannot
+    be added to.
     """
 
     @pytest.mark.parametrize('n, fs', [
         (1000, 8000.0), (1001, 8000.0), (5008, 9600.0), (44100, 44100.0),
         (30011, 48000.0),
     ])
-    @pytest.mark.parametrize('n_rcv', [None, 4])
-    def test_the_output_has_the_input_length(self, n, fs, n_rcv):
-        x = np.zeros(n) if n_rcv is None else np.zeros((n, n_rcv))
-        out = np.asarray(add_noise(x, fs, 0.0, 40.0, 1000.0, 500.0,
-                                   rng=np.random.default_rng(0)))
-        assert out.shape == x.shape
+    @pytest.mark.parametrize('n_channels', [1, 4])
+    def test_the_output_has_the_record_length(self, n, fs, n_channels):
+        _, out = make_bandlimited_noise(1000.0, 500.0, n / fs, sample_rate=fs,
+                                        psd_level_dB=40.0,
+                                        n_channels=n_channels,
+                                        rng=np.random.default_rng(0))
+        assert out.shape == ((n,) if n_channels == 1 else (n, n_channels))
 
     @pytest.mark.parametrize('n, fs', [(1001, 8000.0), (5008, 9600.0)])
-    def test_the_lengths_this_covers_are_the_ones_seconds_would_lose(
+    def test_the_lengths_this_covers_are_the_ones_int_would_lose(
             self, n, fs):
         assert int((n / fs) * fs) == n - 1
 
     def test_a_record_shorter_than_the_filter_padding_is_named(self):
-        with pytest.raises(ConfigurationError) as exc:
-            add_noise(np.zeros(20), 8000.0, 0.0, 40.0, 1000.0, 500.0,
-                      rng=np.random.default_rng(0))
+        with pytest.raises(
+                ConfigurationError,
+                match='is too short for the zero-phase bandpass') as exc:
+            make_bandlimited_noise(1000.0, 500.0, 20 / 8000.0, sample_rate=8000.0,
+                                   psd_level_dB=40.0,
+                                   rng=np.random.default_rng(0))
         message = str(exc.value)
-        assert 'add_noise' in message
+        assert 'make_bandlimited_noise' in message
         assert '20 sample(s)' in message
 
     def test_the_duration_taking_entry_point_sizes_by_duration(self):
-        _, noise = make_bandlimited_noise(1000.0, 500.0, 1.0, 8000.0,
+        _, noise = make_bandlimited_noise(1000.0, 500.0, 1.0, sample_rate=8000.0,
                                           rng=np.random.default_rng(0))
         assert noise.size == int(1.0 * 8000.0)
 
@@ -1223,22 +1304,19 @@ class TestNyquistGuardsSplitGeneratorsFromAnalysers:
 
     @pytest.mark.parametrize('name, call', [
         ('tone_burst',
-         lambda f, fs: tone_burst(f, 5, fs)),
+         lambda f, fs: tone_burst(f, 5, sample_rate=fs)),
         ('lfm_chirp',
-         lambda f, fs: lfm_chirp(100.0, f, 0.1, fs)),
+         lambda f, fs: lfm_chirp(100.0, f, 0.1, sample_rate=fs)),
         ('hfm_chirp',
-         lambda f, fs: hfm_chirp(100.0, f, 0.1, fs)),
+         lambda f, fs: hfm_chirp(100.0, f, 0.1, sample_rate=fs)),
         ('bpsk_modulate',
-         lambda f, fs: bpsk_modulate(np.array([1, -1, 1, -1]), f, fs, 100.0)),
+         lambda f, fs: bpsk_modulate(np.array([1, -1, 1, -1]), f, sample_rate=fs, chips_per_sec=100.0)),
         ('fsk_modulate',
          lambda f, fs: _fsk_modulate(np.array([0, 1]), np.array([1000.0, f]),
                                      0.01, fs)),
         ('fsk_demodulate',
          lambda f, fs: _fsk_demodulate(np.zeros(1000),
                                        np.array([1000.0, f]), 0.01, fs)),
-        ('make_noise_waveform',
-         lambda f, fs: make_noise_waveform(f - 100.0, 200.0, 1.0, fs,
-                                           rng=np.random.default_rng(0))),
     ])
     def test_a_generator_refuses_exactly_nyquist_and_accepts_just_below(
             self, name, call):
@@ -1247,40 +1325,12 @@ class TestNyquistGuardsSplitGeneratorsFromAnalysers:
             call(fs / 2, fs)
         call(fs / 2 - 1.0, fs)
 
-    @pytest.mark.parametrize('bad', [NAN, np.inf])
-    def test_a_generator_refuses_a_non_finite_frequency(self, bad):
-        with pytest.raises(ConfigurationError, match='Nyquist'):
-            make_noise_waveform(bad, 200.0, 1.0, self.FS,
-                                rng=np.random.default_rng(0))
-
-    def test_make_noise_waveform_refuses_a_band_straddling_dc(self):
-        with pytest.raises(ConfigurationError, match='lower band edge'):
-            make_noise_waveform(-1000.0, 200.0, 1.0, self.FS,
-                                rng=np.random.default_rng(0))
-
-    @pytest.mark.parametrize('name,value', [
-        ('sample_rate', -8000.0), ('sample_rate', 0.0), ('sample_rate', NAN),
-        ('duration', -1.0), ('bandwidth', -200.0), ('bandwidth', 0.0),
-    ])
-    def test_make_noise_waveform_refuses_a_non_positive_scalar_by_name(
-            self, name, value):
-        # A negative rate is refused by the band-edge guard for the wrong
-        # reason (a negative Nyquist), and a negative duration or bandwidth
-        # reaches resample as a negative count; each is refused up front by
-        # the shared positive-scalar rule, by name.
-        kw = dict(fc=1000.0, bandwidth=200.0, duration=1.0,
-                  sample_rate=self.FS)
-        kw[name] = value
-        with pytest.raises(ConfigurationError,
-                           match=f"make_noise_waveform: {name} must be > 0"):
-            make_noise_waveform(**kw, rng=np.random.default_rng(0))
-
     @pytest.mark.parametrize('fc', [1000.0, 2000.0, 4000.0])
     def test_an_admitted_band_lands_where_it_was_asked_for(self, fc):
         """The negative half of the guard: below Nyquist the band is where the
         caller put it, so the guard is refusing folds and nothing else."""
-        _, x = make_noise_waveform(fc, 200.0, 1.0, self.FS,
-                                   rng=np.random.default_rng(0))
+        _, x = make_bandlimited_noise(fc, 200.0, 1.0, sample_rate=self.FS,
+                                      rng=np.random.default_rng(0))
         freqs = np.fft.rfftfreq(x.size, 1.0 / self.FS)
         peak = freqs[int(np.argmax(np.abs(np.fft.rfft(x))))]
         assert abs(peak - fc) < 150.0
@@ -1291,26 +1341,30 @@ class TestNyquistGuardsSplitGeneratorsFromAnalysers:
         x = np.random.default_rng(0).standard_normal(8000)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            constant_q(x, fs, scaling='spectrum', fmin=100.0, fmax=fs / 2)
+            constant_q(x, fs, scaling='spectrum', freq_min=100.0, freq_max=fs / 2)
         with pytest.raises(ConfigurationError, match='Nyquist'):
-            constant_q(x, fs, scaling='spectrum', fmin=100.0, fmax=fs / 2 + 1.0)
+            constant_q(x, fs, scaling='spectrum', freq_min=100.0, freq_max=fs / 2 + 1.0)
 
     def test_the_two_helpers_disagree_only_at_exactly_nyquist(self):
-        from uacpy.acoustic_signal._signal_validate import (
-            require_at_most_nyquist, require_below_nyquist)
+        from uacpy.core._validate import (
+            require_at_most_nyquist, require_below_nyquist,
+        )
         fs = self.FS
         require_below_nyquist(fs / 2 - 1e-9, fs, 'probe', 'f', 'it aliases')
         require_at_most_nyquist(fs / 2, fs, 'probe', 'f', 'it aliases')
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='is at or above the Nyquist frequency'):
             require_below_nyquist(fs / 2, fs, 'probe', 'f', 'it aliases')
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='is above the Nyquist frequency'):
             require_at_most_nyquist(fs / 2 + 1e-9, fs, 'probe', 'f',
                                     'it aliases')
 
     def test_an_array_valued_guard_names_the_offending_frequencies(self):
-        from uacpy.acoustic_signal._signal_validate import (
-            require_below_nyquist)
-        with pytest.raises(ConfigurationError) as exc:
+        from uacpy.core._validate import require_below_nyquist
+        with pytest.raises(
+                ConfigurationError,
+                match='are at or above the Nyquist frequency') as exc:
             require_below_nyquist(np.array([100.0, 9000.0, 7000.0]), self.FS,
                                   'probe', 'tone(s)', 'the tones alias')
         message = str(exc.value)
@@ -1336,7 +1390,7 @@ class TestPositiveScalarGuardsCoverEveryAcousticSignalEntryPoint:
     @pytest.mark.parametrize('name, call', [
         ('wigner_ville', lambda d, b: _wigner_ville(d, b)),
         ('constant_q',
-         lambda d, b: _constant_q_spectrum(d, b, fmin=20.0, fmax=100.0)),
+         lambda d, b: _constant_q_spectrum(d, b, freq_min=20.0, freq_max=100.0)),
         ('warp_signal', lambda d, b: _warp_signal(d, b, 1000.0)),
     ])
     def test_a_bad_sample_rate_raises_a_typed_error(self, name, call, bad):
@@ -1364,14 +1418,12 @@ class TestPositiveScalarGuardsCoverEveryAcousticSignalEntryPoint:
             call(self.DATA_2D, bad)
 
     @pytest.mark.parametrize('bad', BAD_SCALARS)
-    @pytest.mark.parametrize('arg', ['range_m', 'c'])
+    @pytest.mark.parametrize('arg', ['range_m', 'sound_speed'])
     def test_warp_signal_guards_its_range_and_sound_speed(self, arg, bad):
         kwargs = {'range_m': 1000.0}
-        if arg == 'c':
-            kwargs['c'] = bad
-        else:
-            kwargs['range_m'] = bad
-        with pytest.raises(ConfigurationError, match=arg):
+        kwargs[arg] = bad
+        with pytest.raises(ConfigurationError,
+                           match=f"warp_signal: {arg} must be"):
             _warp_signal(self.DATA_1D, 1000.0, **kwargs)
 
     def test_wigner_ville_axes_are_finite_on_an_accepted_rate(self):
@@ -1381,6 +1433,84 @@ class TestPositiveScalarGuardsCoverEveryAcousticSignalEntryPoint:
         assert np.all(np.isfinite(result.frequencies))
         assert np.all(np.isfinite(result.times))
         assert np.all(np.diff(result.frequencies) > 0)
+
+
+class TestScalarArgumentsAreRefusedByName:
+    """NaN, non-positive and inverted scalar arguments come back as a typed
+    error naming the argument, never as numpy's own ValueError or IndexError."""
+
+    X = np.random.default_rng(0).standard_normal(4000)
+
+    @pytest.mark.parametrize('bad', [np.nan, -1.0, 0.0])
+    def test_make_bandlimited_noise_names_its_duration(self, bad):
+        with pytest.raises(ConfigurationError, match='duration must be'):
+            make_bandlimited_noise(1000.0, 200.0, bad, sample_rate=8000.0)
+
+    def test_make_bandlimited_noise_names_its_sample_rate(self):
+        with pytest.raises(ConfigurationError, match='sample_rate must be'):
+            make_bandlimited_noise(1000.0, 200.0, 1.0, sample_rate=np.nan)
+
+    @pytest.mark.parametrize('kwargs, name', [
+        (dict(segment_duration=np.nan), 'segment_duration must be'),
+        (dict(level_step_dB=np.nan), 'level_step_dB must be'),
+        (dict(level_step_dB=0.0), 'level_step_dB must be'),
+        (dict(level_min_dB=100, level_max_dB=50), 'level_min_dB < level_max_dB'),
+        (dict(level_min_dB=50, level_max_dB=50), 'level_min_dB < level_max_dB'),
+    ])
+    def test_the_histogram_scalars_are_named(self, kwargs, name):
+        from uacpy.acoustic_signal import probabilistic_welch
+        with pytest.raises(ConfigurationError, match=name):
+            probabilistic_welch(self.X, 2000.0, segment_duration=kwargs.pop(
+                'segment_duration', 0.5), nperseg=256, **kwargs)
+
+    def test_the_constant_q_histogram_takes_the_same_level_window_rule(self):
+        from uacpy.acoustic_signal import probabilistic_constant_q
+        with pytest.raises(ConfigurationError, match='level_min_dB < level_max_dB'):
+            probabilistic_constant_q(self.X, 2000.0, freq_min=100.0,
+                                     level_min_dB=100, level_max_dB=50)
+
+    def test_a_level_window_one_bin_wide_is_accepted(self):
+        from uacpy.acoustic_signal import probabilistic_welch
+        r = probabilistic_welch(self.X, 2000.0, segment_duration=0.5,
+                                nperseg=256, level_min_dB=50, level_max_dB=51)
+        assert r.level_edges.tolist() == [50.0, 51.0]
+
+    def test_uniform_frequency_step_needs_two_frequencies(self):
+        from uacpy.acoustic_signal.channel import uniform_frequency_step
+        with pytest.raises(ConfigurationError, match='at least two'):
+            uniform_frequency_step([100.0])
+        assert uniform_frequency_step([100.0, 110.0]) == pytest.approx(10.0)
+
+    @pytest.mark.parametrize('method', ['welch', 'etfe', 'ls_fir', 'p_etfe'])
+    def test_frf_refuses_records_of_different_lengths(self, method):
+        with pytest.raises(ConfigurationError, match='same length'):
+            FRF(method=method, order=4).compute(self.X[:1000], self.X[:900],
+                                            1000.0)
+
+    @pytest.mark.parametrize('bad', [0.0, -1000.0, np.nan])
+    def test_frf_names_its_sample_rate(self, bad):
+        with pytest.raises(ConfigurationError, match='sample_rate must be'):
+            FRF(method='etfe').compute(self.X, self.X, bad)
+
+    @pytest.mark.parametrize('bad', ['', None, 5])
+    def test_sparc_pulse_refuses_a_pulse_type_that_names_no_letter(self, bad):
+        from uacpy.acoustic_signal.generate import sparc_pulse
+        with pytest.raises(ConfigurationError,
+                           match='pulse_type must be a non-empty string'):
+            sparc_pulse(np.linspace(0, 0.01, 10), 100.0, bad)
+
+    def test_simulate_reception_matches_the_direct_convolution(self):
+        """A long transmit through a long channel takes scipy's FFT route; the
+        reception is the direct sum's to rounding."""
+        from uacpy.acoustic_signal.channel import (
+            impulse_response, simulate_reception,
+        )
+        fs = 48000.0
+        x = np.random.default_rng(1).standard_normal(9600)
+        amps, delays = [1.0, 0.5, 0.25], [0.01, 0.3, 1.0]
+        _, y = simulate_reception(x, amps, delays, fs)
+        _, h = impulse_response(amps, delays, sample_rate=fs)
+        np.testing.assert_allclose(y, np.convolve(x, h), rtol=0, atol=1e-12)
 
 
 class TestDspEstimatorsNameTheBridgeWhenHandedAField:
@@ -1395,7 +1525,8 @@ class TestDspEstimatorsNameTheBridgeWhenHandedAField:
         return Field(data=np.sin(2 * np.pi * 100 * t), coords={'time': t})
 
     def test_psd_names_the_data_attribute(self):
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match=r'Pass Field\.data') as exc:
             welch(self._trace(), 1600.0)
         message = str(exc.value)
         assert 'welch:' in message
@@ -1412,7 +1543,7 @@ class TestSignalAxisGuardsRefuseAnEmptyAxis:
     """Three entry points validated axis monotonicity but not axis emptiness,
     so an empty frequency axis reached numpy and raised an untyped
     ``ValueError`` / ``IndexError`` naming no input the caller supplied — the
-    exact failure the canonical guard in ``core._carrier_validate`` says it
+    exact failure the canonical guard in ``core._validate`` says it
     exists to prevent.
 
     The monotonicity predicate itself agrees across all five copies of it in
@@ -1421,22 +1552,23 @@ class TestSignalAxisGuardsRefuseAnEmptyAxis:
 
     @staticmethod
     def _calls():
-        from uacpy.acoustic_signal.estimate import decidecade_band_levels
-        from uacpy.acoustic_signal.system import (
-            impulse_response_from_transfer_function)
-        from uacpy.acoustic_signal.system import modal_group_velocity
+        from uacpy.acoustic_signal.bands import decidecade_band_levels
+        from uacpy.acoustic_signal.channel import (
+            impulse_response_from_transfer_function,
+        )
+        from uacpy.acoustic_signal.dispersion import modal_group_velocity
         return {
             # A monotonic k_horizontal: a propagating mode's wavenumber
             # rises with frequency, and a flat one is refused (it divides the
             # group velocity by zero), so a constant axis would not exercise
             # the well-formed path this helper is shared with.
             'modal_group_velocity':
-                lambda f, n: modal_group_velocity(f, np.linspace(0.5, 12.0, n)),
+                lambda f, n: modal_group_velocity(f, k_horizontal=np.linspace(0.5, 12.0, n)),
             'impulse_response_from_transfer_function':
                 lambda f, n: impulse_response_from_transfer_function(
-                    np.ones(n, dtype=complex), f, 1000.0),
+                    np.ones(n, dtype=complex), frequencies=f, sample_rate=1000.0),
             'decidecade_band_levels':
-                lambda f, n: decidecade_band_levels(np.ones(n), f),
+                lambda f, n: decidecade_band_levels(np.ones(n), frequencies=f),
         }
 
     @pytest.mark.parametrize('name', ['modal_group_velocity',
@@ -1444,7 +1576,9 @@ class TestSignalAxisGuardsRefuseAnEmptyAxis:
                                       'decidecade_band_levels'])
     def test_an_empty_axis_raises_a_typed_error_naming_the_axis(self, name):
         call = self._calls()[name]
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(
+                ConfigurationError,
+                match='frequencies must contain at least one value') as exc:
             call(np.array([], dtype=float), 0)
         message = str(exc.value)
         assert name in message
@@ -1455,7 +1589,9 @@ class TestSignalAxisGuardsRefuseAnEmptyAxis:
                                       'decidecade_band_levels'])
     def test_a_one_sample_axis_names_its_own_domain_minimum(self, name):
         call = self._calls()[name]
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(
+                ConfigurationError,
+                match='frequencies needs at least 2 samples') as exc:
             call(np.array([100.0]), 1)
         message = str(exc.value)
         assert name in message
@@ -1469,7 +1605,8 @@ class TestSignalAxisGuardsRefuseAnEmptyAxis:
         case without displacing the local message, which is where each
         function's own remediation lives."""
         call = self._calls()[name]
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='frequencies must be .*increasing') as exc:
             call(np.array([1.0, 3.0, 2.0, 4.0]), 4)
         message = str(exc.value)
         assert 'increasing' in message
@@ -1503,47 +1640,60 @@ class TestSignalAxisGuardsRefuseAnEmptyAxis:
             assert calls['decidecade_band_levels'](f, 64) is not None
 
 
-class TestMseqAndDsssSequencesAreNotInterchangeable:
-    """``mseq`` and ``comms.modulate.m_sequence`` share the BPSK polarity but not
-    the register seed, so despreading one's output with the other's sequence
-    lands on the m-sequence's off-peak correlation ``-1/N`` rather than on the
-    symbol — the property ``mseq``'s docstring states."""
+class TestOneMSequenceGenerator:
+    """One generator serves the sonar probes and the spreading codes, with one
+    seed convention, so a spread and a despread built from the same
+    ``(n_register, taps)`` always line up, and the preset table reproduces
+    the Acoustics-Toolbox ``mseq.m`` recursion chip for chip."""
 
     SYMBOLS = np.array([1.0, -1.0, 1.0])
 
     @staticmethod
-    def _pair(n=5, taps=(5, 2)):
-        from uacpy.acoustic_signal.generate import mseq
-        from uacpy.comms.modulate import m_sequence
-        return mseq(n), m_sequence(n, list(taps))
+    def _mseq_m(m):
+        """``mseq.m``'s shift-register recursion, with this package's BPSK
+        mapping (bit 0 -> +1): seed [1, 0, ..., 0], feedback dot(c, seed)."""
+        from uacpy.acoustic_signal.generate import _MSEQ_FEEDBACK
+        c = np.array(_MSEQ_FEEDBACK[m])
+        seed = np.zeros(m)
+        seed[0] = 1
+        out = np.zeros(2 ** m - 1)
+        for i in range(out.size):
+            seed = np.concatenate([seed[1:], [np.mod(np.dot(c, seed), 2)]])
+            out[i] = seed[0]
+        return 1.0 - 2.0 * out
 
-    def test_the_same_generator_at_both_ends_recovers_the_symbols(self):
-        from uacpy.comms.modulate import despread, spread
-        for seq in self._pair():
-            got = despread(spread(self.SYMBOLS, seq), seq)
-            np.testing.assert_allclose(np.real(got), self.SYMBOLS, atol=1e-9)
+    @pytest.mark.parametrize('m', range(2, 16))
+    def test_the_preset_table_reproduces_the_toolbox_recursion(self, m):
+        from uacpy.acoustic_signal.generate import m_sequence
+        np.testing.assert_array_equal(m_sequence(m), self._mseq_m(m))
 
-    @pytest.mark.parametrize('taps', [(5, 2), (5, 3)])
-    def test_crossing_the_two_generators_collapses_to_minus_one_over_n(
-            self, taps):
-        from uacpy.comms.modulate import despread, spread
-        a, b = self._pair(5, taps)
-        got = np.real(despread(spread(self.SYMBOLS, a), b))
-        np.testing.assert_allclose(got, -self.SYMBOLS / a.size, atol=1e-9)
+    def test_explicit_taps_of_the_preset_polynomial_give_the_same_sequence(
+            self):
+        from uacpy.acoustic_signal.generate import m_sequence
+        np.testing.assert_array_equal(m_sequence(5, [5, 2]), m_sequence(5))
+        np.testing.assert_array_equal(m_sequence(7, [7, 1]), m_sequence(7))
 
-    def test_the_seeds_are_what_differ_not_the_polarity(self):
-        a, b = self._pair()
-        assert set(np.unique(a)) == {-1.0, 1.0}
-        assert set(np.unique(np.asarray(b, dtype=float))) == {-1.0, 1.0}
-        assert not np.array_equal(a, np.asarray(b, dtype=float))
+    def test_comms_and_acoustic_signal_share_the_one_function(self):
+        import uacpy.acoustic_signal as sig
+        import uacpy.comms as comms
+        assert comms.m_sequence is sig.m_sequence
+        assert not hasattr(sig, 'mseq')
+        from uacpy.comms import coding
+        assert not hasattr(coding, 'm_sequence')
 
-    def test_even_the_same_cycle_is_only_a_shift_of_it(self):
-        a, b = self._pair(5, (5, 2))
-        b = np.asarray(b, dtype=float)
-        xcorr = np.array([float(np.dot(a, np.roll(b, k)))
-                          for k in range(a.size)])
-        assert xcorr.max() == a.size          # same cycle
-        assert xcorr[0] != a.size             # but not at zero lag
+    @pytest.mark.parametrize('taps', [None, (5, 3)])
+    def test_the_same_call_at_both_ends_recovers_the_symbols(self, taps):
+        from uacpy.acoustic_signal.generate import m_sequence
+        from uacpy.comms.coding import despread, spread
+        seq = m_sequence(5, taps)
+        got = despread(spread(self.SYMBOLS, seq), seq)
+        np.testing.assert_allclose(np.real(got), self.SYMBOLS, atol=1e-9)
+
+    def test_a_non_primitive_tap_set_is_refused(self):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.acoustic_signal.generate import m_sequence
+        with pytest.raises(ConfigurationError, match='not primitive'):
+            m_sequence(5, [5, 1])
 
 
 class TestEstimatorOutputDtypesMatchTheDocumentedSplit:
@@ -1573,7 +1723,7 @@ class TestEstimatorOutputDtypesMatchTheDocumentedSplit:
         ('envelope', lambda x, fs: _envelope(x)),
         ('cepstrum', lambda x, fs: _cepstrum(x)),
         ('constant-Q spectrum',
-         lambda x, fs: _constant_q_spectrum(x, fs, fmin=20.0, fmax=400.0)),
+         lambda x, fs: _constant_q_spectrum(x, fs, freq_min=20.0, freq_max=400.0)),
         ('band exposure', lambda x, fs: _band_exposure(x, fs).power),
         ('wigner_ville', lambda x, fs: _wigner_ville(x, fs).distribution),
     ])
@@ -1650,3 +1800,144 @@ class TestRickerWaveletDelay:
     def test_a_non_finite_delay_raises(self):
         with pytest.raises(ConfigurationError, match='delay must be finite'):
             ricker_wavelet(np.linspace(0, 0.1, 10), 40.0, delay=np.nan)
+
+
+@pytest.mark.parametrize('module, name', [
+    ('uacpy.acoustic_signal', n) for n in (
+        'transfer_function_from_impulse_response', 'arrival_transfer_function',
+        'broadband_propagation_loss', 'gate_transfer_function',
+        'uniform_frequency_step', 'tone_phasor', 'simulate_arrival_reception',
+        'rms_delay_spread', 'energy_support', 'coherence_bandwidth',
+        'coherence_factor', 'channel_regime')] + [
+    ('uacpy.comms', 'pulse_shaped_taps'),
+    ('uacpy.acoustics', 'modal_attenuation')])
+def test_the_delegation_label_lives_on_the_private_form(module, name):
+    """``who`` names the entry point in a refusal when a method delegates.
+    It is not physics, so the public signature does not carry it: the
+    private ``_name`` takes it, keyword-only, and the public form refuses
+    under its own name."""
+    import importlib
+    import inspect
+    func = getattr(importlib.import_module(module), name)
+    assert 'who' not in inspect.signature(func).parameters
+    assert 'who' not in (func.__doc__ or '').split('Returns')[0].split()
+    private = getattr(importlib.import_module(func.__module__), '_' + name)
+    param = inspect.signature(private).parameters['who']
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def _signal_results():
+    """One instance of every signal result tuple, with attributes set away
+    from their defaults so a copy that dropped one would show."""
+    from uacpy.acoustic_signal.beamforming import (
+        BeamformedField, BeamformResult, Snapshots,
+    )
+    from uacpy.acoustic_signal.gathers import FKResult, RadonResult, TauPResult
+    from uacpy.acoustic_signal.detect import AmbiguityResult
+    from uacpy.acoustic_signal.timefreq import (
+        Cepstrum, ComplexCepstrum, CWTResult, SpectrogramResult,
+        WignerVilleResult,
+    )
+    from uacpy.comms.janus import JanusReception
+    from uacpy.comms.link import BerCurve
+    from uacpy.acoustic_signal.cqt import CQSpectrogramResult, CQTResult
+    from uacpy.acoustic_signal.spectral import (
+        ProbabilisticSpectralEstimate, SpectralEstimate,
+    )
+    from uacpy.noise.ambient import NoiseComponents
+    x = np.arange(4.0)
+    return {
+        'SpectralEstimate': SpectralEstimate(
+            x, x, scaling='exposure', method='constant_q',
+            bands=[(1.0, 2.0, 3.0)], band_type='octave'),
+        'ProbabilisticSpectralEstimate': ProbabilisticSpectralEstimate(
+            x, x, x, mean_dB=x, level_step_dB=0.5, ref=1.0, scaling='spectrum',
+            segment_levels_dB=np.ones((3, 4)), segment_times=x[:3]),
+        'CQTResult': CQTResult(x, x + 1j),
+        'CQSpectrogramResult': CQSpectrogramResult(x, x, x,
+                                                   scaling='spectrum'),
+        'WignerVilleResult': WignerVilleResult(x, x, x),
+        'CWTResult': CWTResult(x, x, x),
+        'Cepstrum': Cepstrum(x, x, sample_rate=2.0),
+        'JanusReception': JanusReception(x, False, detected=True,
+                                         start=3, doppler_scale=1e-4,
+                                         statistic=x),
+        'BerCurve': BerCurve(x, x, scheme='16qam', n_bits=10,
+                             channel=[1.0, 0.5], n_train=7),
+        'SpectrogramResult': SpectrogramResult(x, x, x, scaling='spectrum',
+                                               mode='phase'),
+        'ComplexCepstrum': ComplexCepstrum(x, 2),
+        'AmbiguityResult': AmbiguityResult(x, x, x),
+        'BeamformResult': BeamformResult(x, x, 1.0, ranges=x),
+        'Snapshots': Snapshots(100.0, np.ones((2, 3))),
+        'BeamformedField': BeamformedField(np.ones((2, 3)), x[:2], np.ones(3),
+                                           None, grid_coords={'range': x[:3]}),
+        'RadonResult': RadonResult(x, x, x, kind='hyperbolic'),
+        'TauPResult': TauPResult(x, x, x),
+        'FKResult': FKResult(x, x, x, x, scaling='power'),
+        'NoiseComponents': NoiseComponents(x, x, x, x, x, x),
+    }
+
+
+_RESULT_NAMES = sorted(_signal_results())
+
+
+class TestSignalResultsShareOneBehaviour:
+    """Every signal result tuple copies, pickles and replaces the same way,
+    keeping the attributes that say what it holds, and states the unit of
+    each field."""
+
+    @staticmethod
+    def _attrs(result):
+        return {name: getattr(result, name) for name in result._attrs}
+
+    @pytest.mark.parametrize('name', _RESULT_NAMES)
+    def test_a_pickle_round_trip_keeps_fields_and_attributes(self, name):
+        import pickle
+        r = _signal_results()[name]
+        back = pickle.loads(pickle.dumps(r))
+        assert type(back) is type(r)
+        for mine, theirs in zip(back, r):
+            np.testing.assert_array_equal(mine, theirs)
+        assert repr(self._attrs(back)) == repr(self._attrs(r))
+
+    @pytest.mark.parametrize('name', _RESULT_NAMES)
+    def test_replace_changes_one_field_and_keeps_the_attributes(self, name):
+        r = _signal_results()[name]
+        field = r._fields[0]
+        new = r._replace(**{field: 'changed'})
+        assert type(new) is type(r)
+        assert getattr(new, field) == 'changed'
+        assert repr(self._attrs(new)) == repr(self._attrs(r))
+
+    @pytest.mark.parametrize('name', _RESULT_NAMES)
+    def test_replace_refuses_an_unknown_name(self, name):
+        with pytest.raises(TypeError, match='unexpected field names'):
+            _signal_results()[name]._replace(no_such_field=1)
+
+    @pytest.mark.parametrize('name', _RESULT_NAMES)
+    def test_the_units_name_every_field(self, name):
+        r = _signal_results()[name]
+        assert list(r.units) == list(r._fields)
+
+    def test_the_units_follow_what_the_estimate_holds(self):
+        r = _signal_results()
+        assert r['SpectralEstimate'].units['power'] == 'Pa²·s'
+        assert r['SpectralEstimate']._replace(
+            scaling='density').units['power'] == 'Pa²/Hz'
+        assert r['ProbabilisticSpectralEstimate'].units['level_edges'] == \
+            'dB re 1 Pa²'
+        assert r['ProbabilisticSpectralEstimate']._replace(
+            ref=1e-6, scaling='density').units['level_edges'] == \
+            'dB re 1 µPa²/Hz'
+        assert r['SpectrogramResult'].units['power'] == 'rad'
+        assert r['RadonResult'].units['moveout'] == 'm/s'
+        assert r['FKResult'].units['power'] is None
+        assert r['NoiseComponents'].units['wind'] == 'dB re 1 µPa²/Hz'
+
+    def test_only_a_carrier_with_a_plotter_has_a_plot(self):
+        r = _signal_results()
+        assert not hasattr(r['BeamformResult'], 'plot')
+        assert not hasattr(r['Snapshots'], 'plot')
+        assert not hasattr(r['NoiseComponents'], 'plot')
+        assert hasattr(r['FKResult'], 'plot')

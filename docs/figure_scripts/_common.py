@@ -13,6 +13,7 @@ is genuinely the same environment.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -29,10 +30,17 @@ TALL = (7.0, 6.4)
 
 
 def save(fig, stem: str, *, guide: bool = False) -> Path:
-    """Write ``fig`` as ``<stem>.png`` and close it. Returns the path."""
+    """Write ``fig`` as ``<stem>.png`` and close it. Returns the path.
+
+    The PNG goes to the page's figure directory, or to
+    ``$UACPY_FIGURE_OUTPUT`` when it is set (the test suite's run, which
+    leaves ``docs/`` untouched).
+    """
     import matplotlib.pyplot as plt
 
-    out_dir = GUIDE_FIG_DIR if guide else FIG_DIR
+    override = os.environ.get('UACPY_FIGURE_OUTPUT')
+    out_dir = (Path(override) if override
+               else GUIDE_FIG_DIR if guide else FIG_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f'{stem}.png'
     fig.savefig(path, dpi=DPI, bbox_inches='tight', facecolor='white')

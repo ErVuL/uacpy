@@ -38,7 +38,7 @@ def test_at_source_level_subtracts_the_loss_from_the_source_level():
     out = field.at_source_level(180.0)
     np.testing.assert_allclose(np.asarray(out.data), 180.0 - 40.0, atol=1e-9)
     np.testing.assert_array_equal(out.coords['range'], field.coords['range'])
-    assert out.metadata['source_level_dB'] == 180.0
+    assert out.source_level_dB == 180.0
 
 
 def test_a_level_is_its_own_kind_so_it_is_not_labelled_transmission_loss():
@@ -61,6 +61,26 @@ def test_at_source_level_reads_a_real_db_field_as_the_loss_it_already_is():
     np.testing.assert_allclose(np.asarray(db.data), 40.0, atol=1e-9)
     out = db.at_source_level(180.0)
     np.testing.assert_allclose(np.asarray(out.data), 140.0, atol=1e-9)
+
+
+def test_a_cell_no_energy_reached_stays_marked_in_the_level_field():
+    """The loss marker (|TL| = 600 dB for zero pressure) comes back as the
+    level view of the marker, -600 dB, which no_energy_mask recognises —
+    not as SL - 600 = -420 dB, a finite level every mask and metric reads
+    as real (RC-1)."""
+    from uacpy.core.acoustics import no_energy_mask
+    from uacpy.core.constants import NO_ENERGY_DB
+    data = np.full((2, 3), 0.01 + 0.0j)
+    data[1, 2] = 0.0
+    field = Field(data=data,
+                  coords={'depth': [10.0, 20.0],
+                          'range': [100.0, 200.0, 300.0]},
+                  phase_reference='travelling_wave')
+    out = np.asarray(field.at_source_level(180.0).data)
+    assert out[1, 2] == -NO_ENERGY_DB
+    assert no_energy_mask(out).tolist() == [[False] * 3,
+                                            [False, False, True]]
+    np.testing.assert_allclose(out[0], 140.0, atol=1e-9)
 
 
 def test_at_source_level_refuses_a_time_domain_trace():
@@ -189,7 +209,7 @@ def test_the_excitation_plot_draws_both_views_against_mode_angle():
     matplotlib.use('Agg')
     from uacpy.models.kraken import Kraken
     from uacpy.tests.conftest import make_pekeris
-    from uacpy.visualization import plot_mode_excitation
+    from uacpy.plot import plot_mode_excitation
     env = make_pekeris(name='excite-plot', bathymetry=100.0)
     zs = np.linspace(20.0, 60.0, 5)
     src = uacpy.Source(depths=zs, frequencies=F0)
@@ -223,7 +243,7 @@ def test_at_source_level_defaults_to_the_level_the_source_carried():
     """A run made with a levelled Source already knows how loud it was, so
     the level view needs no argument repeated at the call site."""
     field = _complex_field(0.01 + 0.0j)
-    field.metadata['source_level_dB'] = 180.0
+    field.source_level_dB = 180.0
     np.testing.assert_allclose(np.asarray(field.at_source_level().data),
                                140.0, atol=1e-9)
     # An explicit argument still wins over the stamp.
@@ -245,7 +265,7 @@ def test_a_run_stamps_the_sources_level_onto_its_result():
     src = uacpy.Source(depths=50.0, frequencies=F0, source_level_dB=180.0)
     rcv = uacpy.Receiver(depths=[30.0, 70.0], ranges=[1000.0, 2000.0])
     field = Kraken(verbose=False).run(env, src, rcv)
-    assert field.metadata['source_level_dB'] == 180.0
+    assert field.source_level_dB == 180.0
     level = field.at_source_level()
     np.testing.assert_allclose(np.asarray(level.data),
                                180.0 - np.asarray(field.dB), atol=1e-9)
@@ -271,8 +291,7 @@ def test_at_source_level_refuses_a_dB_quantity_that_is_not_a_loss(kind):
     """Only a loss can be subtracted from a source level. A residual, a
     normalised ambiguity power and a signal excess are all dB and none of
     them is a propagation loss."""
-    f = _complex_field(0.01 + 0.0j).to_dB()
-    f.metadata['kind'] = kind
+    f = _complex_field(0.01 + 0.0j).to_dB().replace(kind=kind)
     with pytest.raises(ConfigurationError, match='not a transmission loss'):
         f.at_source_level(180.0)
 
@@ -327,9 +346,9 @@ def test_the_merged_grid_keeps_its_endpoints_for_the_coupled_mode_check():
     """``EvaluateCMMod.f90:312`` stops the run unless ``z(1) == depthT`` and
     ``z(NR) == depthB`` exactly, which ``io/oalib_writer`` already documents.
     A receiver a micron off an endpoint must not displace it."""
-    from uacpy.models.kraken import _merge_depths
+    from uacpy.models.kraken._grid import merge_depths
     grid = np.linspace(0.0, 100.0, 151)
-    merged = _merge_depths(grid, [1e-06, 30.0, 60.0, 100.0 - 1e-06], 100.0)
+    merged = merge_depths(grid, [1e-06, 30.0, 60.0, 100.0 - 1e-06], 100.0)
     assert merged[0] == 0.0, merged[:3]
     assert merged[-1] == 100.0, merged[-3:]
 
@@ -338,8 +357,8 @@ def test_the_merged_grid_separates_every_pair_it_emits():
     """The spacing the comment promises is one MergeVectors cannot collapse,
     and that has to hold between two receivers as well as between a receiver
     and the grid — two legal depths 2 um apart are inside its tolerance."""
-    from uacpy.models.kraken import _merge_depths, _MERGE_VECTORS_TOL_M
-    merged = _merge_depths(np.linspace(0.0, 100.0, 101),
+    from uacpy.models.kraken._grid import merge_depths, _MERGE_VECTORS_TOL_M
+    merged = merge_depths(np.linspace(0.0, 100.0, 101),
                            [50.000000, 50.000002, 75.0], 100.0)
     assert np.all(np.diff(merged) > _MERGE_VECTORS_TOL_M), np.diff(merged).min()
 
@@ -374,7 +393,7 @@ def test_the_excitation_plot_shows_an_upward_steered_main_lobe():
     matplotlib.use('Agg')
     from uacpy.models.kraken import Kraken
     from uacpy.tests.conftest import make_pekeris
-    from uacpy.visualization import plot_mode_excitation
+    from uacpy.plot import plot_mode_excitation
     env = make_pekeris(name='steered', bathymetry=100.0)
     zs = np.linspace(20.0, 60.0, 5)
     c, f = 1500.0, 200.0
@@ -451,7 +470,7 @@ def test_a_weighted_source_on_a_db_mode_yields_a_stack_to_combine():
         stack.superpose()
     # A COMPLEX weight is unusable either way and is still refused up front.
     bad = uacpy.Source(depths=[30.0, 70.0], frequencies=F0, weights=[1.0, 1j])
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match='a weight cannot scale it'):
         Kraken(verbose=False).run(env, bad, rcv,
                                   run_mode=uacpy.RunMode.INCOHERENT_TL)
 
@@ -541,7 +560,7 @@ def test_the_modal_excitation_carries_the_element_pattern_the_engine_applies():
     plain = modes.excitation(bare)
     shaded = modes.excitation(shaped, sound_speed=1500.0)
     angles = np.degrees(np.arccos(np.clip(
-        1500.0 / np.asarray(modes.compute_phase_speeds(), dtype=float),
+        1500.0 / np.asarray(modes.phase_speeds, dtype=float),
         -1.0, 1.0)))
     f = np.interp(angles, _shaped()[:, 0], 10.0 ** (_shaped()[:, 1] / 20.0))
     np.testing.assert_allclose(shaded, f * plain, rtol=1e-9, atol=1e-12)
@@ -589,14 +608,14 @@ def test_the_sonar_heatmaps_draw_the_geometry_they_are_about(plotter, kind,
     the same footing, as it is on ``plot_field``."""
     import matplotlib
     matplotlib.use('Agg')
-    from uacpy import visualization
+    from uacpy import plot as visualization
     fn = getattr(visualization, plotter)
     field = Field(
         data=np.full((3, 4), data, dtype=float),
         coords={'depth': [10.0, 50.0, 90.0],
                 'range': [500.0, 1000.0, 1500.0, 2000.0]},
         model='Test', frequencies=F0, source_depths=[30.0],
-        metadata={'kind': kind},
+        kind=kind,
     )
     src = uacpy.Source(depths=30.0, frequencies=F0)
     rcv = uacpy.Receiver(depths=[40.0, 60.0], ranges=[1000.0, 2000.0])
@@ -605,3 +624,31 @@ def test_the_sonar_heatmaps_draw_the_geometry_they_are_about(plotter, kind,
               if len(np.atleast_1d(ln.get_ydata())) == 1]
     assert any(abs(y - 30.0) < 1e-9 for y in marked), marked
     matplotlib.pyplot.close(fig)
+
+
+def test_a_beam_pattern_angle_is_positive_downward():
+    """``Source(beam_pattern=...)`` angles are Bellhop's launch declination,
+    positive DOWNWARD, and the docstring says so: a pattern loud only for
+    angle > 0 sends its energy below the source. A datasheet's positive-up
+    elevation written as-is comes out mirrored, so the sign is the one fact a
+    user writing a pattern needs."""
+    import warnings
+    env = uacpy.Environment(
+        name='deep', bathymetry=2000.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(
+            acoustic_type='half-space', sound_speed=1500.0, density=1.027,
+            attenuation=0.5))
+    loud_down = np.array([[-180.0, -60.0], [-1.0, -60.0], [1.0, 0.0],
+                          [180.0, 0.0]])
+    src = uacpy.Source(depths=1000.0, frequencies=500.0,
+                       beam_pattern=loud_down)
+    rcv = uacpy.Receiver(depths=np.array([700.0, 1300.0]),
+                         ranges=np.array([300.0]))
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        tl = np.squeeze(np.asarray(uacpy.Bellhop(n_beams=2001).run(
+            env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL).dB))
+    above, below = tl
+    assert below < 60.0
+    assert not np.isfinite(above) or above > below + 40.0
+    assert 'positive downward' in uacpy.Source.__doc__

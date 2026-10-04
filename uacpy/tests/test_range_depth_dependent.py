@@ -23,6 +23,7 @@ from uacpy.core.exceptions import (
     FileFormatError,
 )
 from uacpy.models import Bellhop, RAM, RunMode
+from uacpy.models.ram import _seabed as ram_seabed
 from uacpy.core.environment import (
     Bottom, SedimentLayer, SeabedColumn,
     BoundaryProperties, SoundSpeedProfile,
@@ -70,7 +71,7 @@ class TestRangeDependentEnvironment:
             bottom=bottom_rd
         )
 
-        assert env.has_range_dependent_bottom
+        assert (env.bottom.is_range_dependent and not env.bottom.is_layered)
         assert len(env.bottom.ranges) == 3
 
         # Nearest column: 2 km is on the first column's side of the 2.5 km
@@ -97,8 +98,8 @@ class TestRangeDependentEnvironment:
                                           ),
         )
 
-        assert env.has_range_dependent_ssp
-        assert env.ssp.data.shape == (21, 3)
+        assert env.ssp.is_range_dependent
+        assert env.ssp.sound_speed.shape == (21, 3)
 
     def test_combined_range_dependencies(self):
         """Test environment with both RD bathymetry and RD SSP."""
@@ -120,7 +121,7 @@ class TestRangeDependentEnvironment:
         )
 
         assert env.is_range_dependent
-        assert env.has_range_dependent_ssp
+        assert env.ssp.is_range_dependent
 
 
 class TestDepthDependentSSP:
@@ -348,7 +349,7 @@ class TestRangeDependentConsistency:
                                           ),
         )
 
-        assert env.ssp.data.shape == (21, 3)  # 21 depths, 3 ranges
+        assert env.ssp.sound_speed.shape == (21, 3)  # 21 depths, 3 ranges
         assert len(env.ssp.ranges) == 3
 
 
@@ -373,12 +374,12 @@ class TestRangeDependentLayeredBottom:
     def test_from_columns_keeps_columns_and_max_total_thickness(self):
         rdl = self._make_rdl()
         assert len(rdl.columns) == 2
-        assert rdl.max_total_thickness() == 20.0  # max(5+15, 3+10)
+        assert rdl.total_thickness_max() == 20.0  # max(5+15, 3+10)
 
     def test_sample_at_depths(self):
         rdl = self._make_rdl()
-        cs, rho, attn = rdl.columns[0].sample_at_depths(
-            4, max_thickness=rdl.max_total_thickness())
+        cs, rho, attn = ram_seabed.sample_at_depths(
+            rdl.columns[0], 4, max_thickness=rdl.total_thickness_max())
         assert len(cs) == 4
         # First sample is at depth 0 → layer 0
         assert cs[0] == 1500
@@ -389,8 +390,8 @@ class TestRangeDependentLayeredBottom:
         rdl = self._make_rdl()
         # Profile 1 has total thickness 13m, max is 20m
         # So sample at depth 20m is below its layers → halfspace
-        cs, rho, attn = rdl.columns[1].sample_at_depths(
-            4, max_thickness=rdl.max_total_thickness())
+        cs, rho, attn = ram_seabed.sample_at_depths(
+            rdl.columns[1], 4, max_thickness=rdl.total_thickness_max())
         # Last sample should be halfspace (2200)
         assert cs[3] == 2200
         assert rho[3] == 2.5
@@ -414,9 +415,9 @@ class TestRangeDependentLayeredBottom:
         env = uacpy.Environment(
             name='test', bottom=rdl, bathymetry=bathymetry,
         )
-        assert env.has_range_dependent_layered_bottom
-        assert not env.has_layered_bottom
-        assert not env.has_range_dependent_bottom
+        assert (env.bottom.is_range_dependent and env.bottom.is_layered)
+        assert not (env.bottom.is_layered and not env.bottom.is_range_dependent)
+        assert not (env.bottom.is_range_dependent and not env.bottom.is_layered)
         assert env.is_range_dependent
         assert env.bathymetry.n_ranges == 2
         assert env.bathymetry.depths[0] == 100

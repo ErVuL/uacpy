@@ -16,32 +16,95 @@ The files read here are:
   ``real*8`` TL samples each, one record per range output step.
   uacpy builds the Collins binaries with ``-fdefault-real-8``
   (``install.sh``, both Makefiles), so these are 8 bytes, not the 4 of a
-  stock build. The uacpy-patched builds additionally write
-  ``pcomplex.bin`` on the same grid.
+  stock build. The readers take the precision from the first data record's
+  length (``4·lz`` or ``8·lz`` bytes), so a stock single-precision
+  ``tl.grid`` reads too, returned as float64. The uacpy-patched builds
+  additionally write ``pcomplex.bin`` on the same grid.
 
-The readers return plain ``(ranges, depths, values)`` arrays; the RAM
-wrapper builds a regular ``Field`` from them so the rest of uacpy
-(visualization, max-finding, comparisons) handles the output without
-special cases.
+The readers return a :class:`PeGrid`, which names the quantity its values
+are (transmission loss in dB, or the complex PE envelope before the RAM
+wrapper's carrier and Hankel phase). The RAM wrapper reads the same files
+through :mod:`uacpy.io._parsers` and builds a regular ``Field`` from them.
 """
 
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 import numpy as np
+
+from uacpy.core._export import ExportRecord
 
 from uacpy.io._fortran_helpers import (
     detect_endian, read_fortran_record, require_model_output,
     typed_format_error,
 )
-from uacpy.core.exceptions import FileFormatError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import ConfigurationError, FileFormatError, IOWarning
+
+
+#: The quantities a Collins output file holds, and their units.
+PE_QUANTITY_UNITS = {'transmission_loss': 'dB', 'pe_envelope': ''}
+
+
+@dataclass(frozen=True, eq=False)
+class PeGrid(ExportRecord):
+    """A Collins RAM output file as :func:`read_tl_line`,
+    :func:`read_tl_grid` or :func:`read_pcomplex_grid` reads it.
+
+    Attributes
+    ----------
+    quantity : {'transmission_loss', 'pe_envelope'}
+        What ``data`` is: transmission loss (``tl.line``, ``tl.grid``),
+        or the complex PE envelope ``pcomplex.bin`` holds — the field the
+        march carries, *before* the RAM wrapper multiplies in the carrier
+        and the Hankel phase. An envelope is not a pressure.
+    unit : str
+        ``'dB'`` for transmission loss; ``''`` for the envelope, which is
+        in the binary's own normalisation.
+    ranges : ndarray
+        The output ranges (m).
+    depths : ndarray or None
+        The output depths (m); ``None`` for ``tl.line``, whose single depth
+        is ``zr_line`` on row 2 of ``ram.in``, not in the file.
+    data : ndarray
+        Shape ``(n_depths, n_ranges)``, or ``(n_ranges,)`` for ``tl.line``.
+    """
+
+    quantity: str
+    unit: str
+    ranges: np.ndarray
+    depths: Optional[np.ndarray]
+    data: np.ndarray
+
+    _ARRAY_FIELDS = ('ranges', 'depths', 'data')
+    _XARRAY_FIELDS = {'data': 'data', 'range': 'ranges',
+                      'depth': 'depths'}
+
+    def __post_init__(self):
+        if PE_QUANTITY_UNITS.get(self.quantity) != self.unit:
+            raise ConfigurationError(
+                f"PeGrid: quantity {self.quantity!r} with unit "
+                f"{self.unit!r}; the quantities and their units are "
+                f"{PE_QUANTITY_UNITS}.")
+        super().__post_init__()
+
+    def _payload(self):
+        dims = ('range',) if self.depths is None else ('depth', 'range')
+        return {'data': (self.data, dims, self.unit)}
+
+    def _coords(self):
+        coords = {'range': (self.ranges, 'm')}
+        if self.depths is not None:
+            coords['depth'] = (self.depths, 'm')
+        return coords
 
 
 @typed_format_error
-def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
+def read_tl_line(filepath: Union[str, Path]) -> PeGrid:
     """
     Read a Collins ``tl.line`` — the ASCII ``range  TL`` trace at the single
     receiver depth ``zr_line`` from row 2 of ``ram.in``.
@@ -53,13 +116,13 @@ def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
 
     Returns
     -------
-    ranges : ndarray, shape ``(N,)``
-        Range in **metres**. The Fortran works in metres throughout and
-        writes the range verbatim (``rams0.5.f:253`` /
-        ``ramsurf1.5.f:429``: ``write(2,*) r, tl``), so no conversion is
-        applied.
-    tl : ndarray, shape ``(N,)``
-        Transmission loss in dB.
+    tl : PeGrid
+        ``quantity='transmission_loss'`` in ``'dB'``, ``depths`` ``None``
+        (the depth is ``zr_line`` in ``ram.in``), ``ranges`` in **metres**
+        — the Fortran works in metres throughout and writes the range
+        verbatim (``rams0.5.f:253`` / ``ramsurf1.5.f:429``:
+        ``write(2,*) r, tl``), so no conversion is applied — and
+        ``data``, shape ``(N,)``.
 
     Raises
     ------
@@ -114,7 +177,13 @@ def read_tl_line(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray]:
             remediation="Verify this is the tl.line of a Collins RAM run, "
                         "not another output file.",
         )
-    return data[:, 0].astype(float), data[:, 1].astype(float)
+    return PeGrid(quantity='transmission_loss', unit='dB',
+                  ranges=data[:, 0].astype(float), depths=None,
+                  data=data[:, 1].astype(float))
+
+
+#: Double-precision kind → the single-precision kind a stock build writes.
+_SINGLE_PRECISION = {'f8': 'f4', 'c16': 'c8'}
 
 
 def _read_lz_records(
@@ -131,6 +200,12 @@ def _read_lz_records(
     first record marker and applied to ``dtype`` here, so callers must not
     pass a ``<``/``>`` prefix (any prefix is stripped defensively). A
     one-shot warning fires the first time a big-endian file is decoded.
+
+    ``dtype`` names the double-precision kind; a first data record of half
+    that length (``lz`` single-precision samples, a stock build) switches
+    the file to ``'f4'``/``'c8'``, returned upcast to ``dtype``. Bytes left
+    after the last whole record (a run cut short mid-write) warn with the
+    count of records kept.
     """
     path = Path(filepath)
     with path.open('rb') as f:
@@ -140,7 +215,7 @@ def _read_lz_records(
         # 12 bytes is the smallest possible file: the header record is a
         # 4-byte marker, one int32 ``lz``, and a 4-byte trailing marker.
         if file_size < 12:
-            raise FileFormatError(f"{path}: too short to contain the header record")
+            raise FileFormatError(f"{path}: too short to contain the header record.")
 
         probe = f.read(4)
         f.seek(0)
@@ -151,6 +226,12 @@ def _read_lz_records(
         item_dtype = np.dtype(endian + base_dtype)
 
         (lz,) = read_fortran_record(f, 'i', endian=endian)
+        single = _SINGLE_PRECISION.get(base_dtype)
+        if single is not None and lz > 0 and file_size - f.tell() >= 4:
+            (first_len,) = np.frombuffer(f.read(4), dtype=endian + 'i4')
+            f.seek(-4, 1)
+            if first_len == lz * np.dtype(single).itemsize:
+                item_dtype = np.dtype(endian + single)
         expected = lz * item_dtype.itemsize
 
         columns = []
@@ -161,15 +242,23 @@ def _read_lz_records(
             if len(payload) != expected:
                 raise FileFormatError(
                     f"{path}: expected {expected}-byte data record, "
-                    f"got {len(payload)}"
+                    f"got {len(payload)}."
                 )
             col = np.frombuffer(payload, dtype=item_dtype).astype(
                 base_dtype, copy=True
             )
             columns.append(col)
+        leftover = file_size - f.tell()
 
     if not columns:
-        raise FileFormatError(f"{path}: no data records found")
+        raise FileFormatError(f"{path}: no data records found.")
+    if leftover:
+        warnings.warn(
+            f"{path.name}: {leftover} byte(s) after the last whole "
+            f"{expected}-byte record are not a complete range step and were "
+            f"dropped; {len(columns)} range step(s) read. The run was cut "
+            f"short while writing.",
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     return lz, np.stack(columns, axis=1)
 
@@ -193,7 +282,6 @@ def _read_grid(filepath, reader, dtype, dr, ndr, dz, ndz, depth_index_offset):
     return ranges, depths, field
 
 
-@typed_format_error
 def read_tl_grid(
     filepath: Union[str, Path],
     *,
@@ -202,7 +290,7 @@ def read_tl_grid(
     dz: float,
     ndz: int,
     depth_index_offset: int = 0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> PeGrid:
     """
     Read a Collins ``tl.grid`` (unformatted Fortran binary).
 
@@ -229,15 +317,17 @@ def read_tl_grid(
 
     Returns
     -------
-    ranges, depths, tl : (ndarray, ndarray, ndarray)
-        Range axis (m), depth axis (m), and TL field of shape
+    tl : PeGrid
+        ``quantity='transmission_loss'`` in ``'dB'``: the range axis (m),
+        the depth axis (m), and ``data`` of shape
         ``(n_depths, n_ranges)``.
     """
-    return _read_grid(filepath, 'read_tl_grid', 'f8', dr, ndr, dz, ndz,
-                      depth_index_offset)
+    ranges, depths, tl = _read_grid(filepath, 'read_tl_grid', 'f8', dr, ndr,
+                                    dz, ndz, depth_index_offset)
+    return PeGrid(quantity='transmission_loss', unit='dB', ranges=ranges,
+                  depths=depths, data=tl)
 
 
-@typed_format_error
 def read_pcomplex_grid(
     filepath: Union[str, Path],
     *,
@@ -246,7 +336,7 @@ def read_pcomplex_grid(
     dz: float,
     ndz: int,
     depth_index_offset: int = 0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> PeGrid:
     """
     Read a uacpy-patched ``pcomplex.bin`` (unformatted Fortran binary).
 
@@ -266,7 +356,7 @@ def read_pcomplex_grid(
     bakes ``exp(+i k0 r*rot0)`` into ``u``, so its envelope arrives
     with the carrier and the wrapper adds none. The wrapper conjugates
     both and applies the shared ``exp(-i pi/4)`` Hankel phase
-    (``psi_to_travelling_wave`` in ``models/_pe_phase.py``) before tagging
+    (``psi_to_travelling_wave`` in ``models/ram/_pe_phase.py``) before tagging
     the result.
 
     Parameters
@@ -277,9 +367,14 @@ def read_pcomplex_grid(
 
     Returns
     -------
-    ranges, depths, p : (ndarray, ndarray, ndarray)
-        Range axis (m), depth axis (m), complex envelope of shape
-        ``(n_depths, n_ranges)``.
+    envelope : PeGrid
+        ``quantity='pe_envelope'`` (unit ``''``, the binary's own
+        normalisation): the range axis (m), the depth axis (m), and the
+        complex envelope of shape ``(n_depths, n_ranges)`` — *before* the
+        carrier and the Hankel phase the RAM wrapper applies, so not a
+        pressure.
     """
-    return _read_grid(filepath, 'read_pcomplex_grid', 'c16', dr, ndr, dz,
-                      ndz, depth_index_offset)
+    ranges, depths, p = _read_grid(filepath, 'read_pcomplex_grid', 'c16', dr,
+                                   ndr, dz, ndz, depth_index_offset)
+    return PeGrid(quantity='pe_envelope', unit='', ranges=ranges,
+                  depths=depths, data=p)

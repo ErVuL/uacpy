@@ -24,26 +24,29 @@ import numpy as np
 import pytest
 
 from uacpy.core.absorption import FrancoisGarrison, Thorp
-from uacpy.core.bottom import (
-    BoundaryProperties, SeabedColumn, SedimentLayer,
-    _DENSITY_UNITS_SUSPECT_G_CM3)
+from uacpy.core.boundary import (
+    BoundaryProperties, SedimentLayer, _DENSITY_UNITS_SUSPECT_G_CM3,
+)
+from uacpy.core.bottom import SeabedColumn
+from uacpy.core.exceptions import ValidityWarning
+from uacpy.core._validate import SPEED_UNITS_SUSPECT_M_S
+from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.core.materials import MATERIALS
-from uacpy.data.absorption import build_francois_garrison
+from uacpy.tests.conftest import recorded_warnings
 
 _THIS_FILE = Path(__file__).resolve()
 
 
 def _recorded(call):
     """The warnings ``call()`` emits, under the always-show filter."""
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
+    with recorded_warnings() as record:
         call()
     return record
 
 
 def _only(record):
     assert len(record) == 1, [str(w.message) for w in record]
-    assert record[0].category is UserWarning
+    assert record[0].category is ValidityWarning
     return record[0]
 
 
@@ -129,6 +132,36 @@ class TestShearSpeedAboveCompressional:
         _silent(_recorded(lambda: build(sound_speed=1600.0, shear_speed=0.0)))
 
 
+def _ssp(speed):
+    return SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, speed])
+
+
+@pytest.mark.parametrize('build', [
+    lambda c: _layer(sound_speed=c), lambda c: _halfspace(sound_speed=c),
+    _ssp,
+], ids=['SedimentLayer', 'BoundaryProperties', 'SoundSpeedProfile'])
+class TestSoundSpeedTypedInKmPerSecond:
+
+    def test_a_km_per_s_value_warns_and_names_the_m_per_s_it_means(
+            self, build):
+        warning = _only(_recorded(lambda: build(1.49)))
+        message = str(warning.message)
+        assert '1.49 m/s looks like km/s' in message
+        assert 'uacpy takes m/s (1490)' in message
+
+    def test_the_first_value_under_the_bound_warns(self, build):
+        assert SPEED_UNITS_SUSPECT_M_S == 10.0
+        _only(_recorded(lambda: build(9.999)))
+
+    def test_the_bound_itself_and_everything_over_it_stay_silent(
+            self, build):
+        _silent(_recorded(lambda: build(10.0)))
+        _silent(_recorded(lambda: build(10.001)))
+
+    def test_the_remedy_typed_back_is_silent(self, build):
+        _silent(_recorded(lambda: build(1490.0)))
+
+
 class TestSeabedWarningsStayOffTheOrdinaryPaths:
 
     @pytest.mark.parametrize('name', sorted(MATERIALS))
@@ -155,9 +188,9 @@ class TestSeabedWarningsStayOffTheOrdinaryPaths:
     def test_a_refusal_wins_over_a_warning(self):
         """A density that is also non-positive is refused, not warned about."""
         from uacpy.core.exceptions import ConfigurationError
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
-            with pytest.raises(ConfigurationError):
+        with recorded_warnings() as record:
+            with pytest.raises(ConfigurationError,
+                               match='density must be positive'):
                 SedimentLayer(thickness=1.0, sound_speed=1600.0, density=-1500.0)
         _silent(record)
 
@@ -180,7 +213,7 @@ class TestSeabedWarningsNameTheCallersLine:
         assert Path(warning.filename).resolve() == _THIS_FILE
 
     def test_a_layer_collapsed_onto_a_half_space_lands_here(self):
-        """``SeabedColumn.collapse('top_layer')`` rebuilds a
+        """``SeabedColumn.collapse_layers('top_layer')`` rebuilds a
         ``BoundaryProperties`` from the layer's numbers — a second door two
         frames down."""
         with warnings.catch_warnings():
@@ -189,7 +222,7 @@ class TestSeabedWarningsNameTheCallersLine:
                 layers=[SedimentLayer(thickness=2.0, sound_speed=1600.0,
                                       density=1800.0)],
                 halfspace=BoundaryProperties(sound_speed=1700.0, density=1.9))
-        warning = _only(_recorded(lambda: column.collapse('top_layer')))
+        warning = _only(_recorded(lambda: column.collapse_layers('top_layer')))
         assert Path(warning.filename).resolve() == _THIS_FILE
 
     def test_two_call_sites_each_warn_under_the_default_filter(self):
@@ -204,12 +237,12 @@ class TestSeabedWarningsNameTheCallersLine:
 
 @pytest.mark.parametrize('cls', [SedimentLayer, BoundaryProperties],
                          ids=['SedimentLayer', 'BoundaryProperties'])
-def test_the_written_out_init_takes_exactly_the_dataclass_fields(cls):
-    """Both carriers hand-write the ``__init__`` the decorator would generate
-    (``init=False``), so no ``<string>`` frame sits between the warnings above
-    and the user. The field list therefore exists twice; this pins the two
-    together, in order, so an annotation added to one and not the other is
-    caught rather than producing an attribute the constructor cannot set."""
+def test_the_carrier_init_takes_exactly_the_dataclass_fields(cls):
+    """``@carrier`` builds each carrier's ``__init__`` from its dataclass
+    fields, as an ordinary package function, so no ``<string>`` frame sits
+    between the warnings above and the user. Its signature lists the
+    fields in order, so ``help()`` and ``inspect`` describe the constructor
+    Python runs."""
     parameters = list(inspect.signature(cls.__init__).parameters)[1:]
     assert parameters == [f.name for f in dataclasses.fields(cls)]
 
@@ -229,7 +262,7 @@ def test_the_carriers_compare_copy_and_repr_as_dataclasses():
 # --------------------------------------------------------------------------
 
 def _fg(**kw):
-    base = dict(temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=100.0)
+    base = dict(temperature=10.0, salinity=35.0, pH=8.0)
     base.update(kw)
     return FrancoisGarrison(**base)
 
@@ -237,14 +270,15 @@ def _fg(**kw):
 class TestFrancoisGarrisonRowEnvelope:
     """Francois & Garrison (1982) Part II §III: the boric-acid term was fitted
     at 34-41 ‰, 2-22 °C; Table IV tabulates -1.8 to 30 °C at 30 and 35 ‰; the
-    MgSO4 field data span 30-35 ‰ (APL-UW TR 9407 §I.3); seawater pH runs
-    7.7-8.3 (Mellen et al. 1987). The bounds here are inclusive."""
+    MgSO4 field data span 30-35 ‰ (APL-UW TR 9407 §I.B), so the salinity
+    range is their union, 30-41 ‰; seawater pH runs 7.7-8.3 (Mellen et al.
+    1987). The bounds here are inclusive."""
 
     @pytest.mark.parametrize('field,inside,outside,text', [
-        ('temperature_c', -2.0, -2.001, 'temperature_c=-2.001 is outside -2..30 °C'),
-        ('temperature_c', 30.0, 30.001, 'temperature_c=30.001 is outside -2..30 °C'),
-        ('salinity_psu', 30.0, 29.999, 'salinity_psu=29.999 is outside 30..35 PSU'),
-        ('salinity_psu', 35.0, 35.001, 'salinity_psu=35.001 is outside 30..35 PSU'),
+        ('temperature', -2.0, -2.001, 'temperature=-2.001 is outside -2..30 °C'),
+        ('temperature', 30.0, 30.001, 'temperature=30.001 is outside -2..30 °C'),
+        ('salinity', 30.0, 29.99, 'salinity=29.99 is outside 30..41 PSU'),
+        ('salinity', 41.0, 41.01, 'salinity=41.01 is outside 30..41 PSU'),
         ('pH', 7.7, 7.699, 'pH=7.699 is outside 7.7..8.3'),
         ('pH', 8.3, 8.301, 'pH=8.301 is outside 7.7..8.3'),
     ])
@@ -257,25 +291,40 @@ class TestFrancoisGarrisonRowEnvelope:
         assert 'Francois & Garrison 1982 Part II' in message
         assert 'used as given' in message
 
+    def test_a_salinity_warning_names_the_terms_its_bounds_come_from(self):
+        """A 42 ‰ is outside both salinity terms' data, so the message
+        names each term's range and their source and claims no accuracy
+        figure for outside."""
+        message = str(_only(_recorded(
+            lambda: _fg(salinity=42.0))).message)
+        assert 'boric acid at 34-41, MgSO4 at 30-35' in message
+        assert 'TR 9407 §I.B' in message
+        assert 'none outside' not in message
+
+    def test_a_salinity_inside_the_boric_acid_data_only_is_silent(self):
+        # A Mediterranean 38.5 ‰ is past the MgSO4 term's 30-35 ‰ but
+        # inside the boric-acid term's 34-41 ‰, so inside the union.
+        _silent(_recorded(lambda: _fg(salinity=38.5)))
+
     def test_a_row_out_on_every_axis_is_reported_in_one_warning(self):
         warning = _only(_recorded(
-            lambda: _fg(temperature_c=-5.0, salinity_psu=7.0, pH=8.5)))
+            lambda: _fg(temperature=-5.0, salinity=7.0, pH=8.5)))
         message = str(warning.message)
-        assert 'temperature_c=-5' in message
-        assert 'salinity_psu=7' in message
+        assert 'temperature=-5' in message
+        assert 'salinity=7' in message
         assert 'pH=8.5' in message
 
     def test_the_remedy_typed_back_is_silent(self):
         # A Baltic row (7 ‰) warns; the value the message ranges name, 30,
         # re-entered, does not.
-        _only(_recorded(lambda: _fg(salinity_psu=7.0)))
-        _silent(_recorded(lambda: _fg(salinity_psu=30.0)))
+        _only(_recorded(lambda: _fg(salinity=7.0)))
+        _silent(_recorded(lambda: _fg(salinity=30.0)))
 
     def test_the_value_is_used_as_given(self):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            fg = _fg(salinity_psu=7.0)
-        assert fg.salinity_psu == 7.0
+            fg = _fg(salinity=7.0)
+        assert fg.salinity == 7.0
         assert np.isfinite(fg.alpha_dB_per_m(1000.0, 0.0)).all()
 
     def test_ph_is_compared_on_the_nbs_scale_and_the_message_says_so(self):
@@ -290,10 +339,10 @@ class TestFrancoisGarrisonRowEnvelope:
 
     def test_a_refusal_wins_over_the_envelope_warning(self):
         from uacpy.core.exceptions import ConfigurationError
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
-            with pytest.raises(ConfigurationError):
-                _fg(salinity_psu=-1.0)
+        with recorded_warnings() as record:
+            with pytest.raises(ConfigurationError,
+                               match='salinity must be non-negative'):
+                _fg(salinity=-1.0)
         _silent(record)
 
 
@@ -306,11 +355,33 @@ class TestFrancoisGarrisonFrequencyEnvelope:
         _silent(_recorded(lambda: fg.alpha_dB_per_m(200.0, 0.0)))
         _silent(_recorded(lambda: fg.alpha_dB_per_m(1.0e6, 0.0)))
         low = _only(_recorded(lambda: fg.alpha_dB_per_m(199.99, 0.0)))
-        assert 'frequency=199.99 Hz is outside the 200 Hz..1e+06 Hz' in str(
+        assert '1 of 1 frequency (199.99 Hz) is below 200 Hz' in str(
             low.message)
+        assert 'outside the 200 Hz..1e+06 Hz' in str(low.message)
         assert 'may not hold below 200 Hz' in str(low.message)
         high = _only(_recorded(lambda: fg.alpha_dB_per_m(1.0e6 + 1.0, 0.0)))
-        assert 'frequency=1000001 Hz' in str(high.message)
+        assert '(1000001 Hz) is above 1e+06 Hz' in str(high.message)
+
+    def test_a_frequency_vector_gets_one_notice_with_its_counts(self):
+        """Hundreds of lines for one ``alpha`` call over a wide band was the
+        defect: the notice fires once, naming how many samples fall outside
+        on each side and the span they cover."""
+        fg = _fg()
+        f = np.logspace(1.0, 6.2, 500)
+        below, above = f[f < 200.0], f[f > 1.0e6]
+        warning = _only(_recorded(lambda: fg.table(f)))
+        text = str(warning.message)
+        assert (f"{below.size} of 500 frequencies ({below.min():.10g}-"
+                f"{below.max():.10g} Hz) are below 200 Hz") in text
+        assert (f"{above.size} of 500 frequencies ({above.min():.10g}-"
+                f"{above.max():.10g} Hz) are above 1e+06 Hz") in text
+
+    def test_an_in_band_vector_is_silent_and_200_hz_exactly_is_in_band(self):
+        fg = _fg()
+        _silent(_recorded(lambda: fg.table(np.linspace(200.0, 1.0e6, 50))))
+        edge = _only(_recorded(lambda: fg.table(
+            np.array([199.99, 200.0, 5000.0]))))
+        assert '1 of 3 frequencies (199.99 Hz) is below' in str(edge.message)
 
     def test_the_value_is_the_polynomial_as_given(self):
         fg = _fg()
@@ -326,15 +397,15 @@ class TestFrancoisGarrisonFrequencyEnvelope:
 class TestFrancoisGarrisonWarningsNameTheCallersLine:
 
     def test_a_direct_constructor_call_lands_here(self):
-        warning = _only(_recorded(lambda: _fg(salinity_psu=7.0)))
+        warning = _only(_recorded(lambda: _fg(salinity=7.0)))
         assert warning.filename != '<string>'
         assert Path(warning.filename).resolve() == _THIS_FILE
 
     def test_the_fetched_row_builder_lands_here(self):
-        """``data.build_francois_garrison`` picks a row and constructs the
+        """``FrancoisGarrison.from_temperature_salinity`` constructs the
         model one package frame down — the door a Baltic or Arctic fetch
         comes through."""
-        warning = _only(_recorded(lambda: build_francois_garrison(
+        warning = _only(_recorded(lambda: FrancoisGarrison.from_temperature_salinity(
             depths=[0.0, 50.0], temperature=[5.0, 4.0], salinity=[7.0, 7.5])))
         assert Path(warning.filename).resolve() == _THIS_FILE
 
@@ -346,8 +417,8 @@ class TestFrancoisGarrisonWarningsNameTheCallersLine:
     def test_two_call_sites_each_warn_under_the_default_filter(self):
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter('default')
-            FrancoisGarrison(10.0, 7.0, 8.0, 100.0)
-            FrancoisGarrison(10.0, 7.0, 8.0, 100.0)
+            FrancoisGarrison(10.0, 7.0, 8.0)
+            FrancoisGarrison(10.0, 7.0, 8.0)
         assert len(record) == 2
 
 
@@ -357,4 +428,4 @@ def test_the_francois_garrison_init_takes_exactly_the_dataclass_fields():
     # Positional construction, the form the docstrings use, works.
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        assert FrancoisGarrison(10, 35, 8, 1000) == _fg(z_bar_m=1000.0)
+        assert FrancoisGarrison(10, 35, 8, 'nbs') == _fg(ph_scale='nbs')

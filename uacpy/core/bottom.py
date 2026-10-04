@@ -1,768 +1,67 @@
-"""Seafloor / boundary carriers: sediment layers, half-space and layered
-bottom properties, and their range-dependent variants. Re-exported from
+"""Seabed carriers: a column of sediment layers over a half-space
+(:class:`SeabedColumn`) and the seabed along range (:class:`Bottom`). The
+boundary nodes they hold are :mod:`uacpy.core.boundary`'s. Re-exported from
 :mod:`uacpy.core.environment` for stable import paths.
 """
 
 import warnings
 import copy as _copy
 import numpy as np
-from typing import Any, List, Tuple, Optional, Dict
-from dataclasses import dataclass
+from typing import List, Tuple, Optional, Dict
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.constants import DECK_RANGE_RESOLUTION_M, BoundaryType
+from uacpy.core.boundary import (
+    BoundaryProperties, BoundaryType, SedimentLayer, _columns, _property_row,
+    _HALFSPACE_DELEGATED, _LAYER_ACOUSTIC_FIELDS, _boundary_from_values,
+    _delegate_write, _reduce_boundaries, _reduce_uniform_nodes,
+)
+from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
+from uacpy.core._repr import axis, build, qty
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.core._grid import (
-    _as_finite_scalar_label, _nearest_index_on_axis,
+    _as_finite_scalar_label, nearest_index_on_axis,
 )
-from uacpy.core._carrier_validate import (
+from uacpy.core._validate import (
+    require_strictly_increasing, require_non_negative, reject_complex,
+    scalar_or_none,
+)
+from uacpy.core.collapse import (
     COLUMN_COLLAPSE_METHODS, RANGE_COLLAPSE_METHODS, _method_list,
-    _DeepCopyMixin,
-    _validate_acoustic_type, _require_strictly_increasing,
-    _require_attenuation_in_range,
-    _require_positive, _require_non_negative, _coerce_data_sources,
-    _require_finite, _reject_complex,
-    _dedupe_provenance,
 )
+from uacpy.core._provenance import dedupe_provenance
+from uacpy.core._carrier import (
+    DeepCopyMixin, RevalidateOnAssignMixin, carrier,
+)
+from uacpy.core._export import CarrierExport
+
+__all__ = [
+    'SeabedColumn', 'Bottom', 'medium_density_at',
+]
 
 
-# Boundary types whose cp/ρ/α/cs are construction-time placeholders, never
-# seabed geoacoustics: the solver reads the reflection behaviour from the type
-# (or its reflection_file), so these values must not feed numeric aggregates.
-_NON_GEOACOUSTIC_TYPES = frozenset({'vacuum', 'rigid', 'file', 'precalc'})
+def medium_density_at(depth: float, tops, densities, bottom_depth: float,
+                      halfspace_density: float) -> float:
+    """``ρ(z)`` (g/cm³) of the medium holding ``depth`` (m) in a stack of
+    media.
 
-# Boundary types defined by no parameters at all — of the acoustic fields only
-# the interfacial ``roughness`` is meaningful on them.
-_PARAMETER_FREE_TYPES = frozenset({'vacuum', 'rigid'})
-
-# Half-space fields a ``SeabedColumn`` / ``Bottom`` write follows through to
-# the stored boundaries. ``Surface`` delegates the same nine names and imports
-# this set as ``_SURFACE_DELEGATED`` rather than restating it — both carriers
-# hold their nodes in ``BoundaryProperties``, so the field lists cannot
-# legitimately differ, and two copies drifted apart in silence.
-_HALFSPACE_DELEGATED = frozenset({
-    'acoustic_type', 'density', 'sound_speed', 'attenuation', 'roughness',
-    'shear_speed', 'shear_attenuation', 'grain_size_phi', 'reflection_file',
-})
-
-# Delegated fields that define what kind of boundary a half-space is. A write
-# to one cannot be validated field-by-field (the construction rules couple it
-# to the other fields), so the write is refused rather than stored unvalidated.
-_HALFSPACE_TYPE_FIELDS = frozenset({'acoustic_type', 'reflection_file'})
-
-
-def _validate_boundary_write(owner: str, name, value, nodes, layered=False):
-    """Apply the ``BoundaryProperties`` construction rules to a write delegated
-    to a carrier's boundary node(s) — a seabed's half-space(s) or a surface's
-    nodes — so the carrier cannot store a value its constructor would refuse.
-    Returns the value coerced to float (``None`` stays ``None`` for
-    ``grain_size_phi``, the field's own unset value)."""
-    if name in _HALFSPACE_TYPE_FIELDS:
-        raise ConfigurationError(
-            f"{owner}.{name} cannot be assigned in place: it defines what "
-            f"kind of boundary this is, and the construction rules couple it "
-            f"to the other fields. Build new BoundaryProperties (and a new "
-            f"{owner} from them) instead.")
-    # A layered seabed carries the same field on every layer, so a flat write
-    # cannot say which depth the caller means.
-    if layered:
-        raise ConfigurationError(
-            f"{owner}.{name} = {value!r}: this seabed has sediment layers, so "
-            f"a flat write cannot say whether you mean a layer or the "
-            f"half-space below them. Assign to the layer "
-            f"(``.layers[j].{name}``) or to the half-space "
-            f"(``.halfspace.{name}``) you mean.")
-    # vacuum/rigid boundaries carry no acoustic parameters, so a delegated
-    # write of one is the conflict the constructor's explicit-conflict guard
-    # rejects. ``roughness`` stays writable — every boundary type has an
-    # interface.
-    if name != 'roughness':
-        bare = sorted({n.acoustic_type for n in nodes
-                       if n.acoustic_type in _PARAMETER_FREE_TYPES})
-        if bare:
-            raise ConfigurationError(
-                f"{owner}.{name} = {value!r}: this {owner} has "
-                f"{'/'.join(bare)} boundary node(s), which ignore half-space "
-                f"acoustic parameters. Build half-space BoundaryProperties "
-                f"(and a new {owner} from them) to give it geoacoustics.")
-    if name == 'grain_size_phi':
-        # ϕ = −log₂(d/mm) is signed (gravel is negative), so no sign rule
-        # applies; but it must be a finite number — a NaN/inf ϕ stored as
-        # metadata reads back looking like a measurement.
-        if value is None:
-            return None
-        value = float(value)
-        _require_finite(value, f"{owner} grain_size_phi", hint="ϕ units")
-        return value
-    value = float(value)
-    if name == 'density':
-        _require_positive(value, f"{owner} density", hint="g/cm^3")
-    elif name == 'sound_speed' and any(n.acoustic_type == 'half-space'
-                                       for n in nodes):
-        _require_positive(value, f"{owner} sound_speed on a half-space",
-                          hint="m/s")
-    else:
-        _require_non_negative(value, f"{owner} {name}")
-    if name in ('attenuation', 'shear_attenuation'):
-        _require_attenuation_in_range(value, f"{owner} {name}")
-    return value
-
-
-def _delegate_write(owner: str, nodes, name, value, *, layered=False,
-                    noun='columns', hint='.columns[i].halfspace'):
-    """Store a write of a delegated boundary field on every node.
-
-    ``owner`` names the carrier for the messages, ``nodes`` are its
-    ``BoundaryProperties``, ``layered`` says whether sediment layers sit above
-    them (a flat write is then refused — :func:`_validate_boundary_write`),
-    and ``noun``/``hint`` are the per-node spelling the warning offers (a
-    ``Surface`` passes ``'nodes'`` / ``'.properties[i]'``). The value is
-    validated once, then broadcast; on more than one node that flattens any
-    range dependence, so it warns — attributed to the assigning line by the
-    frame walk, since the write reaches here through ``__setattr__``.
+    Medium ``i`` spans ``tops[i]`` to the next top (to ``bottom_depth`` for
+    the last) at ``densities[i]``, and ``halfspace_density`` holds below the
+    stack. A depth on an interface belongs to the upper medium (the
+    convention of :meth:`SeabedColumn.at`). It is the ``ρ(z_s)`` of the
+    point-source modal sum (Jensen et al., *Computational Ocean Acoustics*,
+    eq. 5.14): a model run builds the stack from its environment, and a mode
+    set from the medium table its ``.mod`` recorded
+    (:meth:`~uacpy.core.results.MediaTable.density_at`).
     """
-    value = _validate_boundary_write(owner, name, value, nodes, layered)
-    if len(nodes) > 1:
-        warnings.warn(
-            f"{owner}.{name} = {value!r} sets all {len(nodes)} range {noun} "
-            f"to the same value, flattening any range dependence. Assign to "
-            f"{hint}.{name} to write a single {noun[:-1]}.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    for node in nodes:
-        setattr(node, name, value)
-
-
-# g/cm³ above which a density reads as kg/m³: no sediment or rock reaches it
-# (Hamilton's tables top out below 3), and the smallest kg/m³ value a user
-# could plausibly type (fresh water, 1000) is fifty times over it.
-_DENSITY_UNITS_SUSPECT_G_CM3 = 20.0
-
-
-def _warn_implausible_geoacoustics(owner: str, density: float,
-                                   sound_speed: float, shear_speed: float):
-    """``UserWarning`` for a value the constructor accepts but no seabed has.
-
-    Two checks, each a plausibility bound rather than a validity rule, so
-    they warn and never raise: a density over
-    :data:`_DENSITY_UNITS_SUSPECT_G_CM3` (the number was typed in kg/m³), and
-    a shear speed above the compressional speed (no real solid: Poisson's
-    ratio bounds ``c_s < c_p / sqrt(2)``).
-
-    Reached from both carriers' ``__post_init__`` two frames below the user's
-    constructor call, which is why both write their ``__init__`` out: every
-    frame between here and the caller is then an ordinary ``bottom.py`` frame
-    that :data:`USER_FRAME_SKIP` steps over, from a direct ``SedimentLayer(…)``
-    and from the in-package factories (``Bottom.range_dependent``, the CRUST1
-    and GRAW readers, ``SeabedColumn.collapse``) alike."""
-    if density > _DENSITY_UNITS_SUSPECT_G_CM3:
-        warnings.warn(
-            f"{owner}: density={density:g} looks like kg/m³; uacpy takes "
-            f"g/cm³ ({density / 1000.0:g}). Every deck writes the value as "
-            f"given, so a seabed this dense reflects like a rigid wall.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    if shear_speed > sound_speed:
-        warnings.warn(
-            f"{owner}: shear_speed={shear_speed:g} m/s exceeds "
-            f"sound_speed={sound_speed:g} m/s. No real solid has a shear "
-            f"speed above its compressional speed (Poisson's ratio bounds "
-            f"c_s < c_p/sqrt(2) = {sound_speed / np.sqrt(2.0):g} m/s); check "
-            f"whether the two were swapped.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-
-
-@dataclass(init=False)
-class SedimentLayer(_DeepCopyMixin):
-    """
-    Single sediment layer in a layered bottom structure.
-
-    Parameters
-    ----------
-    thickness : float
-        Layer thickness in meters.
-    sound_speed : float
-        Compressional wave speed (m/s).
-    density : float
-        Density (g/cm³).
-    attenuation : float
-        Compressional attenuation (dB/wavelength). Default 0.5.
-    shear_speed : float
-        Shear wave speed (m/s). Default 0.0 (fluid layer).
-    shear_attenuation : float
-        Shear attenuation (dB/wavelength). Default 0.0.
-    roughness : float
-        RMS roughness (m) of the interface at the *top* of this layer, so the
-        first layer's value is the seafloor. Default 0.0 (smooth).
-
-    Notes
-    -----
-    A density above 20 g/cm³ (a kg/m³ value typed into a g/cm³ field) and a
-    shear speed above the compressional speed each raise a ``UserWarning``
-    at construction; both are accepted, since neither breaks a deck. The
-    ``__init__`` is written out (``init=False``) rather than generated so
-    those warnings name the caller's line: a generated ``__init__`` lives in
-    the pseudo-file ``<string>``, which the attribution walk cannot step
-    over. ``@dataclass`` still supplies ``__eq__`` / ``fields()`` from the
-    annotations; a test pins the signature against them.
-
-    Examples
-    --------
-    >>> sand = SedimentLayer(thickness=10, sound_speed=1650, density=1.9, attenuation=0.8)
-    >>> clay = SedimentLayer(thickness=50, sound_speed=1550, density=1.5, attenuation=0.2)
-    """
-    thickness: float
-    sound_speed: float
-    density: float
-    attenuation: float = 0.5
-    shear_speed: float = 0.0
-    shear_attenuation: float = 0.0
-    roughness: float = 0.0
-    name: Optional[str] = None
-
-    def __init__(self, thickness: float, sound_speed: float, density: float,
-                 attenuation: float = 0.5, shear_speed: float = 0.0,
-                 shear_attenuation: float = 0.0, roughness: float = 0.0,
-                 name: Optional[str] = None) -> None:
-        self.thickness = thickness
-        self.sound_speed = sound_speed
-        self.density = density
-        self.attenuation = attenuation
-        self.shear_speed = shear_speed
-        self.shear_attenuation = shear_attenuation
-        self.roughness = roughness
-        self.name = name
-        self.__post_init__()
-
-    def __post_init__(self):
-        # float()-coerce before validating, as BoundaryProperties does: the
-        # validators below check a converted copy, so without this a str
-        # value would pass them and be stored unconverted.
-        for attr in ('thickness', 'sound_speed', 'density', 'attenuation',
-                     'shear_speed', 'shear_attenuation', 'roughness'):
-            setattr(self, attr, float(getattr(self, attr)))
-        _require_positive(self.thickness, "SedimentLayer thickness", hint="m")
-        _require_positive(self.sound_speed, "SedimentLayer sound_speed", hint="m/s")
-        _require_positive(self.density, "SedimentLayer density", hint="g/cm^3")
-        for attr in ('attenuation', 'shear_speed', 'shear_attenuation',
-                     'roughness'):
-            _require_non_negative(getattr(self, attr), f"SedimentLayer {attr}")
-        _require_attenuation_in_range(
-            self.attenuation, "SedimentLayer attenuation")
-        _require_attenuation_in_range(
-            self.shear_attenuation, "SedimentLayer shear_attenuation")
-        _warn_implausible_geoacoustics(
-            "SedimentLayer", self.density, self.sound_speed, self.shear_speed)
-
-    def __repr__(self) -> str:
-        tag = f"{self.name!r}, " if self.name else ""
-        bits = [
-            f"thickness={self.thickness:g} m",
-            f"cp={self.sound_speed:g} m/s",
-            f"ρ={self.density:g}",
-            f"α={self.attenuation:g}",
-        ]
-        if self.shear_speed > 0:
-            bits.append(f"cs={self.shear_speed:g} m/s")
-        return f"SedimentLayer({tag}{', '.join(bits)})"
-
-    @classmethod
-    def from_preset(cls, name: str, *, thickness: float, elastic: bool = False,
-                    **overrides) -> "SedimentLayer":
-        """Build a :class:`SedimentLayer` from a :mod:`uacpy.core.materials`
-        preset (``'sand'``, ``'silt'``, ``'clay'``, …).
-
-        ``thickness`` is required (presets only encode acoustic
-        properties, not layer geometry). The layer is **fluid by default**;
-        pass ``elastic=True`` to keep the preset's shear properties. Any
-        additional kwargs override the preset's ``sound_speed`` /
-        ``density`` / ``attenuation`` / ``shear_*`` / ``roughness`` for
-        site-specific tuning.
-        """
-        from uacpy.core.materials import get_material
-        m = get_material(name)
-        kwargs = dict(
-            thickness=thickness,
-            sound_speed=m['sound_speed'],
-            density=m['density'],
-            attenuation=m['attenuation'],
-            shear_speed=m['shear_speed'] if elastic else 0.0,
-            shear_attenuation=m['shear_attenuation'] if elastic else 0.0,
-            roughness=m['roughness'],
-            name=name,
-        )
-        kwargs.update(overrides)
-        return cls(**kwargs)
-
-
-#: Constructor sentinel for ``acoustic_type``: ``None`` means "infer it",
-#: which ``__post_init__`` resolves to 'file', 'half-space' or 'vacuum' from
-#: the supplied parameters. Typed ``Any`` so the field can declare the ``str``
-#: every attribute read sees, without the sentinel widening that declaration
-#: back to Optional.
-_TYPE_NOT_GIVEN: Any = None
-
-
-@dataclass(init=False)
-class BoundaryProperties(_DeepCopyMixin):
-    """
-    Properties of ocean boundaries (surface or bottom).
-
-    Carries acoustic properties only — boundary geometry lives on
-    ``Environment.bathymetry`` (bottom) or is fixed at z=0 (surface;
-    rough surfaces use ``Environment.altimetry``).
-
-    Attributes
-    ----------
-    acoustic_type : str, optional
-        Boundary type: 'vacuum', 'rigid', 'half-space', 'file', 'precalc'.
-        Inferred from the supplied parameters when omitted: ``reflection_file``
-        → ``'file'``, any **explicitly passed** cp/ρ/α/cs →
-        ``'half-space'`` (even a value equal to the documented default —
-        passing ``sound_speed=1600`` means a 1600 m/s half-space, never a
-        vacuum), nothing → ``'vacuum'``. Pass ``acoustic_type='rigid'``
-        explicitly (a parameter-free physical model). To build a bottom from a
-        grain size, use :meth:`from_grain_size` — there is no ``'grain-size'``
-        type.
-    density : float
-        Density (g/cm³)
-    sound_speed : float
-        Compressional wave speed (m/s)
-    attenuation : float
-        Compressional attenuation (dB/wavelength)
-    roughness : float
-        RMS interfacial roughness (m). An interface property of *every*
-        boundary type (a rough pressure-release sea surface is
-        ``BoundaryProperties(roughness=2.0)``), so it never drives the
-        ``acoustic_type`` inference.
-    shear_speed : float
-        Shear wave speed (m/s), 0 = fluid bottom
-    shear_attenuation : float
-        Shear attenuation (dB/wavelength)
-    grain_size_phi : float
-        Mean grain size in Wentworth phi units. Informational metadata only
-        (e.g. set by :meth:`from_grain_size`); it does not by itself define a
-        bottom — see :meth:`from_grain_size`.
-    reflection_file : str, optional
-        Path to a precomputed reflection-coefficient table, staged beside the
-        ``.env`` under the name the solver expects: ``.brc`` for a bottom and
-        ``.trc`` for a top with ``acoustic_type='file'``, or ``.irc`` for a
-        bottom with ``acoustic_type='precalc'`` (the internal-reflection
-        table, a different format). Generated by BOUNCE or OASR — a BOUNCE
-        run publishes both as ``result.metadata['brc_file']`` and
-        ``['irc_file']``.
-        Phase-velocity sampling bounds and range stride are carried by the
-        consuming model (e.g. ``Kraken(c_low=…, c_high=…)``), not by this
-        object.
-
-    Notes
-    -----
-    On a half-space, a density above 20 g/cm³ (a kg/m³ value typed into a
-    g/cm³ field) and a shear speed above the compressional speed each raise
-    a ``UserWarning`` at construction; both are accepted, since neither
-    breaks a deck. The ``__init__`` is written out so those warnings name
-    the caller's line (see the comment above it).
-
-    Examples
-    --------
-    Using pre-computed reflection coefficients from BOUNCE:
-
-    (a sketch — it runs the BOUNCE binary, so it is shown rather than
-    executed)::
-
-        import tempfile
-        from uacpy.models import Bounce
-
-        # A temporary work dir, so running this leaves nothing behind
-        with tempfile.TemporaryDirectory() as work_dir:
-            # First, compute reflection coefficients
-            bounce = Bounce(work_dir=work_dir)
-            result = bounce.run(env, source, receiver)
-            brc_file = result.metadata['brc_file']
-
-            # Then use in Bellhop/Kraken/Scooter
-            bottom = BoundaryProperties(acoustic_type='file',
-                                        reflection_file=brc_file)
-            env = Environment(name="test", bathymetry=100, bottom=bottom)
-    """
-
-    acoustic_type: str = _TYPE_NOT_GIVEN
-    density: Optional[float] = None
-    sound_speed: Optional[float] = None
-    attenuation: Optional[float] = None
-    roughness: Optional[float] = None
-    shear_speed: Optional[float] = None
-    shear_attenuation: Optional[float] = None
-    grain_size_phi: Optional[float] = None
-    reflection_file: Optional[str] = None
-    name: Optional[str] = None
-    data_sources: tuple = ()
-
-    # Written out rather than generated (``init=False``), for two reasons.
-    # The two roles of a dataclass field annotation are separated for
-    # ``acoustic_type``: the attribute holds the resolved boundary type
-    # ``__post_init__`` always assigns, while the constructor keeps taking
-    # ``None`` to mean "infer it" — declaring both through the field
-    # annotation alone gives ``Optional[str]`` to every attribute read,
-    # including ``Bottom.acoustic_type``, whose ``-> str`` is then read as a
-    # wrong annotation rather than as the total function it is. And the
-    # plausibility warnings ``__post_init__`` raises have to name the
-    # caller's line: a generated ``__init__`` lives in the pseudo-file
-    # ``<string>``, which the attribution walk cannot step over, whereas an
-    # ordinary ``bottom.py`` frame is skipped like any other. The parameter
-    # list mirrors the fields above in order; a test pins the two together.
-    def __init__(
-        self,
-        acoustic_type: Optional[str] = None,
-        density: Optional[float] = None,
-        sound_speed: Optional[float] = None,
-        attenuation: Optional[float] = None,
-        roughness: Optional[float] = None,
-        shear_speed: Optional[float] = None,
-        shear_attenuation: Optional[float] = None,
-        grain_size_phi: Optional[float] = None,
-        reflection_file: Optional[str] = None,
-        name: Optional[str] = None,
-        data_sources: tuple = (),
-    ) -> None:
-        self.acoustic_type = acoustic_type
-        self.density = density
-        self.sound_speed = sound_speed
-        self.attenuation = attenuation
-        self.roughness = roughness
-        self.shear_speed = shear_speed
-        self.shear_attenuation = shear_attenuation
-        self.grain_size_phi = grain_size_phi
-        self.reflection_file = reflection_file
-        self.name = name
-        self.data_sources = data_sources
-        self.__post_init__()
-
-    # Resolved values for acoustic parameters left unset. The dataclass
-    # defaults are ``None`` sentinels so "explicitly passed" is detectable:
-    # BoundaryProperties(sound_speed=1600) means a 1600 m/s half-space even
-    # though 1600 is also the resolved default — value-vs-default comparison
-    # cannot tell the two apart. After ``__post_init__`` every attribute
-    # carries a concrete float.
-    _ACOUSTIC_DEFAULTS = {
-        'density': 1.5,
-        'sound_speed': 1600.0,
-        'attenuation': 0.5,
-        'roughness': 0.0,
-        'shear_speed': 0.0,
-        'shear_attenuation': 0.0,
-    }
-
-    def __post_init__(self):
-        self.data_sources = _coerce_data_sources(
-            self.data_sources, "BoundaryProperties")
-        if self.grain_size_phi is not None:
-            # Signed (gravel is negative), so no sign rule; a finite number
-            # all the same — NaN/inf/str stored here reads back as data.
-            self.grain_size_phi = float(self.grain_size_phi)
-            _require_finite(self.grain_size_phi,
-                            "BoundaryProperties grain_size_phi", hint="ϕ units")
-
-        explicit = {
-            name for name in self._ACOUSTIC_DEFAULTS
-            if getattr(self, name) is not None
-        }
-        for name, default in self._ACOUSTIC_DEFAULTS.items():
-            if getattr(self, name) is None:
-                setattr(self, name, default)
-            else:
-                setattr(self, name, float(getattr(self, name)))
-
-        _require_positive(self.density, "BoundaryProperties density", hint="g/cm^3")
-        # roughness is an RMS magnitude and the OASES writers put it in a
-        # column whose sign is an encoding: RG < 0 makes INENVI re-read the
-        # record as nine tokens (oases/src/oaseun31.f:72-93), so a negative
-        # value shifts every later READ in the deck.
-        for name in ('sound_speed', 'attenuation', 'shear_speed',
-                     'shear_attenuation', 'roughness'):
-            _require_non_negative(getattr(self, name), f"BoundaryProperties {name}")
-        _require_attenuation_in_range(
-            self.attenuation, "BoundaryProperties attenuation")
-        _require_attenuation_in_range(
-            self.shear_attenuation, "BoundaryProperties shear_attenuation")
-
-        # Explicitly passed acoustic params drive both the auto-inference
-        # (when acoustic_type is None) and the explicit-conflict guard below.
-        # ``roughness`` is excluded: it is an interface property every boundary
-        # type carries (SSP%sigma), not a half-space acoustic parameter.
-        half_space_offenders = [
-            f"{name}={getattr(self, name):g}"
-            for name in ('sound_speed', 'density', 'attenuation',
-                         'shear_speed', 'shear_attenuation')
-            if name in explicit
-        ]
-
-        if self.acoustic_type is None:
-            # Grain size is a construction-time input, not a bottom *type*: a
-            # bare ``grain_size_phi`` carries no geoacoustics until converted, so
-            # inferring a bottom from it would silently use the default cp/ρ/α.
-            # Direct the caller to the explicit factory instead.
-            if (self.grain_size_phi is not None and not half_space_offenders
-                    and self.reflection_file is None):
-                raise ConfigurationError(
-                    "BoundaryProperties: grain_size_phi alone does not define a "
-                    "bottom (no geoacoustics until converted). Use "
-                    "BoundaryProperties.from_grain_size(phi) (or "
-                    "Bottom.from_grain_size) to build a half-space from a grain "
-                    "size."
-                )
-            # Auto-infer from the supplied parameters. 'rigid' stays opt-in
-            # (a parameter-free physical model).
-            if self.reflection_file is not None:
-                self.acoustic_type = 'file'
-            elif half_space_offenders:
-                self.acoustic_type = 'half-space'
-            else:
-                self.acoustic_type = 'vacuum'
-
-        _validate_acoustic_type(self.acoustic_type, "BoundaryProperties")
-        self.acoustic_type = BoundaryType.from_string(self.acoustic_type).value
-
-        # ``misc/ReadEnvironmentMod.f90:292`` aborts a half-space whose
-        # compressional speed *or* density vanishes. The density half of that
-        # guard is the _require_positive above; this is the other half. Checked
-        # after the type is resolved because vacuum/rigid/file boundaries carry
-        # placeholder speeds they never use, and reachable only here: an
-        # explicitly-passed sound_speed forces 'half-space' or trips the
-        # conflict guard below, and the unset default is non-zero.
-        if self.acoustic_type == 'half-space':
-            _require_positive(self.sound_speed,
-                              "BoundaryProperties sound_speed on a half-space",
-                              hint="m/s")
-
-        # Explicit-conflict guard: vacuum/rigid ignore half-space params,
-        # so explicitly setting one alongside non-default cp/ρ/α/cs is a
-        # mistake the auto-infer path would never make.
-        if self.acoustic_type in _PARAMETER_FREE_TYPES:
-            offenders = list(half_space_offenders)
-            if self.reflection_file is not None:
-                offenders.append(f"reflection_file={self.reflection_file!r}")
-            if self.grain_size_phi is not None:
-                offenders.append(f"grain_size_phi={self.grain_size_phi:g}")
-            if offenders:
-                raise ConfigurationError(
-                    f"BoundaryProperties(acoustic_type={self.acoustic_type!r}) "
-                    f"ignores half-space acoustic parameters, but you set "
-                    f"{', '.join(offenders)}. Drop ``acoustic_type=`` to let "
-                    f"uacpy infer 'half-space', or remove the conflicting "
-                    f"parameters."
-                )
-
-        # Plausibility, after every rule that raises: a value no seabed has
-        # but every deck accepts. Only a half-space carries the numbers it
-        # is about; the parameter-free and file types hold the defaults.
-        if self.acoustic_type == 'half-space':
-            _warn_implausible_geoacoustics(
-                "BoundaryProperties", self.density, self.sound_speed,
-                self.shear_speed)
-
-    def __repr__(self) -> str:
-        if self.acoustic_type in _PARAMETER_FREE_TYPES:
-            bits = [self.acoustic_type]
-        elif self.acoustic_type in ('file', 'precalc'):
-            bits = [f"{self.acoustic_type}={self.reflection_file!r}"]
-        else:
-            bits = [self.acoustic_type,
-                    f"cp={self.sound_speed:g} m/s",
-                    f"ρ={self.density:g}",
-                    f"α={self.attenuation:g}"]
-            if self.shear_speed > 0:
-                bits.append(f"cs={self.shear_speed:g} m/s")
-        if self.roughness > 0:
-            bits.append(f"σ={self.roughness:g} m")
-        return f"BoundaryProperties({', '.join(bits)})"
-
-    @classmethod
-    def from_grain_size(
-        cls, grain_size_phi: float, *, model: str = DEFAULT_GRAIN_SIZE_MODEL,
-        environment: Optional[str] = None,
-        roughness: float = 0.0,
-        water_sound_speed: Optional[float] = None,
-        water_density: Optional[float] = None,
-    ) -> "BoundaryProperties":
-        """Build a half-space bottom from a mean grain size (Wentworth ϕ).
-
-        Converts ϕ to explicit ``sound_speed`` / ``density`` / ``attenuation``
-        via :func:`uacpy.core.sediment.grain_size_to_geoacoustics` so the bottom
-        works in *every* model. ``grain_size_phi`` is retained as informational
-        metadata. This is the only supported way to use a grain size — there is
-        no ``'grain-size'`` boundary type.
-
-        Parameters
-        ----------
-        grain_size_phi : float
-            Mean grain size on the Wentworth ϕ scale.
-        model : {'hamilton', 'apl-uw'}, optional
-            Conversion model (see :func:`grain_size_to_geoacoustics`).
-        environment : str, optional
-            Which of Hamilton & Bachman's three fits ``'hamilton'`` uses —
-            ``'continental-terrace'`` (the default when ``None``),
-            ``'abyssal-hill'`` or ``'abyssal-plain'``. A deep-ocean seabed
-            wants one of the abyssal fits; nothing infers it, because the
-            paper states no rule for choosing and only the caller knows the
-            site.
-        roughness : float, optional
-            RMS interface roughness (m).
-        water_sound_speed, water_density : float, optional
-            In-situ seawater properties the ratios scale by (default: the
-            Hamilton reference 1510 m/s, 1.030 g/cm³).
-        """
-        from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_ENVIRONMENT,
-                                         check_grain_size_selection,
-                                         grain_size_to_geoacoustics)
-        if environment is None:
-            environment = DEFAULT_GRAIN_SIZE_ENVIRONMENT
-        check_grain_size_selection(model, environment,
-                                   caller='BoundaryProperties.from_grain_size')
-        g = grain_size_to_geoacoustics(
-            grain_size_phi, model=model, environment=environment,
-            water_sound_speed=water_sound_speed, water_density=water_density)
-        return cls(
-            acoustic_type='half-space',
-            grain_size_phi=float(grain_size_phi),
-            sound_speed=g['sound_speed'],
-            density=g['density'],
-            attenuation=g['attenuation'],
-            roughness=roughness,
-        )
-
-    @classmethod
-    def from_preset(cls, name: str, *, elastic: bool = False, **overrides) -> "BoundaryProperties":
-        """Build a :class:`BoundaryProperties` from a
-        :mod:`uacpy.core.materials` preset.
-
-        Picks ``acoustic_type='half-space'`` automatically, copies every
-        preset field that maps onto :class:`BoundaryProperties` (sound
-        speeds, density, attenuations, ``grain_size_phi`` if defined,
-        ``roughness``), and applies any ``**overrides`` last.
-
-        The boundary is **fluid by default** (shear dropped) so it works
-        with every model. Pass ``elastic=True`` to keep the preset's shear
-        speed / attenuation — needed only for the elastic-capable solvers
-        (OASES, Scooter, Kraken). ``shear_*`` in ``**overrides`` wins
-        regardless.
-        """
-        from uacpy.core.materials import get_material
-        m = get_material(name)
-        kwargs = dict(
-            acoustic_type='half-space',
-            sound_speed=m['sound_speed'],
-            density=m['density'],
-            attenuation=m['attenuation'],
-            shear_speed=m['shear_speed'] if elastic else 0.0,
-            shear_attenuation=m['shear_attenuation'] if elastic else 0.0,
-            roughness=m['roughness'],
-            name=name,
-        )
-        if m['grain_size_phi'] is not None:
-            kwargs['grain_size_phi'] = m['grain_size_phi']
-        kwargs.update(overrides)
-        return cls(**kwargs)
-
-
-# Numeric acoustic fields a SedimentLayer shares with BoundaryProperties.
-# ``roughness`` is absent: it is an interface property, not a bulk one.
-_LAYER_ACOUSTIC_FIELDS = ('density', 'sound_speed', 'attenuation',
-                          'shear_speed', 'shear_attenuation')
-
-
-def _boundary_from_values(template: BoundaryProperties, values: dict
-                          ) -> BoundaryProperties:
-    """Build a :class:`BoundaryProperties` from reduced numeric ``values``.
-
-    ``values`` supplies the numeric acoustic fields (the keys of
-    ``BoundaryProperties._ACOUSTIC_DEFAULTS``); the non-blendable fields
-    (``acoustic_type``, ``grain_size_phi``, ``reflection_file``, ``name``,
-    ``data_sources``) come from ``template``. ``'vacuum'`` / ``'rigid'`` carry
-    no acoustic parameters — passing them alongside is a construction-time
-    error — so only the interfacial ``roughness`` survives for those types.
-
-    The single home for "reduced numbers → one boundary", shared by
-    :func:`_reduce_boundaries` and :meth:`SeabedColumn.collapse`.
-    """
-    if template.acoustic_type in _PARAMETER_FREE_TYPES:
-        return BoundaryProperties(
-            acoustic_type=template.acoustic_type,
-            roughness=values['roughness'],
-            name=template.name, data_sources=template.data_sources)
-    return BoundaryProperties(
-        acoustic_type=template.acoustic_type,
-        grain_size_phi=template.grain_size_phi,
-        reflection_file=template.reflection_file,
-        name=template.name, data_sources=template.data_sources,
-        **values)
-
-
-def _reduce_boundaries(props: List[BoundaryProperties], reducer
-                       ) -> BoundaryProperties:
-    """Reduce a list of :class:`BoundaryProperties` to a single one.
-
-    ``reducer(values) -> float`` folds the per-node values of each numeric
-    acoustic field (the keys of ``BoundaryProperties._ACOUSTIC_DEFAULTS``):
-    ``np.mean`` / ``np.median`` for a collapse, ``np.interp`` for a
-    range-interpolated blend. The non-blendable fields come from the first
-    node (see :func:`_boundary_from_values`).
-
-    The single home for "many boundaries → one", shared by
-    :meth:`Bottom.halfspace_at`, :meth:`Bottom.select_range` and
-    :meth:`uacpy.core.surface.Surface.collapse`.
-    """
-    values = {name: float(reducer([getattr(p, name) for p in props]))
-              for name in BoundaryProperties._ACOUSTIC_DEFAULTS}
-    return _boundary_from_values(props[0], values)
-
-
-def _reduce_uniform_nodes(nodes: List[BoundaryProperties], method: str,
-                          who: str, noun: str) -> BoundaryProperties:
-    """``'mean'`` / ``'median'`` a range axis of boundary nodes down to one
-    :class:`BoundaryProperties` — the reduction :meth:`Bottom.select_range`
-    (``noun='columns'``) and :meth:`uacpy.core.surface.Surface.collapse`
-    (``noun='nodes'``) share; ``who`` names the caller in the messages.
-
-    Averaging is only meaningful within one boundary type: reducing a vacuum
-    node with a sand half-space would fold construction-time placeholders
-    into the numbers and stamp one node's type on the result. A uniform
-    ``'file'``/``'precalc'`` axis carries no real numbers to reduce — each
-    node is its reflection-coefficient table. Nodes sharing one table
-    collapse to that shared spec (roughness, the one genuine number they
-    carry, is still reduced); distinct tables cannot be averaged into
-    anything.
-    """
-    types = {n.acoustic_type for n in nodes}
-    if len(types) > 1:
-        raise ConfigurationError(
-            f"{who}({method!r}) needs a single boundary type to average; "
-            f"got {sorted(types)}. Boundary types cannot be blended — use "
-            f"'r0' or 'rmax'.")
-    # Refused rather than assumed. ``np.mean if method == 'mean' else
-    # np.median`` makes every unrecognised method a median, which is a
-    # silently wrong boundary rather than an error. Both callers already
-    # reject anything outside ('mean','median') before reaching here, so
-    # this is defence in depth and not a path anyone can currently take —
-    # it exists so that a caller added later cannot reopen one.
-    if method not in ('mean', 'median'):
-        raise ConfigurationError(
-            f"{who}({method!r}) is not a numeric reduction of a range axis; "
-            f"this reducer implements 'mean' and 'median'. Pick one of "
-            f"those, or 'r0'/'rmax' to keep one node whole.")
-    reduce = np.mean if method == 'mean' else np.median
-    (the_type,) = types
-    if the_type in ('file', 'precalc'):
-        specs = {n.reflection_file for n in nodes}
-        if len(specs) > 1:
-            raise ConfigurationError(
-                f"{who}({method!r}) cannot average '{the_type}' {noun} with "
-                f"different reflection files ({sorted(specs, key=str)}). "
-                f"Reflection-coefficient tables cannot be blended — use "
-                f"'r0' or 'rmax'.")
-        shared = _copy.deepcopy(nodes[0])
-        shared.roughness = float(reduce([n.roughness for n in nodes]))
-        return shared
-    return _reduce_boundaries(nodes, reduce)
+    z = float(depth)
+    tops = [float(t) for t in tops]
+    for i in range(len(tops)):
+        bottom = (tops[i + 1] if i + 1 < len(tops)
+                  else float(bottom_depth))
+        if z <= bottom:
+            return float(densities[i])
+    return float(halfspace_density)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -773,8 +72,8 @@ def _reduce_uniform_nodes(nodes: List[BoundaryProperties], method: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass
-class SeabedColumn(_DeepCopyMixin):
+@carrier
+class SeabedColumn(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     """A seabed column at one range: sediment layers over a half-space.
 
     ``layers`` may be **empty** — that is a pure half-space. A non-empty
@@ -804,12 +103,16 @@ class SeabedColumn(_DeepCopyMixin):
             if not isinstance(la, SedimentLayer):
                 raise ConfigurationError(
                     "SeabedColumn: every layer must be a SedimentLayer; got "
-                    f"{type(la).__name__}")
+                    f"{type(la).__name__}.")
         if not isinstance(self.halfspace, BoundaryProperties):
             raise ConfigurationError(
                 "SeabedColumn: halfspace must be a BoundaryProperties; "
-                f"got {type(self.halfspace).__name__}"
+                f"got {type(self.halfspace).__name__}."
             )
+        # The column holds copies: a layer or half-space the caller edits
+        # afterwards never reaches it.
+        self.layers = [_copy.deepcopy(la) for la in self.layers]
+        self.halfspace = _copy.deepcopy(self.halfspace)
 
     @property
     def is_layered(self) -> bool:
@@ -822,17 +125,55 @@ class SeabedColumn(_DeepCopyMixin):
         half-space)."""
         return tuple(getattr(self.halfspace, 'data_sources', ()) or ())
 
+    def _rows(self) -> list:
+        """One row per layer, shallow first, then the half-space: depth
+        below the seafloor of its ``top`` and ``bottom`` (m; ``inf`` for the
+        half-space), ``layer`` (index; the half-space's is the layer
+        count), ``name``, ``acoustic_type`` (``'layer'`` for a sediment
+        layer) and the acoustic properties."""
+        rows, top = [], 0.0
+        for i, layer in enumerate(self.layers):
+            rows.append({'layer': i, 'name': layer.name or '',
+                         'acoustic_type': 'layer', 'top': top,
+                         'bottom': top + float(layer.thickness),
+                         **_property_row(layer)})
+            top += float(layer.thickness)
+        rows.append({'layer': len(self.layers),
+                     'name': self.halfspace.name or '',
+                     'acoustic_type': self.halfspace.acoustic_type,
+                     'top': top, 'bottom': np.inf,
+                     **_property_row(self.halfspace)})
+        return rows
+
+    def _table(self):
+        """The layers, then the half-space, one row each (see
+        :meth:`_rows`)."""
+        return _columns(self._rows())
+
+    def _layers_text(self) -> Optional[str]:
+        """``'2 layers 30 m'`` (count and total thickness, and ``elastic``
+        when a layer carries shear); ``None`` for a bare half-space."""
+        if not self.layers:
+            return None
+        n = len(self.layers)
+        text = (f"{n} layer{'s' if n > 1 else ''} "
+                f"{qty(self.total_thickness(), 'm')}")
+        if any(layer.shear_speed > 0 for layer in self.layers):
+            text += ' elastic'
+        return text
+
+    def _repr_bits(self) -> List[str]:
+        """The column in repr words: its layers, then its half-space."""
+        layers = self._layers_text()
+        return ([layers] if layers else []) + self.halfspace._repr_bits()
+
+    def _short(self) -> str:
+        """The column in a few words, with no comma."""
+        layers = self._layers_text()
+        return (f"{layers} over " if layers else '') + self.halfspace._short()
+
     def __repr__(self) -> str:
-        bits = [f"n_layers={len(self.layers)}"]
-        if self.layers:
-            bits.append(f"thickness={self.total_thickness():g} m")
-        if any(layer.shear_speed > 0 for layer in self.layers) \
-                or self.halfspace.shear_speed > 0:
-            bits.append("elastic")
-        bits.append(f"halfspace={self.halfspace.acoustic_type}")
-        if self.halfspace.acoustic_type not in _NON_GEOACOUSTIC_TYPES:
-            bits.append(f"cp={self.halfspace.sound_speed:g} m/s")
-        return f"SeabedColumn({', '.join(bits)})"
+        return build('SeabedColumn', self._repr_bits())
 
     def total_thickness(self) -> float:
         """Total thickness of all sediment layers (m); 0 for a half-space."""
@@ -841,7 +182,7 @@ class SeabedColumn(_DeepCopyMixin):
     def __setattr__(self, name, value):
         # Writes to a half-space field follow through to ``halfspace``. A plain
         # assignment would create an instance attribute that echoes the new
-        # value back while ``at()``, ``sample_at_depths()``, the repr and every
+        # value back while ``at()``, RAM's seabed samples, the repr and every
         # writer — all of which read ``halfspace`` — keep the previous one.
         if name in _HALFSPACE_DELEGATED and 'halfspace' in self.__dict__:
             _delegate_write(type(self).__name__, [self.halfspace], name,
@@ -849,15 +190,20 @@ class SeabedColumn(_DeepCopyMixin):
             return
         super().__setattr__(name, value)
 
-    def _layer_at(self, depth: float) -> Optional[SedimentLayer]:
-        """Internal: the :class:`SedimentLayer` containing sub-bottom ``depth``
-        (m, ``0`` = top of the column), or ``None`` for the deep half-space.
+    def layer_at(self, depth: float) -> Optional[SedimentLayer]:
+        """The :class:`SedimentLayer` containing sub-bottom ``depth`` (m,
+        ``0`` = top of the column), or ``None`` below the stack, in the deep
+        half-space.
 
-        A private helper — the public accessors are the carrier contract
-        :meth:`at` (depth → material) and :meth:`isel` (index → layer); this
-        just single-sources the layer-boundary convention they share with
-        :meth:`sample_at_depths` (a depth exactly on an internal boundary maps
-        to the **upper** layer).
+        A depth exactly on an internal boundary maps to the **upper** layer,
+        and the bottom of the stack to the deepest layer. :meth:`at` builds
+        on it (depth → material); :meth:`isel` is the positional
+        counterpart (index → layer).
+
+        Parameters
+        ----------
+        depth : float
+            Sub-bottom depth (m).
         """
         z = _as_finite_scalar_label(depth, 'depth')
         cumulative = 0.0
@@ -884,8 +230,13 @@ class SeabedColumn(_DeepCopyMixin):
 
         ``depth`` must be a finite scalar — a NaN/inf or array-valued label
         raises ``ConfigurationError``.
+
+        Parameters
+        ----------
+        depth : float
+            Sub-bottom depth (m), a finite scalar.
         """
-        layer = self._layer_at(depth)
+        layer = self.layer_at(depth)
         if layer is None:
             return _copy.deepcopy(self.halfspace)
         return BoundaryProperties(
@@ -900,7 +251,13 @@ class SeabedColumn(_DeepCopyMixin):
     def isel(self, *, layer: int) -> SedimentLayer:
         """A copy of the :class:`SedimentLayer` at integer index ``layer`` —
         the positional counterpart of :meth:`at`. (The deep half-space is
-        ``self.halfspace``.)"""
+        ``self.halfspace``.)
+
+        Parameters
+        ----------
+        layer : int
+            Layer index.
+        """
         i = int(layer)
         n = len(self.layers)
         if not -n <= i < n:
@@ -911,7 +268,13 @@ class SeabedColumn(_DeepCopyMixin):
 
     def layer_depths(self, seafloor_depth: float) -> List[Tuple[float, float]]:
         """``(top, bottom)`` depth pairs for each layer (empty for a
-        half-space). ``seafloor_depth`` is the top of the first layer (m)."""
+        half-space). ``seafloor_depth`` is the top of the first layer (m).
+
+        Parameters
+        ----------
+        seafloor_depth : float
+            Depth (m) of the top of the first layer.
+        """
         depths = []
         current = seafloor_depth
         for layer in self.layers:
@@ -921,39 +284,7 @@ class SeabedColumn(_DeepCopyMixin):
             current = bottom
         return depths
 
-    def to_piecewise_breakpoints(
-        self,
-        seafloor_depth: float,
-        zmax: Optional[float] = None,
-        properties: Tuple[str, ...] = (
-            'sound_speed', 'density', 'attenuation',
-        ),
-    ) -> Dict[str, List[Tuple[float, float]]]:
-        """Collins-style ``(depth, value)`` breakpoints per property — each
-        layer becomes a (top, bottom) step, then the half-space to ``zmax``.
-        With 0 layers the half-space spans from ``seafloor_depth`` down."""
-        out = {p: [] for p in properties}
-        depths = self.layer_depths(seafloor_depth)
-        for (top, bottom), layer in zip(depths, self.layers):
-            for prop in properties:
-                value = float(getattr(layer, prop))
-                out[prop].append((float(top), value))
-                out[prop].append((float(bottom), value))
-
-        deepest_layer_bottom = depths[-1][1] if depths else seafloor_depth
-        final_depth = float(zmax) if zmax is not None else deepest_layer_bottom
-        # Give the half-space a non-zero depth extent: a ``zmax`` that does not
-        # reach past the layer stack would emit both of its breakpoints at the
-        # same depth, i.e. a step of zero thickness.
-        if final_depth <= deepest_layer_bottom:
-            final_depth = deepest_layer_bottom + 1.0
-        for prop in properties:
-            hs_value = float(getattr(self.halfspace, prop, 0.0) or 0.0)
-            out[prop].append((deepest_layer_bottom, hs_value))
-            out[prop].append((final_depth, hs_value))
-        return out
-
-    def collapse(self, method: str = 'halfspace') -> BoundaryProperties:
+    def collapse_layers(self, method: str = 'halfspace') -> BoundaryProperties:
         """Collapse the column to a single ``BoundaryProperties``.
 
         ``'halfspace'`` → the deep half-space; ``'top_layer'`` → topmost
@@ -976,11 +307,17 @@ class SeabedColumn(_DeepCopyMixin):
 
         The half-space is the template for the non-blendable fields, so a
         ``'vacuum'`` / ``'rigid'`` column collapses back to that parameter-free
-        type carrying only its ``roughness``."""
+        type carrying only its ``roughness``.
+
+        Parameters
+        ----------
+        method : {'halfspace', 'top_layer', 'volume_average'}, optional
+            The reduction (see above). Default ``'halfspace'``.
+        """
         if method not in COLUMN_COLLAPSE_METHODS:
             raise ConfigurationError(
-                f"SeabedColumn.collapse: unknown method={method!r}; "
-                f"valid: {_method_list(COLUMN_COLLAPSE_METHODS)}"
+                f"SeabedColumn.collapse_layers: unknown method={method!r}; "
+                f"valid: {_method_list(COLUMN_COLLAPSE_METHODS)}."
             )
         if method == 'halfspace' or not self.layers:
             return _copy.deepcopy(self.halfspace)
@@ -991,8 +328,9 @@ class SeabedColumn(_DeepCopyMixin):
         # them (only roughness survives — see _boundary_from_values), while
         # file/precalc store them on the returned object but the solver reads
         # the reflection-coefficient file instead.
-        if self.halfspace.acoustic_type in _NON_GEOACOUSTIC_TYPES:
-            if self.halfspace.acoustic_type in _PARAMETER_FREE_TYPES:
+        halfspace_type = BoundaryType.from_string(self.halfspace.acoustic_type)
+        if not halfspace_type.is_geoacoustic:
+            if halfspace_type.is_parameter_free:
                 outcome = (f"the {len(self.layers)} sediment layer(s)' "
                            f"properties are dropped (only the interfacial "
                            f"roughness survives)")
@@ -1002,10 +340,10 @@ class SeabedColumn(_DeepCopyMixin):
                            f"boundary but the solver reads the "
                            f"reflection-coefficient file and ignores them")
             warnings.warn(
-                f"SeabedColumn.collapse({method!r}): the half-space is "
+                f"SeabedColumn.collapse_layers({method!r}): the half-space is "
                 f"'{self.halfspace.acoustic_type}' — the solver reads no "
                 f"geoacoustic parameters from it, so {outcome}.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
         if method == 'top_layer':
             top = self.layers[0]
             values = {name: float(getattr(top, name))
@@ -1029,36 +367,16 @@ class SeabedColumn(_DeepCopyMixin):
         values['roughness'] = float(self.halfspace.roughness)
         return _boundary_from_values(self.halfspace, values)
 
-    def sample_at_depths(
-        self, n_points: int = 4, max_thickness: Optional[float] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Sample ``(cp, rho, attn)`` — compressional speed (m/s), density
-        (g/cm³) and attenuation (dB/λ) — at ``n_points`` evenly-spaced depths in
-        ``[0, max_thickness]`` (defaults to this column's own thickness). Used
-        by RAM to map arbitrary layers onto its fixed sediment grid."""
-        max_thick = (float(max_thickness) if max_thickness is not None
-                     else self.total_thickness())
-        if max_thick <= 0:
-            # A pure half-space has no thickness, and ``linspace(0, 0, n)``
-            # would return n identical depths. 1 m keeps the grid non-degenerate
-            # without changing the samples: with no layers every depth resolves
-            # to the half-space anyway.
-            max_thick = 1.0
-        sample_depths = np.linspace(0, max_thick, n_points)
-        cp = np.empty(n_points)
-        rho = np.empty(n_points)
-        attn = np.empty(n_points)
-        for i, d in enumerate(sample_depths):
-            layer = self._layer_at(d)
-            src = layer if layer is not None else self.halfspace
-            cp[i], rho[i], attn[i] = (src.sound_speed, src.density,
-                                      src.attenuation)
-        return cp, rho, attn
-
     @classmethod
     def from_halfspace(cls, halfspace: BoundaryProperties) -> 'SeabedColumn':
         """A pure half-space column (no sediment layers) over a copy of
-        ``halfspace``."""
+        ``halfspace``.
+
+        Parameters
+        ----------
+        halfspace : BoundaryProperties
+            The column's deep half-space (copied).
+        """
         return cls(layers=[], halfspace=_copy.deepcopy(halfspace))
 
     @classmethod
@@ -1072,7 +390,20 @@ class SeabedColumn(_DeepCopyMixin):
     ) -> 'SeabedColumn':
         """Build a column from :mod:`uacpy.core.materials` presets. Each
         ``layers`` entry is ``(name, thickness)`` or
-        ``(name, thickness, overrides)``; ``halfspace`` is a preset name."""
+        ``(name, thickness, overrides)``; ``halfspace`` is a preset name.
+
+        Parameters
+        ----------
+        layers : sequence of tuple
+            ``(name, thickness)`` or ``(name, thickness, overrides)`` per layer,
+            shallowest first.
+        halfspace : str
+            The half-space preset.
+        halfspace_overrides : dict, optional
+            Properties replacing the half-space preset's.
+        elastic : bool, optional
+            Keep the presets' shear properties. Default False.
+        """
         sediment_layers = []
         for entry in layers:
             if len(entry) == 2:
@@ -1084,7 +415,7 @@ class SeabedColumn(_DeepCopyMixin):
                 raise ConfigurationError(
                     "SeabedColumn.from_presets: layer entry must be "
                     f"(name, thickness) or (name, thickness, overrides); "
-                    f"got {entry!r}"
+                    f"got {entry!r}."
                 )
             sediment_layers.append(
                 SedimentLayer.from_preset(name, thickness=thickness,
@@ -1096,8 +427,8 @@ class SeabedColumn(_DeepCopyMixin):
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
-@dataclass(eq=False)
-class Bottom(_DeepCopyMixin):
+@carrier(eq=False)
+class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     """Unified seabed carrier — one or more :class:`SeabedColumn` columns with
     an optional ``ranges`` axis (metres). ``ranges=None`` ⇒ range-independent
     (exactly one column), mirroring ``SoundSpeedProfile(ranges=None)``.
@@ -1109,10 +440,10 @@ class Bottom(_DeepCopyMixin):
     `Bottom` and :class:`~uacpy.core.surface.Surface` are the two carriers
     without a ``.plot()``: placing the sub-bottom depth axis needs a seafloor
     depth, which lives on ``env.bathymetry``. Plot one with
-    ``uacpy.plots.plot_bottom_properties(env)``.
+    ``uacpy.plot.plot_bottom_properties(env)``.
 
     Every accessor — :meth:`at`, :meth:`isel`, :meth:`halfspace_at` — and
-    every reduction — :meth:`select_range`, :meth:`collapse`,
+    every reduction — :meth:`collapse_range`, :meth:`collapse`,
     :meth:`to_halfspace` — returns a **copy**, so a result is always safe to
     mutate and never writes back through to the carrier. Reach through
     ``.columns`` to edit in place, or through
@@ -1125,24 +456,27 @@ class Bottom(_DeepCopyMixin):
     def __post_init__(self):
         self.columns = list(self.columns)
         if not self.columns:
-            raise ConfigurationError("Bottom: requires at least one SeabedColumn")
+            raise ConfigurationError("Bottom: requires at least one SeabedColumn.")
         for c in self.columns:
             if not isinstance(c, SeabedColumn):
                 raise ConfigurationError(
                     "Bottom: columns must be SeabedColumn instances; got "
-                    f"{type(c).__name__}")
+                    f"{type(c).__name__}.")
+        # The bottom holds copies: a column the caller edits afterwards
+        # never reaches it.
+        self.columns = [_copy.deepcopy(c) for c in self.columns]
         if self.ranges is None:
             if len(self.columns) != 1:
                 raise ConfigurationError(
                     "Bottom: range-independent bottom (ranges=None) needs "
-                    f"exactly one column; got {len(self.columns)}")
+                    f"exactly one column; got {len(self.columns)}.")
         else:
             # Ahead of the float64 cast below, which discards an imaginary
             # part — see _reject_complex for the two ways it does it.
-            _reject_complex(self.ranges, "Bottom.ranges")
+            reject_complex(self.ranges, "Bottom.ranges")
             self.ranges = np.array(self.ranges, dtype=float).ravel()
-            _require_non_negative(self.ranges, "Bottom.ranges", hint="metres")
-            _require_strictly_increasing(
+            require_non_negative(self.ranges, "Bottom.ranges", hint="metres")
+            require_strictly_increasing(
                 self.ranges, "Bottom.ranges", min_step=DECK_RANGE_RESOLUTION_M)
             if len(self.ranges) != len(self.columns):
                 raise ConfigurationError(
@@ -1152,9 +486,12 @@ class Bottom(_DeepCopyMixin):
     # ── queries (replace isinstance dispatch) ──────────────────────────────
     @property
     def data_sources(self) -> tuple:
-        """Aggregated provenance across all columns, de-duplicated by source id
-        (harmonised with the leaf carriers and ``env.data_sources``)."""
-        return _dedupe_provenance(self.columns)
+        """Every column's provenance, exact repeats removed (harmonised with
+        the leaf carriers and ``env.data_sources``). On a range-dependent
+        bottom each record carries its column's range as ``range_m``."""
+        return dedupe_provenance(
+            self.columns,
+            ranges=self.ranges if len(self.columns) > 1 else None)
 
     @property
     def is_range_dependent(self) -> bool:
@@ -1163,7 +500,7 @@ class Bottom(_DeepCopyMixin):
         A structural test (node count on the ranged axis), like
         ``SoundSpeedProfile`` / ``Surface``: columns with identical
         properties still count as range-dependent. Contrast
-        ``Bathymetry.is_range_dependent`` / ``Altimetry.is_range_dependent``,
+        ``Bathymetry.varies_with_range`` / ``Altimetry.varies_with_range``,
         which test whether the *values* actually vary with range."""
         return self.ranges is not None and len(self.columns) > 1
 
@@ -1187,18 +524,33 @@ class Bottom(_DeepCopyMixin):
     def acoustic_type(self) -> str:
         return self.columns[0].halfspace.acoustic_type
 
+    def _table(self):
+        """Every column's layers and half-space, one row each, with the
+        ``range`` (m) of the column they belong to first; see
+        :meth:`SeabedColumn._rows` for the other columns."""
+        ranges = (np.zeros(len(self.columns)) if self.ranges is None
+                  else np.asarray(self.ranges, dtype=float))
+        return _columns([{'range': float(r), **row}
+                         for r, column in zip(ranges, self.columns)
+                         for row in column._rows()])
+
     def __repr__(self) -> str:
         if not self.is_range_dependent:
-            return f"Bottom({self.columns[0]!r})"
-        r_lo = float(self.ranges[0]) / 1000
-        r_hi = float(self.ranges[-1]) / 1000
-        kind = "layered" if self.is_layered else "half-space"
-        return (f"Bottom(range-dependent {kind}, n={len(self.columns)}, "
-                f"range=[{r_lo:g}, {r_hi:g}] km)")
+            return build('Bottom', self.columns[0]._repr_bits())
+        return build('Bottom', [axis(self.ranges, 'ranges', 'm'),
+                                'layered' if self.is_layered else 'half-space',
+                                'elastic' if self.is_elastic else None])
+
+    def _short(self) -> str:
+        """The seabed in a few words, with no comma."""
+        if not self.is_range_dependent:
+            return self.columns[0]._short()
+        return (f"{len(self.columns)} columns "
+                f"{'layered' if self.is_layered else 'half-space'}")
 
     # ── slicing ─────────────────────────────────────────────────────────────
     def _nearest_index(self, range: float) -> int:
-        return _nearest_index_on_axis(self.ranges, range)
+        return nearest_index_on_axis(self.ranges, range)
 
     def at(self, *, range: float) -> SeabedColumn:
         """Copy of the nearest :class:`SeabedColumn` to ``range`` (m).
@@ -1211,6 +563,11 @@ class Bottom(_DeepCopyMixin):
 
         ``range`` must be a finite scalar — a NaN/inf or array-valued label
         raises ``ConfigurationError``, the same contract ``Field.at`` applies.
+
+        Parameters
+        ----------
+        range : float
+            Range (m), a finite scalar.
         """
         return _copy.deepcopy(self.columns[self._nearest_index(range)])
 
@@ -1232,12 +589,23 @@ class Bottom(_DeepCopyMixin):
         Same nearest rule and same finite-scalar ``range`` contract as
         :meth:`at`, so which column a query resolves to stays this class's to
         decide rather than the caller's to re-derive.
+
+        Parameters
+        ----------
+        range : float
+            Range (m), a finite scalar.
         """
         return self._nearest_index(range)
 
     def isel(self, *, range: int) -> SeabedColumn:
         """Copy of the :class:`SeabedColumn` at integer position ``range`` —
-        the positional counterpart of :meth:`at`."""
+        the positional counterpart of :meth:`at`.
+
+        Parameters
+        ----------
+        range : int
+            Column index.
+        """
         i = int(range)
         n = len(self.columns)
         if not -n <= i < n:
@@ -1259,11 +627,19 @@ class Bottom(_DeepCopyMixin):
         columns; it is only defined when every column is a pure
         ``'half-space'``, and it takes the non-blendable fields
         (``acoustic_type``, ``reflection_file``, ``grain_size_phi``) from the
-        r = 0 column. ``range`` must be a finite scalar on both paths."""
+        r = 0 column. ``range`` must be a finite scalar on both paths.
+
+        Parameters
+        ----------
+        range : float
+            Range (m), a finite scalar.
+        interp : {None, 'nearest', 'linear'}, optional
+            Nearest column (default) or a blend of the two bracketing ones.
+        """
         if interp not in (None, 'linear', 'nearest'):
             raise ConfigurationError(
                 f"Bottom.halfspace_at: interp must be 'linear', 'nearest' or "
-                f"None; got {interp!r}")
+                f"None; got {interp!r}.")
         # Checked here as well as in ``_nearest_index`` because the blend below
         # never reaches that helper: ``np.interp`` would carry a NaN range into
         # every blended property, and the error then names the stored density
@@ -1291,7 +667,7 @@ class Bottom(_DeepCopyMixin):
             [c.halfspace for c in self.columns],
             lambda values: np.interp(label, self.ranges, values))
 
-    def max_total_thickness(self) -> float:
+    def total_thickness_max(self) -> float:
         """Maximum sediment thickness across all columns (0 if all half-space)."""
         return max(c.total_thickness() for c in self.columns)
 
@@ -1306,7 +682,8 @@ class Bottom(_DeepCopyMixin):
         speeds: List[float] = []
         for c in self.columns:
             speeds.extend(float(la.sound_speed) for la in c.layers)
-            if c.halfspace.acoustic_type not in _NON_GEOACOUSTIC_TYPES:
+            if BoundaryType.from_string(
+                    c.halfspace.acoustic_type).is_geoacoustic:
                 speeds.append(float(c.halfspace.sound_speed))
         return speeds
 
@@ -1336,12 +713,13 @@ class Bottom(_DeepCopyMixin):
         return np.array([c.halfspace.roughness for c in self.columns])
 
     # ── reductions ──────────────────────────────────────────────────────────
-    def select_range(self, method: str = 'r0') -> 'Bottom':
+    def collapse_range(self, method: str = 'r0') -> 'Bottom':
         """Reduce the range axis to a single column (range-independent result).
 
         ``'r0'`` / ``'rmax'`` pick the first / last column (layers kept).
-        ``'mean'`` / ``'median'`` numerically average the half-spaces — only
-        meaningful when no column is layered. For a layered bottom ``'median'``
+        ``'mean'`` / ``'median'`` numerically average the half-spaces over
+        the columns, each column weighing the same whatever its range
+        spacing — only meaningful when no column is layered. For a layered bottom ``'median'``
         falls back to picking the middle column (layers can't be averaged) and
         ``'mean'`` is rejected. Uniform ``'file'`` / ``'precalc'`` columns
         carry no real numbers to average: they collapse to their shared
@@ -1350,14 +728,20 @@ class Bottom(_DeepCopyMixin):
 
         The picking methods return a **copy** of the chosen column, matching
         :meth:`at` / :meth:`isel` / :meth:`halfspace_at`; the averaging ones
-        build a new half-space and never held the parent's to begin with."""
+        build a new half-space and never held the parent's to begin with.
+
+        Parameters
+        ----------
+        method : {'r0', 'rmax', 'mean', 'median'}, optional
+            The reduction (see above). Default ``'r0'``.
+        """
         # Validated before the early return: a range-independent bottom has
         # nothing to reduce, and returning first made a typo silent until the
         # user switched to a range-dependent environment.
         if method not in RANGE_COLLAPSE_METHODS:
             raise ConfigurationError(
-                f"Bottom.select_range: unknown method={method!r}; "
-                f"valid: {_method_list(RANGE_COLLAPSE_METHODS)}")
+                f"Bottom.collapse_range: unknown method={method!r}; "
+                f"valid: {_method_list(RANGE_COLLAPSE_METHODS)}.")
         if not self.is_range_dependent:
             # Nothing to reduce: one column in, one column out. A single-node
             # ``ranges`` is a coordinate at that range (``from_halfspaces``
@@ -1378,12 +762,12 @@ class Bottom(_DeepCopyMixin):
                         self.columns[len(self.columns) // 2])],
                     ranges=None)
             raise ConfigurationError(
-                "Bottom.select_range('mean') is undefined for a layered "
+                "Bottom.collapse_range('mean') is undefined for a layered "
                 "bottom (layer stacks can't be averaged); use 'r0', 'rmax' "
                 "or 'median'.")
         halfspace = _reduce_uniform_nodes(
             [c.halfspace for c in self.columns], method,
-            'Bottom.select_range', 'columns')
+            'Bottom.collapse_range', 'columns')
         return Bottom(columns=[SeabedColumn(layers=[], halfspace=halfspace)],
                       ranges=None)
 
@@ -1391,14 +775,23 @@ class Bottom(_DeepCopyMixin):
                  layers: Optional[str] = None) -> 'Bottom':
         """Reduce along one or both axes, returning a new ``Bottom``.
 
-        ``range=`` collapses the range axis (see :meth:`select_range`).
+        ``range=`` collapses the range axis (see :meth:`collapse_range`).
         ``layers=`` flattens each column's layers to a half-space (per-column,
-        keeping the range axis), via :meth:`SeabedColumn.collapse`."""
+        keeping the range axis), via :meth:`SeabedColumn.collapse_layers`.
+
+        Parameters
+        ----------
+        range : str, optional
+            Method collapsing the range axis (:meth:`collapse_range`).
+        layers : str, optional
+            Method flattening each column's layers
+            (:meth:`SeabedColumn.collapse_layers`).
+        """
         b = self
         if range is not None:
-            b = b.select_range(range)
+            b = b.collapse_range(range)
         if layers is not None:
-            new_cols = [SeabedColumn(layers=[], halfspace=c.collapse(layers))
+            new_cols = [SeabedColumn(layers=[], halfspace=c.collapse_layers(layers))
                         for c in b.columns]
             # One flattened column per input column, so the range axis is
             # untouched — including a single-node ``ranges``, which is a
@@ -1407,8 +800,14 @@ class Bottom(_DeepCopyMixin):
         return b
 
     def to_halfspace(self, range_method: str = 'r0') -> BoundaryProperties:
-        """Collapse fully to a single ``BoundaryProperties``."""
-        return self.select_range(range_method).columns[0].collapse('halfspace')
+        """Collapse fully to a single ``BoundaryProperties``.
+
+        Parameters
+        ----------
+        range_method : str, optional
+            The range reduction (:meth:`collapse_range`). Default ``'r0'``.
+        """
+        return self.collapse_range(range_method).columns[0].collapse_layers('halfspace')
 
     def __setattr__(self, name, value):
         # Writes to a half-space field follow through to every column. A plain
@@ -1422,35 +821,113 @@ class Bottom(_DeepCopyMixin):
             return
         super().__setattr__(name, value)
 
+    @classmethod
+    def coerce(cls, bottom) -> 'Bottom':
+        """Coerce ``bottom=`` into a :class:`Bottom`, mirroring ``ssp=``:
+        scalar cp, preset name, ``BoundaryProperties``, ``SeabedColumn`` or
+        ``Bottom`` (``None`` → the default half-space).
+
+        Parameters
+        ----------
+        bottom : float, str, BoundaryProperties, SeabedColumn, Bottom or None
+            The value to coerce (see above).
+        """
+        if bottom is None:
+            return cls.from_halfspace(
+                BoundaryProperties(acoustic_type='half-space'))
+        if isinstance(bottom, cls):
+            return bottom
+        if isinstance(bottom, SeabedColumn):
+            return cls.from_column(bottom)
+        if isinstance(bottom, BoundaryProperties):
+            return cls.from_halfspace(bottom)
+        # A scalar (a 0-d array included) always means "half-space at this
+        # cp" — never let inference see it (a bare 1600.0 equals the resolved
+        # default and would otherwise be indistinguishable from unset). A bool
+        # is refused as one — the shared guard says why.
+        sound_speed = scalar_or_none(bottom, lambda v: (
+            f"Environment: bottom={v!r} is a bool, not a scalar sound speed "
+            f"— as a scalar it would mean a {float(v):g} m/s half-space."))
+        if sound_speed is not None:
+            return cls.from_halfspace(BoundaryProperties(
+                acoustic_type='half-space', sound_speed=sound_speed))
+        if isinstance(bottom, str):
+            return cls.from_halfspace(BoundaryProperties.from_preset(bottom))
+        raise ConfigurationError(
+            "Environment: bottom must be a Bottom, SeabedColumn, "
+            "BoundaryProperties, a scalar sound speed (m/s), or a material "
+            f"preset name; got {type(bottom).__name__}.")
+
     # ── factories (mirror SoundSpeedProfile.from_*) ─────────────────────────
     @classmethod
     def from_halfspace(cls, halfspace: BoundaryProperties) -> 'Bottom':
-        """Range-independent pure half-space bottom."""
+        """Range-independent pure half-space bottom.
+
+        Parameters
+        ----------
+        halfspace : BoundaryProperties
+            The half-space, at every range.
+        """
         return cls(columns=[SeabedColumn(layers=[], halfspace=halfspace)],
                    ranges=None)
 
     @classmethod
     def from_grain_size(cls, grain_size_phi: float, *, model: str = DEFAULT_GRAIN_SIZE_MODEL,
+                        hamilton_fit: Optional[str] = None,
                         roughness: float = 0.0,
                         water_sound_speed: Optional[float] = None,
                         water_density: Optional[float] = None) -> 'Bottom':
         """Range-independent half-space bottom from a mean grain size (ϕ).
 
         Convenience wrapper over
-        :meth:`BoundaryProperties.from_grain_size`."""
+        :meth:`BoundaryProperties.from_grain_size`; every argument, including
+        ``hamilton_fit=`` (Hamilton's continental-terrace / abyssal-hill /
+        abyssal-plain fits), is forwarded unchanged.
+
+        Parameters
+        ----------
+        grain_size_phi : float
+            Mean grain size on the Wentworth ϕ scale.
+        model : {'hamilton', 'apl-uw'}, optional
+            Conversion model. Default ``'hamilton'``.
+        hamilton_fit : str, optional
+            Hamilton & Bachman's fit for ``'hamilton'``.
+        roughness : float, optional
+            RMS interface roughness (m). Default 0.
+        water_sound_speed, water_density : float, optional
+            In-situ seawater properties the ratios scale by.
+        """
+        from uacpy.core.sediment import canonical_grain_size_selection
+        model, hamilton_fit = canonical_grain_size_selection(
+            model, hamilton_fit, who='Bottom.from_grain_size')
         return cls.from_halfspace(BoundaryProperties.from_grain_size(
-            grain_size_phi, model=model, roughness=roughness,
+            grain_size_phi, model=model, hamilton_fit=hamilton_fit,
+            roughness=roughness,
             water_sound_speed=water_sound_speed, water_density=water_density))
 
     @classmethod
     def from_column(cls, column: SeabedColumn) -> 'Bottom':
-        """Range-independent bottom from a single column."""
+        """Range-independent bottom from a single column.
+
+        Parameters
+        ----------
+        column : SeabedColumn
+            The column, at every range.
+        """
         return cls(columns=[column], ranges=None)
 
     @classmethod
     def from_columns(cls, columns: List[SeabedColumn],
                      ranges) -> 'Bottom':
-        """Range-dependent bottom from one column per range break."""
+        """Range-dependent bottom from one column per range break.
+
+        Parameters
+        ----------
+        columns : list of SeabedColumn
+            One column per range break.
+        ranges : array_like
+            The range (m) of each column.
+        """
         return cls(columns=list(columns), ranges=ranges)
 
     @classmethod
@@ -1470,7 +947,21 @@ class Bottom(_DeepCopyMixin):
 
         Every property is either a scalar applied to every range break or a
         per-range array of the same length as ``ranges``. ``shear_speed`` /
-        ``shear_attenuation`` / ``roughness`` default to 0."""
+        ``shear_attenuation`` / ``roughness`` default to 0.
+
+        Parameters
+        ----------
+        ranges : array_like
+            Range breaks (m).
+        sound_speed, density, attenuation : float or array_like
+            Compressional speed (m/s), density (g/cm³) and attenuation
+            (dB/wavelength), scalar or one per range.
+        shear_speed, shear_attenuation, roughness : float or array_like, optional
+            Shear speed (m/s), shear attenuation (dB/wavelength) and RMS
+            roughness (m); ``None`` is 0.
+        acoustic_type : str, optional
+            The half-spaces' acoustic type.
+        """
         # RD bottoms always carry user cp/ρ/α, so 'half-space' is the coherent
         # default — never infer vacuum just because a sample happens to equal
         # the BoundaryProperties defaults.
@@ -1483,7 +974,7 @@ class Bottom(_DeepCopyMixin):
             if value is None:
                 if default is None:
                     raise ConfigurationError(
-                        f"Bottom.from_halfspaces: {name} is required")
+                        f"Bottom.from_halfspaces: {name} is required.")
                 return np.full(n, float(default))
             arr = np.asarray(value, dtype=float).ravel()
             if arr.size == 1:
@@ -1516,7 +1007,20 @@ class Bottom(_DeepCopyMixin):
     @classmethod
     def from_presets(cls, layers, *, halfspace, halfspace_overrides=None,
                      elastic: bool = False) -> 'Bottom':
-        """Range-independent layered bottom from material presets."""
+        """Range-independent layered bottom from material presets.
+
+        Parameters
+        ----------
+        layers : sequence of tuple
+            ``(name, thickness)`` or ``(name, thickness, overrides)`` per layer,
+            shallowest first.
+        halfspace : str
+            The half-space preset.
+        halfspace_overrides : dict, optional
+            Properties replacing the half-space preset's.
+        elastic : bool, optional
+            Keep the presets' shear properties. Default False.
+        """
         return cls.from_column(SeabedColumn.from_presets(
             layers, halfspace=halfspace,
             halfspace_overrides=halfspace_overrides, elastic=elastic))

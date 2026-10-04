@@ -184,7 +184,7 @@ def test_animate_field_handles_alternate_coord_order():
 def test_save_animation_gif(tmp_path):
     """Writer inferred from `.gif` suffix → PillowWriter; output file
     is non-empty."""
-    from uacpy.visualization import save_animation
+    from uacpy.plot import save_animation
 
     field = _make_synthetic_field(n_t=40, t_max=1.0)
     out = save_animation(field, tmp_path / 'pulse.gif',
@@ -194,7 +194,7 @@ def test_save_animation_gif(tmp_path):
 
 
 def test_save_animation_rejects_unknown_suffix(tmp_path):
-    from uacpy.visualization import save_animation
+    from uacpy.plot import save_animation
 
     field = _make_synthetic_field(n_t=10)
     with pytest.raises(ConfigurationError, match=r"cannot infer writer"):
@@ -204,7 +204,7 @@ def test_save_animation_rejects_unknown_suffix(tmp_path):
 def test_save_animation_closes_figure(tmp_path):
     """Calling save_animation should not leak open figures."""
     import matplotlib.pyplot as plt
-    from uacpy.visualization import save_animation
+    from uacpy.plot import save_animation
 
     plt.close('all')
     n_open_before = len(plt.get_fignums())
@@ -224,7 +224,7 @@ def test_save_animation_closes_figure(tmp_path):
 
 def test_plot_time_snapshots_grid_shape():
     """One row per field, one column per requested time."""
-    from uacpy.visualization import plot_time_snapshots
+    from uacpy.plot import plot_time_snapshots
 
     fields = {
         'A': _make_synthetic_field(n_t=40, t_max=1.0),
@@ -237,7 +237,7 @@ def test_plot_time_snapshots_grid_shape():
 
 
 def test_plot_time_snapshots_empty_raises():
-    from uacpy.visualization import plot_time_snapshots
+    from uacpy.plot import plot_time_snapshots
 
     with pytest.raises(ConfigurationError, match='empty'):
         plot_time_snapshots({}, times_s=(0.1,))
@@ -268,7 +268,7 @@ def test_a_frame_stride_below_one_is_refused_by_name(frame_stride, accepted):
 
 def test_plot_time_snapshots_global_pmax():
     """``p_max`` scalar applies the same colour scale to every panel."""
-    from uacpy.visualization import plot_time_snapshots
+    from uacpy.plot import plot_time_snapshots
     import matplotlib.pyplot as plt
 
     fields = {'A': _make_synthetic_field(n_t=20, t_max=0.5)}
@@ -277,6 +277,29 @@ def test_plot_time_snapshots_global_pmax():
     for ax in axes.flat:
         im = ax.get_images()[0]
         assert im.get_clim() == (-0.5, 0.5)
+    plt.close(fig)
+
+
+@pytest.mark.parametrize("p_max, n_bars, label", [
+    (None, 2, 'p(t) (Pa), row scale'),
+    ((0.5, 0.25), 2, 'p(t) (Pa), row scale'),
+    (0.5, 2, 'p(t) (Pa)'),
+])
+def test_the_snapshot_grid_states_its_colour_scale(p_max, n_bars, label):
+    """Without a bar no amplitude can be read off a snapshot, and per-row
+    scaling makes equal colours in two rows unequal pressures: every row
+    carries a bar, labelled as its own scale unless one scale covers all."""
+    from uacpy.plot import plot_time_snapshots
+    import matplotlib.pyplot as plt
+
+    fields = {'A': _make_synthetic_field(n_t=20, t_max=0.5),
+              'B': _make_synthetic_field(n_t=20, t_max=0.5)}
+    fig, axes = plot_time_snapshots(fields, times_s=(0.1, 0.3), p_max=p_max)
+    panels = set(axes.flat)
+    bars = [child for ax in axes[:, -1] for child in ax.child_axes]
+    assert all(child not in panels for child in bars)
+    assert len(bars) == n_bars
+    assert all(bar.get_ylabel() == label for bar in bars)
     plt.close(fig)
 
 
@@ -303,9 +326,85 @@ def test_the_snapshot_source_star_is_whole_on_the_left_limit(
     """Each snapshot panel starts its axis at r = 0, exactly where the star
     is drawn; a limit ON the marker's centre cuts half the glyph away."""
     import matplotlib.pyplot as plt
-    from uacpy.visualization import plot_time_snapshots
+    from uacpy.plot import plot_time_snapshots
 
     fields = {'A': _make_synthetic_field(n_t=20, t_max=0.5)}
     fig, axes = plot_time_snapshots(fields, times_s=(0.1,))
     assert marker_fraction_inside(axes[0, 0]) == pytest.approx(1.0)
     plt.close(fig)
+
+
+def _stripe_at_60_m():
+    """A time-series field on a receiver grid dense near the surface, with
+    energy on the 60 m row only."""
+    depths = np.array([0, 2, 4, 6, 8, 10, 20, 40, 60, 80, 100], dtype=float)
+    data = np.zeros((depths.size, 21, 5))
+    data[list(depths).index(60.0)] = 1.0
+    return Field(data=data,
+                 coords={'depth': depths, 'range': np.linspace(50, 1050, 21),
+                         'time': np.linspace(0.0, 1.0, 5)},
+                 unit='Pa')
+
+
+def _painted_depths(ax):
+    """Depth extent of the cells painted with the stripe's value."""
+    import matplotlib.collections as mcoll
+    mesh = next(c for c in ax.collections if isinstance(c, mcoll.QuadMesh))
+    y = np.asarray(mesh.get_coordinates())[:, 0, 1]      # cell edges in depth
+    values = np.asarray(mesh.get_array()).reshape(len(y) - 1, -1)[:, 0]
+    rows = np.flatnonzero(values == 1.0)
+    return y[rows.min()], y[rows.max() + 1]
+
+
+def test_a_snapshot_of_a_non_uniform_grid_puts_each_row_at_its_depth():
+    """An image stretches rows evenly, which drew the 60 m row at 73-83 m;
+    each cell is drawn about its own sample instead: 50-70 m."""
+    from uacpy.plot import plot_time_snapshots
+    import matplotlib.pyplot as plt
+    fig, axes = plot_time_snapshots([_stripe_at_60_m()], times_s=[0.5])
+    try:
+        assert _painted_depths(axes[0, 0]) == pytest.approx((50.0, 70.0))
+    finally:
+        plt.close(fig)
+
+
+def test_an_animation_of_a_non_uniform_grid_puts_each_row_at_its_depth():
+    from uacpy.visualization.plots import animate_field
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    try:
+        animate_field(_stripe_at_60_m(), ax=ax)
+        assert _painted_depths(ax) == pytest.approx((50.0, 70.0))
+    finally:
+        plt.close(fig)
+
+
+def test_the_animation_colorbar_names_the_fields_own_quantity():
+    """Labelled as plot_field labels the same trace, from its kind and
+    unit, and dropped on request."""
+    from uacpy.visualization.plots import animate_field
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    try:
+        animate_field(_stripe_at_60_m(), ax=ax)
+        assert [a.get_ylabel() for a in fig.axes if a is not ax] == ['p(t) (Pa)']
+    finally:
+        plt.close(fig)
+    fig, ax = plt.subplots()
+    try:
+        animate_field(_stripe_at_60_m(), ax=ax, show_colorbar=False)
+        assert fig.axes == [ax]
+    finally:
+        plt.close(fig)
+
+
+def test_the_snapshot_grid_draws_into_a_given_figure():
+    from uacpy.plot import plot_time_snapshots
+    import matplotlib.pyplot as plt
+    parent = plt.figure(layout='constrained')
+    try:
+        fig, axes = plot_time_snapshots([_stripe_at_60_m()], times_s=[0.2, 0.5],
+                                        fig=parent)
+        assert fig is parent and axes.shape == (1, 2)
+    finally:
+        plt.close(parent)

@@ -17,6 +17,7 @@ from uacpy import Field
 from uacpy.core.results import Modes
 from uacpy.visualization import plots
 from uacpy.models import RunMode
+from uacpy.core.exceptions import ConfigurationError
 
 pytestmark = pytest.mark.requires_binary
 
@@ -183,3 +184,19 @@ class TestRunModeAndComputeTl:
         # so the tolerance absorbs deck round-tripping (the .env writes depths
         # and speeds at fixed precision) rather than any modelling difference.
         assert np.allclose(a.data, b.data, rtol=1e-3, atol=1e-3)
+
+    def test_compute_tl_accepts_the_run_mode_value_string(
+            self, simple_env, source, receiver_small):
+        """``compute_tl`` takes the value string ``run()`` takes
+        (``'coherent_tl'``) and returns the same field as the enum; a
+        non-TL value string still refuses, naming the mode."""
+        bellhop = Bellhop(verbose=False)
+        a = bellhop.compute_tl(simple_env, source, receiver_small,
+                               run_mode='coherent_tl')
+        b = bellhop.compute_tl(simple_env, source, receiver_small,
+                               run_mode=RunMode.COHERENT_TL)
+        assert isinstance(a, Field)
+        assert np.allclose(a.data, b.data, rtol=1e-3, atol=1e-3)
+        with pytest.raises(ConfigurationError, match='run_mode=RAYS'):
+            bellhop.compute_tl(simple_env, source, receiver_small,
+                               run_mode='rays')

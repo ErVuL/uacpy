@@ -32,7 +32,8 @@ setuptools = pytest.importorskip(
 
 # The Markdown-citation machinery is shared with test_documentation.py.
 from uacpy.tests._doc_gate import (
-    package_python_files,            # noqa: E402
+    engines_missing_from,            # noqa: E402
+    package_python_files,
     _DOC_ANCHOR,
     _MIN_DOC_ANCHORS_RESOLVED,
     _MIN_QUOTED_DOC_ANCHORS,
@@ -45,6 +46,14 @@ from uacpy.tests._doc_gate import (
     _section_span,
 )
 from uacpy.tests import conftest  # noqa: E402
+from uacpy.tests._internal_modules import (  # noqa: E402
+    PACKAGE_INTERNAL_MODULES, private_module, private_module_imports,
+)
+from uacpy.models.ram import mpirams as ram_mpirams
+
+#: Every test here pins a repo convention (sources, docs, packaging), not
+#: runtime behaviour: ``-m "not convention"`` deselects the module.
+pytestmark = pytest.mark.convention
 
 
 # The complete importable surface the wheel ships. A new subpackage must be
@@ -60,6 +69,13 @@ _EXPECTED_PACKAGES = [
     "uacpy.data",
     "uacpy.io",
     "uacpy.models",
+    "uacpy.models.bellhop",
+    "uacpy.models.bounce",
+    "uacpy.models.kraken",
+    "uacpy.models.oases",
+    "uacpy.models.ram",
+    "uacpy.models.scooter",
+    "uacpy.models.sparc",
     "uacpy.noise",
     "uacpy.sonar",
     "uacpy.visualization",
@@ -157,6 +173,16 @@ def test_version_exists_and_matches_pyproject():
             == "uacpy._version.__version__")
 
 
+#: uacpy's own GPL text, then the BSD-3-Clause text and function list for the
+#: arlpy-adapted code in ``uacpy/core/acoustics/``. ``third_party/`` is not in
+#: the wheel, so ``license-files`` is what carries the notice into an install.
+_LICENCE_FILES = [
+    "LICENSE",
+    "uacpy/third_party/arlpy/LICENSE",
+    "uacpy/third_party/arlpy/NOTICE",
+]
+
+
 def test_the_licence_is_declared_as_an_spdx_expression():
     """PEP 639: ``license`` is a bare SPDX string with the licence text listed
     in ``license-files``. The old ``{ text = ... }`` table is deprecated with a
@@ -166,8 +192,8 @@ def test_the_licence_is_declared_as_an_spdx_expression():
         cfg = tomllib.load(fh)
     project = cfg["project"]
     assert project["license"] == "GPL-3.0-or-later"
-    assert project["license-files"] == ["LICENSE"]
-    assert (_REPO_ROOT / "LICENSE").is_file()
+    assert project["license-files"] == _LICENCE_FILES
+    assert all((_REPO_ROOT / name).is_file() for name in _LICENCE_FILES)
     assert not [c for c in project["classifiers"] if c.startswith("License ::")]
     # PEP 639 support landed in setuptools 77; an older backend rejects both
     # fields, so the build requirement has to keep pace with them.
@@ -184,7 +210,7 @@ def test_the_config_setuptools_reads_matches_the_file():
     from setuptools.config.pyprojecttoml import read_configuration
     project = read_configuration(str(_REPO_ROOT / "pyproject.toml"))["project"]
     assert project["license"] == "GPL-3.0-or-later"
-    assert project["license-files"] == ["LICENSE"]
+    assert project["license-files"] == _LICENCE_FILES
 
 
 def test_the_py_typed_marker_ships():
@@ -234,7 +260,7 @@ def _staged_tree(root):
 
     staged = root / "repo"
     staged.mkdir(parents=True)
-    for name in ("pyproject.toml", "README.md", "LICENSE"):
+    for name in ("pyproject.toml", "README.md"):
         shutil.copy2(_REPO_ROOT / name, staged / name)
     shutil.copytree(
         _REPO_ROOT / "uacpy", staged / "uacpy",
@@ -245,6 +271,11 @@ def _staged_tree(root):
         directory.mkdir(parents=True, exist_ok=True)
         for name in files:
             (directory / name).write_text("", encoding="utf-8")
+    # The licence files the build reads, two of them inside the otherwise
+    # stubbed third_party/ tree.
+    for name in _LICENCE_FILES:
+        (staged / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_REPO_ROOT / name, staged / name)
     return staged
 
 
@@ -313,6 +344,17 @@ def test_a_built_wheel_carries_the_py_typed_marker(wheel_members):
         f"{[n for n in names if not n.endswith('.py')]}")
 
 
+def test_a_built_wheel_carries_every_licence_file(wheel_members):
+    """The installed copy holds the arlpy BSD-3-Clause text and its function
+    list next to uacpy's own licence: the source headers in
+    ``uacpy/core/acoustics/`` point at them, and ``third_party/`` itself is
+    not part of the wheel."""
+    names, _ = wheel_members
+    shipped = sorted(name.split(".dist-info/licenses/", 1)[1]
+                     for name in names if ".dist-info/licenses/" in name)
+    assert shipped == sorted(_LICENCE_FILES), shipped
+
+
 def test_a_built_wheel_ships_exactly_the_expected_packages(wheel_members):
     """The "12 packages, not 222" pin, read off the artifact. The discovery
     test calls ``find_packages`` with the parsed settings; this one asks what
@@ -335,10 +377,14 @@ def test_a_built_wheel_carries_nothing_from_a_gitignored_tree(wheel_members):
     """``uacpy/third_party`` is ~150 directories of vendored Fortran,
     ``uacpy/bin`` is machine-specific binaries, and both are gitignored: a
     member from either means discovery swept the checkout rather than the
-    package."""
+    package. The licence texts ``license-files`` copies out of
+    ``third_party/arlpy`` sit under ``.dist-info/licenses/``, outside the
+    importable tree, and ``test_a_built_wheel_carries_every_licence_file``
+    pins exactly those."""
     names, _ = wheel_members
     swept = sorted(n for n in names
-                   if any(f"/{tree}/" in f"/{n}" for tree in _MUST_NOT_SHIP))
+                   if ".dist-info/" not in n
+                   and any(f"/{tree}/" in f"/{n}" for tree in _MUST_NOT_SHIP))
     assert not swept, (
         f"the built wheel carries {len(swept)} member(s) from a gitignored "
         f"tree: {swept[:10]}")
@@ -531,6 +577,32 @@ _MIN_BARE_CONTINUATIONS_BOUND = 90
 # cannot lapse back to Python-only and stay green on the Python count.
 _MIN_MARKDOWN_CITATIONS_CHECKED = 40
 
+# OASES is downloaded by ``./install.sh --oases yes`` into a gitignored tree,
+# so a checkout without it cannot resolve a citation into it. With the tree
+# absent, a citation naming one of these files is counted as skipped; with it
+# present, every citation is resolved and
+# ``test_the_oases_citation_list_is_the_set_the_tree_resolves`` holds this set
+# to exactly the OASES files the package cites.
+_OASES_TREE = _REPO_ROOT / "uacpy" / "third_party" / "oases"
+_OASES_CITED_FILES = frozenset({
+    "comdat.f", "compar.f", "comvol.f", "noiprm.f", "trford.f",
+    "oasaun31.f", "oaseun31.f", "oasfun22.f", "oasgun21.f", "oashun21.f",
+    "oasiun22.f", "oasiun23.f", "oasjun21.f", "oaskun21.f", "oasmun21_bin.f",
+    "oasnun22.f", "oassun26.f", "oasvun31.f",
+    "unoasn22.f", "unoasp22.f", "unoasr21.f", "unoass21.f", "unoassp30.f",
+    "unoast31.f",
+    "oases.tex", "oases_gen.tex", "oases_graph.tex", "oases_install.tex",
+    "oasn.tex", "oasp.tex", "oasr.tex", "oass.tex", "oassp.tex", "oast.tex",
+    "rdoast.tex",
+})
+
+
+def _cites_the_absent_oases_tree(cited_path):
+    """Whether ``cited_path`` names an OASES file on a checkout without the
+    OASES tree, where it cannot be resolved."""
+    return (not _OASES_TREE.is_dir()
+            and Path(cited_path).name in _OASES_CITED_FILES)
+
 
 def _citing_sources():
     """Every file of uacpy's own that may carry a vendored address.
@@ -585,7 +657,7 @@ def test_vendored_citations_resolve_and_single_line_targets_carry_code():
     and 76 of the single-line targets read here live in ``DOCUMENTATION.md``,
     the pages under ``docs/`` and ``third_party/MODIFICATIONS.md``.
 
-    Four groups are skipped rather than guessed at, and the counts ride along
+    Five groups are skipped rather than guessed at, and the counts ride along
     in every failure message so the coverage stays visible:
 
     * ``external:``-marked addresses — the CMRE janus-c reference the JANUS
@@ -604,6 +676,10 @@ def test_vendored_citations_resolve_and_single_line_targets_carry_code():
     * addresses into uacpy's own Markdown, which are banned rather than
       resolved — ``test_no_comment_pins_a_line_number_in_the_projects_own_docs``
       owns that population.
+    * on a checkout without the OASES tree (``./install.sh --oases yes`` puts
+      it in place), addresses into a file of ``_OASES_CITED_FILES``. Every
+      other citation is still resolved there, and with the tree present these
+      are resolved too.
 
     An address that resolves to nothing *without* the marker fails, because it
     is indistinguishable from a typo. One that carries the marker but *does*
@@ -618,12 +694,19 @@ def test_vendored_citations_resolve_and_single_line_targets_carry_code():
 
     body_cache: dict = {}
     counts = {'checked': 0, 'spanned': 0, 'bound_bare': 0,
-              'skipped_bare': 0, 'markdown': 0}
+              'skipped_bare': 0, 'markdown': 0, 'oases_unread': 0}
     external, ambiguous, unmarked, offenders = [], [], [], []
-    own_doc = []
+    own_doc, oases_absent = [], []
+    # Stands in for the file a citation into the absent OASES tree names, so
+    # the bare continuations after it still bind to it; ``read`` counts their
+    # elements as unread instead of resolving them.
+    absent_oases_file = object()
 
     def read(address, vendored, where):
         """Read every element of ``address`` against ``vendored``'s body."""
+        if vendored is absent_oases_file:
+            counts['oases_unread'] += len(address.split(","))
+            return
         if vendored not in body_cache:
             body_cache[vendored] = vendored.read_text(
                 encoding="utf-8", errors="replace").splitlines()
@@ -711,6 +794,10 @@ def test_vendored_citations_resolve_and_single_line_targets_carry_code():
                     # gate per rule: this one reads addresses into frozen
                     # vendored source, and own Markdown is not frozen.
                     own_doc.append(where)
+                elif not hits and _cites_the_absent_oases_tree(
+                        match.group(2)):
+                    oases_absent.append(where)
+                    vendored = absent_oases_file
                 elif not hits:
                     unmarked.append(where)
                 elif len(hits) > 1:
@@ -739,7 +826,9 @@ def test_vendored_citations_resolve_and_single_line_targets_carry_code():
                 f"{counts['skipped_bare']} bare addresses skipped as unbound, "
                 f"{len(ambiguous)} skipped as ambiguous, {len(external)} "
                 f"skipped as external, {len(own_doc)} handed to the own-doc "
-                f"line-pin gate")
+                f"line-pin gate, {len(oases_absent)} citations and "
+                f"{counts['oases_unread']} bare continuations of them skipped "
+                f"because the OASES tree is not installed")
     assert not offenders, (
         "citation(s) into the vendored tree whose target carries no code — "
         f"the evidence has drifted ({coverage}):\n" + "\n".join(offenders)
@@ -791,7 +880,7 @@ def test_the_citation_walk_reads_the_projects_own_markdown():
     if (_REPO_ROOT / "docs" / "superpowers").is_dir():
         assert any(name.startswith("docs/superpowers/")
                    for name in relative)
-    assert "uacpy/models/ram.py" in relative
+    assert "uacpy/models/ram/collins.py" in relative
 
     vendored = [path for path in sources
                 if path.suffix == ".md" and "third_party" in path.parts
@@ -986,12 +1075,41 @@ def test_no_citation_resolves_to_a_bare_block_ender():
         f"{_MIN_CITATIONS_CHECKED} floor the resolve gate uses over the same "
         f"population — the walk or the patterns have stopped covering the tree"
     )
-    stale = set(_STRUCTURAL_TARGET_IS_THE_EVIDENCE) - exempt_seen
+    # An exemption into OASES cannot be seen without the OASES tree.
+    stale = {address for address in
+             set(_STRUCTURAL_TARGET_IS_THE_EVIDENCE) - exempt_seen
+             if not _cites_the_absent_oases_tree(address.split(":")[0])}
     assert not stale, (
         "exemption(s) nothing cites any more, or that no longer resolve to a "
         "block-ender — drop them rather than leaving a licence standing over "
         f"an address: {sorted(stale)}"
     )
+
+
+@pytest.mark.requires_oases
+def test_the_oases_citation_list_is_the_set_the_tree_resolves():
+    """``_OASES_CITED_FILES`` names the files the citation gates skip when the
+    OASES tree is absent, so with the tree present it must be exactly the
+    basenames of the files under ``uacpy/third_party/oases`` that the package
+    cites: a missing name fails a checkout without OASES, and a name no longer
+    cited would skip nothing."""
+    oases = _OASES_TREE.resolve()
+    by_name: dict = {}
+    for path in (_REPO_ROOT / "uacpy" / "third_party").rglob("*"):
+        if path.is_file():
+            by_name.setdefault(path.name, []).append(path)
+    cited = set()
+    for source in _citing_sources():
+        for match in _VENDORED_CITATION.finditer(
+                source.read_text(encoding="utf-8")):
+            wanted = Path(match.group(2)).parts
+            for hit in by_name.get(wanted[-1], ()):
+                if (hit.parts[-len(wanted):] == wanted
+                        and oases in hit.resolve().parents):
+                    cited.add(hit.name)
+    assert cited == set(_OASES_CITED_FILES), (
+        f"cited but not listed: {sorted(cited - _OASES_CITED_FILES)}; "
+        f"listed but not cited: {sorted(_OASES_CITED_FILES - cited)}")
 
 
 # ── Markdown citations ─────────────────────────────────────────────────────
@@ -2067,6 +2185,81 @@ def test_copernicusmarine_is_an_extra_not_a_core_dependency():
                for spec in extras['copernicus'])
 
 
+#: The labelled-data packages the ``xarray`` extra installs (xarray requires
+#: pandas): a module that imports one at module level makes ``import uacpy``
+#: need the extra.
+_XARRAY_EXTRA_PACKAGES = ('pandas', 'xarray')
+
+
+def _module_level_imports(tree, packages):
+    """Line numbers of the imports of ``packages`` that run when the
+    module is imported: every import outside a function or lambda body
+    (a class body runs at import)."""
+    lines = []
+    stack = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.Lambda)):
+            continue
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            names = [node.module or '']
+        else:
+            names = []
+        if any(name.split('.')[0] in packages for name in names):
+            lines.append(node.lineno)
+        stack.extend(ast.iter_child_nodes(node))
+    return sorted(lines)
+
+
+def test_the_xarray_extra_packages_are_imported_at_the_point_of_use():
+    """pandas and xarray arrive only through the ``xarray`` extra, so no
+    shipped module imports either at module level: a DataFrame or
+    labelled-array export imports it inside the call and refuses naming
+    the extra, and ``import uacpy`` never needs it."""
+    import uacpy
+    package = Path(uacpy.__file__).resolve().parent
+    config = _pyproject()
+    assert not any(spec.startswith(_XARRAY_EXTRA_PACKAGES)
+                   for spec in config['project']['dependencies'])
+    assert any(spec.startswith('xarray')
+               for spec in config['project']['optional-dependencies']
+               ['xarray'])
+    offenders = []
+    for path in package_python_files(package):
+        relative = path.relative_to(package).as_posix()
+        if relative.split('/')[0] in ('third_party', 'tests'):
+            continue
+        tree = ast.parse(path.read_text(encoding='utf-8'))
+        offenders += [f'{relative}:{line}' for line in
+                      _module_level_imports(tree, _XARRAY_EXTRA_PACKAGES)]
+    assert not offenders, (
+        f"module-level import of an xarray-extra package: {offenders}. "
+        f"Import it inside the function that needs it.")
+
+
+def test_the_point_of_use_sweep_separates_module_level_from_function_body():
+    """Both sides: a module-level, class-body or guarded import is
+    reported, one inside a function or lambda is not, and another package
+    is not."""
+    tree = ast.parse(
+        'import pandas as pd\n'
+        'try:\n'
+        '    from xarray import DataArray\n'
+        'except ImportError:\n'
+        '    pass\n'
+        'class A:\n'
+        '    import pandas.api\n'
+        'def f():\n'
+        '    import pandas\n'
+        'g = lambda: __import__("xarray")\n'
+        'import numpy\n'
+        'import pandasish\n')
+    assert _module_level_imports(tree, _XARRAY_EXTRA_PACKAGES) == [1, 3, 7]
+
+
 def _extract(pattern):
     match = re.search(pattern, _INSTALL_SH.read_text(), re.S | re.M)
     assert match, f"{pattern} not found in install.sh"
@@ -2269,59 +2462,103 @@ def test_the_shadowed_docstring_detector_fires_on_the_shape_it_hunts():
 #: public one. A leading underscore in uacpy means "not public API", not
 #: "module-private" — so what the convention cannot say is *which* privates
 #: other packages depend on. This list says it, and renaming any of these
-#: names is a cross-package change.
+#: names is a cross-package change. A name imported from (or as) a declared
+#: package-internal module (``uacpy.tests._internal_modules``) is covered by
+#: that module's entry and is not repeated here.
 _CROSS_PACKAGE_PRIVATES = {
-    # The packaging convention: a dunder read from the generated file.
-    ('__init__.py', 'uacpy._version', '__version__'),
-    # The core -> visualization inversion (docs/DEV.md section 7). Every one
-    # of these sits inside a .plot() body; hoisting one to module scope makes
-    # ``import uacpy`` raise ImportError.
-    ('core/_grid.py', 'uacpy.visualization.plots.environment',
-     '_plot_range_profile'),
-    ('core/environment.py', 'uacpy.visualization.plots.environment',
-     '_plot_environment'),
-    ('core/ssp.py', 'uacpy.visualization.plots.environment', '_plot_ssp'),
-    ('core/results/field.py', 'uacpy.visualization.plots._common',
-     '_draw_result_credit'),
-    # One rule decides whether a weight can scale a field, and both callers
-    # of it are in models/: the n = 1 weight ``PropagationModel.run``
-    # applies and the n-slab sum ``ResultStack.superpose`` forms. It lives
-    # beside the Field it interrogates and stays private because the
-    # question it answers is not one a user asks.
-    ('models/base.py', 'uacpy.core.results.field', '_check_field_weightable'),
+    # The labelled form of a user-level function: the public one carries no
+    # ``who``, and a method (or engine) that delegates passes its own name so
+    # a refusal names the call the user made.
+    ('core/results/field.py', 'uacpy.acoustic_signal.channel',
+     '_broadband_propagation_loss'),
+    ('core/results/field.py', 'uacpy.acoustic_signal.channel',
+     '_gate_transfer_function'),
+    ('core/results/field.py', 'uacpy.acoustic_signal.channel',
+     '_transfer_function_from_impulse_response'),
+    ('core/results/field.py', 'uacpy.acoustic_signal.spectrum_at',
+     '_tone_phasor'),
+    ('core/results/rays.py', 'uacpy.acoustic_signal.channel',
+     '_arrival_grid_transfer_function'),
+    ('core/results/rays.py', 'uacpy.acoustic_signal.channel',
+     '_arrival_transfer_function'),
+    ('core/results/rays.py', 'uacpy.acoustic_signal.channel',
+     '_simulate_arrival_grid'),
+    ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
+     '_channel_regime'),
+    ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
+     '_coherence_bandwidth'),
+    ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
+     '_energy_support'),
+    ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
+     '_rms_delay_spread'),
+    ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
+     '_synthesis_band'),
+    ('core/results/rays.py', 'uacpy.comms.channel',
+     '_pulse_shaped_taps'),
+    ('models/bellhop/_synthesis.py', 'uacpy.acoustic_signal.delay_profile',
+     '_fold_notice'),
+    ('models/sparc/_extract.py', 'uacpy.acoustic_signal.spectrum_at',
+     '_tone_phasor'),
+    ('visualization/plots/rays_modes.py', 'uacpy.acoustic_signal.delay_profile',
+     '_energy_support'),
+    # ``uacpy.plot``, ``uacpy.acoustics``, ``uacpy.metrics``,
+    # ``uacpy.materials`` and ``uacpy.units`` re-export
+    # their package's own public list, so the two import paths cannot name
+    # different sets.
+    ('plot.py', 'uacpy.visualization.plots', '__all__'),
+    ('acoustics.py', 'uacpy.core.acoustics', '__all__'),
+    ('metrics.py', 'uacpy.core.metrics', '__all__'),
+    ('materials.py', 'uacpy.core.materials', '__all__'),
+    ('units.py', 'uacpy.core.units', '__all__'),
+    # An in-place edit of BOUNCE's .irc file format (the ``g`` column's
+    # density scale), which only the Bounce wrapper applies to its own output;
+    # file-format code lives in io, and no user reads or writes the column.
+    ('models/bounce/_model.py', 'uacpy.io.refl_io', '_scale_irc_impedance'),
+    # BOUNCE's .irc is rescaled to the absolute density scale once, where the
+    # file is made; the fixed-width row layout belongs to the reader module.
+    ('models/bounce/_model.py', 'uacpy.io.refl_io', '_scale_irc_impedance'),
+    # The one weighted sum of a field's slabs, which refuses a weight the
+    # field cannot take: ``ResultStack.superpose`` forms it, and the n = 1
+    # weight ``PropagationModel.run`` applies (models/) calls it so a bad
+    # weight is refused in the caller's own terms. It lives beside
+    # superpose in core/results/stack.py and stays private because a user
+    # asks superpose, not the sum behind it.
+    ('models/_stacking.py', 'uacpy.core.results.stack', '_weighted_slab_sum'),
     # The weaker of the same pair: a stack is not weighted when it is built,
     # so it refuses only what no sum of it could use and the rest waits for
     # superpose. Both callers are in models/.
-    ('models/base.py', 'uacpy.core.results.field', '_check_stack_weightable'),
-    # The set of acoustic_type values that carry no geoacoustic parameters.
-    # Defined beside the carrier that validates them; every writer and every
-    # wrapper that skips a geoacoustic block reads the same set.
-    ('io/oalib_writer.py', 'uacpy.core.bottom', '_NON_GEOACOUSTIC_TYPES'),
-    ('models/kraken.py', 'uacpy.core.bottom', '_NON_GEOACOUSTIC_TYPES'),
-    ('models/ram.py', 'uacpy.core.bottom', '_NON_GEOACOUSTIC_TYPES'),
-    # Carrier validators applied at the file boundary so a deck written from
-    # raw arguments gets the same guard a carrier would have applied.
-    ('io/oalib_writer.py', 'uacpy.core._carrier_validate', '_sanitize_title'),
-    ('io/refl_io.py', 'uacpy.core._carrier_validate',
-     '_require_strictly_increasing'),
-    ('acoustic_signal/_signal_validate.py', 'uacpy.core._carrier_validate',
-     '_require_strictly_increasing'),
-    # The union-and-dedupe of ``data_sources`` over several carriers, whose
-    # docstring declares itself the single home for it: Bottom aggregates over
-    # its columns, Surface over its nodes, Environment over its five carriers,
-    # and the range-dependent SSP assembly over its columns.
-    ('data/sound_speed.py', 'uacpy.core._carrier_validate',
-     '_dedupe_provenance'),
-    # The verbosity-threshold resolver behind ``verbose=``, shared so a model
-    # and the logger agree on what a level means.
-    ('models/base.py', 'uacpy._log', '_resolve_threshold'),
-    # The one statement of what a too-short synthesis record folds — count
-    # and level — shared so ``Arrivals.synthesis_band`` and a Bellhop
-    # BROADBAND run on the default grid describe the same fold the same way.
-    ('models/bellhop.py', 'uacpy.core.results.rays', '_fold_notice'),
-    # The on-demand dataset cache, read by the basemap renderer to draw from
-    # what is already downloaded rather than fetching again.
-    ('visualization/basemap.py', 'uacpy.data', '_cache'),
+    ('models/_stacking.py', 'uacpy.core.results.stack', '_check_stack_weightable'),
+    # The dB arm of the same rule, as an exception: a one-depth weight the
+    # run would apply to a field it declares as dB is refused in stage 3,
+    # before the engine runs, with the words superpose uses.
+    ('models/_stacking.py', 'uacpy.core.results.stack', '_dB_weight_refusal'),
+    # The (FREQ1, FREQ2, NFREQ) an OAST/OASN deck carries, and its refusal of
+    # a sweep that is not uniform: the settings stage records and refuses
+    # with the one rule the writer applies.
+    ('models/oases/oast.py', 'uacpy.io.oases_writer', '_resolve_freq_sweep'),
+    ('models/oases/oasn.py', 'uacpy.io.oases_writer', '_resolve_freq_sweep'),
+    # The noise-record and replica-grid rules the OASN deck is written
+    # under: OASN refuses its own knobs with them at stage 2, by name.
+    ('models/oases/oasn.py', 'uacpy.io.oases_writer',
+     '_check_oasn_discrete_sources'),
+    ('models/oases/oasn.py', 'uacpy.io.oases_writer',
+     '_check_oasn_noise_level'),
+    ('models/oases/oasn.py', 'uacpy.io.oases_writer',
+     '_check_oasn_replica_counts'),
+    # OASES' compiled wavenumber-array bound NP, defined once beside the deck
+    # checks and read by the models' overrun checks.
+    ('models/oases/_common.py', 'uacpy.io.oases_writer',
+     '_OASES_MAX_WAVENUMBERS'),
+    ('models/oases/_sampling.py', 'uacpy.io.oases_writer',
+     '_OASES_MAX_WAVENUMBERS'),
+    ('models/oases/oass.py', 'uacpy.io.oases_writer',
+     '_OASES_MAX_WAVENUMBERS'),
+    # OASS's Block VIII range-count rule (RSTEP divides by NR - 1) and the
+    # option letters that need that block: the writer's own check, applied
+    # by the model in stage 2 so the refusal precedes the mean-field run.
+    ('models/oases/oass.py', 'uacpy.io.oases_writer',
+     '_check_oass_range_count'),
+    ('models/oases/oass.py', 'uacpy.io.oases_writer', '_OASS_REVERB_OPTIONS'),
 }
 
 
@@ -2350,10 +2587,97 @@ def _cross_package_private_imports():
                 else '<top>'
             if source_owner == owner(relative):
                 continue
+            if private_module(node.module) in PACKAGE_INTERNAL_MODULES:
+                continue
             for alias in node.names:
-                if alias.name.startswith('_'):
+                if (alias.name.startswith('_') and f'{node.module}.'
+                        f'{alias.name}' not in PACKAGE_INTERNAL_MODULES):
                     found.add((relative, node.module, alias.name))
     return found
+
+
+def _cross_package_private_modules():
+    """``(importer, private module)`` for every import of a ``_``-prefixed
+    module of another top-level package in the shipped tree."""
+    import uacpy
+    package = Path(uacpy.__file__).resolve().parent
+    found = set()
+    for path in package_python_files(package):
+        relative = path.relative_to(package).as_posix()
+        if relative.split('/')[0] in ('third_party', 'tests', 'examples'):
+            continue
+        found |= private_module_imports(
+            ast.parse(path.read_text(encoding='utf-8')), relative, package)
+    return found
+
+
+def _private_module_findings(found, table):
+    """``(undeclared, stale)``: the private modules imported across a
+    package boundary that ``table`` does not declare, and the entries of
+    ``table`` no such import uses."""
+    used = {module for _importer, module in found}
+    undeclared = sorted({(importer, module) for importer, module in found
+                         if module not in table})
+    return undeclared, sorted(set(table) - used)
+
+
+def test_a_private_module_crosses_a_package_boundary_only_when_declared():
+    """A ``_``-prefixed module may be imported from another top-level
+    package only when ``PACKAGE_INTERNAL_MODULES`` declares it, with the
+    reason it is shared; an entry no import uses any more is deleted. The
+    private-name list below reads names only, so without this a public name
+    taken from a private module (``from uacpy.data._http import
+    http_get``) crossed a package boundary unseen."""
+    found = _cross_package_private_modules()
+    # A sweep that stopped resolving imports would find nothing to hold.
+    assert len(found) >= 100, f'only {len(found)} imports were found'
+    undeclared, stale = _private_module_findings(
+        found, PACKAGE_INTERNAL_MODULES)
+    assert not undeclared, (
+        f"private module(s) imported from another package without a "
+        f"declaration: {undeclared}. Import a public name instead, or add "
+        f"the module to PACKAGE_INTERNAL_MODULES with the reason it is "
+        f"shared.")
+    assert not stale, (
+        f"PACKAGE_INTERNAL_MODULES declares module(s) no other package "
+        f"imports: {stale}. Delete them.")
+    assert all(reason.strip() for reason in
+               PACKAGE_INTERNAL_MODULES.values())
+
+
+def test_the_private_module_gate_reads_every_import_form():
+    """``from <private module> import name``, ``from <package> import
+    <_module>`` and ``import <private module>`` from another package are
+    each found; the same import from inside the owning package, a dunder
+    and a public module are not."""
+    import uacpy
+    package = Path(uacpy.__file__).resolve().parent
+    tree = ast.parse(
+        'from uacpy.data._http import http_get\n'
+        'from uacpy.data import _cache\n'
+        'import uacpy.core._validate\n'
+        'from uacpy.data import fetch_ssp\n'
+        'from uacpy import __version__\n')
+    assert private_module_imports(tree, 'visualization/x.py', package) == {
+        ('visualization/x.py', 'uacpy.data._http'),
+        ('visualization/x.py', 'uacpy.data._cache'),
+        ('visualization/x.py', 'uacpy.core._validate')}
+    assert private_module_imports(tree, 'data/x.py', package) == {
+        ('data/x.py', 'uacpy.core._validate')}
+
+
+def test_the_private_module_gate_refuses_undeclared_and_stale_entries():
+    """Both sides of the table: an undeclared private module is reported
+    with its importer, a declared one passes, and an entry nothing imports
+    is reported stale."""
+    found = {('visualization/basemap.py', 'uacpy.data._http'),
+             ('models/base.py', 'uacpy._log')}
+    table = {'uacpy._log': 'r', 'uacpy.core._host': 'r'}
+    undeclared, stale = _private_module_findings(found, table)
+    assert undeclared == [('visualization/basemap.py', 'uacpy.data._http')]
+    assert stale == ['uacpy.core._host']
+    assert _private_module_findings(
+        found, {'uacpy._log': 'r', 'uacpy.data._http': 'r'}) == ([], [])
 
 
 def test_no_undocumented_private_name_crosses_a_package_boundary():
@@ -2367,8 +2691,8 @@ def test_no_undocumented_private_name_crosses_a_package_boundary():
 
     BLIND SPOT, stated because a green run here is not coverage: only
     ``from … import _name`` is read. A private reached as an attribute
-    (``file_manager._tmpfs_available()``, which ``parallel.py`` does) never
-    appears in an ``ImportFrom`` node and is invisible here."""
+    (``module._name()``) never appears in an ``ImportFrom`` node and is
+    invisible here."""
     found = _cross_package_private_imports()
     added = sorted(found - _CROSS_PACKAGE_PRIVATES)
     dropped = sorted(_CROSS_PACKAGE_PRIVATES - found)
@@ -2421,8 +2745,8 @@ def test_the_private_name_sweep_reads_the_shipped_tree():
     """The sweep itself, so an empty collection cannot pass as a green gate."""
     found = _cross_package_private_imports()
     assert len(found) >= 10
-    assert ('core/ssp.py', 'uacpy.visualization.plots.environment',
-            '_plot_ssp') in found
+    assert ('models/_stacking.py', 'uacpy.core.results.stack',
+            '_weighted_slab_sum') in found
 
 
 # ── MODIFICATIONS.md diff blocks vs the vendored source they describe ──────
@@ -2533,15 +2857,25 @@ _MAX_TRY_SPAN_IN_MODELS = 135
 
 
 def _try_block_spans():
-    """``(span, filename, lineno)`` for every ``try`` in ``uacpy/models/``."""
+    """``(span, path, lineno)`` for every ``try`` in ``uacpy/models/`` and
+    its subpackages, ``path`` relative to ``uacpy/models/``.
+
+    Refuses a sweep that read no file of some registered engine, which is
+    what a flat ``glob`` reads of an engine laid out as a package."""
     import ast
 
+    models_dir = _REPO_ROOT / "uacpy" / "models"
+    paths = package_python_files(models_dir)
+    missing = engines_missing_from(paths, models_dir)
+    assert not missing, (
+        f"the try-span sweep read no file of the engine(s) {missing}")
     spans = []
-    for path in sorted((_REPO_ROOT / "uacpy" / "models").glob("*.py")):
+    for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Try):
-                spans.append((node.end_lineno - node.lineno, path.name,
+                spans.append((node.end_lineno - node.lineno,
+                              str(path.relative_to(models_dir)),
                               node.lineno))
     return sorted(spans, reverse=True)
 
@@ -2562,7 +2896,7 @@ def test_no_try_block_in_models_swallows_a_whole_run():
         f"try block(s) longer than {_MAX_TRY_SPAN_IN_MODELS} lines in "
         f"uacpy/models/: {over}. End the block by delegating to an assembly "
         f"helper, as _assemble_tl_field / _assemble_broadband_field / "
-        f"_assemble_oasp_result / _read_and_assemble do.")
+        f"a staged engine's _to_result / Bellhop's assemble do.")
 
 
 def test_the_try_span_sweep_reads_real_blocks():
@@ -2581,14 +2915,13 @@ def test_each_binary_round_trip_ends_by_delegating():
     ceiling alone would not necessarily catch, since each is under it — fails
     here instead.
     """
-    from uacpy.models.bellhop import Bellhop
+    from uacpy.models.bellhop import Bellhop, _output as bellhop_output
     from uacpy.models.oases import OASP
-    from uacpy.models.ram import RAM
-
-    assert hasattr(RAM, '_assemble_tl_field')
-    assert hasattr(RAM, '_assemble_broadband_field')
-    assert hasattr(OASP, '_assemble_oasp_result')
-    assert hasattr(Bellhop, '_read_and_assemble')
+    assert callable(ram_mpirams.assemble_tl_field)
+    assert callable(ram_mpirams.assemble_broadband_field)
+    assert '_to_result' in vars(OASP)
+    assert '_to_result' in vars(Bellhop)
+    assert callable(bellhop_output.assemble)
 
 
 # ── names state what the code does ──────────────────────────────────────────
@@ -2609,7 +2942,7 @@ _HISTORICAL_BIGRAMS = frozenset({('as', 'before'), ('no', 'longer'),
 #: is checked to still exist, so a stale exemption fails rather than widens
 #: the gate silently.
 _PHYSICAL_STATE_NAMES = {
-    # A SPARC trace that has not decayed by t_max: "still ringing" is what the
+    # A SPARC trace that has not decayed by time_max: "still ringing" is what the
     # trace is doing, not what the code used to do.
     'test_a_still_ringing_trace_is_reported',
 }
@@ -2858,7 +3191,6 @@ def _searchable_module_names():
     return out
 
 
-@pytest.mark.convention
 def test_no_searchable_name_says_a_kind_of_code_instead_of_a_subject():
     """A public module or test file is named for what it holds, never
     ``utils`` / ``helpers`` / ``functions`` / ``comprehensive``.
@@ -2895,13 +3227,12 @@ def test_no_searchable_name_says_a_kind_of_code_instead_of_a_subject():
     ('test_acoustics_helpers', ['helpers']),
     ('test_oases_comprehensive', ['comprehensive']),
     # a private module is out of scope, so its name is never even offered
-    ('test_io_readers_and_decks', []),
+    ('test_io_oalib', []),
 ])
 def test_the_kind_matcher_reads_whole_words_not_substrings(stem, expected):
     assert _content_free_words(stem) == expected
 
 
-@pytest.mark.convention
 def test_the_kind_sweep_reaches_both_test_files_and_public_modules():
     """The gate above passes trivially if its sweep reaches nothing, and a
     filter written for ``rglob`` is exactly the kind that can stop matching
@@ -2916,7 +3247,6 @@ def test_the_kind_sweep_reaches_both_test_files_and_public_modules():
     assert len(seen) > 200, len(seen)
 
 
-@pytest.mark.convention
 def test_no_test_file_is_named_after_the_work_session_that_produced_it():
     """Test files are named by the module or behaviour they pin, never by
     the audit, date, round, or batch that produced them: an event name says
@@ -2945,7 +3275,7 @@ def test_no_test_file_is_named_after_the_work_session_that_produced_it():
 #: numpy-union inference friction rather than wrong annotations. What the
 #: contract actually promises is measured by the gates on the public
 #: surface — the lazy-import static mirror (test_lazy_imports.py) and the
-#: carrier field annotations (test_core_carriers_and_results.py) — not by a total.
+#: carrier field annotations (test_source_receiver.py) — not by a total.
 _TYPE_CLEAN_SUBPACKAGES = (
     "uacpy/noise",
     "uacpy/parallel.py",
@@ -2991,10 +3321,9 @@ def test_a_type_clean_subpackage_stays_at_zero_checker_errors(subpackage,
 _UNSHIPPED_DIRS = {'tests', 'examples', 'third_party', 'bin', '__pycache__'}
 
 #: The lowest number of ``TypedDict``-annotated returns the sweep below has to
-#: find. Two readers carry one today (``read_oast_tl``,
-#: ``read_reflection_coefficient``); a sweep that found none would report no
-#: mismatches and pass.
-_MIN_TYPED_DICT_RETURNS = 2
+#: find. One parser carries one (``parse_oast_tl``); a sweep that found none
+#: would report no mismatches and pass.
+_MIN_TYPED_DICT_RETURNS = 1
 
 
 def _typed_dict_returns():
@@ -3051,8 +3380,8 @@ def test_every_typed_dict_reader_returns_exactly_the_keys_it_declares():
     and returns an ``int`` under ``"n_pts"``, so
     ``read_reflection_coefficient(f)["n_pts"] + 1`` is arithmetic on something
     the annotation calls an array. ``read_oast_tl`` was declared a 4-tuple and
-    returns a dict, which its caller in ``uacpy/models/oases.py`` subscripts
-    with ``'depths'`` and ``'metadata'``.
+    returns a dict, which its caller in ``uacpy/models/oases/oast.py``
+    subscripts with ``'depths'`` and ``'metadata'``.
 
     A ``TypedDict`` states the keys and their value types, and this holds the
     declaration to the literal on both sides: a key added to the return and
@@ -3196,7 +3525,6 @@ def _registered_marker_names():
     return {entry.split(":", 1)[0].strip() for entry in markers}
 
 
-@pytest.mark.convention
 class TestConventionMarkerIsRegistered:
     """``convention`` is a registered marker, so ``-m convention`` /
     ``-m "not convention"`` select without ``--strict-markers`` warnings."""
@@ -3209,11 +3537,10 @@ class TestConventionMarkerIsRegistered:
                 "requires_network", "benchmark"} <= _registered_marker_names()
 
 
-@pytest.mark.convention
 class TestRequiresOasesImpliesRequiresBinary:
     """The conftest collection hook attaches ``requires_binary`` to every
     ``requires_oases`` item — the wiring that makes
-    ``-m "not requires_binary and not slow"`` exclude OASES tests."""
+    ``-m "not requires_binary and not slow and not requires_network"`` exclude OASES tests."""
 
     def test_an_oases_item_gains_the_binary_marker(self):
         item = _CollectedItem("requires_oases")
@@ -3226,7 +3553,6 @@ class TestRequiresOasesImpliesRequiresBinary:
         assert item.marker_names == set()
 
 
-@pytest.mark.convention
 class TestTheComposedDevTierIsDocumented:
     """README.md and docs/DEV.md both name the composed pure-Python tier
     command, and DEV.md names the gate reporting flags that keep skips
@@ -3234,18 +3560,17 @@ class TestTheComposedDevTierIsDocumented:
 
     def test_the_readme_names_the_composed_tier_command(self):
         text = (_REPO_ROOT / "README.md").read_text()
-        assert '-m "not requires_binary and not slow"' in text
+        assert '-m "not requires_binary and not slow and not requires_network"' in text
 
     def test_dev_md_names_the_composed_tier_command(self):
         text = (_REPO_ROOT / "docs" / "DEV.md").read_text()
-        assert '-m "not requires_binary and not slow"' in text
+        assert '-m "not requires_binary and not slow and not requires_network"' in text
 
     def test_dev_md_names_the_gate_reporting_flags(self):
         text = (_REPO_ROOT / "docs" / "DEV.md").read_text()
         assert "-rs --durations=50" in text
 
 
-@pytest.mark.convention
 class TestDevMdStatesTheMatchAnchoringRule:
     """docs/DEV.md states the ``match=`` convention: patterns cover the
     load-bearing fragment of a message, not the full sentence."""

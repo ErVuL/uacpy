@@ -1,4 +1,4 @@
-"""Time-frequency transforms in ``uacpy.acoustic_signal.estimate``.
+"""Time-frequency transforms in ``uacpy.acoustic_signal.timefreq``.
 
 The analytic signal and its envelope and instantaneous frequency; the
 spectrogram; the continuous wavelet transform and its inverse; the
@@ -40,7 +40,7 @@ from uacpy.acoustic_signal import (  # noqa: E402
     spectrogram,
     wigner_ville,
 )
-from uacpy.acoustic_signal.estimate import _smoothing_window  # noqa: E402
+from uacpy.acoustic_signal.timefreq import _smoothing_window
 from uacpy.core.exceptions import ConfigurationError  # noqa: E402
 from uacpy.visualization.plots.signal import (  # noqa: E402
     plot_cepstrum, plot_cwt, plot_spectrogram, plot_wigner_ville)
@@ -89,7 +89,7 @@ class TestTimeFrequency:
         nn = np.arange(nfft_n)
         x = np.cos(2 * np.pi * 150.0 * nn / FS) + np.cos(2 * np.pi * 400.0 * nn / FS)
         f, _, W_plain = wigner_ville(x, FS)
-        _, _, W_smooth = wigner_ville(x, FS, freq_window=65, time_window=33)
+        _, _, W_smooth = wigner_ville(x, FS, lag_smoothing=65, time_smoothing=33)
         mid = np.argmin(np.abs(f - 275.0))   # cross-term location
         band = slice(mid - 2, mid + 3)
         # Cross-terms oscillate in time, so use magnitude (not a time-mean that
@@ -102,19 +102,46 @@ class TestTimeFrequency:
         """All three time-frequency results carry an ``(n_freq, n_time)``
         payload, so all three must name their axes in that order — otherwise a
         square distribution transposes silently."""
-        from uacpy.acoustic_signal.estimate import constant_q_spectrogram
-        from uacpy.acoustic_signal.estimate import (
-            SpectrogramResult, WignerVilleResult, spectrogram)
+        from uacpy.acoustic_signal.cqt import constant_q_spectrogram
+        from uacpy.acoustic_signal.timefreq import (
+            SpectrogramResult, WignerVilleResult, spectrogram,
+        )
         assert (WignerVilleResult._fields[:2]
                 == SpectrogramResult._fields[:2] == ("frequencies", "times"))
         x = np.cos(2 * np.pi * 250.0 * np.arange(1024) / FS)
         for res in (wigner_ville(x[:256], FS), spectrogram(x, FS, nperseg=256),
-                    constant_q_spectrogram(x, FS, fmin=200.0, fmax=2000.0)):
+                    constant_q_spectrogram(x, FS, freq_min=200.0, freq_max=2000.0)):
             assert res[2].shape == (res.frequencies.size, res.times.size)
 
     def test_wigner_ville_nfft_truncation_raises(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError, match='must be >= n'):
             wigner_ville(np.zeros(256), FS, nfft=128)
+
+    def test_wigner_ville_refuses_negative_frequency_complex_input(self):
+        """The discrete WVD is periodic in frequency with period fs/2, so a
+        complex component at -f is drawn at fs/2 - f on the [0, fs/2) axis
+        (-100 Hz at fs = 1 kHz peaked at 400 Hz). A complex signal with its
+        content at +f, like an analytic signal, is drawn where it is."""
+        from uacpy.acoustic_signal.timefreq import _WIGNER_NEGATIVE_ENERGY_MAX
+        fs, t = 1000.0, np.arange(256) / 1000.0
+        with pytest.raises(ConfigurationError, match='negative frequencies'):
+            wigner_ville(np.exp(-2j * np.pi * 100.0 * t), fs)
+        f, _, W = wigner_ville(np.exp(2j * np.pi * 100.0 * t), fs)
+        assert f[np.argmax(W.mean(axis=1))] == pytest.approx(100.0,
+                                                             abs=fs / 256)
+        # Both sides of the energy-fraction threshold: a -f component of
+        # energy fraction just under / just over the cap.
+        up = np.exp(2j * np.pi * 100.0 * t)
+        down = np.exp(-2j * np.pi * 100.0 * t)
+        for frac, refused in ((0.9 * _WIGNER_NEGATIVE_ENERGY_MAX, False),
+                              (1.1 * _WIGNER_NEGATIVE_ENERGY_MAX, True)):
+            z = np.sqrt(1.0 - frac) * up + np.sqrt(frac) * down
+            if refused:
+                with pytest.raises(ConfigurationError,
+                                   match='energy is at negative frequencies'):
+                    wigner_ville(z, fs)
+            else:
+                wigner_ville(z, fs)
 
     def test_wigner_ville_refuses_surface_past_cell_cap_before_allocating(
             self, monkeypatch):
@@ -123,7 +150,7 @@ class TestTimeFrequency:
         # np.zeros runs: the kernel backs the surface lazily, so a cap checked
         # after the allocation would still let the per-time loop swap the host
         # instead of raising.
-        import uacpy.acoustic_signal.estimate as timefreq
+        import uacpy.acoustic_signal.timefreq as timefreq
 
         class AllocationAttempted(Exception):
             pass
@@ -143,7 +170,7 @@ class TestTimeFrequency:
 
     def test_wigner_ville_cell_cap_admits_equality_and_refuses_one_past(
             self, monkeypatch):
-        import uacpy.acoustic_signal.estimate as timefreq
+        import uacpy.acoustic_signal.timefreq as timefreq
         n = 64
         monkeypatch.setattr(timefreq, "_MAX_WIGNER_CELLS", n * n)
         z = np.ones(n, dtype=complex)
@@ -175,16 +202,16 @@ class TestTimeFrequency:
         m = power > 1e-6 * power.max()
         _, _, W = wigner_ville(x, FS)
         # pseudo-WVD: the lag window has h(0)=1, so the time marginal is intact
-        _, _, Wp = wigner_ville(x, FS, freq_window=65)
+        _, _, Wp = wigner_ville(x, FS, lag_smoothing=65)
         assert np.allclose(Wp.sum(axis=0)[m] / power[m], n, rtol=1e-9)
         # smoothed-pseudo-WVD: the (Σg-normalised) time window conserves energy
-        _, _, Ws = wigner_ville(x, FS, freq_window=65, time_window=33)
+        _, _, Ws = wigner_ville(x, FS, lag_smoothing=65, time_smoothing=33)
         assert np.isclose(Ws.sum(), W.sum(), rtol=1e-9)
 
     def test_cepstrum_finite(self):
         rng = np.random.default_rng(0)
         x = rng.standard_normal(512)
-        assert np.all(np.isfinite(cepstrum(x)))
+        assert np.all(np.isfinite(cepstrum(x).cepstrum))
         assert np.all(np.isfinite(complex_cepstrum(x).cepstrum))
 
     def test_complex_cepstrum_round_trip(self):
@@ -202,7 +229,7 @@ class TestTimeFrequency:
         x = rng.standard_normal(n)
         d = 120
         x[d:] += 0.8 * x[:-d]
-        c = cepstrum(x)
+        c = cepstrum(x).cepstrum
         lo, hi = 20, n // 2
         assert lo + np.argmax(c[lo:hi]) == pytest.approx(d, abs=1)
 
@@ -210,10 +237,10 @@ class TestTimeFrequency:
         rng = np.random.default_rng(1)
         n = 512
         x = rng.standard_normal(n)
-        c = cepstrum(x, window="hann", nfft=1024)
+        c = cepstrum(x, window="hann", nfft=1024).cepstrum
         assert c.size == 1024 and np.all(np.isfinite(c))
         # Long-pass lifter zeros the low quefrencies (spectral envelope).
-        lifted = cepstrum(x, lifter=-10)
+        lifted = cepstrum(x, lifter=-10).cepstrum
         assert np.allclose(lifted[:10], 0.0) and lifted[0] == 0.0
 
     def test_cepstrum_echo_survives_longpass_lifter(self):
@@ -222,12 +249,12 @@ class TestTimeFrequency:
         x = rng.standard_normal(n)
         d = 120
         x[d:] += 0.8 * x[:-d]
-        c = cepstrum(x, lifter=-30)  # remove smooth envelope, keep echo peak
+        c = cepstrum(x, lifter=-30).cepstrum  # remove smooth envelope, keep echo peak
         lo, hi = 40, n // 2
         assert lo + np.argmax(c[lo:hi]) == pytest.approx(d, abs=1)
 
     def test_cepstrum_nfft_truncation_raises(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError, match=r'must be >= len\(x\)'):
             cepstrum(np.zeros(512), nfft=256)
 
 
@@ -235,14 +262,14 @@ class TestCWT:
     @pytest.mark.parametrize("wavelet", ["morlet", "paul", "dog"])
     def test_localizes_tone(self, wavelet):
         x = np.cos(2 * np.pi * 200 * np.arange(2048) / FS)
-        freqs, W = cwt(x, FS, wavelet=wavelet)
+        freqs, _, W = cwt(x, FS, wavelet=wavelet)
         ridge = freqs[np.argmax(np.abs(W).mean(axis=1))]
         assert ridge == pytest.approx(200.0, rel=0.08)
 
     def test_shape_and_explicit_freqs(self):
         x = np.cos(2 * np.pi * 100 * np.arange(1024) / FS)
         freqs = np.array([50.0, 100.0, 200.0])
-        f, W = cwt(x, FS, frequencies=freqs)
+        f, _, W = cwt(x, FS, frequencies=freqs)
         assert W.shape == (3, 1024)
         assert np.iscomplexobj(W)
 
@@ -253,7 +280,7 @@ class TestCWT:
         # (require_at_most_nyquist); its endpoints are exact, not 10**log10.
         n = 1024
         x = np.cos(2 * np.pi * 0.1 * fs * np.arange(n) / fs)
-        freqs, W = cwt(x, fs)
+        freqs, _, W = cwt(x, fs)
         assert freqs[-1] == fs / 2.0
         assert freqs[0] == 4.0 * fs / n
         assert W.shape == (freqs.size, n)
@@ -261,13 +288,13 @@ class TestCWT:
     def test_explicit_grid_admits_nyquist_and_refuses_one_ulp_past(self):
         x = np.cos(2 * np.pi * 100 * np.arange(256) / FS)
         nyq = FS / 2.0
-        f, _ = cwt(x, FS, frequencies=[100.0, nyq])
+        f, _, _ = cwt(x, FS, frequencies=[100.0, nyq])
         assert f[-1] == nyq
         with pytest.raises(ConfigurationError, match="above the Nyquist"):
             cwt(x, FS, frequencies=[100.0, np.nextafter(nyq, np.inf)])
 
     def test_bad_wavelet_raises(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError, match="unknown wavelet 'haar'"):
             cwt(np.zeros(128), FS, wavelet="haar")
 
     @pytest.mark.parametrize("wavelet", ["morlet", "paul", "dog"])
@@ -275,7 +302,7 @@ class TestCWT:
         t = np.arange(512) / FS
         x = (np.sin(2 * np.pi * 60 * t) * np.exp(-0.5 * ((t - 0.25) / 0.05) ** 2)
              + 0.4 * np.sin(2 * np.pi * 150 * t))
-        f, W = cwt(x, FS, wavelet=wavelet, n_freqs=96)
+        f, _, W = cwt(x, FS, wavelet=wavelet, n_freqs=96)
         xr = inverse_cwt(W, f, FS, wavelet=wavelet)
         # A 96-scale bank over a finite frequency span cannot resolve the
         # identity, and the cone of influence corrupts both ends of the record,
@@ -286,7 +313,8 @@ class TestCWT:
         assert np.corrcoef(x, xr)[0, 1] > 0.95
 
     def test_icwt_bad_shape_raises(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match=r'W must be \(n_freqs, n_time\)'):
             inverse_cwt(np.zeros((3, 10)), np.array([1.0, 2.0]), FS)
 
     @pytest.mark.parametrize("wavelet,kw", [
@@ -303,7 +331,7 @@ class TestCWT:
         t = np.arange(n) / FS
         x = (1.7 * np.sin(2 * np.pi * 450.0 * t)
              + 0.8 * np.sin(2 * np.pi * 1500.0 * t))
-        f, W = cwt(x, FS, wavelet=wavelet, n_freqs=200, **kw)
+        f, _, W = cwt(x, FS, wavelet=wavelet, n_freqs=200, **kw)
         xr = inverse_cwt(W, f, FS, wavelet=wavelet, **kw)
         mid = slice(n // 4, 3 * n // 4)      # outside the cone of influence
         assert np.std(xr[mid]) / np.std(x[mid]) == pytest.approx(1.0, rel=0.06)
@@ -326,7 +354,7 @@ class TestCWT:
         DOG case. psi0(0) is a closed-form integral and matches to <4e-4, so
         rel=0.01 only has to cover T&C's 4-significant-figure rounding.
         """
-        from uacpy.acoustic_signal.estimate import _reconstruction_constants
+        from uacpy.acoustic_signal.timefreq import _reconstruction_constants
         cd, p0 = _reconstruction_constants(wavelet, w0, order)
         assert cd == pytest.approx(c_delta, rel=0.03)
         assert p0 == pytest.approx(psi0, rel=0.01)
@@ -335,8 +363,8 @@ class TestCWT:
     def test_icwt_odd_dog_order_raises(self, order):
         """An odd DOG is an odd function: psi0(0) = 0 and the eq.-11 inverse
         does not exist. Reject it instead of dividing by a pinned constant."""
-        f, W = cwt(np.zeros(512), FS, wavelet="dog", order=order, n_freqs=16)
-        with pytest.raises(ConfigurationError):
+        f, _, W = cwt(np.zeros(512), FS, wavelet="dog", order=order, n_freqs=16)
+        with pytest.raises(ConfigurationError, match='is an odd function'):
             inverse_cwt(W, f, FS, wavelet="dog", order=order)
 
 
@@ -380,11 +408,10 @@ class TestComplexCepstrumRemovesLinearPhase:
 
 def test_spectrogram_matches_scipy():
     x = np.random.default_rng(0).standard_normal(48000)
-    # spectrogram passes noverlap=None straight through, letting scipy derive
-    # nperseg//8; the reference must use the same default or it compares two
-    # different overlaps.
+    # spectrogram resolves noverlap=None to half a segment, as welch does;
+    # the reference states the same overlap.
     f0, t0, S0 = _scipy_spec(x, 48000.0, window="hann", nperseg=8192,
-                             noverlap=None, scaling="density", mode="psd")
+                             noverlap=4096, scaling="density", mode="psd")
     f, t, S = spectrogram(x, 48000.0)
     assert np.allclose(f, f0) and np.allclose(S, S0)
     fig, ax = plot_spectrogram(f, t, S)
@@ -395,14 +422,14 @@ def test_spectrogram_matches_scipy():
 def test_timefreq_plots():
     fs = 1000.0
     x = np.sin(2 * np.pi * 50 * np.arange(1024) / fs)
-    fr, W = cwt(x, fs, np.linspace(20, 200, 40))
+    fr, _, W = cwt(x, fs, np.linspace(20, 200, 40))
     fig, ax = plot_cwt(fr, W, fs)
     assert ax.collections
     plt.close(fig)
     f, t, wv = wigner_ville(x[:256], fs)
     fig, ax = plot_wigner_ville(f, t, wv)
     plt.close(fig)
-    c = cepstrum(x)
+    c = cepstrum(x).cepstrum
     fig, ax = plot_cepstrum(c, sample_rate=fs)
     assert ax.lines
     plt.close(fig)
@@ -434,8 +461,8 @@ def test_even_array_freq_window_keeps_transform_real():
     assert np.sqrt(num / den) < 1e-12
     # And the public API accepts the even array, matching the explicit
     # centre-deleted odd window.
-    Wa = wigner_ville(x, fs, freq_window=even)
-    Wb = wigner_ville(x, fs, freq_window=np.delete(even, even.size // 2))
+    Wa = wigner_ville(x, fs, lag_smoothing=even)
+    Wb = wigner_ville(x, fs, lag_smoothing=np.delete(even, even.size // 2))
     np.testing.assert_allclose(Wa.distribution, Wb.distribution)
 
 
@@ -463,7 +490,7 @@ def test_smoothed_pseudo_wvd_matches_per_lag_reference():
         kernel = np.zeros(n, dtype=complex)
         kernel[(taus + n) % n] = acc
         W_ref[:, ti] = np.real(np.fft.fft(kernel))
-    W = wigner_ville(x, fs, freq_window=15, time_window=7)
+    W = wigner_ville(x, fs, lag_smoothing=15, time_smoothing=7)
     np.testing.assert_allclose(W.distribution, W_ref, atol=1e-12)
 
 
@@ -551,7 +578,9 @@ def test_inverse_cwt_warns_off_log2_uniform_scale_grid():
 
 class TestTheCepstrumDelayIsTheDelay:
     def test_a_late_signal_reports_a_positive_delay_and_round_trips(self):
-        from uacpy.acoustic_signal.estimate import complex_cepstrum, inverse_complex_cepstrum
+        from uacpy.acoustic_signal.timefreq import (
+            complex_cepstrum, inverse_complex_cepstrum,
+        )
         rng = np.random.default_rng(0)
         n = 256
         base = np.zeros(n); base[10:40] = rng.standard_normal(30)
@@ -559,3 +588,213 @@ class TestTheCepstrumDelayIsTheDelay:
         c7 = complex_cepstrum(np.roll(base, 7))
         assert c7.delay - c0.delay == 7
         np.testing.assert_allclose(inverse_complex_cepstrum(c7), np.roll(base, 7), atol=1e-8)
+
+def test_spectrogram_overlaps_half_a_segment_by_default():
+    """``noverlap=None`` is ``nperseg // 2`` — welch's overlap, so the frame
+    average of a spectrogram is the welch estimate of the same record — and
+    a record shorter than ``nperseg`` clamps first and does not raise."""
+    x = np.random.default_rng(1).standard_normal(8192)
+    sg = spectrogram(x, 1000.0, nperseg=1024)
+    assert sg.times.size == (8192 - 1024) // 512 + 1
+    from uacpy.acoustic_signal import welch
+    est = welch(x, 1000.0, nperseg=1024)
+    np.testing.assert_allclose(sg.power.mean(axis=-1), est.power, rtol=1e-12)
+    short = spectrogram(x[:300], 1000.0, nperseg=1024)
+    assert short.times.size == 1
+
+
+class TestWignerSmoothingWindowConstruction:
+    """Both paths return an odd, symmetric, centre-peaked window: scalar
+    even L generates hann(L-1); an even user array loses its centre
+    sample. No smoothing is ``(None, 0)``."""
+
+    def test_none_is_no_smoothing(self):
+        from uacpy.acoustic_signal.timefreq import _smoothing_window
+        assert _smoothing_window(None, "time") == (None, 0)
+
+    def test_even_scalar_generates_length_l_minus_1(self):
+        from uacpy.acoustic_signal.timefreq import _smoothing_window
+        w, half = _smoothing_window(6, "time")
+        assert w.size == 5 and half == 2
+        np.testing.assert_allclose(w, w[::-1], rtol=0)
+        assert w.argmax() == half
+
+    def test_length_one_scalar_is_legal_zero_is_not(self):
+        from uacpy.acoustic_signal.timefreq import _smoothing_window
+        w, half = _smoothing_window(1, "time")
+        assert w.size == 1 and half == 0
+        with pytest.raises(ConfigurationError, match=">= 1"):
+            _smoothing_window(0, "time")
+
+    def test_even_array_loses_its_centre_sample(self):
+        import scipy.signal as _sig
+        from uacpy.acoustic_signal.timefreq import _smoothing_window
+        w6 = _sig.get_window("hann", 6, fftbins=False)
+        w, half = _smoothing_window(w6, "time")
+        assert w.size == 5 and half == 2
+        np.testing.assert_allclose(w, w[::-1], rtol=0, atol=1e-15)
+        assert w.argmax() == half
+
+    def test_two_dimensional_array_raises(self):
+        from uacpy.acoustic_signal.timefreq import _smoothing_window
+        with pytest.raises(ConfigurationError, match="1-D"):
+            _smoothing_window(np.ones((3, 3)), "time")
+
+
+class TestWignerVilleTimeAxis:
+    """``times = arange(n)/fs`` — starts at zero, in seconds."""
+
+    def test_times_axis(self):
+        from uacpy.acoustic_signal.timefreq import wigner_ville
+        fs = 500.0
+        x = np.sin(2 * np.pi * 50.0 * np.arange(64) / fs)
+        r = wigner_ville(x, fs)
+        np.testing.assert_allclose(r.times, np.arange(64) / fs, rtol=1e-12)
+
+
+class TestReconstructionConstantsPinned:
+    """``(C_delta, psi0(0))`` pinned to this implementation's converged
+    quadrature (deterministic grid), with ``psi0(0)`` agreeing with
+    Torrence & Compo (1998) Table 2 to the tabulated digits."""
+
+    @pytest.mark.parametrize("wavelet, w0, order, c_delta, psi0, tc_psi0", [
+        ("morlet", 6.0, 2, 0.7784324428938577, 0.7511255437203238, 0.751),
+        ("paul", 6.0, 4, 1.1330895139729555, 1.0789368501515262, 1.079),
+        ("dog", 6.0, 2, 3.6162903894907927, 0.8673250705840745, 0.867),
+    ])
+    def test_constants(self, wavelet, w0, order, c_delta, psi0, tc_psi0):
+        from uacpy.acoustic_signal.timefreq import _reconstruction_constants
+        cd, p0 = _reconstruction_constants(wavelet, w0, order)
+        assert cd == pytest.approx(c_delta, rel=1e-6)
+        assert p0 == pytest.approx(psi0, rel=1e-6)
+        assert p0 == pytest.approx(tc_psi0, abs=5e-4)
+
+
+class TestCwtFrequencyContract:
+    """Sub-hertz sampling rates are legal; the default grid tops out at
+    Nyquist; a record too short for the default grid raises; explicit
+    zero frequencies raise while sub-unity ones are legal."""
+
+    def test_sub_hertz_sample_rate_is_legal(self):
+        from uacpy.acoustic_signal.timefreq import cwt
+        r = cwt(np.random.default_rng(3).normal(size=64), 0.5)
+        assert np.isfinite(np.asarray(r.coefficients)).all()
+
+    def test_default_grid_tops_out_at_nyquist(self):
+        from uacpy.acoustic_signal.timefreq import cwt
+        fs = 100.0
+        r = cwt(np.random.default_rng(4).normal(size=128), fs)
+        assert float(np.max(r.frequencies)) == pytest.approx(fs / 2.0,
+                                                             rel=1e-9)
+
+    def test_record_of_eight_samples_raises(self):
+        # f_lo = 4*fs/n hits Nyquist exactly at n = 8 — the >= boundary.
+        from uacpy.acoustic_signal.timefreq import cwt
+        with pytest.raises(ConfigurationError, match='signal too short'):
+            cwt(np.zeros(8), 100.0)
+
+    def test_zero_frequency_rejected_subunity_legal(self):
+        from uacpy.acoustic_signal.timefreq import cwt
+        x = np.random.default_rng(5).normal(size=256)
+        with pytest.raises(ConfigurationError,
+                           match='frequencies must be > 0'):
+            cwt(x, 100.0, frequencies=np.array([0.0, 10.0]))
+        r = cwt(x, 100.0, frequencies=np.array([0.5, 10.0]))
+        assert np.isfinite(np.asarray(r.coefficients)).all()
+
+
+class TestSpectrogramSubHertzSampleRate:
+    def test_legal(self):
+        from uacpy.acoustic_signal.timefreq import spectrogram
+        r = spectrogram(np.random.default_rng(6).normal(size=256), 0.5,
+                        nperseg=64)
+        assert np.isfinite(np.asarray(r.power)).all()
+
+
+class TestWignerSmoothingWindowSingleSampleArray:
+    """A one-sample user window is legal on the array path too."""
+
+    def test_single_sample_array(self):
+        from uacpy.acoustic_signal.timefreq import _smoothing_window
+        w, half = _smoothing_window(np.array([0.7]), "time")
+        assert w.size == 1 and half == 0
+
+
+class TestWignerSmoothingWindowDeletesTheTrueCentre:
+    """hann(8)'s two equal middles sit at indices 3 and 4: the deletion
+    must take one of them, keeping the peak on-centre (hann(6) cannot
+    discriminate — its index 6//3 = 2 is the other equal middle)."""
+
+    def test_even_eight_array(self):
+        import scipy.signal as _sig
+        from uacpy.acoustic_signal.timefreq import _smoothing_window
+        w8 = _sig.get_window("hann", 8, fftbins=False)
+        w, half = _smoothing_window(w8, "time")
+        assert w.size == 7 and half == 3
+        np.testing.assert_allclose(w, w[::-1], rtol=0, atol=1e-15)
+        assert w.argmax() == half
+
+
+class TestTheTimeFrequencyResultsCarryTheirAxes:
+    """``CWTResult.times`` and ``Cepstrum.quefrencies`` are the axes the
+    plotters built from a sample rate, carried on the result."""
+
+    FS = 2000.0
+
+    def _chirp(self):
+        t = np.arange(1024) / self.FS
+        return np.sin(2 * np.pi * (50 + 300 * t) * t)
+
+    def test_cwt_times_are_the_sample_times(self):
+        from uacpy.acoustic_signal import cwt
+        r = cwt(self._chirp(), self.FS, n_freqs=12)
+        f, t, W = r
+        assert t is r.times and W is r.coefficients
+        assert np.array_equal(t, np.arange(1024) / self.FS)
+        assert r.units == {'frequencies': 'Hz', 'times': 's',
+                           'coefficients': None}
+
+    def test_the_scalogram_is_drawn_on_the_carried_times(self):
+        from uacpy.acoustic_signal import cwt
+        from uacpy.core.exceptions import ConfigurationError
+        r = cwt(self._chirp(), self.FS, n_freqs=12)
+        fig, ax = r.plot()
+        mesh = ax.collections[0]
+        assert mesh.get_coordinates()[0, :, 0].max() == pytest.approx(
+            r.times[-1], abs=1.0 / self.FS)
+        plt.close(fig)
+        with pytest.raises(ConfigurationError, match='carries its own time'):
+            plot_cwt(r, sample_rate=self.FS)
+
+    @pytest.mark.parametrize('rate, unit', [(None, 'samples'), (2000.0, 's')])
+    def test_the_cepstrum_carries_its_quefrencies(self, rate, unit):
+        from uacpy.acoustic_signal import cepstrum
+        r = cepstrum(self._chirp(), sample_rate=rate, nfft=2048)
+        q, c = r
+        n = np.arange(2048)
+        assert np.array_equal(q, n if rate is None else n / rate)
+        assert c.size == 2048 and r.sample_rate == rate
+        assert r.units['quefrencies'] == unit
+        fig, ax = r.plot()
+        line = ax.get_lines()[0]
+        assert np.array_equal(line.get_xdata(), q)
+        assert ax.get_xlabel() == f'Quefrency ({unit})'
+        plt.close(fig)
+
+    @pytest.mark.parametrize('rate', [0.0, -1.0, np.nan, np.inf])
+    def test_a_rate_that_is_not_positive_and_finite_is_refused(self, rate):
+        from uacpy.acoustic_signal import cepstrum
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError, match='cepstrum: sample_rate'):
+            cepstrum(self._chirp(), sample_rate=rate)
+
+    def test_a_tiny_positive_rate_is_accepted(self):
+        from uacpy.acoustic_signal import cepstrum
+        assert cepstrum(self._chirp(), sample_rate=1e-3).quefrencies[1] == 1e3
+
+    def test_a_carried_axis_refuses_a_second_rate(self):
+        from uacpy.acoustic_signal import cepstrum
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError,
+                           match='carries its own quefrency axis'):
+            plot_cepstrum(cepstrum(self._chirp()), sample_rate=self.FS)

@@ -1,20 +1,13 @@
-"""The single Bartlett/MVDR numerical core.
+"""The Bartlett/MVDR numerical core and the snapshot covariance.
 
-Three public surfaces run the same two operations over a Hermitian
-covariance ``R`` and a bank of weight vectors ``W``:
+:func:`uacpy.acoustic_signal.bartlett` / :func:`~uacpy.acoustic_signal.mvdr`
+run their two operations over a Hermitian covariance ``R`` and a bank of
+weight rows ``W`` through :func:`quadratic_form` and :func:`loaded_inverse`;
+every matched-field surface in the package (:func:`uacpy.sonar.bartlett`,
+:meth:`uacpy.core.results.Covariance.bartlett`, and their MVDR twins) is
+those functions over a replica bank.
 
-* :func:`uacpy.acoustic_signal.bartlett_spectrum` / ``mvdr_spectrum`` —
-  plane-wave steering vectors over one covariance;
-* :func:`uacpy.sonar.bartlett` / ``mvdr`` — unit-norm replica banks over a
-  measured CSDM, trace-normalised / max-scaled;
-* :meth:`uacpy.core.results.Covariance.bartlett` / ``mvdr`` — per-frequency
-  replica grids over OASN's ``.xsm`` covariance, unnormalised.
-
-Each keeps its own policy (weight normalisation, loading default, NaN/inf
-conventions, output scaling) — the physics they share lives here, so the
-three cannot drift apart numerically the way three hand-rolled einsums did.
-
-The covariance those surfaces consume is built here as well:
+The covariance they consume is built here as well:
 :func:`snapshot_covariance` is the ``(d dH)/L`` average behind both
 :func:`uacpy.acoustic_signal.sample_covariance` and :func:`uacpy.sonar.csdm`,
 so the estimate and the checks that make it meaningful are one implementation
@@ -29,13 +22,13 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError
 
 
-def snapshot_covariance(snapshots, caller: str) -> np.ndarray:
+def snapshot_covariance(snapshots, who: str) -> np.ndarray:
     """``K = (d dH) / L`` for an ``(N, L)`` snapshot matrix, with its guards.
 
     Backs :func:`uacpy.acoustic_signal.sample_covariance` and
     :func:`uacpy.sonar.csdm`: one average, one set of checks, two public
     names that add their own policy on top (``sample_covariance`` offers
-    diagonal loading). The three checks travel with the arithmetic because
+    diagonal loading). The four checks travel with the arithmetic because
     each of them is a property of the average itself:
 
     * 2-D shape - a flat array is not a snapshot matrix;
@@ -48,7 +41,7 @@ def snapshot_covariance(snapshots, caller: str) -> np.ndarray:
       Bartlett/MVDR surface built from it comes back all-NaN, which
       :func:`uacpy.sonar.bartlett` reports with no diagnostic at all.
 
-    ``caller`` names the public function in every message.
+    ``who`` names the public function in every message.
     """
     try:
         d = np.asarray(snapshots, dtype=complex)
@@ -62,28 +55,28 @@ def snapshot_covariance(snapshots, caller: str) -> np.ndarray:
                   if hasattr(snapshots, "data") and hasattr(snapshots, "coords")
                   else "Pass a numeric array.")
         raise ConfigurationError(
-            f"{caller}: snapshots must be a numeric array; got {what}. "
+            f"{who}: snapshots must be a numeric array; got {what}. "
             f"{bridge}") from exc
     if d.ndim != 2:
         raise ConfigurationError(
-            f"{caller}: snapshots must be 2-D (n_sensors, n_snapshots); got "
+            f"{who}: snapshots must be 2-D (n_sensors, n_snapshots); got "
             f"shape {d.shape}. A single snapshot is column-shaped: "
             f"d[:, None].")
     if d.shape[0] == 0:
         raise ConfigurationError(
-            f"{caller}: snapshots has zero sensor rows (shape {d.shape}); "
+            f"{who}: snapshots has zero sensor rows (shape {d.shape}); "
             f"the covariance would be an empty (0, 0) matrix and every "
             f"beamformer surface built from it silently all-zero. Pass at "
             f"least one sensor row.")
     if d.shape[1] == 0:
         raise ConfigurationError(
-            f"{caller}: snapshots has zero snapshot columns (shape {d.shape}); "
+            f"{who}: snapshots has zero snapshot columns (shape {d.shape}); "
             f"the average over L snapshots is undefined at L=0 and every "
             f"matrix entry would be NaN. Pass at least one snapshot column.")
     bad = ~np.isfinite(d)
     if bad.any():
         raise ConfigurationError(
-            f"{caller}: snapshots contain NaN or Inf (a dead hydrophone, or a "
+            f"{who}: snapshots contain NaN or Inf (a dead hydrophone, or a "
             f"shadow-zone column of a modelled field), which would silently "
             f"contaminate every entry of the covariance and leave the "
             f"Bartlett/MVDR surface all-NaN; clean the snapshots first. Got "

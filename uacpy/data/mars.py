@@ -26,30 +26,32 @@ import urllib.parse
 import warnings
 from typing import Dict, Optional, Union
 
-from uacpy.core.environment import BoundaryProperties, Bottom
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.environment import BoundaryProperties
+from uacpy.core.exceptions import DataFetchError, IOWarning, ValidityWarning
 from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
                                  GRAIN_SIZE_MODEL_RANGES)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.data._geo import (
+from uacpy.core.geo import (
     Coordinate, as_coordinate, great_circle_km, normalize_lon,
 )
+from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data._http import http_get
-from uacpy.data.sediment import (
-    bottom_from_grain_size, range_dependent_bottom_along, water_sound_speed_at,
-)
+from uacpy.data.sediment import SeabedSample, bottom_from_grain_size
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
 
-__all__ = ['fetch_mars_sediment', 'fetch_bottom_mars',
-           'fetch_bottom_mars_transect']
+from uacpy.data._offset_policy import MARS_OFFSET_WARN_KM
+
+__all__ = ['fetch_mars_sediment', 'fetch_bottom_mars']
 
 MARS_WFS_URL = 'https://warehouse.ausseabed.gov.au/geoserver/wfs'
 MARS_LAYER = 'ausseabed:Seabed_Sediments_Collection'
 
-DEFAULT_MAX_DISTANCE_KM = 100.0
+#: How far (km) the WFS search reaches for a sample when the caller sets no
+#: ``max_distance_km``.
+MARS_SEARCH_RADIUS_KM = 100.0
 # Expanding search radii (km): most points on the shelf resolve in the first
-# small box; the final rung is max_distance_km itself.
+# small box; the final rung is the search radius itself.
 _SEARCH_RADII_KM = (10.0, 30.0)
 _MAX_FEATURES = 2000
 #: ``(lat_min, lat_max, lon_min, lon_max)`` enclosing Australia's marine
@@ -204,7 +206,7 @@ def _folk_class_centroid(g_lo, g_hi, x_lo, x_hi):
 #
 # The ϕ scale is Krumbein's, ϕ = -log2(d / 1 mm) — the same conversion
 # :func:`_phi_from_properties` applies to MEAN_GRAIN_SIZE just below. Medwin &
-# Clay Sect. 14.2 fixes the coarse end against it: "Marine geologists define
+# Clay Sect. 14.5 fixes the coarse end against it: "Marine geologists define
 # gravel as being the loose material that ranges in size from 2 to 256 mm
 # (Gross 1972, Glossary)", i.e. ϕ = -1 down to -8.
 _FOLK_TO_PHI = {
@@ -257,7 +259,7 @@ def _phi_from_properties(p: Dict) -> Optional[Dict]:
     return None
 
 
-def _warn_outside_the_fit(sample: Dict, model: str) -> None:
+def _warn_outside_the_fit(sample: SeabedSample, model: str) -> None:
     """Announce a sample whose ϕ lies outside ``model``'s own fitted range.
 
     MARS carries seabed coarser than either grain-size relation covers — a
@@ -278,19 +280,20 @@ def _warn_outside_the_fit(sample: Dict, model: str) -> None:
     if bounds is None:
         return                      # unknown model: the conversion raises
     lo, hi = bounds
-    phi = float(sample['phi'])
+    phi = float(sample.grain_size_phi)
     if lo <= phi <= hi:
         return
     warnings.warn(
-        f"AusSeabed MARS sample at {sample['latitude']:.3f}, "
-        f"{sample['longitude']:.3f} has ϕ={phi:.2f} (via {sample['via']}), "
+        f"AusSeabed MARS sample at {sample.sample_point[0]:.3f}, "
+        f"{sample.sample_point[1]:.3f} has ϕ={phi:.2f} (via "
+        f"{sample.details['via']}), "
         f"outside the [{lo:g}, {hi:g}] ϕ the {model!r} grain-size relations "
         f"are fitted over: the geoacoustics returned are that fit at "
         f"ϕ={min(max(phi, lo), hi):g}, not at the sampled grain size. The "
         f"'apl-uw' relations reach -1 ϕ (2 mm) against 'hamilton''s 0 ϕ; for "
         f"seabed coarser than that, a class from uacpy.core.materials "
         f"describes it and a grain-size relation does not.",
-        UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def _require_coverage(lat, lon, max_distance_km):
@@ -350,26 +353,44 @@ def _query_bbox(lat, lon, radius_km, *, layer, base_url, timeout, verbose):
             f"AusSeabed MARS returned {len(features)} of {int(matched)} "
             f"matching samples (server page cap) — the result may not be the "
             f"nearest sample; use a smaller search radius.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return features
 
 
 def fetch_mars_sediment(
     point: Coordinate,
     *,
-    max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
+    max_distance_km: Optional[float] = None,
     layer: str = MARS_LAYER,
     base_url: str = MARS_WFS_URL,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
-) -> Dict:
+) -> SeabedSample:
     """Nearest usable MARS sediment sample to a ``(lat, lon)`` point.
 
-    Returns ``{'phi', 'via', 'distance_km', 'folk_class', 'latitude',
-    'longitude'}`` where ``via`` names the conversion that produced ϕ
-    (``'grain_size'`` / ``'percentages'`` / ``'folk_class'``) and
-    ``latitude``/``longitude`` are the sample's own coordinates, so a caller
-    can record where the value actually came from.
+    Returns a :class:`~uacpy.data.SeabedSample`: ``grain_size_phi``, the
+    sample's Folk class (scheme ``'folk'``) when it has one, its own
+    coordinates as ``sample_point``, its ``distance_km``, ``details['via']``
+    naming the conversion that produced ϕ (``'grain_size'`` /
+    ``'percentages'`` / ``'folk_class'``), and the ``'mars'`` provenance
+    with the sample as its ``data_point``.
+
+    Parameters
+    ----------
+    point : (lat, lon)
+        Site coordinates in decimal degrees.
+    max_distance_km : float, optional
+        Farthest sample accepted (km); ``None`` (default) searches
+        :data:`MARS_SEARCH_RADIUS_KM` and returns a sample farther than
+        :data:`MARS_OFFSET_WARN_KM` with a ``ProvenanceWarning``.
+    layer : str, optional
+        The WFS layer queried.
+    base_url : str, optional
+        The WFS endpoint.
+    timeout : float, optional
+        Per-request network timeout in seconds.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
 
     Raises
     ------
@@ -378,6 +399,8 @@ def fetch_mars_sediment(
         (coverage is the Australian margin).
     """
     lat, lon = as_coordinate(point)
+    limit = checked_max_distance(max_distance_km, 'fetch_mars_sediment')
+    max_distance_km = MARS_SEARCH_RADIUS_KM if limit is None else limit
     _require_coverage(lat, lon, max_distance_km)
     radii = [r for r in _SEARCH_RADII_KM if r < max_distance_km]
     radii.append(max_distance_km)
@@ -415,7 +438,19 @@ def fetch_mars_sediment(
         f"{lat:.3f}, {lon:.3f}: ϕ={best['phi']:.2f} via {best['via']}",
         verbose=verbose,
     )
-    return best
+    return SeabedSample(
+        grain_size_phi=best['phi'], material=None,
+        folk_class=best['folk_class'],
+        folk_class_scheme=None if best['folk_class'] is None else 'folk',
+        sample_point=(best['latitude'], best['longitude']),
+        distance_km=best['distance_km'],
+        provenance=checked_offset(
+            DataProvenance(source=SOURCES['mars'],
+                           data_point=(best['latitude'], best['longitude']),
+                           requested_point=(lat, lon), point_kind='sample'),
+            who='fetch_mars_sediment', warn_km=MARS_OFFSET_WARN_KM,
+            max_distance_km=limit),
+        details={'via': best['via']})
 
 
 def fetch_bottom_mars(
@@ -424,8 +459,8 @@ def fetch_bottom_mars(
     roughness: float = 0.0,
     water_sound_speed: Optional[float] = None,
     model: str = DEFAULT_GRAIN_SIZE_MODEL,
-    environment: Optional[str] = None,
-    max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
+    hamilton_fit: Optional[str] = None,
+    max_distance_km: Optional[float] = None,
     layer: str = MARS_LAYER,
     base_url: str = MARS_WFS_URL,
     timeout: float = 60.0,
@@ -439,56 +474,22 @@ def fetch_bottom_mars(
     ``None`` uses the Hamilton reference. ``model`` picks the grain-size
     relations (``'hamilton'`` or ``'apl-uw'``); a sample coarser or finer than
     the chosen relations are fitted over is converted at the nearer end of
-    that fit, with a ``UserWarning`` naming the sample and the route its ϕ
+    that fit, with a ``ValidityWarning`` naming the sample and the route its ϕ
     came from.
     """
-    lat, lon = as_coordinate(point)
+    from uacpy.core.sediment import canonical_grain_size_selection
+    model, hamilton_fit = canonical_grain_size_selection(
+        model, hamilton_fit, who='fetch_bottom_mars')
     sample = fetch_mars_sediment(
         point, max_distance_km=max_distance_km, layer=layer,
         base_url=base_url, timeout=timeout, verbose=verbose)
     _warn_outside_the_fit(sample, model)
     bottom = bottom_from_grain_size(
-        sample['phi'], roughness=roughness, model=model,
-        environment=environment,
+        sample.grain_size_phi, roughness=roughness, model=model,
+        hamilton_fit=hamilton_fit,
         water_sound_speed=water_sound_speed)
-    # Point samples are sparse, so the nearest one can be up to
-    # max_distance_km from the requested position; record where it actually
-    # came from so ``citations(env)`` reports the hop and ``prov.offset_km``
-    # measures it — the same stamp the local grain-size DB carries.
-    prov = DataProvenance(
-        source=SOURCES['mars'],
-        data_point=(sample['latitude'], sample['longitude']),
-        requested_point=(lat, lon),
-    )
-    return dataclasses.replace(bottom, data_sources=(prov,))
-
-
-def fetch_bottom_mars_transect(
-    start: Coordinate, end: Coordinate, *,
-    n_points=6,
-    max_points=None,
-    roughness: float = 0.0,
-    water_sound_speed: Optional[float] = None,
-    model: str = DEFAULT_GRAIN_SIZE_MODEL,
-    environment: Optional[str] = None,
-    max_distance_km: float = DEFAULT_MAX_DISTANCE_KM,
-    layer: str = MARS_LAYER,
-    base_url: str = MARS_WFS_URL,
-    timeout: float = 60.0,
-    verbose: Union[bool, str] = False,
-) -> Bottom:
-    """Range-dependent bottom from MARS samples along ``start`` → ``end``.
-
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable,
-    so each column scales to the water over its own seafloor.
-    """
-    return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom_mars(
-            (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model, environment=environment,
-            max_distance_km=max_distance_km, layer=layer, base_url=base_url,
-            timeout=timeout, verbose=verbose),
-        start, end, n_points, source_label='AusSeabed MARS',
-        max_points=max_points,
-    )
+    # Point samples are sparse, so the nearest one can sit far from the
+    # requested position; the sample's own record
+    # says where it came from, so ``citations(env)`` reports the hop and
+    # ``prov.offset_km`` measures it — as the local grain-size DB does.
+    return dataclasses.replace(bottom, data_sources=(sample.provenance,))

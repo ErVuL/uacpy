@@ -20,7 +20,7 @@ from figure_scripts._common import (
 import uacpy
 from uacpy.io import read_grn_file
 from uacpy.models import Bellhop, Kraken, RunMode, Scooter
-from uacpy.visualization.plots import shared_colorbar
+from uacpy.plot import shared_colorbar
 from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 
@@ -33,11 +33,6 @@ def run_with_greens_function(env, source, receiver, **knobs):
     with tempfile.TemporaryDirectory() as tmp:
         field = Scooter(work_dir=Path(tmp), **knobs).run(env, source, receiver)
         return field, read_grn_file(field.metadata['grn_file'])
-
-
-def _wavenumbers(grn):
-    """Horizontal wavenumbers behind a ``.grn``: ``k = 2πf / c``."""
-    return 2.0 * np.pi * grn['freq'] / grn['cVec']
 
 
 def tl_field():
@@ -60,12 +55,12 @@ def greens_function():
     """
     env, source, receiver = shallow_water()
     _, grn = run_with_greens_function(env, source, receiver)
-    k = _wavenumbers(grn)
-    G = np.abs(grn['G'][0, 0])                       # (n_rd, n_k)
+    k = grn.wavenumbers()                            # k = 2πf / c
+    G = np.abs(grn.data[0, 0])                     # (n_rd, n_k)
     G_dB = 20.0 * np.log10(G / G.max() + 1e-12)
     modes = Kraken().compute_modes(env, source)
 
-    freq = float(grn['freq'])
+    freq = grn.f0
     c_water = float(np.min(env.ssp.to_pairs()[:, 1]))
     c_bottom = float(env.bottom.halfspace_at(range=0.0).sound_speed)
 
@@ -73,10 +68,11 @@ def greens_function():
                              gridspec_kw={'height_ratios': [1.5, 1.0]})
     im = axes[0].imshow(
         G_dB, aspect='auto', origin='upper', cmap='inferno', vmin=-55, vmax=0,
-        extent=_flip_y(_cell_edge_extent(k, grn['rd'])))
+        extent=_flip_y(_cell_edge_extent(k, grn.receiver_depths)))
     axes[0].set_ylabel('Depth (m)')
-    axes[0].set_title(f"$|G(k, z)|$ — {grn['nk']} wavenumbers × "
-                      f"{grn['nrd']} depths", fontweight='bold', fontsize=11)
+    axes[0].set_title(f"$|G(k, z)|$ — {len(grn.phase_speeds)} wavenumbers × "
+                      f"{len(grn.receiver_depths)} depths", fontweight='bold',
+                      fontsize=11)
     fig.colorbar(im, ax=axes[0], pad=0.02, label='dB re max')
     # The bar belongs to the map, so it stays on the top panel -- but it was
     # taken out of that panel's width ALONE, and these two share an x axis.
@@ -90,13 +86,14 @@ def greens_function():
                           lambda c: 2.0 * np.pi * freq / np.maximum(c, 1e-9)))
     top.set_xlabel('Phase speed $c = \\omega/k$ (m/s)')
 
-    zi = int(np.argmin(np.abs(grn['rd'] - float(source.depths[0]))))
+    zi = int(np.argmin(np.abs(grn.receiver_depths
+                              - float(source.depths[0]))))
     k_bottom = 2.0 * np.pi * freq / c_bottom
     k_water = 2.0 * np.pi * freq / c_water
     axes[1].axvspan(k_bottom, k_water, color='0.85', zorder=0,
                     label=f'trapped: {c_bottom:.0f} > c > {c_water:.0f} m/s')
     axes[1].plot(k, G_dB[zi], color='C0', linewidth=0.9,
-                 label=f"$|G(k)|$ at z = {grn['rd'][zi]:.0f} m")
+                 label=f"$|G(k)|$ at z = {grn.receiver_depths[zi]:.0f} m")
     for i, km in enumerate(np.real(modes.k)):
         axes[1].axvline(km, color='C3', linestyle=':', linewidth=1.0,
                         label='Kraken eigenvalues $k_m$' if i == 0 else None)
@@ -135,9 +132,9 @@ def phase_speed_window():
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.4))
     for label, knobs, colour in cases:
         tl, grn = run_with_greens_function(env, source, line, **knobs)
-        k = _wavenumbers(grn)
+        k = grn.wavenumbers()
         if not knobs:
-            G = np.abs(grn['G'][0, 0, 0])
+            G = np.abs(grn.data[0, 0, 0])
             axes[0].plot(k, 20.0 * np.log10(G / G.max() + 1e-12), color=colour,
                          linewidth=0.9, zorder=3)
             k_full = k
@@ -149,7 +146,7 @@ def phase_speed_window():
         axes[1].plot(np.asarray(line.ranges) / 1000.0,
                      np.asarray(tl.dB, dtype=float).ravel(),
                      color=colour, linewidth=1.0,
-                     label=f"{label} — {grn['nk']} k-samples")
+                     label=f"{label} — {len(grn.phase_speeds)} k-samples")
 
     axes[0].set_xlim(k_full[0], k_full[-1])
     axes[0].set_xlabel('Horizontal wavenumber $k$ (rad/m)')
@@ -239,7 +236,7 @@ def benchmark():
     reference = np.asarray(Scooter().run(env, source, line).dB,
                            dtype=float).ravel()
     others = [('Kraken (normal modes)', Kraken(), 'C1'),
-              ('Bellhop (Gaussian beams)', Bellhop(n_beams=3000), 'C2')]
+              ('Bellhop (hat beams)', Bellhop(n_beams=3000), 'C2')]
 
     r_km = np.asarray(line.ranges) / 1000.0
     fig, axes = plt.subplots(2, 1, figsize=(9.5, 6.4), sharex=True,

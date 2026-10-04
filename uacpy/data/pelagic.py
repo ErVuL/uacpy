@@ -16,8 +16,10 @@ The thresholds reproduce the first-order findings of the reference global map of
 Data 12, 3367–3381, doi:10.5194/essd-12-3367-2020 (CC-BY 4.0) — namely that clay
 dominates below the CCD (~4500 m), calcareous sediment above it, and siliceous
 (diatom) ooze in the high-latitude productivity belts; after Berger (1974). The
-full 10 km Diesing map (CC-BY, PANGAEA doi:10.1594/PANGAEA.911692) can replace
-this rule where a reprojection dependency is acceptable.
+full 10 km Diesing map (CC-BY, PANGAEA doi:10.1594/PANGAEA.911692) is
+:mod:`uacpy.data.diesing_local`, which precedes this rule in the ``'auto'``
+bottom chain; this rule covers what that map leaves (water shallower than
+500 m, and an uninstalled cache).
 
 Provinces (dominant surficial lithology → representative mean grain size ϕ):
 
@@ -29,22 +31,21 @@ Provinces (dominant surficial lithology → representative mean grain size ϕ):
 * otherwise (above CCD)  → **calcareous ooze** — low-to-mid latitude
 """
 
+import dataclasses
 import warnings
 from typing import Optional, Union
 
 from uacpy._log import log_message
-from uacpy.core.environment import BoundaryProperties, Bottom
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.environment import BoundaryProperties
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.data._geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.core.geo import Coordinate, as_coordinate, normalize_lon
+from uacpy.data._geo import checked_max_distance, checked_offset
+from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
-from uacpy.data.sediment import (
-    bottom_from_grain_size, range_dependent_bottom_along,
-    water_sound_speed_at,
-)
+from uacpy.data.sediment import bottom_from_grain_size
+from uacpy.core.exceptions import ValidityWarning
 
-__all__ = ['pelagic_lithology', 'pelagic_grain_size', 'fetch_bottom_pelagic',
-           'fetch_bottom_pelagic_transect']
+__all__ = ['pelagic_lithology', 'pelagic_grain_size', 'fetch_bottom_pelagic']
 
 # Carbonate compensation depth (m): below it calcareous tests dissolve, so
 # carbonate ooze gives way to pelagic clay. Global-average value (the CCD is
@@ -112,6 +113,15 @@ def pelagic_lithology(depth_m: float, lat: float,
 
     It still returns a value: :func:`fetch_bottom_pelagic` is the last
     fallback in the ``'auto'`` chain and is documented as never failing.
+
+    Parameters
+    ----------
+    depth_m : float
+        Water depth (m).
+    lat : float
+        Latitude (deg).
+    lon : float, optional
+        Longitude (deg); see below.
     """
     if depth_m < SHELF_BREAK_DEPTH:
         warnings.warn(
@@ -120,7 +130,7 @@ def pelagic_lithology(depth_m: float, lat: float,
             f"(siliceous belt / carbonate compensation depth). Shelf sediment "
             f"is terrigenous. The value returned is a first-principles "
             f"fallback, not a shelf estimate.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if _in_siliceous_belt(lat, lon):
         return 'diatom ooze'               # high-latitude siliceous belt
     if depth_m >= CCD_DEPTH:
@@ -134,6 +144,15 @@ def pelagic_grain_size(depth_m: float, lat: float,
 
     ``lon`` is forwarded to :func:`pelagic_lithology` (Pacific-sector test of
     the northern siliceous belt).
+
+    Parameters
+    ----------
+    depth_m : float
+        Water depth (m).
+    lat : float
+        Latitude (deg).
+    lon : float, optional
+        Longitude (deg), for the Pacific-sector test.
     """
     return _LITHOLOGY_PHI[pelagic_lithology(depth_m, lat, lon)]
 
@@ -142,28 +161,27 @@ def _water_depth(point, timeout, verbose, cache_only):
     """Water depth (m) from GEBCO — local cache if installed, else the live API
     (skipped when ``cache_only``, so the cache-miss error propagates instead)."""
     from uacpy.data.bathymetry import fetch_bathy
-    try:
-        return fetch_bathy(point, source='local')
-    except ConfigurationError:             # local grid not installed
-        if cache_only:
-            raise
-        return fetch_bathy(point, source='api', timeout=timeout,
-                           verbose=verbose)
+    return fetch_bathy(point, source='local' if cache_only else 'gebco',
+                       timeout=timeout, verbose=verbose)
 
 
 def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
                          water_sound_speed: Optional[float] = None,
                          model: str = DEFAULT_GRAIN_SIZE_MODEL,
-                         environment: Optional[str] = None,
+                         hamilton_fit: Optional[str] = None,
                          depth: Optional[float] = None, cache_only: bool = False,
                          timeout: float = 30.0,
-                         verbose: Union[bool, str] = False) -> BoundaryProperties:
+                         verbose: Union[bool, str] = False,
+                         max_distance_km: Optional[float] = None,
+                         ) -> BoundaryProperties:
     """Model-ready bottom from the pelagic depth/latitude model at ``(lat, lon)``.
 
-    Provenance is catalogue-level: the value is computed from depth and
-    latitude, and no per-cell ``data_point``/``offset_km`` is recorded —
-    unlike the sample sources (``grainsize``, ``mars``), which record the
-    sample the value came from.
+    The returned bottom carries a ``pelagic`` ``DataProvenance``, plus a
+    ``gebco`` one when the depth was fetched rather than given. Both record
+    the requested point as their data point: the lithology is computed at the
+    point from its depth and latitude, and the GEBCO depth is read in the
+    point's own 15-arc-second cell, so ``offset_km`` is 0 and every
+    ``max_distance_km`` passes.
 
     The water depth is taken from ``depth`` if given, else fetched from GEBCO
     (local cache, falling back to the live API unless ``cache_only``). The
@@ -175,45 +193,25 @@ def fetch_bottom_pelagic(point: Coordinate, *, roughness: float = 0.0,
     live GEBCO request; a stalled host raises ``DataFetchError`` instead of
     blocking indefinitely.
     """
+    from uacpy.core.sediment import canonical_grain_size_selection
+    model, hamilton_fit = canonical_grain_size_selection(
+        model, hamilton_fit, who='fetch_bottom_pelagic')
     lat, lon = as_coordinate(point)
+    limit = checked_max_distance(max_distance_km, 'fetch_bottom_pelagic')
     d = depth if depth is not None else _water_depth(point, timeout, verbose,
                                                      cache_only)
     litho = pelagic_lithology(d, lat, lon)
     bottom = bottom_from_grain_size(
         _LITHOLOGY_PHI[litho], roughness=roughness, model=model,
-        environment=environment,
+        hamilton_fit=hamilton_fit,
         water_sound_speed=water_sound_speed)
     log_message(
         'pelagic', f"pelagic {litho} at {lat:.2f}, {lon:.2f} "
         f"(depth {d:.0f} m) → ϕ={_LITHOLOGY_PHI[litho]}", verbose=verbose)
-    return bottom
-
-
-def fetch_bottom_pelagic_transect(start: Coordinate, end: Coordinate, *,
-                                  n_points=6, max_points=None,
-                                  roughness: float = 0.0,
-                                  water_sound_speed: Optional[float] = None,
-                                  model: str = DEFAULT_GRAIN_SIZE_MODEL,
-                                  environment: Optional[str] = None,
-                                  depth=None, cache_only: bool = False,
-                                  timeout: float = 30.0,
-                                  verbose: Union[bool, str] = False
-                                  ) -> Bottom:
-    """Range-dependent bottom from the pelagic model along ``start`` → ``end``.
-
-    ``water_sound_speed`` also takes a ``(lat, lon) -> m/s`` callable, so each
-    column scales to the water over its own seafloor. ``depth`` likewise takes
-    a ``(lat, lon) -> m`` callable, so a caller holding the transect's
-    bathymetry supplies it instead of paying for a second fetch per waypoint.
-    ``timeout`` (s) bounds each live GEBCO request.
-    """
-    return range_dependent_bottom_along(
-        lambda la, lo: fetch_bottom_pelagic(
-            (la, lo), roughness=roughness,
-            water_sound_speed=water_sound_speed_at(water_sound_speed, la, lo),
-            model=model, environment=environment,
-            depth=depth(la, lo) if callable(depth) else depth,
-            cache_only=cache_only, timeout=timeout, verbose=verbose),
-        start, end, n_points, source_label='pelagic model',
-        max_points=max_points,
-    )
+    ids = ('pelagic',) if depth is not None else ('pelagic', 'gebco')
+    return dataclasses.replace(bottom, data_sources=tuple(
+        checked_offset(DataProvenance(source=SOURCES[i], data_point=(lat, lon),
+                                      requested_point=(lat, lon)),
+                       who='fetch_bottom_pelagic', warn_km=0.0,
+                       max_distance_km=limit)
+        for i in ids))

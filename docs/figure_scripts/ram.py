@@ -95,7 +95,7 @@ def backend_dispatch():
 
 
 def pade_order():
-    """What ``np_pade`` buys: the same answer for far fewer range steps.
+    """What ``n_pade`` buys: the same answer for far fewer range steps.
 
     Every order resolves this waveguide, so the TL curves lie on top of one
     another. What changes is the range step the grid optimiser can afford at
@@ -111,12 +111,12 @@ def pade_order():
     for order, colour in zip(orders, ('C0', 'C1', 'C2', 'C3')):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            tl = RAM(np_pade=order).run(env, source, line)
-        dr.append(tl.metadata['dr'])
+            tl = RAM(n_pade=order).run(env, source, line)
+        dr.append(tl.run_settings.engine.grids[0].dr)
         axes[0].plot(np.asarray(line.ranges) / 1000.0,
                      np.asarray(tl.dB, dtype=float).ravel(),
                      color=colour, linewidth=1.0,
-                     label=f'np_pade={order} — dr={dr[-1]:.1f} m')
+                     label=f'n_pade={order} — dr={dr[-1]:.1f} m')
 
     axes[0].set_xlabel('Range (km)')
     axes[0].set_ylabel('TL (dB)')
@@ -129,7 +129,7 @@ def pade_order():
     for x, value in enumerate(dr):
         axes[1].text(x, value, f'{value:.1f} m', ha='center', va='bottom',
                      fontsize=9)
-    axes[1].set_xlabel('np_pade')
+    axes[1].set_xlabel('n_pade')
     axes[1].set_ylabel('Range step dr the optimiser affords (m)')
     axes[1].set_title('Cost of one accuracy budget', fontweight='bold',
                       fontsize=11)
@@ -145,7 +145,7 @@ def pade_order():
 def lytaev_grid():
     """The two knobs the grid optimiser actually responds to.
 
-    Left: widening ``theta_max`` forces a finer march — the PE spectrum has to
+    Left: widening ``angle_max`` forces a finer march — the PE spectrum has to
     stay accurate over a wider angular window. Right: leaving ``c0=None`` lets
     Lytaev Eq. (15) centre that spectrum, which buys a coarser step than
     pinning ``c0`` to the water speed.
@@ -158,9 +158,9 @@ def lytaev_grid():
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             tl = model.run(env, source, point)
-        return tl.metadata['dr'], tl.metadata['pe_reference_speed']
+        return tl.run_settings.engine.grids[0].dr, tl.run_settings.engine.c0
 
-    swept = [grid_of(RAM(theta_max=angle)) for angle in angles]
+    swept = [grid_of(RAM(angle_max=angle)) for angle in angles]
     dr_auto, c0_auto = swept[2]
     dr_pinned, c0_pinned = grid_of(RAM(c0=1500.0))
 
@@ -171,7 +171,7 @@ def lytaev_grid():
                          textcoords='offset points', xytext=(0, -14),
                          ha='center', va='top', fontsize=8, color='0.3')
     axes[0].set_ylim(0.0, max(d for d, _ in swept) * 1.15)
-    axes[0].set_xlabel('theta_max (degrees)')
+    axes[0].set_xlabel('angle_max (degrees)')
     axes[0].set_ylabel('Range step dr (m)')
     axes[0].set_title('Angular window vs march cost', fontweight='bold',
                       fontsize=11)
@@ -184,7 +184,7 @@ def lytaev_grid():
         axes[1].text(x, value, f'{value:.1f} m', ha='center', va='bottom',
                      fontsize=9)
     axes[1].set_ylabel('Range step dr (m)')
-    axes[1].set_title('Reference speed vs march cost (theta_max=30°)',
+    axes[1].set_title('Reference speed vs march cost (angle_max=30°)',
                       fontweight='bold', fontsize=11)
     axes[1].set_ylim(0.0, max(dr_auto, dr_pinned) * 1.25)
     axes[1].grid(True, axis='y', alpha=0.3)

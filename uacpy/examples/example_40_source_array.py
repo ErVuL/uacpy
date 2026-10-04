@@ -47,8 +47,10 @@ env = uacpy.Environment(
         acoustic_type='half-space', sound_speed=1700.0, density=1.9,
         attenuation=0.5)),
 )
+# Ranges start at 600 m: closer in, the deepest receivers see direct and
+# surface-reflected paths steeper than the modes (33°) and the PE (30°) carry.
 receiver = uacpy.Receiver(depths=np.linspace(5.0, 195.0, 60),
-                          ranges=np.linspace(200.0, 12000.0, 150))
+                          ranges=np.linspace(600.0, 12000.0, 145))
 
 # Five elements on a half-wavelength ladder, driven at 180 dB each. The
 # weights are the relative complex drives; source_level_dB is how hard one
@@ -115,9 +117,9 @@ print(f"median level, incoherent total  : {med(incoherent):6.2f} dB "
 fig, axes = plt.subplots(1, 2, figsize=(14, 4.4))
 # source=array draws a marker at every element depth, so the aperture the
 # gain comes from is visible against the field it produced.
-uacpy.plot_field(coherent.at_source_level(), ax=axes[0], env=env, source=array,
+uacpy.plot.plot_field(coherent.at_source_level(), ax=axes[0], env=env, source=array,
                  title=f'Coherent array, steered {steer_deg:g} deg')
-uacpy.plot_field(incoherent.at_source_level(), ax=axes[1], env=env, source=fleet,
+uacpy.plot.plot_field(incoherent.at_source_level(), ax=axes[1], env=env, source=fleet,
                  title='The same five sources, mutually incoherent')
 fig.tight_layout()
 fig.savefig(OUT / 'example_40_level.png', dpi=140, bbox_inches='tight')
@@ -136,9 +138,9 @@ modes = kraken.compute_modes(env, uacpy.Source(depths=depths,
                                                frequencies=FREQ))
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 4.4))
-uacpy.plot_mode_excitation(modes, array, ax=axes[0], sound_speed=C_REF,
+uacpy.plot.plot_mode_excitation(modes, array, ax=axes[0], sound_speed=C_REF,
                            title='Omnidirectional elements')
-uacpy.plot_mode_excitation(modes, shaded, ax=axes[1], sound_speed=C_REF,
+uacpy.plot.plot_mode_excitation(modes, shaded, ax=axes[1], sound_speed=C_REF,
                            title='Directional elements — P = f·A')
 fig.tight_layout()
 fig.savefig(OUT / 'example_40_array_response.png', dpi=140,

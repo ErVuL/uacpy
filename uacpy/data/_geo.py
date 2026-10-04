@@ -1,24 +1,32 @@
-"""Small shared geographic helpers for the data layer."""
+"""Grid and transect helpers of the data layer.
+
+The coordinate, great-circle and date helpers every layer shares are in
+:mod:`uacpy.core.geo`.
+"""
 
 import warnings
-from typing import Tuple
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
-from uacpy.core.constants import EARTH_RADIUS_M
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core._export import ExportRecord
+from uacpy.data.sources import DataProvenance
+from uacpy.core.provenance import point_in_words
+
+from uacpy.core.exceptions import (
+    ConfigurationError, DataFetchError, FallbackWarning, ProvenanceWarning,
+)
+from uacpy.core.geo import great_circle_km
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = [
-    'Coordinate', 'as_coordinate', 'normalize_lon', 'lon_linspace',
-    'EARTH_RADIUS_KM', 'central_angle', 'great_circle_km', 'geodesic_waypoints',
-    'nearest_indices', 'ring_offsets', 'run_representative_indices',
+    'lon_linspace', 'nearest_indices', 'ring_offsets', 'run_representative_indices',
     'run_boundary_indices',
     'DEFAULT_MAX_TRANSECT_POINTS', 'checked_max_points',
     'checked_n_points', 'capped_n_points', 'require_source',
     'depth_from_elevation',
-    'depth_to_pressure_dbar', 'pressure_dbar_to_depth',
-    'insitu_from_potential',
+    'checked_max_distance', 'cell_half_diagonal_km', 'checked_offset',
 ]
 
 #: Default ceiling on the number of points sampled along a transect *before*
@@ -28,8 +36,6 @@ __all__ = [
 #: for a full-native bathy transect. Override via ``max_points=`` on the
 #: fetchers / fetch_environment.
 DEFAULT_MAX_TRANSECT_POINTS = 1000
-
-Coordinate = Tuple[float, float]
 
 
 def require_source(source, allowed, what: str, remediation: str) -> None:
@@ -54,7 +60,7 @@ def depth_from_elevation(elev, lat, lon, *, dataset: str) -> float:
     return -elev
 
 
-def checked_max_points(max_points, caller: str) -> int:
+def checked_max_points(max_points, who: str) -> int:
     """Validate a transect fetch budget: an integer of at least 2.
 
     ``n_points`` is guarded at >= 2 wherever it is accepted, but the cap it is
@@ -68,32 +74,28 @@ def checked_max_points(max_points, caller: str) -> int:
         value = int(max_points)
     except (TypeError, ValueError):
         raise ConfigurationError(
-            f"{caller}: max_points must be an integer >= 2, got "
+            f"{who}: max_points must be an integer >= 2, got "
             f"{max_points!r}.",
             remediation="Pass max_points>=2, the transect fetch budget.",
         ) from None
     if value < 2:
         raise ConfigurationError(
-            f"{caller}: max_points must be >= 2, got {max_points}.",
+            f"{who}: max_points must be >= 2, got {max_points}.",
             remediation="Pass max_points>=2; fewer than two waypoints is not "
                         "a transect.",
         )
     return value
 
 
-def checked_n_points(n_points, label: str, *, allow_auto: bool = False):
+def checked_n_points(n_points, label: str, *, allow_auto: bool = False,
+                     name: str = 'n_points'):
     """Validate a transect sample count: an integer of at least 2.
 
-    The eight transect fetchers each rolled their own guard and behaved five
-    different ways on the same input. ``n_points=1`` was a typed
-    ``ConfigurationError`` at six sites and a silent coercion to 2 at
-    ``range_dependent_bottom_along``; ``n_points=2.7`` was silently truncated
-    to 2 at two sites, an untyped ``TypeError`` at four and typed only at
-    ``bathy_transect_plan``; ``n_points='x'`` was an untyped ``ValueError``
-    almost everywhere. Two waypoints are the fewest that define a path, and a
+    Every transect fetcher validates its count here, so one input means one
+    thing everywhere. Two waypoints are the fewest that define a path, and a
     fractional or non-numeric count is a caller mistake rather than something
-    to round — so all of them come here now, and ``bathy_transect_plan``'s
-    behaviour (the one that was already right) is the behaviour they share.
+    to round: ``n_points=1``, ``2.7`` and ``'x'`` all raise
+    ``ConfigurationError``.
 
     Parameters
     ----------
@@ -104,6 +106,9 @@ def checked_n_points(n_points, label: str, *, allow_auto: bool = False):
     allow_auto : bool, optional
         Accept the string ``'auto'`` and return it unchanged, for the fetchers
         that resolve a native sample count themselves. Default ``False``.
+    name : str, optional
+        The argument's name in the message (``'n_lat'`` for a grid axis).
+        Default ``'n_points'``.
 
     Returns
     -------
@@ -118,29 +123,29 @@ def checked_n_points(n_points, label: str, *, allow_auto: bool = False):
     if allow_auto and isinstance(n_points, str) and n_points == 'auto':
         return 'auto'
     forms = ("an integer >= 2, or 'auto'" if allow_auto else "an integer >= 2")
-    remediation = ("Pass n_points as an int (e.g. n_points=50)"
-                   + (" or n_points='auto'." if allow_auto else "."))
-    msg = (f"{label}: n_points={n_points!r} is not a sample count. "
+    remediation = (f"Pass {name} as an int (e.g. {name}=50)"
+                   + (f" or {name}='auto'." if allow_auto else "."))
+    msg = (f"{label}: {name}={n_points!r} is not a sample count. "
            f"Valid forms: {forms}.")
     try:
         value = int(n_points)
     except (TypeError, ValueError) as exc:
         raise ConfigurationError(msg, remediation=remediation) from exc
-    if value != n_points:            # 2.7 was silently truncated to 2
+    if value != n_points:            # a fraction (2.7) is refused, not truncated
         raise ConfigurationError(msg, remediation=remediation)
     if value < 2:
         raise ConfigurationError(
-            f"{label}: n_points must be >= 2, got {n_points}.",
-            remediation="Pass n_points>=2"
+            f"{label}: {name} must be >= 2, got {n_points}.",
+            remediation=f"Pass {name}>=2"
                         + (" or 'auto'; " if allow_auto else "; ")
-                        + "fewer than two waypoints is not a transect.",
+                        + "fewer than two samples span nothing.",
         )
     return value
 
 
 def capped_n_points(n_points: int, max_points, label: str) -> int:
     """``n_points`` clamped to ``max_points`` (``None``: no cap), with a
-    ``UserWarning`` naming both when the clamp bites.
+    ``FallbackWarning`` naming both when the clamp bites.
 
     The transect fetchers share this one cap rule for an explicit count;
     their ``'auto'`` branches resolve a probe count against ``max_points``
@@ -151,66 +156,8 @@ def capped_n_points(n_points: int, max_points, label: str) -> int:
     warnings.warn(
         f"{label}: n_points={n_points} exceeds max_points={max_points}; "
         f"sampling {max_points}.",
-        UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return int(max_points)
-
-
-#: How close to antipodal (radians of central angle short of π) a pair of
-#: endpoints may be before :func:`geodesic_waypoints` refuses them. The slerp
-#: divides by ``sin(ang)``, and the haversine central angle saturates at
-#: exactly π once the endpoints are within ~0.1 m of antipodal, so past this
-#: point the waypoints stop lying on the path ``ranges_m`` reports. Measured
-#: disagreement between a waypoint's great-circle distance from ``start`` and
-#: its reported range: 0.13 m at π − ang = 1e-5, 142 m at 1e-6, 37 km at 1e-7
-#: and 1083 km at exactly π. 1e-6 rad is ~6 m of antipodal offset, so no real
-#: transect is refused.
-_ANTIPODAL_TOL_RAD = 1e-6
-
-#: Spherical-Earth radius in km, derived from the single source of truth in
-#: ``core.constants`` so every haversine in the data layer shares one value.
-EARTH_RADIUS_KM = EARTH_RADIUS_M / 1000.0
-
-
-def as_coordinate(point) -> Coordinate:
-    """Validate and unpack a ``(lat, lon)`` coordinate pair as floats.
-
-    The data layer takes a single ``point`` tuple everywhere, so this is the
-    shared guard against the easy mistakes of passing two bare scalars / a
-    single number, a non-finite (``NaN`` / ``inf``) coordinate, or a latitude
-    outside ``[-90, 90]`` — each turns into a typed, actionable
-    :class:`ConfigurationError` here rather than a cryptic unpack ``TypeError``
-    or a downstream ``"cannot convert float NaN to integer"`` deeper in a
-    fetcher's grid-index maths.
-    """
-    try:
-        lat, lon = point
-        lat, lon = float(lat), float(lon)
-    except (TypeError, ValueError):
-        raise ConfigurationError(
-            f"expected a (lat, lon) coordinate pair; got {point!r}.",
-            remediation="Pass a 2-tuple of degrees, e.g. (43.2, 7.5).",
-        ) from None
-    if not (np.isfinite(lat) and np.isfinite(lon)):
-        raise ConfigurationError(
-            f"coordinate must be finite; got (lat={lat}, lon={lon}).",
-            remediation="Pass finite degrees, e.g. (43.2, 7.5).",
-        )
-    if not -90.0 <= lat <= 90.0:
-        raise ConfigurationError(
-            f"latitude must be in [-90, 90] degrees; got {lat}.",
-            remediation="Pass a latitude within [-90, 90] (longitude wraps).",
-        )
-    return lat, lon
-
-
-def normalize_lon(lon: float) -> float:
-    """Wrap a longitude (degrees) into ``[-180, 180)``.
-
-    Callers may pass longitude in either ``[-180, 180]`` or ``[0, 360]``;
-    every source normalizes through here so the same physical point yields the
-    same result regardless of convention (and dateline values stay in range).
-    """
-    return ((float(lon) + 180.0) % 360.0) - 180.0
 
 
 def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:
@@ -235,14 +182,6 @@ def lon_linspace(lon0: float, lon1: float, n: int) -> np.ndarray:
     return wrapped
 
 
-def central_angle(start: Coordinate, end: Coordinate) -> float:
-    """Great-circle central angle (radians) between two ``(lat, lon)`` points
-    — :func:`great_circle_km` in radians, with the scalar coordinate checks."""
-    lat1, lon1 = as_coordinate(start)
-    lat2, lon2 = as_coordinate(end)
-    return float(great_circle_km(lat1, lon1, lat2, lon2) / EARTH_RADIUS_KM)
-
-
 def require_month(month, who: str) -> int:
     """``month`` as an int in 1-12, or ``ConfigurationError``: a bool, a
     fraction (``6.7``) or a non-number is refused rather than truncated to a
@@ -259,64 +198,6 @@ def require_month(month, who: str) -> int:
             f"{who}: month={month!r} is not an integer month 1-12; a fraction "
             f"would be truncated to a month you did not ask for.")
     return int(value)
-
-
-def great_circle_km(lat0, lon0, lat, lon):
-    """Haversine great-circle distance (km) from ``(lat0, lon0)`` to ``(lat,
-    lon)``. Vectorized over the second point; uses :data:`EARTH_RADIUS_KM`."""
-    la0, lo0, la, lo = map(np.radians, (lat0, lon0, lat, lon))
-    d = (np.sin((la - la0) / 2) ** 2
-         + np.cos(la0) * np.cos(la) * np.sin((lo - lo0) / 2) ** 2)
-    return 2.0 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(d))
-
-
-def geodesic_waypoints(
-    start: Coordinate, end: Coordinate, n_points: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Evenly spaced great-circle waypoints between two ``(lat, lon)``.
-
-    Returns ``(lats_deg, lons_deg, ranges_m)`` where ``ranges_m`` is the
-    cumulative spherical surface distance from ``start`` (0 at the first
-    point, total length at the last). Spherical-Earth slerp — accurate to a
-    few parts in 10³ versus the WGS84 ellipsoid, ample for sampling a grid
-    of ~450 m resolution.
-
-    Coincident endpoints, and endpoints antipodal to within
-    :data:`_ANTIPODAL_TOL_RAD` (where infinitely many great circles join them
-    and the slerp's ``1/sin(ang)`` returns waypoints that do not lie on the
-    reported ranges), raise :class:`ConfigurationError`.
-    """
-    lat1, lon1 = np.radians(as_coordinate(start))
-    lat2, lon2 = np.radians(as_coordinate(end))
-
-    ang = central_angle(start, end)               # shared geodesic (haversine)
-    if ang == 0.0:
-        raise ConfigurationError(
-            "geodesic_waypoints: start and end coordinates coincide.",
-            remediation="Use a single-point fetch, or pass distinct endpoints.",
-        )
-    if np.pi - ang < _ANTIPODAL_TOL_RAD:
-        raise ConfigurationError(
-            f"geodesic_waypoints: the endpoints are antipodal to within "
-            f"{(np.pi - ang) * EARTH_RADIUS_M:.1f} m, so no single great "
-            f"circle joins them.",
-            remediation="Split the path into two transects through an "
-                        "intermediate waypoint, or move an endpoint away from "
-                        "the other's antipode.",
-        )
-
-    f = np.linspace(0.0, 1.0, n_points)
-    sin_ang = np.sin(ang)
-    A = np.sin((1 - f) * ang) / sin_ang
-    B = np.sin(f * ang) / sin_ang
-    x = A * np.cos(lat1) * np.cos(lon1) + B * np.cos(lat2) * np.cos(lon2)
-    y = A * np.cos(lat1) * np.sin(lon1) + B * np.cos(lat2) * np.sin(lon2)
-    z = A * np.sin(lat1) + B * np.sin(lat2)
-    lats = np.degrees(np.arctan2(z, np.hypot(x, y)))
-    lons = np.degrees(np.arctan2(y, x))
-
-    ranges_m = f * ang * EARTH_RADIUS_M
-    return lats, lons, ranges_m
 
 
 def nearest_indices(axis, queries) -> np.ndarray:
@@ -424,99 +305,125 @@ def run_boundary_indices(keys) -> 'list[int]':
     return out
 
 
-# Converting a depth to a pressure is seawater physics, so it lives in
-# uacpy.core.acoustics.seawater, which ``core`` can reach and ``data`` cannot
-# be imported from. Re-exported here for this module's callers.
-from uacpy.core.acoustics.seawater import (          # noqa: E402
-    depth_to_pressure_dbar, pressure_dbar_to_depth,
-)
+@dataclass(frozen=True, eq=False)
+class AlongTrack(ExportRecord):
+    """One quantity sampled at the waypoints of a ``start`` → ``end``
+    transect, as the scalar transect fetchers return it.
 
-
-def _adiabatic_gradient(sal, temp, pres):
-    """Adiabatic temperature gradient (°C/dbar), Bryden (1973).
-
-    The polynomial as published in UNESCO Technical Papers in Marine Science
-    44 (1983), Fofonoff & Millard, routine ``ATG``. Salinity is practical
-    salinity (PSS-78), ``temp`` in-situ °C, ``pres`` in decibars. The paper's
-    check value ``ATG(S=40, T=40, P=10000) = 3.255976e-4 °C/dbar`` is pinned
-    in the tests.
-    """
-    ds = np.asarray(sal, dtype=float) - 35.0
-    t = np.asarray(temp, dtype=float)
-    p = np.asarray(pres, dtype=float)
-    return ((((-2.1687e-16 * t + 1.8676e-14) * t - 4.6206e-13) * p
-             + ((2.7759e-12 * t - 1.1351e-10) * ds
-                + ((-5.4481e-14 * t + 8.733e-12) * t - 6.7795e-10) * t
-                + 1.8741e-8)) * p
-            + (-4.2393e-8 * t + 1.8932e-6) * ds
-            + ((6.6228e-10 * t - 6.836e-8) * t + 8.5258e-6) * t + 3.5803e-5)
-
-
-def _shift_adiabatically(sal, temp, pres_from, pres_to):
-    """Move a water parcel adiabatically from ``pres_from`` to ``pres_to``.
-
-    Fourth-order Runge-Kutta integration of :func:`_adiabatic_gradient` over
-    the pressure interval, in the coefficient form of UNESCO 44's ``THETA``
-    (Fofonoff 1977). One RK4 step spans the whole interval, which is what the
-    reference routine does and what its check value
-    ``THETA(S=40, T=40, P=10000, Pr=0) = 36.89073 °C`` certifies; the gradient
-    is a slowly varying polynomial, so the round trip closes to better than
-    2e-4 °C over the full oceanic range (both pinned in the tests).
-    """
-    p = np.asarray(pres_from, dtype=float)
-    t = np.asarray(temp, dtype=float)
-    h = np.asarray(pres_to, dtype=float) - p
-    xk = h * _adiabatic_gradient(sal, t, p)
-    t = t + 0.5 * xk
-    q = xk
-    p = p + 0.5 * h
-    xk = h * _adiabatic_gradient(sal, t, p)
-    t = t + 0.29289322 * (xk - q)
-    q = 0.58578644 * xk + 0.121320344 * q
-    xk = h * _adiabatic_gradient(sal, t, p)
-    t = t + 1.707106781 * (xk - q)
-    q = 3.414213562 * xk - 4.121320344 * q
-    p = p + 0.5 * h
-    xk = h * _adiabatic_gradient(sal, t, p)
-    return t + (xk - 2.0 * q) / 6.0
-
-
-def insitu_from_potential(sal, theta, pres) -> np.ndarray:
-    """Potential temperature (°C, referenced to the surface) → in-situ °C.
-
-    Ocean models report ``thetao``, the temperature a parcel *would* have if
-    brought adiabatically to 0 dbar; the sound-speed equations (UNESCO,
-    Del Grosso) want the temperature the parcel actually has at depth. The two
-    are the same at the surface and diverge with pressure: a parcel is warmed
-    by compression, so in-situ is always the warmer of the pair below 0 dbar.
-
-    Ignoring the difference is a deep-water error, not a uniform one. At
-    S=34.7 the in-situ excess and the sound-speed error it costs are
-
-    ======  ==========  =======  ==============
-    depth   theta (°C)  ΔT (°C)  Δc (m/s)
-    ======  ==========  =======  ==============
-    2000 m         2.5    0.149  +0.64
-    5000 m         1.5    0.462  +1.97
-    10000 m        1.2    1.286  +4.98
-    ======  ==========  =======  ==============
-
-    (UNESCO; Del Grosso agrees within 0.2 m/s.) Climatology and float sources
-    are unaffected — WOA23's ``t_an`` and Argo's ``TEMP`` are already in-situ.
-
-    Parameters
+    Attributes
     ----------
-    sal : array_like
-        Practical salinity (PSS-78). Conserved by the adiabatic shift.
-    theta : array_like
-        Potential temperature (°C), referenced to 0 dbar.
-    pres : array_like
-        In-situ pressure (dbar).
-
-    Returns
-    -------
-    numpy.ndarray
-        In-situ temperature (°C).
+    ranges : ndarray
+        The waypoints' great-circle distance from ``start`` (m).
+    lats, lons : ndarray
+        The waypoints (decimal degrees).
+    data : ndarray
+        The quantity at each waypoint; ``NaN`` where the source has none.
+    unit : str
+        The unit of ``data``.
+    quantity : str
+        What ``data`` is (``'sediment_thickness'``, ``'seabed_density'``,
+        ``'sea_ice_concentration'``, ``'wind_speed'``).
+    provenance : DataProvenance or None
+        The source the values were read from, which the transect fetchers
+        always set. ``None`` is user-supplied data: no catalogue source, so
+        no credit is drawn.
     """
-    return np.asarray(
-        _shift_adiabatically(sal, theta, 0.0, pres), dtype=float)
+
+    ranges: np.ndarray
+    lats: np.ndarray
+    lons: np.ndarray
+    data: np.ndarray
+    unit: str
+    quantity: str
+    provenance: Optional[DataProvenance] = None
+
+    _ARRAY_FIELDS = ('ranges', 'lats', 'lons', 'data')
+    _TABLE_FIELDS = ('ranges', 'lats', 'lons', 'data')
+    _XARRAY_FIELDS = {'data': 'data', 'range': 'ranges', 'lat': 'lats',
+                      'lon': 'lons'}
+
+    def _payload(self):
+        return {'data': (self.data, ('range',), self.unit)}
+
+    def _coords(self):
+        return {'range': (self.ranges, 'm'),
+                'lat': (self.lats, 'degrees_north', 'range'),
+                'lon': (self.lons, 'degrees_east', 'range')}
+
+
+# ── The data offset rule ─────────────────────────────────────────────────────
+# Every point fetch records the requested point and the point its data stands
+# for (the centre of the grid cell read, or the sample's own position), so
+# ``DataProvenance.offset_km`` is always known. One decider then applies the
+# same rule to every source: a warning past the source's own threshold, a
+# refusal past the caller's ``max_distance_km``.
+
+def checked_max_distance(max_distance_km, who: str) -> Optional[float]:
+    """``max_distance_km`` validated: ``None`` (no limit beyond the warning)
+    or a positive finite distance in km."""
+    if max_distance_km is None:
+        return None
+    if (isinstance(max_distance_km, bool)
+            or not isinstance(max_distance_km, (int, float, np.integer, np.floating))
+            or not np.isfinite(max_distance_km) or max_distance_km <= 0):
+        raise ConfigurationError(
+            f"{who}: max_distance_km must be None or a positive number of km; "
+            f"got {max_distance_km!r}.",
+            remediation="Pass e.g. max_distance_km=25, or None for no limit.")
+    return float(max_distance_km)
+
+
+def cell_half_diagonal_km(centre_lat: float, dlat_deg: float,
+                          dlon_deg: float) -> float:
+    """The farthest (km) a point inside the ``dlat_deg`` x ``dlon_deg`` grid
+    cell centred at latitude ``centre_lat`` can sit from that centre: the
+    great-circle distance to the cell's farthest corner (its equatorward
+    ones), measured as the offset is. An offset beyond it means the data did
+    not come from the cell holding the point."""
+    lat = float(centre_lat)
+    half = 0.5 * float(dlat_deg)
+    corners_lat = np.array([lat - half, lat - half, lat + half, lat + half])
+    corners_lon = 0.5 * float(dlon_deg) * np.array([-1.0, 1.0, -1.0, 1.0])
+    # The relative margin absorbs the rounding between this distance and the
+    # offset, which reach one corner by different arithmetic.
+    return float(np.max(great_circle_km(lat, 0.0, corners_lat,
+                                        corners_lon))) * (1.0 + 1e-9)
+
+
+def checked_offset(prov: DataProvenance, *, who: str, warn_km: float,
+                   max_distance_km: Optional[float] = None) -> DataProvenance:
+    """``prov`` once the offset rule has passed it.
+
+    Refuses (``DataFetchError``) when the data stand more than
+    ``max_distance_km`` from the requested point. Otherwise warns
+    (``ProvenanceWarning``) when the data are not the point's own: for a
+    record that knows (``prov.from_neighbour_cell`` not ``None``) exactly
+    when the cell read is a neighbour, else when they stand more than
+    ``warn_km`` away — the source's own threshold, a cell's half diagonal
+    for a gridded source, a documented distance for sparse samples. The
+    messages name the point in words (:meth:`DataProvenance.describe_point`).
+    A record with no offset (either point unknown) passes as it is."""
+    offset = prov.offset_km
+    if offset is None:
+        return prov
+    where = (f"{prov.source.name}: the data come from "
+             f"{'the ' if prov.point_kind else ''}"
+             f"{prov.describe_point()}, {offset:.1f} km from the requested "
+             f"point ({point_in_words(*prov.requested_point)})")
+    if max_distance_km is not None and offset > max_distance_km:
+        raise DataFetchError(
+            f"{who}: {where}, past max_distance_km={max_distance_km:g}.",
+            remediation=("Widen max_distance_km, move the point, or choose "
+                         "another source."))
+    if prov.from_neighbour_cell is not None:
+        why = ("the requested point's own cell holds no data"
+               if prov.from_neighbour_cell else None)
+    else:
+        why = (f"beyond the {warn_km:.1f} km this source's data stand for"
+               if offset > warn_km else None)
+    if why is not None:
+        warnings.warn(
+            f"{who}: {where}: {why}. Pass max_distance_km= to refuse data "
+            f"that far.",
+            ProvenanceWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return prov

@@ -85,7 +85,7 @@ def _ram_minus_modal_sum(backend, case):
     return d
 
 
-_FLUID_BACKENDS = ['mpiramS', 'ramgeo', 'ramsurf']
+_FLUID_BACKENDS = ['mpirams', 'ramgeo', 'ramsurf']
 
 
 @pytest.mark.parametrize('backend', _FLUID_BACKENDS + ['rams'])

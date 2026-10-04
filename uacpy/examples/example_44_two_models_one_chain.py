@@ -36,13 +36,15 @@ radiate that pulse. Each bin is steered at its own frequency, because a
 beam delay is a phase that scales with it: one steering vector at the band
 centre mis-steers both edges.
 
-Uses: Kraken(mode_coupling='coupled') · Bellhop · RunMode.BROADBAND ·
+Uses: Kraken(mode_coupling='coupled') · Bellhop · ResultStack.p ·
+RunMode.BROADBAND ·
 beamform_field (narrowband and broadband) · BeamformedField.to_time_trace ·
-compare_models · passive_signal_excess_field(array_gain=<grid>)
+compare_models · passive_signal_excess_field(array_gain_dB=<grid>)
 """
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
@@ -51,13 +53,13 @@ import matplotlib.pyplot as plt
 import uacpy
 from uacpy.acoustic_signal import (beamform_field, independent_beams,
                                    shading_taper)
-from uacpy.core.results import Field
+from uacpy import Field
 from uacpy.models import RunMode
 from uacpy.sonar import (detection_threshold_energy,
                          passive_signal_excess_field, per_look_false_alarm,
-                         probability_of_detection_field)
-from uacpy.sonar.sonar_equation import detection_range_by_depth
-from uacpy.visualization import compare_models
+                         transition_probability_field)
+from uacpy.sonar import detection_ranges_by_depth
+from uacpy.plot import compare_models
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -109,11 +111,18 @@ i60 = int(np.argmin(np.abs(plane_depths - 60.0)))
 # See example 43 for what the mirror arrangement costs.
 array_as_sources = uacpy.Source(depths=elements, frequencies=FREQ)
 kraken = uacpy.Kraken(verbose=False, mode_coupling='coupled')
-bellhop = uacpy.Bellhop(verbose=False, n_beams=0, beam_type='G')
-p_map = np.stack([np.asarray(f.data)
-                  for _, f in kraken.run(env, array_as_sources, plane)])
-bh_map = np.stack([np.asarray(f.data) for _, f in bellhop.run(
-    env, array_as_sources, plane, run_mode=RunMode.COHERENT_TL)])
+bellhop = uacpy.Bellhop(backend='fortran', verbose=False, n_beams=0, beam_type='G')
+# .p stacks every slab's complex pressure: (n_el, n_z, n_r)
+# Within about 0.6 km of the array the plane's deepest cells see paths
+# steeper than Kraken's modes carry, well inside the ranges this example
+# reads off; that notice is printed.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    p_map = kraken.run(env, array_as_sources, plane).p
+    bh_map = bellhop.run(env, array_as_sources, plane,
+                         run_mode=RunMode.COHERENT_TL).p
+for warning in caught:
+    print(f"  noted: {str(warning.message).split(';')[0]}")
 
 # ── propagation, compared symmetrically ─────────────────────────────────
 edge = 5
@@ -142,7 +151,7 @@ BW_HZ, INT_S = 10.0, 10.0
 # |w|^2, and hann^2 is three DFT bins wide against a rectangular window's
 # one, so this scan holds about a third of the looks the unshaded geometry
 # would give.
-n_looks = independent_beams(elements, angles, FREQ, c=C_REF, weights=taper)
+n_looks = independent_beams(elements, angles, FREQ, sound_speed=C_REF, weights=taper)
 dt = detection_threshold_energy(pd=PD, pf=per_look_false_alarm(PF, n_looks),
                                 bandwidth_hz=BW_HZ, integration_time_s=INT_S)
 print(f"\nthe {angles.size}-point scan holds {n_looks:.0f} independent "
@@ -150,7 +159,7 @@ print(f"\nthe {angles.size}-point scan holds {n_looks:.0f} independent "
 
 se, pd_map, r_by_z = {}, {}, {}
 for label, pressure in (('Kraken', p_map), ('Bellhop', bh_map)):
-    scan = beamform_field(pressure, elements, angles, FREQ, c=C_REF,
+    scan = beamform_field(pressure, elements, angles, FREQ, sound_speed=C_REF,
                           weights=taper)
     with np.errstate(divide='ignore', invalid='ignore'):
         gain = np.where(in_water, scan.array_gain(), np.nan)
@@ -160,11 +169,11 @@ for label, pressure in (('Kraken', p_map), ('Bellhop', bh_map)):
                                   'range': np.asarray(array.ranges,
                                                       dtype=float)},
                model=label)
-    se[label] = passive_signal_excess_field(tl, source_level=SL,
-                                            noise_level=NL, array_gain=gain,
-                                            detection_threshold=dt)
-    pd_map[label] = probability_of_detection_field(se[label], sigma_dB=8.0)
-    _, r_by_z[label] = detection_range_by_depth(se[label])
+    se[label] = passive_signal_excess_field(tl, source_level_dB=SL,
+                                            noise_level_dB=NL, array_gain_dB=gain,
+                                            detection_threshold_dB=dt)
+    pd_map[label] = transition_probability_field(se[label], sigma_dB=8.0)
+    _, r_by_z[label] = detection_ranges_by_depth(se[label])
     print(f"  {label:8s} realised AG median {np.nanmedian(gain):.1f} dB, "
           f"{100.0 * np.mean(np.asarray(se[label].data)[in_water] > 0.0):.0f} "
           f"% of the water above threshold")
@@ -184,14 +193,11 @@ print("  -> a 1 dB model difference barely moves the map and moves the "
 
 fig, _ = compare_models(
     [pd_map['Kraken'], pd_map['Bellhop']],
-    labels=['Kraken — coupled modes', 'Bellhop — Gaussian beams'],
+    labels=['Kraken — coupled modes', 'Bellhop — hat beams'],
     env=env, receiver=array_at_origin, figsize=(13, 4.6), contours=(0.5,),
     title=f'The same detection chain under two models — maps agree to '
           f'{pd_gap:.02f} in P_D, headline ranges differ by '
           f'{abs(np.nanmedian(r_by_z["Kraken"]) - np.nanmedian(r_by_z["Bellhop"])) / 1e3:.1f} km')
-# compare_models sets its margins as fixed fractions, so the suptitle lands
-# on the panel titles at this aspect; give it back the strip it needs.
-fig.subplots_adjust(top=0.80)
 fig.savefig(OUT / 'example_44_two_models.png', dpi=140, bbox_inches='tight')
 plt.close(fig)
 
@@ -200,19 +206,21 @@ plt.close(fig)
 # the reception itself. Bellhop for this one, for speed rather than
 # capability: Kraken does run a range-dependent band (uacpy loops the
 # multi-profile deck, one mode solve per bin) but that is ~0.3 s a bin.
-BAND = np.linspace(FREQ - 50.0, FREQ + 50.0, 81)
+# ±60 Hz holds the 25 Hz Gaussian burst below to -50 dB at both edges, so
+# the synthesis has no band edge to ring at.
+BAND = np.linspace(FREQ - 60.0, FREQ + 60.0, 97)
 R_SHOT = float(array.ranges[np.argmin(np.abs(np.asarray(array.ranges) - 5000.0))])
 H = bellhop.run(env, uacpy.Source(depths=60.0, frequencies=BAND),
                 uacpy.Receiver(depths=elements, ranges=[R_SHOT]),
                 run_mode=RunMode.BROADBAND)
 beams = beamform_field(np.asarray(H.data)[:, 0, :], elements, angles, BAND,
-                       c=C_REF, weights=taper)
+                       sound_speed=C_REF, weights=taper)
 pulse = np.exp(-((BAND - FREQ) / 25.0) ** 2)     # a Gaussian tone burst
 # The window opens at the earliest arrival this MODEL can produce, r over
 # the fastest WATER speed. The seabed's 1700 m/s must not enter it: a ray
 # code has no head wave, and anchoring above the true fastest speed opens
 # the window early, so late multipath wraps into the record.
-t_start = R_SHOT / float(np.max(np.asarray(env.ssp.data)))
+t_start = R_SHOT / float(np.max(np.asarray(env.ssp.sound_speed)))
 # power is (n_angles, n_frequencies) here, so the band-averaged winner is
 # the look to use.
 look_best = float(angles[int(np.argmax(beams.power.mean(axis=1)))])
@@ -229,7 +237,7 @@ ax.plot(t_one, np.abs(y_one) / np.abs(y_one).max(), color='0.6', lw=1.0,
 for (label, look), style in ((('steered to the arrival', look_best), 'C0-'),
                              (('steered 30 deg off', look_best + 30.0),
                               'C3--')):
-    tr = beams.to_time_trace(look, range_m=R_SHOT, source_spectrum=pulse,
+    tr = beams.to_time_trace(look, range=R_SHOT, source_spectrum=pulse,
                              t_start=t_start)
     y = np.asarray(tr.data).ravel()
     print(f"  {label:24s} ({look:+5.1f} deg): "

@@ -15,11 +15,12 @@ from uacpy.acoustic_signal import (  # noqa: E402
     probabilistic_constant_q,
     CQTResult, CQSpectrogramResult, SpectralEstimate,
     ProbabilisticSpectralEstimate)
-from uacpy.acoustic_signal.estimate import _cq_quality, _cq_frequencies
-from uacpy.visualization import (  # noqa: E402
+from uacpy.acoustic_signal.cqt import _cq_quality, _cq_frequencies
+from uacpy.plot import (  # noqa: E402
     plot_constant_q_transform, plot_constant_q_spectrogram,
     plot_constant_q_psd, plot_constant_q_ppsd)
 from uacpy.core.exceptions import ConfigurationError  # noqa: E402
+from uacpy.tests.conftest import recorded_warnings
 
 
 # One function per statistic, so the scaling is the name: these adapters map
@@ -63,7 +64,7 @@ def test_geometric_frequency_spacing(B):
 # ── behaviour: a tone peaks in the nearest bin ───────────────────────────────
 def test_transform_peaks_at_tone():
     f0 = 440.0
-    r = constant_q_transform(_tone(f0), FS, fmin=100, fmax=2000,
+    r = constant_q_transform(_tone(f0), FS, freq_min=100, freq_max=2000,
                              bins_per_octave=24)
     assert isinstance(r, CQTResult)
     peak = r.frequencies[np.argmax(np.abs(r.coefficients))]
@@ -73,7 +74,7 @@ def test_transform_peaks_at_tone():
 
 def test_psd_peaks_at_tone_and_shape():
     f0 = 440.0
-    p = _cq_spectrum(_tone(f0), FS, fmin=100, fmax=2000, bins_per_octave=24)
+    p = _cq_spectrum(_tone(f0), FS, freq_min=100, freq_max=2000, bins_per_octave=24)
     assert isinstance(p, SpectralEstimate)
     assert p.power.shape == p.frequencies.shape
     assert np.all(p.power[np.isfinite(p.power)] >= 0)
@@ -82,7 +83,7 @@ def test_psd_peaks_at_tone_and_shape():
 
 
 def test_spectrogram_shape_and_finite():
-    sg = constant_q_spectrogram(_tone(440.0), FS, fmin=100, fmax=2000,
+    sg = constant_q_spectrogram(_tone(440.0), FS, freq_min=100, freq_max=2000,
                                 bins_per_octave=12)
     assert isinstance(sg, CQSpectrogramResult)
     assert sg.power.shape == (sg.frequencies.size, sg.times.size)
@@ -103,8 +104,8 @@ class TestConstantQPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
     """
 
     def _run(self, **kw):
-        return _cq_probabilistic_spectrum(_tone(440.0), FS, fmin=100, fmax=2000,
-                                        bins_per_octave=12, ddB=1.0, **kw)
+        return _cq_probabilistic_spectrum(_tone(440.0), FS, freq_min=100, freq_max=2000,
+                                        bins_per_octave=12, level_step_dB=1.0, **kw)
 
     def test_the_default_reference_is_reported(self):
         from uacpy.core.constants import REFERENCE_PRESSURE_WATER
@@ -143,15 +144,15 @@ class TestConstantQPPSDCarriesTheReferenceItsLevelsAreStatedAgainst:
 
 
 def test_probabilistic_constant_q():
-    pp = _cq_probabilistic_spectrum(_tone(440.0), FS, fmin=100, fmax=2000,
-                                  bins_per_octave=12, ddB=1.0)
+    pp = _cq_probabilistic_spectrum(_tone(440.0), FS, freq_min=100, freq_max=2000,
+                                  bins_per_octave=12, level_step_dB=1.0)
     assert isinstance(pp, ProbabilisticSpectralEstimate)
-    assert (pp.method, pp.seg_duration) == ('constant_q', None)
+    assert (pp.method, pp.segment_duration) == ('constant_q', None)
     assert pp.pdf.shape == (pp.level_edges.size - 1, pp.frequencies.size)
     assert pp.mean_dB.shape == pp.frequencies.shape
     # each frequency column integrates to ~1 over the level axis (density)
     col = pp.pdf[:, np.nanargmax(pp.mean_dB)]
-    integral = np.nansum(col) * pp.binwidth_dB
+    integral = np.nansum(col) * pp.level_step_dB
     assert integral == pytest.approx(1.0, abs=0.05)
     # mean level peaks near the tone bin
     assert abs(pp.frequencies[np.nanargmax(pp.mean_dB)] - 440.0) < 60.0
@@ -160,22 +161,23 @@ def test_probabilistic_constant_q():
 # ── validation / robustness ──────────────────────────────────────────────────
 def test_validation_errors():
     x = _tone(440.0)
-    with pytest.raises(ConfigurationError):
-        constant_q_transform(x, FS, fmin=500, fmax=100)          # fmin >= fmax
-    with pytest.raises(ConfigurationError):
-        constant_q_transform(x, FS, fmin=100, fmax=FS)           # > Nyquist
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match='require 0 < freq_min < freq_max'):
+        constant_q_transform(x, FS, freq_min=500, freq_max=100)          # freq_min >= freq_max
+    with pytest.raises(ConfigurationError,
+                       match='is above the Nyquist frequency'):
+        constant_q_transform(x, FS, freq_min=100, freq_max=FS)           # > Nyquist
+    with pytest.raises(ConfigurationError, match='data must be 1-D'):
         constant_q_transform(np.zeros((4, 4)), FS)               # not 1-D
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match=r'data must be real \(got complex input\)'):
         constant_q_transform(_tone(440.0).astype(complex), FS)   # complex input
 
 
 def test_short_signal_warns_and_drops_low_bins():
-    # fmin so low that the lowest bin's window exceeds the signal length: it
+    # freq_min so low that the lowest bin's window exceeds the signal length: it
     # never fits a full window, so it is warned about and averaged to NaN.
     short = _tone(440.0, dur=0.02)
     with pytest.warns(UserWarning):
-        p = _cq_spectrum(short, FS, fmin=20, fmax=2000, bins_per_octave=12)
+        p = _cq_spectrum(short, FS, freq_min=20, freq_max=2000, bins_per_octave=12)
     assert np.isnan(p.power[0])          # lowest bin: no fully-inside frame
     assert np.isfinite(p.power[-1])      # highest bin: short window fits
 
@@ -194,7 +196,7 @@ def test_short_signal_warning_names_what_the_estimator_does_with_the_bins(
     # averaging estimators drop it. The warning says which.
     short = _tone(440.0, dur=0.02)
     with pytest.warns(UserWarning, match=fate) as rec:
-        estimator(short, FS, fmin=20, fmax=2000, bins_per_octave=12)
+        estimator(short, FS, freq_min=20, freq_max=2000, bins_per_octave=12)
     short_bin = [str(w.message) for w in rec
                  if "lowest bin needs" in str(w.message)]
     assert len(short_bin) == 1 and not_fate not in short_bin[0]
@@ -205,7 +207,7 @@ def test_density_scaling_matches_welch_white_noise():
     from scipy.signal import welch
     rng = np.random.default_rng(1)
     x = rng.standard_normal(40000)       # white noise, variance ~ 1
-    cq = _cq_spectrum(x, FS, fmin=200, fmax=3000, bins_per_octave=12,
+    cq = _cq_spectrum(x, FS, freq_min=200, freq_max=3000, bins_per_octave=12,
                         scaling="density")
     cq_level = float(np.nanmedian(cq.power))
     # one-sided white PSD level (scipy welch density, and analytic 2*var/fs)
@@ -226,7 +228,7 @@ def test_spectrum_scaling_tone_power():
     fb = _cq_frequencies(80.0, 4000.0, 24)
     f0 = float(fb[np.argmin(np.abs(fb - 1000.0))])     # tone exactly on a bin
     x = np.sin(2 * np.pi * f0 * np.arange(int(2.0 * FS)) / FS)
-    p = _cq_spectrum(x, FS, fmin=80, fmax=4000, bins_per_octave=24,
+    p = _cq_spectrum(x, FS, freq_min=80, freq_max=4000, bins_per_octave=24,
                        scaling="spectrum")
     assert np.nanmax(p.power) == pytest.approx(0.5, rel=0.1)
 
@@ -234,15 +236,15 @@ def test_spectrum_scaling_tone_power():
 def test_nan_input_rejected():
     x = _tone(440.0)
     x[5] = np.nan
-    with pytest.raises(ConfigurationError):
-        _cq_spectrum(x, FS, fmin=200, fmax=2000)
+    with pytest.raises(ConfigurationError, match='data contains NaN or Inf'):
+        _cq_spectrum(x, FS, freq_min=200, freq_max=2000)
 
 
 def test_spectrum_and_density_differ():
     x = _tone(440.0)
-    sp = _cq_spectrum(x, FS, fmin=100, fmax=2000, bins_per_octave=12,
+    sp = _cq_spectrum(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12,
                         scaling="spectrum")
-    de = _cq_spectrum(x, FS, fmin=100, fmax=2000, bins_per_octave=12,
+    de = _cq_spectrum(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12,
                         scaling="density")
     assert not np.allclose(sp.power, de.power)
 
@@ -257,19 +259,19 @@ def test_each_door_names_the_scaling_it_returns():
     for fn in (welch, constant_q):
         assert "method" not in inspect.signature(fn).parameters
         assert inspect.signature(fn).parameters["scaling"].default == "density"
-    assert constant_q(_tone(440.0), FS, fmin=100, fmax=2000,
+    assert constant_q(_tone(440.0), FS, freq_min=100, freq_max=2000,
                       scaling="spectrum").scaling == "spectrum"
-    assert constant_q(_tone(440.0), FS, fmin=100,
-                      fmax=2000).scaling == "density"
+    assert constant_q(_tone(440.0), FS, freq_min=100,
+                      freq_max=2000).scaling == "density"
     assert inspect.signature(
         spectrogram).parameters["scaling"].default == "density"
     assert inspect.signature(
-        constant_q_spectrogram).parameters["scaling"].default == "spectrum"
-    # The two constant-Q doors differ, and differ in the documented way.
+        constant_q_spectrogram).parameters["scaling"].default == "density"
+    # The two scalings differ, and differ in the documented way.
     x = _tone(440.0, dur=1.0)
-    sp = constant_q(x, FS, fmin=200, fmax=2000, bins_per_octave=12,
+    sp = constant_q(x, FS, freq_min=200, freq_max=2000, bins_per_octave=12,
                     scaling="spectrum")
-    de = constant_q(x, FS, fmin=200, fmax=2000, bins_per_octave=12)
+    de = constant_q(x, FS, freq_min=200, freq_max=2000, bins_per_octave=12)
     assert not np.allclose(np.nan_to_num(sp.power), np.nan_to_num(de.power))
 
 
@@ -278,7 +280,7 @@ def test_scaling_validation():
     keyword — while the spectrogram, which still takes one, validates it."""
     with pytest.raises(ConfigurationError, match="scaling"):
         constant_q(_tone(440.0), FS, scaling="bogus")
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match='scaling must be one of'):
         constant_q_spectrogram(_tone(440.0), FS, scaling="bogus")
 
 
@@ -288,21 +290,147 @@ def test_edge_exclusion_reduces_padding_bias():
     # bins above the naive mean of all spectrogram frames (which keeps the
     # diluting edge frames).
     x = _tone(150.0, dur=2.0)
-    fmin, fmax, B = 120, 1000, 12
-    psd = _cq_spectrum(x, FS, fmin=fmin, fmax=fmax, bins_per_octave=B)
-    sg = constant_q_spectrogram(x, FS, fmin=fmin, fmax=fmax, bins_per_octave=B)
+    freq_min, freq_max, B = 120, 1000, 12
+    psd = _cq_spectrum(x, FS, freq_min=freq_min, freq_max=freq_max, bins_per_octave=B)
+    sg = constant_q_spectrogram(x, FS, freq_min=freq_min, freq_max=freq_max, bins_per_octave=B,
+                                scaling='spectrum')
     naive = np.nanmean(sg.power, axis=1)        # includes zero-padded edges
     k = int(np.nanargmax(psd.power))            # the tone's bin (longest window)
     assert psd.power[k] >= naive[k]
 
 
+# ── coverage: every sample reaches every bin ─────────────────────────────────
+class TestEveryBinReadsEverySample:
+    """Each bin steps by a quarter of its own kernel, so a transient shorter
+    than the lowest bin's kernel reaches the high bins wherever it falls.
+
+    The case is a 20 ms, 1 Pa, Hann-gated tone burst on a ~10 kHz bin in 2 s
+    of 1 mPa white noise at 48 kHz, with the default ``freq_min = 20`` Hz: the
+    lowest kernel is 81 906 samples and the 10 kHz one 165. Five onsets span
+    more than an eighth of the lowest kernel (213 ms), the step every bin
+    shared when the frames sat on one grid, so at least four of them fall
+    between frames of that grid.
+    """
+
+    fs = 48000.0
+    duration = 2.0
+    freq_max = 12000.0
+    onsets = (0.50, 0.55, 0.60, 0.65, 0.70)
+
+    @classmethod
+    def _bin(cls):
+        ladder = _cq_frequencies(20.0, cls.freq_max, 24)
+        k = int(np.argmin(np.abs(ladder - 10000.0)))
+        return k, float(ladder[k])
+
+    @classmethod
+    def _record(cls, onset):
+        _, fk = cls._bin()
+        n = int(cls.duration * cls.fs)
+        x = 1e-3 * np.random.default_rng(0).standard_normal(n)
+        m = int(0.020 * cls.fs)
+        i0 = int(onset * cls.fs)
+        t = np.arange(m) / cls.fs
+        burst = np.hanning(m) * np.sin(2 * np.pi * fk * t)
+        x[i0:i0 + m] += burst
+        return x, burst
+
+    @pytest.mark.parametrize("onset", onsets)
+    def test_the_average_reads_the_burst_power_wherever_it_falls(self, onset):
+        k, _ = self._bin()
+        x, burst = self._record(onset)
+        # The burst's time-averaged band power over the record: its whole
+        # spectrum sits inside the 10 kHz bin (293 Hz wide at 24 per octave).
+        want = np.sum(burst ** 2) / x.size
+        got = _cq_spectrum(x, self.fs, freq_max=self.freq_max).power[k]
+        assert got == pytest.approx(want, rel=0.05)
+
+    @pytest.mark.parametrize("onset", onsets)
+    def test_the_spectrogram_carries_the_burst_energy_wherever_it_falls(
+            self, onset):
+        k, _ = self._bin()
+        x, burst = self._record(onset)
+        sg = constant_q_spectrogram(x, self.fs, freq_max=self.freq_max,
+                                    scaling="spectrum")
+        cell = sg.times[1] - sg.times[0]
+        # Power times cell duration, summed over the cells, is the energy the
+        # bin saw; the background adds 1.7e-8 Pa² x 2 s.
+        energy = float(np.sum(sg.power[k]) * cell)
+        assert energy == pytest.approx(np.sum(burst ** 2) / self.fs,
+                                       rel=0.05)
+
+    @pytest.mark.parametrize("onset", onsets)
+    def test_the_histogram_holds_the_burst_levels_wherever_it_falls(
+            self, onset):
+        k, _ = self._bin()
+        x, _ = self._record(onset)
+        pp = _cq_probabilistic_spectrum(x, self.fs, freq_max=self.freq_max)
+        # The burst peaks at 0.5 Pa² band power, 117 dB re 1 µPa²; the
+        # background sits near 43 dB.
+        loud = pp.level_edges[:-1] >= 110.0
+        assert np.isfinite(pp.pdf[loud, k]).any()
+
+    def test_a_burst_shorter_than_the_kernel_reads_the_same_at_every_offset(
+            self):
+        # A 2 ms burst inside the 3.4 ms kernel weighs as the squared window
+        # summed over the frames that cover it: flat for Hann² stepped by a
+        # quarter kernel, rippling by 3 dB at a half-kernel step. Twelve
+        # onsets one sample apart and beyond span a whole 41-sample step.
+        k, fk = self._bin()
+        n = int(1.0 * self.fs)
+        m = int(0.002 * self.fs)
+        burst = np.hanning(m) * np.sin(2 * np.pi * fk * np.arange(m) / self.fs)
+        read = []
+        for i0 in 24000 + np.array([0, 1, 3, 5, 8, 11, 15, 20, 26, 31, 36,
+                                    40]):
+            x = np.zeros(n)
+            x[i0:i0 + m] = burst
+            read.append(_cq_spectrum(x, self.fs, freq_max=self.freq_max).power[k])
+        spread_dB = 10 * np.log10(max(read) / min(read))
+        assert spread_dB < 0.05
+
+    def test_a_stationary_on_bin_tone_reads_its_full_power(self):
+        k, fk = self._bin()
+        n = int(self.duration * self.fs)
+        x = np.sin(2 * np.pi * fk * np.arange(n) / self.fs)
+        got = _cq_spectrum(x, self.fs, freq_max=self.freq_max).power[k]
+        assert got == pytest.approx(0.5, rel=1e-4)
+
+
+def test_spectrogram_defaults_to_density_like_its_siblings():
+    """``constant_q_spectrogram`` defaults to the density ``constant_q`` and
+    ``spectrogram`` default to, and carries the scaling it used: the default
+    frame average equals the explicit density one, and differs from the
+    band-power one by each bin's noise-equivalent bandwidth."""
+    x = _tone(440.0, dur=1.0)
+    kw = dict(freq_min=100, freq_max=2000, bins_per_octave=12)
+    default = constant_q_spectrogram(x, FS, **kw)
+    density = constant_q_spectrogram(x, FS, scaling='density', **kw)
+    band = constant_q_spectrogram(x, FS, scaling='spectrum', **kw)
+    assert default.scaling == 'density' and band.scaling == 'spectrum'
+    np.testing.assert_array_equal(default.power, density.power)
+    assert not np.allclose(default.power, band.power)
+
+
+def test_the_result_plot_labels_the_unit_it_carries():
+    """``.plot()`` reads ``scaling`` off the result, so a density panel is
+    labelled per hertz and a band-power panel is not."""
+    x = _tone(440.0, dur=1.0)
+    kw = dict(freq_min=100, freq_max=2000, bins_per_octave=12)
+    for scaling, per_hz in (('density', True), ('spectrum', False)):
+        fig, ax = constant_q_spectrogram(x, FS, scaling=scaling, **kw).plot()
+        label = fig.axes[-1].get_ylabel()
+        assert ('/Hz' in label) is per_hz, (scaling, label)
+        plt.close(fig)
+
+
 # ── plotters ─────────────────────────────────────────────────────────────────
 def test_plotters_smoke():
     x = _tone(440.0, dur=1.0)
-    sg = constant_q_spectrogram(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
-    p = _cq_spectrum(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
-    pp = _cq_probabilistic_spectrum(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
-    cqt = constant_q_transform(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
+    sg = constant_q_spectrogram(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12)
+    p = _cq_spectrum(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12)
+    pp = _cq_probabilistic_spectrum(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12)
+    cqt = constant_q_transform(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12)
     for fig, ax in (plot_constant_q_transform(cqt.frequencies, cqt.coefficients),
                     plot_constant_q_spectrogram(sg.frequencies, sg.times, sg.power),
                     plot_constant_q_psd(p.frequencies, p.power),
@@ -315,7 +443,7 @@ def test_the_transform_plotter_draws_the_magnitude_on_a_log_axis():
     """The coefficients are complex, so the line is ``|X_cq|``, and the
     frequency axis is geometric like the bins it draws."""
     x = _tone(440.0, dur=1.0)
-    cqt = constant_q_transform(x, FS, fmin=100, fmax=2000, bins_per_octave=12)
+    cqt = constant_q_transform(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12)
     _, ax = plot_constant_q_transform(cqt.frequencies, cqt.coefficients)
     drawn = ax.lines[0].get_ydata()
     assert ax.get_xscale() == "log"
@@ -342,7 +470,7 @@ def test_the_transform_plotter_requires_one_coefficient_per_frequency(
 
 def test_plotter_unit_label_switches_with_scaling():
     x = _tone(440.0, dur=1.0)
-    p = _cq_spectrum(x, FS, fmin=100, fmax=2000, bins_per_octave=12,
+    p = _cq_spectrum(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12,
                        scaling="density")
     _, ax = plot_constant_q_psd(p.frequencies, p.power, scaling="density")
     assert "Pa²/Hz" in ax.get_ylabel()
@@ -357,23 +485,23 @@ def test_spectrum_calibration_is_exact_on_a_bin_centre():
     """The 'spectrum' scaling promises a tone of amplitude A peaks at A**2/2.
     That holds on a bin centre; between centres the filterbank scallops, by at
     most the ~1.4 dB the module docstring quotes."""
-    from uacpy.acoustic_signal.estimate import _cq_frequencies
-    B, fs, A, fmin = 24, 48000.0, 1.7, 100.0
-    f = _cq_frequencies(fmin, 4000.0, B)
+    from uacpy.acoustic_signal.cqt import _cq_frequencies
+    B, fs, A, freq_min = 24, 48000.0, 1.7, 100.0
+    f = _cq_frequencies(freq_min, 4000.0, B)
     k = int(np.argmin(np.abs(f - 500.0)))
     t = np.arange(int(fs)) / fs
 
     on = A * np.cos(2 * np.pi * f[k] * t)
-    freqs, X = constant_q_transform(on, fs, fmin=fmin, fmax=4000.0,
+    freqs, X = constant_q_transform(on, fs, freq_min=freq_min, freq_max=4000.0,
                                     bins_per_octave=B)
     assert abs(X[k]) == pytest.approx(A / 2, rel=1e-3)
-    _, power = _cq_spectrum(on, fs, fmin=fmin, fmax=4000.0,
+    _, power = _cq_spectrum(on, fs, freq_min=freq_min, freq_max=4000.0,
                               bins_per_octave=B, scaling='spectrum')
     assert power.max() == pytest.approx(A ** 2 / 2, rel=1e-3)
 
     mid = float(np.sqrt(f[k] * f[k + 1]))            # midway between centres
     off = A * np.cos(2 * np.pi * mid * t)
-    _, pm = _cq_spectrum(off, fs, fmin=fmin, fmax=4000.0, bins_per_octave=B,
+    _, pm = _cq_spectrum(off, fs, freq_min=freq_min, freq_max=4000.0, bins_per_octave=B,
                            scaling='spectrum')
     assert 0.0 < -10 * np.log10(pm.max() / (A ** 2 / 2)) < 1.5
 
@@ -392,7 +520,7 @@ def test_kernel_analyses_at_bin_centre_up_to_nyquist():
     top = f[-40:]
     for f0 in top[top < 0.48 * fs]:                   # top ~1.7 octaves
         x = np.cos(2 * np.pi * f0 * t)
-        r = _cq_spectrum(x, fs, fmin=20.0, bins_per_octave=24)
+        r = _cq_spectrum(x, fs, freq_min=20.0, bins_per_octave=24)
         k = int(np.argmin(np.abs(r.frequencies - f0)))
         err_dB = 10 * np.log10(r.power[k] / 0.5)
         assert abs(err_dB) < 0.05, f"{err_dB:.3f} dB at f0={f0:.1f} Hz"
@@ -447,19 +575,17 @@ class TestNearNyquistBinsReadAToneHigh:
         import warnings as _w
         with _w.catch_warnings():
             _w.simplefilter("ignore")
-            _, power = _cq_spectrum(x, fs, fmin=fk / 1.0000001,
-                                      fmax=fk * 1.0000001,
+            _, power = _cq_spectrum(x, fs, freq_min=fk / 1.0000001,
+                                      freq_max=fk * 1.0000001,
                                       bins_per_octave=TestNearNyquistBinsReadAToneHigh.B)
         return float(power[0])
 
     @staticmethod
     def _warns(u, fs=FS):
-        import warnings as _w
         fk = u * fs
         x = np.cos(2 * np.pi * fk * np.arange(int(2.0 * fs)) / fs)
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter("always")
-            _cq_spectrum(x, fs, fmin=fk / 1.0000001, fmax=fk * 1.0000001,
+        with recorded_warnings() as caught:
+            _cq_spectrum(x, fs, freq_min=fk / 1.0000001, freq_max=fk * 1.0000001,
                            bins_per_octave=TestNearNyquistBinsReadAToneHigh.B)
         return [str(c.message) for c in caught
                 if 'negative-frequency image' in str(c.message)]
@@ -507,28 +633,39 @@ class TestNearNyquistBinsReadAToneHigh:
         x = rng.standard_normal(int(60 * FS))
         with _w.catch_warnings():
             _w.simplefilter("ignore")
-            freqs, power = _cq_spectrum(x, FS, scaling="density")
+            freqs, power = _cq_spectrum(x, FS, scaling="density",
+                                        freq_max=FS / 2)
         dB = 10 * np.log10(power / (2.0 / FS))
         assert abs(dB[-1]) < 0.4
         assert freqs[-1] / FS > 0.49
 
-    def test_every_estimator_warns_on_the_default_call(self):
-        import warnings as _w
+    def test_every_estimator_warns_on_an_explicit_nyquist_fmax_only(self):
+        """An unset ``freq_max`` stops below the leaking bins, so the default
+        call has nothing to warn about; asking for the Nyquist bin by name
+        is warned on every estimator."""
         x = np.cos(2 * np.pi * 3948.0 * np.arange(int(2 * FS)) / FS)
-        for call in (lambda: constant_q_transform(x, FS),
-                     lambda: _cq_spectrum(x, FS),
-                     lambda: constant_q_spectrogram(x, FS),
-                     lambda: _cq_probabilistic_spectrum(x, FS)):
-            with _w.catch_warnings(record=True) as caught:
-                _w.simplefilter("always")
-                call()
-            assert any('negative-frequency image' in str(c.message)
-                       for c in caught)
+        for estimator in (constant_q_transform, _cq_spectrum,
+                          constant_q_spectrogram, _cq_probabilistic_spectrum):
+            for kwargs, warned in (({}, False), ({'freq_max': FS / 2}, True)):
+                with recorded_warnings() as caught:
+                    estimator(x, FS, **kwargs)
+                assert any('negative-frequency image' in str(c.message)
+                           for c in caught) is warned, (estimator, kwargs)
+
+    def test_the_default_range_ends_on_the_last_bin_below_the_threshold(self):
+        """Both sides of the cut: the default grid's top bin reads its tone
+        without a warning, and the next bin of the same ladder would warn."""
+        freqs = _cq_spectrum(np.random.default_rng(0).standard_normal(
+            int(2 * FS)), FS, bins_per_octave=self.B).frequencies
+        top = freqs[-1] / FS
+        above = top * 2.0 ** (1.0 / self.B)
+        assert self._warns(top) == []
+        assert len(self._warns(above)) == 1
 
     @staticmethod
     def _one_bin_power_at_phase(u, phase_deg, fs=FS, dur=8.0):
         """Same as ``_one_bin_power`` but with the tone's phase as an argument
-        and the bin placed exactly on ``fmax``, so ``u = 0.5`` is reachable."""
+        and the bin placed exactly on ``freq_max``, so ``u = 0.5`` is reachable."""
         import warnings as _w
         fk = u * fs
         n = np.arange(int(dur * fs))
@@ -536,7 +673,7 @@ class TestNearNyquistBinsReadAToneHigh:
         with _w.catch_warnings():
             _w.simplefilter("ignore")
             _, power = _cq_spectrum(
-                x, fs, fmin=fk / 1.0000001, fmax=fk,
+                x, fs, freq_min=fk / 1.0000001, freq_max=fk,
                 bins_per_octave=TestNearNyquistBinsReadAToneHigh.B)
         return float(power[-1])
 
@@ -574,3 +711,272 @@ class TestNearNyquistBinsReadAToneHigh:
         of excess."""
         power = self._one_bin_power_at_phase(0.5, 90.0)
         assert power < 1e-20 * 0.5, f"read {power:g}, expected ~0"
+
+
+def test_constant_q_runs_along_the_named_axis_of_a_multichannel_record():
+    """``axis=`` means what it means on ``welch``: a ``(n_samples,
+    n_channels)`` record at ``axis=0`` gives one spectrum per channel,
+    frequency last, each equal to the channel's own 1-D estimate."""
+    rng = np.random.default_rng(1)
+    x = rng.standard_normal((int(FS), 3))
+    kw = dict(freq_min=100.0, freq_max=2000.0, bins_per_octave=12)
+    est = _cq_spectrum(x, FS, axis=0, **kw)
+    assert est.power.shape == (3, est.frequencies.size)
+    for ch in range(3):
+        np.testing.assert_array_equal(est.power[ch],
+                                      _cq_spectrum(x[:, ch], FS, **kw).power)
+
+
+@pytest.mark.parametrize('axis', [0, 1])
+def test_constant_q_channels_come_out_in_welchs_orientation(axis):
+    """For the same multichannel input and ``axis``, ``constant_q`` and
+    ``welch`` both return one spectrum per channel with frequency LAST, the
+    channels in input order, so one caller handles both estimates."""
+    from uacpy.acoustic_signal import welch
+    rng = np.random.default_rng(2)
+    block = rng.standard_normal((int(FS), 2))
+    block[:, 1] *= 10.0                       # channel 1 is 20 dB louder
+    x = block if axis == 0 else block.T
+    kw = dict(freq_min=100.0, freq_max=2000.0, bins_per_octave=12)
+    cq = _cq_spectrum(x, FS, axis=axis, **kw)
+    w = welch(x, FS, axis=axis, nperseg=1024)
+    assert cq.power.shape[:-1] == w.power.shape[:-1] == (2,)
+    assert cq.power.shape[-1] == cq.frequencies.size
+    assert w.power.shape[-1] == w.frequencies.size
+    for est in (cq, w):
+        assert np.nanmedian(est.power[1] / est.power[0]) == pytest.approx(
+            100.0, rel=0.2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# acoustic_signal/cqt.py — frequency ladder, kernel, frames, hop, ppsd
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestConstantQFrequencyLadder:
+    """``f_k = freq_min·2**(k/B)`` with ``K = floor(B·log2(freq_max/freq_min)) + 1``
+    bins; freq_min below 1 Hz is legal, freq_min = 0 and freq_max <= freq_min are not."""
+
+    def test_exact_octave_ladder(self):
+        from uacpy.acoustic_signal.cqt import constant_q_transform
+        x = np.sin(2 * np.pi * 200.0 * np.arange(4096) / 4096.0)
+        r = constant_q_transform(x, 4096.0, freq_min=100.0, freq_max=400.0,
+                                 bins_per_octave=1)
+        np.testing.assert_allclose(r.frequencies, [100.0, 200.0, 400.0],
+                                   rtol=1e-12)
+
+    def test_sub_hertz_fmin_is_legal(self):
+        from uacpy.acoustic_signal.cqt import _cq_frequencies
+        f = _cq_frequencies(0.5, 2.0, 1)
+        np.testing.assert_allclose(f, [0.5, 1.0, 2.0], rtol=1e-12)
+
+    def test_fmin_zero_raises(self):
+        from uacpy.acoustic_signal.cqt import _cq_frequencies
+        with pytest.raises(ConfigurationError, match="0 < freq_min < freq_max"):
+            _cq_frequencies(0.0, 100.0, 24)
+
+    def test_fmax_equal_to_fmin_raises(self):
+        from uacpy.acoustic_signal.cqt import _cq_frequencies
+        with pytest.raises(ConfigurationError, match="0 < freq_min < freq_max"):
+            _cq_frequencies(100.0, 100.0, 24)
+
+
+class TestConstantQKernelConstruction:
+    """The kernel is ``w·exp(-2j·pi·f_k·n/fs)/Σw`` with a *periodic*
+    (fftbins) window of ``N_k = max(1, ceil(Q·fs/f_k))`` samples — pinned
+    against an independent reconstruction, phase included."""
+
+    def test_kernel_matches_definition_exactly(self):
+        from scipy.signal import get_window
+        from uacpy.acoustic_signal.cqt import _cq_kernels
+        fs, fk, Q = 1000.0, 125.0, 16.817
+        (Nk, ker, _), = _cq_kernels(np.array([fk]), Q, fs, "hann")
+        assert Nk == int(np.ceil(Q * fs / fk))
+        w = get_window("hann", Nk, fftbins=True)
+        n = np.arange(Nk)
+        want = (w * np.exp(-2j * np.pi * fk * n / fs)) / float(np.sum(w))
+        np.testing.assert_allclose(ker, want, rtol=0, atol=1e-15)
+
+    def test_window_floor_is_one_sample(self):
+        from uacpy.acoustic_signal.cqt import _cq_kernels
+        # Q·fs/f_k = 0.5 -> ceil = 1: the floor keeps N_k = 1, not 2.
+        (Nk, _, _), = _cq_kernels(np.array([2000.0]), 1.0, 1000.0, "hann")
+        assert Nk == 1
+
+
+class TestConstantQFrameGeometry:
+    """Window centring, the exact-fit validity boundary, and the
+    zero-padded edge path, pinned with unit impulses."""
+
+    def test_window_is_centred_on_the_requested_sample(self):
+        from uacpy.acoustic_signal.cqt import _cq_frame, _cq_kernels
+        kernels = _cq_kernels(np.array([100.0]), 8.0, 1000.0, "hann")
+        Nk, ker, _ = kernels[0]
+        x = np.zeros(4 * Nk)
+        centre = 2 * Nk
+        x[centre] = 1.0
+        coeffs, valid = _cq_frame(x, centre, kernels)
+        # The impulse sits at window index Nk//2, so the coefficient is
+        # that single kernel sample.
+        assert valid[0]
+        np.testing.assert_allclose(coeffs[0], ker[Nk // 2], rtol=0,
+                                   atol=1e-15)
+
+    def test_exact_fit_window_is_valid_one_short_is_not(self):
+        from uacpy.acoustic_signal.cqt import _cq_frame, _cq_kernels
+        kernels = _cq_kernels(np.array([100.0]), 8.0, 1000.0, "hann")
+        Nk = kernels[0][0]
+        x = np.ones(Nk)
+        _, valid_fit = _cq_frame(x, Nk // 2, kernels)
+        assert valid_fit[0]
+        _, valid_short = _cq_frame(x[:-1], Nk // 2, kernels)
+        assert not valid_short[0]
+
+    def test_edge_padding_keeps_sample_zero(self):
+        from uacpy.acoustic_signal.cqt import _cq_frame, _cq_kernels
+        kernels = _cq_kernels(np.array([100.0]), 8.0, 1000.0, "hann")
+        Nk, ker, _ = kernels[0]
+        x = np.zeros(Nk)
+        x[0] = 1.0
+        # Centre at 0: the window start is negative, so x[0] lands at
+        # kernel index Nk//2 via the zero-padded path.
+        coeffs, valid = _cq_frame(x, 0, kernels)
+        assert not valid[0]
+        np.testing.assert_allclose(coeffs[0], ker[Nk // 2], rtol=0,
+                                   atol=1e-15)
+
+
+class TestConstantQSpectrogramTimeAxis:
+    """``times = arange(0, n, hop)/fs`` — starts at zero, in seconds."""
+
+    def test_times_start_at_zero_in_seconds(self):
+        from uacpy.acoustic_signal.cqt import constant_q_spectrogram
+        fs = 2000.0
+        x = np.sin(2 * np.pi * 250.0 * np.arange(2048) / fs)
+        r = constant_q_spectrogram(x, fs, freq_min=125.0, freq_max=500.0,
+                                   bins_per_octave=2, hop=100)
+        np.testing.assert_allclose(
+            r.times, np.arange(0, 2048, 100) / fs, rtol=1e-12)
+
+
+class TestConstantQHopResolution:
+    """Default hop is ``max(1, min(n_lowest//8, max(1, n//8)))`` from the
+    *lowest* bin's window; an explicit ``hop=1`` is legal."""
+
+    def test_default_hop_follows_the_lowest_bin(self):
+        from uacpy.acoustic_signal.cqt import _resolve_hop
+        kernels = [(100, None, None), (50, None, None)]
+        assert _resolve_hop(None, kernels, 10000, "t") == 100 // 8
+
+    def test_tiny_signal_floors_at_one(self):
+        from uacpy.acoustic_signal.cqt import _resolve_hop
+        assert _resolve_hop(None, [(8, None, None)], 8, "t") == 1
+
+    def test_explicit_hop_of_one_is_accepted(self):
+        from uacpy.acoustic_signal.cqt import _resolve_hop
+        assert _resolve_hop(1, [(100, None, None)], 1000, "t") == 1
+        with pytest.raises(ConfigurationError, match="hop must be >= 1"):
+            _resolve_hop(0, [(100, None, None)], 1000, "t")
+
+
+class TestConstantQSetupWarningBoundary:
+    """The too-short-signal warning keys on the lowest bin needing *more*
+    samples than the signal has — an exact fit stays silent."""
+
+    def test_exact_fit_does_not_warn(self):
+        from uacpy.acoustic_signal.cqt import (
+            _cq_frequencies, _cq_kernels, _cq_quality, _cq_setup,
+        )
+        fs, freq_min, B = 1000.0, 100.0, 2
+        n_lowest = _cq_kernels(
+            _cq_frequencies(freq_min, fs / 2, B), _cq_quality(B), fs,
+            "hann")[0][0]
+        with recorded_warnings() as caught:
+            _cq_setup(np.zeros(n_lowest), fs, freq_min, None, B, "hann", "t",
+                      drops_short_bins=True)
+        # Only this warning is under test. `freq_max=None` resolves to fs/2, so
+        # the near-Nyquist image note fires on the same call by design.
+        assert not any("lowest bin needs" in str(c.message) for c in caught)
+        with pytest.warns(UserWarning, match="lowest bin needs"):
+            _cq_setup(np.zeros(n_lowest - 1), fs, freq_min, None, B, "hann", "t",
+                      drops_short_bins=True)
+
+
+class TestConstantQTransformCentresTheFrame:
+    """``constant_q_transform`` analyses one frame centred on ``n//2``."""
+
+    def test_impulse_at_the_centre_sample(self):
+        from uacpy.acoustic_signal.cqt import (
+            _cq_frequencies, _cq_kernels, _cq_quality, constant_q_transform,
+        )
+        fs, freq_min, freq_max, B = 1000.0, 100.0, 200.0, 1
+        n = 1024
+        x = np.zeros(n)
+        x[n // 2] = 1.0
+        r = constant_q_transform(x, fs, freq_min=freq_min, freq_max=freq_max,
+                                 bins_per_octave=B)
+        kernels = _cq_kernels(_cq_frequencies(freq_min, freq_max, B),
+                              _cq_quality(B), fs, "hann")
+        for got, (Nk, ker, _) in zip(r.coefficients, kernels):
+            np.testing.assert_allclose(got, ker[Nk // 2], rtol=0, atol=1e-15)
+
+
+class TestProbabilisticConstantQContracts:
+    """Level-edge defaults run ``level_min_dB..level_max_dB`` inclusive, and a bin
+    with exactly one fully-inside frame is data — for the PSD average and
+    the PPSD histogram both — not a NaN column."""
+
+    def _one_frame_case(self):
+        from uacpy.acoustic_signal.cqt import (
+            _cq_frequencies, _cq_kernels, _cq_quality,
+        )
+        fs, freq_min, B = 1000.0, 100.0, 2
+        n_lowest = _cq_kernels(
+            _cq_frequencies(freq_min, fs / 2, B), _cq_quality(B), fs,
+            "hann")[0][0]
+        # A record exactly as long as the lowest bin's window: that window
+        # fits in one place only -> exactly one valid frame for bin 0.
+        x = np.sin(2 * np.pi * freq_min * np.arange(n_lowest) / fs)
+        return x, fs, freq_min, B, n_lowest
+
+    def test_level_edges_run_from_lvlmin_to_lvlmax_inclusive(self):
+        from uacpy.acoustic_signal import probabilistic_constant_q
+        x, fs, freq_min, B, n_lowest = self._one_frame_case()
+        r = probabilistic_constant_q(x, fs, scaling='spectrum', freq_min=freq_min, bins_per_octave=B,
+                                     level_step_dB=1.0, level_min_dB=0, level_max_dB=150)
+        assert r.level_edges[0] == 0.0
+        assert r.level_edges[-1] == 150.0
+        assert r.level_edges.size == 151
+
+    def test_single_valid_frame_is_data(self):
+        from uacpy.acoustic_signal import (constant_q,
+                                           probabilistic_constant_q)
+        x, fs, freq_min, B, n_lowest = self._one_frame_case()
+        psd = constant_q(x, fs, scaling='spectrum', freq_min=freq_min,
+                             bins_per_octave=B)
+        assert np.isfinite(psd.power[0])
+        ppsd = probabilistic_constant_q(x, fs, scaling='spectrum', freq_min=freq_min, bins_per_octave=B)
+        assert np.isfinite(ppsd.pdf[:, 0]).any()
+
+
+class TestProbabilisticConstantQDefaultLevels:
+    """The *default* level range is 0..150 dB — pinned without passing
+    level_min_dB/level_max_dB explicitly."""
+
+    def test_default_edges(self):
+        from uacpy.acoustic_signal import probabilistic_constant_q
+        x = np.sin(2 * np.pi * 100.0 * np.arange(4096) / 1000.0)
+        r = probabilistic_constant_q(x, 1000.0, scaling='spectrum', freq_min=100.0,
+                                     bins_per_octave=2)
+        assert r.level_edges[0] == 0.0
+        assert r.level_edges[-1] == 150.0
+
+
+class TestConstantQHopInnerFloor:
+    """The signal-length term of the default hop, ``max(1, n//8)``, floors
+    at one for signals under 16 samples even when the lowest window is
+    longer."""
+
+    def test_short_signal_with_long_window(self):
+        from uacpy.acoustic_signal.cqt import _resolve_hop
+        assert _resolve_hop(None, [(24, None, None)], 8, "t") == 1

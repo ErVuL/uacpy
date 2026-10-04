@@ -4,12 +4,12 @@ Covers the harmonisation layer that makes ``run(run_mode=TIME_SERIES,
 source_waveform=, sample_rate=, output_duration=)`` work uniformly
 across RAM / Scooter / Kraken / Bellhop / OASP:
 
-* ``PropagationModel._resolve_time_series_frequencies`` — derives a
-  uniform frequency grid from the source-waveform spectrum when the
-  caller doesn't pin one, and warns about what got picked.
-* ``PropagationModel._pad_waveform_to_duration`` — zero-pads the
+* ``uacpy.models._band.time_series_band`` — derives a uniform frequency
+  grid from the source-waveform spectrum when the caller doesn't pin one,
+  with the notice a run gives about what got picked.
+* ``uacpy.models._band.pad_waveform_to_duration`` — zero-pads the
   waveform so ``Δf = 1/output_duration`` falls out of the synthesis.
-* ``RAM._resolve_broadband_grid`` — derives the native (fc, Q, T) tuple
+* ``ram._band.resolve_broadband_grid`` — derives the native (fc, Q, T) tuple
   from a multi-element frequency array, with user-pinned Q/T winning.
 * ``output_duration=`` kwarg on the model wrappers — end-to-end check
   that the returned ``Field`` covers at least the requested duration.
@@ -31,10 +31,11 @@ import pytest
 
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import ConfigurationError
-from uacpy import Source
-from uacpy.models.base import RunMode
+from uacpy.core.results import SoundSpeeds
+from uacpy.core.run_settings import RunMode
 from uacpy.models.bellhop import Bellhop
 import uacpy
+from uacpy.tests.conftest import recorded_warnings
 
 
 C_WATER = 1500.0
@@ -71,23 +72,20 @@ def _make_env():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _pad_waveform_to_duration
+# pad_waveform_to_duration
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.requires_binary  # constructs a model to reach its helper method
 class TestPadWaveformToDuration:
     """Zero-padding helper used by every IFFT-based wrapper."""
 
     def setup_method(self):
-        # Concrete subclass needed because PropagationModel is abstract.
-        from uacpy.models import Scooter
-        self.model = Scooter(verbose=False)
+        from uacpy.models._band import pad_waveform_to_duration
+        self.pad = pad_waveform_to_duration
 
     def test_pads_short_waveform(self):
         wf = np.ones(100)
-        out = self.model._pad_waveform_to_duration(wf, sample_rate=1000.0,
-                                                   output_duration=1.0)
+        out = self.pad(wf, sample_rate=1000.0, output_duration=1.0)
         assert len(out) == 1000
         # Pad is exactly zero, original samples preserved.
         assert np.array_equal(out[:100], wf)
@@ -95,58 +93,92 @@ class TestPadWaveformToDuration:
 
     def test_longer_waveform_passes_through(self):
         wf = np.ones(2000)
-        out = self.model._pad_waveform_to_duration(wf, sample_rate=1000.0,
-                                                   output_duration=1.0)
+        out = self.pad(wf, sample_rate=1000.0, output_duration=1.0)
         assert out is wf  # no copy when no padding needed
 
     def test_none_output_duration_is_noop(self):
         wf = np.ones(100)
-        out = self.model._pad_waveform_to_duration(wf, sample_rate=1000.0,
-                                                   output_duration=None)
+        out = self.pad(wf, sample_rate=1000.0, output_duration=None)
         assert out is wf
 
     def test_none_waveform_returns_none(self):
-        out = self.model._pad_waveform_to_duration(None, sample_rate=1000.0,
-                                                    output_duration=1.0)
+        out = self.pad(None, sample_rate=1000.0, output_duration=1.0)
         assert out is None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _resolve_time_series_frequencies
+# resolve_band / time_series_band
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.requires_binary  # constructs a model to reach its helper method
 class TestResolveTimeSeriesFrequencies:
     """Auto-derivation of the broadband freq grid from the waveform."""
 
     def setup_method(self):
-        from uacpy.models import Scooter
-        self.model = Scooter(verbose=False)
+        from uacpy.core.run_settings import TimeSettings
         self.source = uacpy.Source(depths=25.0, frequencies=F_CENTER)
+        self.time = TimeSettings(source_waveform=_gaussian_pulse(),
+                                 sample_rate=FS, output_duration=None,
+                                 t_start=None)
 
-    def test_non_time_series_passes_through(self):
-        out = self.model._resolve_time_series_frequencies(
-            RunMode.COHERENT_TL, None,
-            source_waveform=_gaussian_pulse(), sample_rate=FS,
-        )
-        assert out is None
+    def test_a_single_frequency_mode_reads_the_source(self):
+        from uacpy.models._band import resolve_band
+        band = resolve_band(RunMode.COHERENT_TL, self.source, None,
+                            self.time, model_name='Scooter')
+        np.testing.assert_array_equal(band.frequencies, [F_CENTER])
+        assert band.notice is None
 
     def test_explicit_frequencies_bypasses_derivation(self):
+        from uacpy.models._band import resolve_band
         freqs_in = np.linspace(100, 300, 11)
-        out = self.model._resolve_time_series_frequencies(
-            RunMode.TIME_SERIES, freqs_in,
-            source_waveform=_gaussian_pulse(), sample_rate=FS,
-        )
-        assert out is freqs_in  # user-supplied wins, no derivation
+        band = resolve_band(RunMode.TIME_SERIES, self.source, freqs_in,
+                            self.time, model_name='Scooter')
+        assert band.frequencies is freqs_in  # user-supplied wins
+        assert band.notice is None
 
-    def test_derives_from_waveform_spectrum_and_warns(self):
+    def test_a_multi_element_source_band_is_the_grid(self):
+        from uacpy.models._band import resolve_band
+        source = uacpy.Source(depths=25.0,
+                              frequencies=np.linspace(150., 250., 11))
+        band = resolve_band(RunMode.TIME_SERIES, source, None, self.time,
+                            model_name='Scooter')
+        np.testing.assert_array_equal(band.frequencies, source.frequencies)
+        assert band.notice is None
+
+    def test_a_one_element_source_band_derives_from_the_pulse(self):
+        from uacpy.models._band import resolve_band
+        band = resolve_band(RunMode.TIME_SERIES, self.source, None,
+                            self.time, model_name='Scooter')
+        assert band.frequencies.size > 1
+        assert 'auto-derived' in band.notice
+
+    @pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
+    @pytest.mark.parametrize('source_freqs, expected', [
+        (100.0, (10.0, 280.0, 28)),
+        (np.arange(60.0, 140.5, 0.5), (60.0, 140.0, 161)),
+    ])
+    def test_a_model_time_series_run_marches_the_source_band(
+            self, source_freqs, expected):
+        from uacpy.acoustic_signal import lfm_chirp
+        from uacpy.models import Kraken
+        _, pulse = lfm_chirp(80.0, 120.0, 0.1, sample_rate=1000.0)
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom='sand')
+        source = uacpy.Source(depths=36.0, frequencies=source_freqs)
+        receiver = uacpy.Receiver(depths=50.0, ranges=3000.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = Kraken().run_settings(
+                env, source, receiver, run_mode=RunMode.TIME_SERIES,
+                source_waveform=pulse, sample_rate=1000.0)
+        freqs = settings.frequencies
+        assert (freqs[0], freqs[-1], freqs.size) == expected
+
+    def test_derives_from_waveform_spectrum_with_a_notice(self):
+        from uacpy.models._band import time_series_band
         wf = _gaussian_pulse()
-        with pytest.warns(UserWarning, match=r"auto-derived"):
-            freqs = self.model._resolve_time_series_frequencies(
-                RunMode.TIME_SERIES, None,
-                source_waveform=wf, sample_rate=FS,
-            )
+        band = time_series_band(wf, FS, model_name='Scooter')
+        assert 'auto-derived' in band.notice
+        freqs = band.frequencies
         assert freqs is not None
         assert len(freqs) >= 2
         # Δf should equal sample_rate / n_samples (= 1/duration).
@@ -158,16 +190,183 @@ class TestResolveTimeSeriesFrequencies:
         assert abs(f_centre - F_CENTER) < F_CENTER * 0.3
 
     def test_raises_on_zero_waveform(self):
+        from uacpy.models._band import time_series_band
         wf = np.zeros(100)
         with pytest.raises(ConfigurationError, match='identically zero'):
-            self.model._resolve_time_series_frequencies(
-                RunMode.TIME_SERIES, None,
-                source_waveform=wf, sample_rate=FS,
-            )
+            time_series_band(wf, FS, model_name='Scooter')
+
+
+def _burst(n_cycles, f0=80.0, fs=2000.0):
+    """A rectangular tone burst of ``n_cycles`` cycles."""
+    n = int(round(n_cycles / f0 * fs))
+    return np.sin(2.0 * np.pi * f0 * np.arange(n) / fs), fs
+
+
+class TestTheRecordOpensJustBeforeTheFirstArrival:
+    """``record_start``: a tenth of the record (or four inverse bandwidths,
+    whichever is longer, at most half) before ``r / c`` on the fastest
+    stamped speed, and a warning when the record ends before the
+    arrival at the slowest stated water speed."""
+
+    def test_a_tenth_of_the_record_leads_the_estimated_arrival(self):
+        from uacpy.acoustic_signal._synthesis import (
+            RECORD_LEAD_FRACTION, record_start)
+        assert RECORD_LEAD_FRACTION == 0.1
+        # 1 s over 200 Hz: the onset term 4/200 = 0.02 s is under a tenth.
+        t0 = record_start(3000.0, 1.0, bandwidth=200.0, c_max=1700.0,
+                          c0=0.0, c_slow=0.0, who='t')
+        assert t0 == pytest.approx(3000.0 / 1700.0 - 0.1, abs=1e-12)
+
+    @pytest.mark.parametrize('bandwidth, lead', [
+        (40.0, 0.1), (39.0, 4.0 / 39.0), (4.0, 0.5)])
+    def test_a_narrow_band_widens_the_lead_to_hold_its_onset(self,
+                                                             bandwidth, lead):
+        from uacpy.acoustic_signal._synthesis import record_lead
+        assert record_lead(1.0, bandwidth) == pytest.approx(lead, abs=1e-12)
+
+    @pytest.mark.parametrize('c_slow, warns', [(1224.0, True),
+                                               (1225.0, False)])
+    def test_a_record_ending_before_the_slow_arrival_warns(self, c_slow,
+                                                           warns):
+        from uacpy.acoustic_signal._synthesis import record_start
+        # [1.95, 2.45] s at 3 km: r/c_slow = 2.4510 s at 1224 m/s, 2.4490
+        # at 1225 m/s.
+        with recorded_warnings() as record:
+            t0 = record_start(3000.0, 0.5, bandwidth=1000.0, c_max=1500.0,
+                              c0=0.0, c_slow=c_slow, who='t')
+        assert t0 == pytest.approx(1.95, abs=1e-12)
+        messages = [str(w.message) for w in record
+                    if 'folds onto' in str(w.message)]
+        assert len(messages) == (1 if warns else 0)
+
+
+class TestTheBandIsMeasuredOffTheRecordLattice:
+    """RA-WAVE-4: the band of a pulse is measured on the pulse zero-padded
+    well past its length, then placed on the record's bins, and a pulse
+    with a hard edge is limited to one -20 dB band-width beyond its -20 dB
+    band (``log/fix-r2-models_scratch/b1_band_rules.out``)."""
+
+    @staticmethod
+    def _grid(wf, fs):
+        from uacpy.models._band import _time_series_grid
+        return _time_series_grid(wf, fs, -40.0)
+
+    def test_an_integer_cycle_burst_keeps_its_main_lobe(self):
+        """Unpadded, a 4.0-cycle burst's DFT is one line at 80 Hz, and the
+        band was [80, 100] Hz; its main lobe spans 60-100 Hz."""
+        grid = self._grid(*_burst(4.0))
+        assert grid.freq_min <= 60.0 and grid.freq_max >= 100.0
+
+    def test_a_pulse_length_record_keeps_a_tapered_tone_skirts(self):
+        """A 40-sample Hann-tapered 100 Hz tone at 400 Hz: the record's 10 Hz
+        lattice sits on its spectral nulls, and the band was [90, 110] Hz
+        (8.8 % of its energy outside, -0.80 dB). Its -40 dB support is
+        71.4-128.6 Hz; the record bins inside it are 80-120 Hz, and the band
+        takes one more on each side, 70-130 Hz, where the pulse is below
+        -40 dB."""
+        t = np.arange(40) / 400.0
+        grid = self._grid(np.hanning(40) * np.sin(2 * np.pi * 100.0 * t),
+                          400.0)
+        assert (grid.freq_min, grid.freq_max) == (70.0, 130.0)
+        assert grid.energy_outside < 1e-3
+
+    @pytest.mark.parametrize('padding', [1, 4, 20])
+    def test_a_smooth_pulse_takes_the_record_bins_of_its_support(
+            self, padding):
+        """A Gaussian burst sampled finely enough by the record gets the
+        record bins above -40 dB on the record's own DFT and one more bin
+        on each side, and no limit."""
+        wf = _gaussian_pulse()
+        wf = np.concatenate([wf, np.zeros((padding - 1) * wf.size)])
+        grid = self._grid(wf, FS)
+        spectrum = np.abs(np.fft.rfft(wf))
+        bins = np.fft.rfftfreq(wf.size, 1.0 / FS)
+        df = FS / wf.size
+        above = bins[spectrum >= spectrum.max() * 1e-2]
+        assert (grid.freq_min, grid.freq_max) == (max(above[0] - df, df),
+                                            above[-1] + df)
+        assert not grid.limited
+
+    def test_a_hard_edged_burst_stops_one_core_width_beyond_its_core(self):
+        """A 4.2-cycle burst ends on a jump; its -40 dB support reaches
+        990 Hz. The band's top is the last record bin at or below the -20 dB
+        band's top plus that band's width, measured independently here on
+        the 16x-padded spectrum."""
+        wf, fs = _burst(4.2)
+        grid = self._grid(wf, fs)
+        m = 16
+        spectrum = np.abs(np.fft.rfft(wf, m * wf.size))
+        core = np.flatnonzero(spectrum >= spectrum.max() * 0.1)
+        top = core[-1] + (core[-1] - core[0])
+        df = fs / wf.size
+        assert grid.freq_max == pytest.approx((top // m) * df)
+        assert grid.support_max > 900.0
+        assert grid.limited and grid.freq_max_origin.startswith('the -20 dB')
+        assert 0.005 < grid.energy_outside < 0.02
+
+    @pytest.mark.parametrize('padding', [1, 4])
+    def test_the_band_edges_stand_below_the_ring_threshold(self, padding):
+        """The synthesis's untapered band-edge check (-40 dB re the band's
+        peak) stays silent on the auto band: each edge is one record bin past
+        the -40 dB support, while the last bin inside it is still above."""
+        from uacpy.acoustic_signal._synthesis import _BAND_EDGE_RING_DB
+        wf = _gaussian_pulse()
+        wf = np.concatenate([wf, np.zeros((padding - 1) * wf.size)])
+        grid = self._grid(wf, FS)
+        n = np.arange(wf.size)
+
+        def level(f):
+            return np.abs(np.exp(-2j * np.pi * np.outer(f, n) / FS) @ wf)
+
+        f = grid.frequencies
+        band = level(f)
+        edge_dB = 20 * np.log10(max(band[0], band[-1]) / band.max())
+        assert edge_dB <= _BAND_EDGE_RING_DB
+        df = FS / wf.size
+        inner = level(np.array([grid.freq_min + df, grid.freq_max - df]))
+        assert 20 * np.log10(inner.max() / band.max()) > _BAND_EDGE_RING_DB
+
+    def test_a_chosen_record_drops_the_record_notice(self):
+        """With ``output_duration=`` the record is the caller's choice, so
+        the notice that the pulse set it is silent; without, it speaks."""
+        from uacpy.models._band import time_series_band
+        wf = _gaussian_pulse()
+        assert time_series_band(wf, FS, model_name='Bellhop',
+                                record_chosen=True).notice is None
+        assert 'output_duration' in time_series_band(
+            wf, FS, model_name='Bellhop').notice
+
+    def test_a_chosen_record_keeps_the_limit_notice(self):
+        from uacpy.models._band import time_series_band
+        wf, fs = _burst(4.2)
+        said = time_series_band(wf, fs, model_name='Scooter',
+                                record_chosen=True).notice
+        assert 'falls slowly' in said and 'record' not in said
+
+    def test_resolve_band_reads_the_chosen_record_off_the_time_settings(self):
+        from uacpy.core.run_settings import TimeSettings
+        from uacpy.models._band import resolve_band
+        source = uacpy.Source(depths=25.0, frequencies=F_CENTER)
+        wf = _gaussian_pulse()
+        for duration, silent in ((None, False), (0.2, True)):
+            time = TimeSettings(source_waveform=wf, sample_rate=FS,
+                                output_duration=duration)
+            notice = resolve_band(uacpy.RunMode.TIME_SERIES, source, None,
+                                  time, model_name='Bellhop').notice
+            assert (notice is None) is silent
+
+    def test_the_notice_states_the_limit_and_the_full_band_cost(self):
+        from uacpy.models._band import time_series_band
+        wf, fs = _burst(4.2)
+        band = time_series_band(wf, fs, model_name='Scooter')
+        said = band.notice
+        assert 'falls slowly' in said
+        assert f"instead of {band.frequencies.size}" in said
+        assert '% of the pulse' in said
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RAM._resolve_broadband_grid
+# ram._band.resolve_broadband_grid
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -185,31 +384,39 @@ class TestResolveBroadbandGrid:
         # H(f): the sweep collapses the same way COHERENT_TL does, and the
         # requested-bins helper trims the result to exactly that bin.
         ram = self.RAM(verbose=False)
-        fc, Q, T = ram._resolve_broadband_grid(self.source_scalar)
+        fc, Q, T = ram_band.resolve_broadband_grid(self.source_scalar,
+                                                   knobs=ram._knob_record(),
+                                                   log=ram._log)
         assert fc == F_CENTER
         assert Q == 1e6
         assert T == 1.0
-        target = ram._requested_broadband_bins(self.source_scalar)
+        target = ram_band.requested_broadband_bins(self.source_scalar,
+                                                   knobs=ram._knob_record())
         assert list(target) == [F_CENTER]
 
     def test_single_freq_respects_pinned_q_t(self):
-        ram = self.RAM(verbose=False, Q=4.0, T=5.0)
-        fc, Q, T = ram._resolve_broadband_grid(self.source_scalar)
+        ram = self.RAM(verbose=False, q_factor=4.0, record_duration=5.0)
+        fc, Q, T = ram_band.resolve_broadband_grid(self.source_scalar,
+                                                   knobs=ram._knob_record(),
+                                                   log=ram._log)
         assert (fc, Q, T) == (F_CENTER, 4.0, 5.0)
 
-    def test_multi_freq_auto_derives_and_warns(self):
+    def test_multi_freq_auto_derives_silently(self):
         # Band [50, 350] Hz at Δf=0.5. fc anchors on the upper-middle array
         # bin and Q = fc / ((n//2 + 1/2)·Δf), so the marched (fc, Q, T)
         # sweep reproduces every requested bin — the property that matters —
-        # rather than a nominal fc/half-width ratio.
+        # rather than a nominal fc/half-width ratio. The result carries
+        # exactly the requested bins, so the derivation warns nothing.
         freqs = np.linspace(50.0, 350.0, 601)
         src = uacpy.Source(depths=25.0, frequencies=freqs)
         ram = self.RAM(verbose=False)
-        with pytest.warns(UserWarning, match=r"From the 601-element"):
-            fc, Q, T = ram._resolve_broadband_grid(src)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            fc, Q, T = ram_band.resolve_broadband_grid(
+                src, knobs=ram._knob_record(), log=ram._log)
         assert fc == pytest.approx(200.0)
         assert T == pytest.approx(2.0, rel=1e-4)
-        marched = ram._broadband_frequencies(fc, Q, T)
+        marched = ram_band.broadband_frequencies(fc, Q, T)
         assert marched.size == freqs.size
         assert np.allclose(marched, freqs)
 
@@ -220,9 +427,10 @@ class TestResolveBroadbandGrid:
         # silent — now the warning names both grids.
         freqs = np.linspace(50.0, 350.0, 601)
         src = uacpy.Source(depths=25.0, frequencies=freqs)
-        ram = self.RAM(verbose=False, Q=1.333, T=2.0)
+        ram = self.RAM(verbose=False, q_factor=1.333, record_duration=2.0)
         with pytest.warns(UserWarning, match="pinned"):
-            fc, q, t = ram._resolve_broadband_grid(src)
+            fc, q, t = ram_band.resolve_broadband_grid(
+                src, knobs=ram._knob_record(), log=ram._log)
         assert fc == pytest.approx(200.0)    # the middle array bin (odd count)
         assert (q, t) == (1.333, 2.0)
 
@@ -231,20 +439,68 @@ class TestResolveBroadbandGrid:
         src = uacpy.Source(depths=25.0, frequencies=freqs)
         ram = self.RAM(verbose=False)
         with pytest.raises(ConfigurationError, match='non-uniform'):
-            ram._resolve_broadband_grid(src)
+            ram_band.resolve_broadband_grid(src, knobs=ram._knob_record(),
+                                            log=ram._log)
+
+    def test_non_uniform_spacing_passes_where_bins_march_one_by_one(self):
+        """The Collins BROADBAND loop (``require_uniform=False``) takes an
+        increasing non-uniform array and has no (Q, T) for it; an unsorted
+        one still refuses."""
+        ram = self.RAM(verbose=False)
+        src = uacpy.Source(depths=25.0,
+                           frequencies=[50.0, 60.0, 80.0, 200.0, 350.0])
+        fc, Q, T = ram_band.resolve_broadband_grid(src, require_uniform=False,
+                                                   knobs=ram._knob_record(),
+                                                   log=ram._log)
+        assert (fc, Q, T) == (80.0, None, None)
+        assert list(
+            ram_band.requested_broadband_bins(src,
+                                              knobs=ram._knob_record())) == [
+            50.0, 60.0, 80.0, 200.0, 350.0]
+        unsorted = uacpy.Source(depths=25.0,
+                                frequencies=[50.0, 80.0, 60.0, 200.0])
+        with pytest.raises(ConfigurationError, match='strictly increasing'):
+            ram_band.resolve_broadband_grid(unsorted, require_uniform=False,
+                                            knobs=ram._knob_record(),
+                                            log=ram._log)
+
+    @pytest.mark.parametrize('pin', [dict(q_factor=100.0), dict(record_duration=5.0)])
+    def test_a_lone_pin_beside_an_array_is_ignored_and_named(self, pin):
+        """With a frequency array, one pinned knob cannot describe the band
+        (``Q=100`` alone would march 99-101 Hz for a 90-110 Hz request):
+        it is ignored, the warning names it, and the resolved (Q, T) are the
+        array's own, so every backend marches and stamps the same band."""
+        freqs = np.linspace(90.0, 110.0, 21)
+        src = uacpy.Source(depths=25.0, frequencies=freqs)
+        model = self.RAM(verbose=False)
+        free = ram_band.resolve_broadband_grid(src, knobs=model._knob_record(),
+                                               log=model._log)
+        knob = next(iter(pin))
+        with pytest.warns(UserWarning, match=rf"{knob}=\S+ is pinned alone"):
+            model = self.RAM(verbose=False, **pin)
+            got = ram_band.resolve_broadband_grid(src,
+                                                  knobs=model._knob_record(),
+                                                  log=model._log)
+        assert got == free
+        marched = ram_band.broadband_frequencies(*got)
+        assert all(np.isclose(marched, f).any() for f in freqs)
 
     def test_single_freq_partial_pin_fills_in_broadband_defaults(self):
-        """ram.md §5: with exactly one of Q/T pinned, the other fills in at
-        the broadband defaults Q=2.0 / T=10.0 (not the narrowband 1e6 / 1.0
-        collapse), and the warning names which value was defaulted."""
-        with pytest.warns(UserWarning, match='default'):
-            fc, Q, T = self.RAM(verbose=False, T=5.0)._resolve_broadband_grid(
-                self.source_scalar)
-        assert (fc, Q, T) == (F_CENTER, 2.0, 5.0)
-        with pytest.warns(UserWarning, match='default'):
-            fc, Q, T = self.RAM(verbose=False, Q=8.0)._resolve_broadband_grid(
-                self.source_scalar)
-        assert (fc, Q, T) == (F_CENTER, 8.0, 10.0)
+        """ram.md §5: with exactly one of Q/T pinned, the other fills in
+        from the default band every engine shares (Q = 4, its half-width;
+        T = 127/(fc·0.5), its bin spacing) — not the narrowband 1e6 / 1.0
+        collapse — and the warning names which value came from it."""
+        with pytest.warns(UserWarning, match='the default band'):
+            model = self.RAM(verbose=False, record_duration=5.0)
+            fc, Q, T = ram_band.resolve_broadband_grid(
+                self.source_scalar, knobs=model._knob_record(), log=model._log)
+        assert (fc, Q, T) == (F_CENTER, 4.0, 5.0)
+        with pytest.warns(UserWarning, match='the default band'):
+            model = self.RAM(verbose=False, q_factor=8.0)
+            fc, Q, T = ram_band.resolve_broadband_grid(
+                self.source_scalar, knobs=model._knob_record(), log=model._log)
+        assert (fc, Q) == (F_CENTER, 8.0)
+        assert T == pytest.approx(127.0 / (F_CENTER * 0.5))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,7 +563,8 @@ class TestSynthesisCarriesMetadata:
             model='Synthetic', source_depths=np.array([25.0]),
             frequencies=freqs,
             phase_reference=PhaseReference.TRAVELLING_WAVE,
-            metadata={'grn_file': '/pinned/model.grn', 'c0': 1500.0},
+            speeds=SoundSpeeds(surface=1500.0),
+            metadata={'grn_file': '/pinned/model.grn'},
         )
 
     def test_synthesize_time_series_keeps_source_metadata(self):
@@ -316,15 +573,15 @@ class TestSynthesisCarriesMetadata:
         wf[: int(0.005 * FS)] = 1.0
         ts = tf.synthesize_time_series(source_waveform=wf, sample_rate=FS)
         assert ts.metadata['grn_file'] == '/pinned/model.grn'
-        assert ts.metadata['c0'] == 1500.0
-        assert ts.metadata['window'] == 'hann'          # synthesis keys too
+        assert ts.speeds.surface == 1500.0
+        assert ts.synthesis_window is None          # synthesis keys too
 
     def test_to_time_trace_keeps_source_metadata(self):
         tf = self._tf_with_metadata()
         trace = tf.to_time_trace(depth=25.0, range=100.0)
         assert trace.metadata['grn_file'] == '/pinned/model.grn'
-        assert trace.metadata['c0'] == 1500.0
-        assert trace.metadata['window'] == 'hann'
+        assert trace.speeds.surface == 1500.0
+        assert trace.synthesis_window == 'hann'
 
 
 class TestSynthesisCarriesPinned:
@@ -384,13 +641,14 @@ class TestToTimeTraceDefaultCell:
 
     def test_defaults_to_middle_depth_first_range(self):
         tf = self._tf()
-        trace = tf.to_time_trace()
+        trace = tf.to_time_trace(t_start=0.0)
         assert trace.pinned['depth'] == 20.0
         assert trace.pinned['range'] == 500.0
         # The (20 m, 500 m) cell carries |H| = 11 against 2 at
-        # (10 m, 1000 m); the same synthesis on both cells preserves that
-        # amplitude ratio, so the defaulted pick is visible in the data too.
-        other = tf.to_time_trace(depth=10.0, range=1000.0)
+        # (10 m, 1000 m); the same synthesis on both cells (one record
+        # placement, t_start=0) preserves that amplitude ratio, so the
+        # defaulted pick is visible in the data too.
+        other = tf.to_time_trace(depth=10.0, range=1000.0, t_start=0.0)
         ratio = (float(np.max(np.abs(trace.data)))
                  / float(np.max(np.abs(other.data))))
         assert ratio == pytest.approx(11.0 / 2.0, rel=1e-6)
@@ -528,8 +786,7 @@ class TestSynthesisErrorsNameTheEntryPoint:
         )
 
     def test_to_time_trace_warnings_carry_its_label(self):
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             self._tf_nan_cell_no_stamped_speed().to_time_trace(
                 depth=20.0, range=2000.0)
         messages = [str(w.message) for w in record]
@@ -540,8 +797,7 @@ class TestSynthesisErrorsNameTheEntryPoint:
     def test_synthesize_time_series_warnings_carry_its_label(self):
         wf = np.zeros(64)
         wf[:8] = 1.0
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             self._tf_nan_cell_no_stamped_speed().synthesize_time_series(
                 source_waveform=wf, sample_rate=4000.0)
         messages = [str(w.message) for w in record]
@@ -567,12 +823,11 @@ class TestSynthesisErrorsNameTheEntryPoint:
             model='Synthetic', source_depths=np.array([5.0]),
             frequencies=freqs,
             phase_reference=PhaseReference.TRAVELLING_WAVE,
-            metadata={'c0': C_WATER},
+            speeds=SoundSpeeds(surface=C_WATER),
         )
 
     def test_short_window_warning_carries_the_entry_points_label(self):
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             self._tf_c0_only_short_window().to_time_trace(
                 depth=20.0, range=100000.0)
         messages = [str(w.message) for w in record]
@@ -616,7 +871,7 @@ class TestTheSynthesisWindowAnchorsOnTheStampedSpeed:
 
     R = 100_000.0
 
-    def _tf(self, metadata):
+    def _tf(self, speeds=None):
         from uacpy.core.results import Field, PhaseReference
         freqs = np.arange(100.0, 150.0 + 1e-9, 0.5)          # Δf = 0.5 Hz: a 2 s record
         H = np.exp(-2j * np.pi * freqs * self.R / 1450.0)
@@ -627,34 +882,35 @@ class TestTheSynthesisWindowAnchorsOnTheStampedSpeed:
             model='Synthetic', source_depths=np.array([50.0]),
             frequencies=freqs,
             phase_reference=PhaseReference.TRAVELLING_WAVE,
-            metadata=metadata,
+            speeds=speeds,
         )
 
     def _peak_time(self, tf):
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
-            trace = tf.to_time_trace(window='none')
+        with recorded_warnings() as rec:
+            trace = tf.to_time_trace(window=None)
         t = np.asarray(trace.coords['time'])
         p = np.abs(np.asarray(trace.data))
         return t, float(t[np.argmax(p)]), [str(w.message) for w in rec]
 
     def test_a_stamped_speed_below_the_default_anchors_the_window(self):
-        t, peak, msgs = self._peak_time(self._tf({'c_max': 1450.0}))
+        t, peak, msgs = self._peak_time(self._tf(SoundSpeeds(water_max=1450.0)))
         truth = self.R / 1450.0                                  # 68.966 s
         assert t[0] <= truth <= t[-1], (t[0], truth, t[-1])
         assert abs(peak - truth) < 0.005, (peak, truth)          # half a 125 Hz cycle
         assert not any('stamped no sound speed' in m for m in msgs)
 
     def test_with_nothing_stamped_the_default_anchors_and_warns(self):
-        t, peak, msgs = self._peak_time(self._tf({}))
+        t, peak, msgs = self._peak_time(self._tf())
         truth = self.R / 1450.0
         # Anchored on 1500 the 2 s window opens at 65.67 s and closes before
         # 68.97 s: the wrap is the pre-existing, WARNED behaviour.
         assert any('stamped no sound speed' in m for m in msgs)
+        assert not any('the model stamped' in m for m in msgs)
+        assert any('BeamformedField carries none' in m for m in msgs)
         assert not (t[0] <= truth <= t[-1])
 
     def test_a_shared_window_uses_the_same_anchor(self):
-        tf = self._tf({'c_max': 1450.0})
+        tf = self._tf(SoundSpeeds(water_max=1450.0))
         fs = 1000.0
         wf = np.zeros(int(0.05 * fs)); wf[0] = 1.0
         with warnings.catch_warnings():
@@ -683,7 +939,7 @@ class TestSynthesisRangeSpanWarning:
                     'frequency': freqs},
             model='Synthetic', frequencies=freqs,
             phase_reference=PhaseReference.TRAVELLING_WAVE,
-            metadata={'c0': c0})
+            speeds=SoundSpeeds(surface=c0))
 
     def test_warns_when_range_span_exceeds_window(self):
         tf = self._pure_delay_tf([100.0, 3000.0])   # 1.93 s spread, ~1 s window
@@ -694,8 +950,7 @@ class TestSynthesisRangeSpanWarning:
     def test_no_span_warning_for_single_range(self):
         tf = self._pure_delay_tf([100.0])
         wf = np.zeros(64); wf[0] = 1.0
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
+        with recorded_warnings() as rec:
             tf.synthesize_time_series(wf, sample_rate=4000.0)
         assert not [w for w in rec if 'range span' in str(w.message)]
 
@@ -738,6 +993,44 @@ class TestSynthesisSizeCap:
         assert ts.data.shape[-1] == 4096
 
 
+class TestSynthesisFloorsAtTheModelsTimeSampleCount:
+    """The auto IFFT length is never below the time-sample count the model
+    reports as :attr:`Field.synthesis_floor` (OASP's NX, OASSP's NT,
+    mpiramS's Nsam). The 21 bins of 100-300 Hz at 10 Hz size an unfloored
+    grid of 128 (4 bins per frequency, rounded up to a power of two)."""
+
+    @staticmethod
+    def _tf(floor=None, metadata=None):
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 300.0, 21)
+        return Field(
+            data=np.ones((1, 1, freqs.size), dtype=complex),
+            coords={'depth': np.array([25.0]), 'range': np.array([100.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([25.0]),
+            frequencies=freqs, phase_reference=PhaseReference.TRAVELLING_WAVE,
+            synthesis_floor=floor, metadata=metadata)
+
+    @pytest.mark.parametrize('floor,n_time', [
+        (None, 128), (128, 128), (129, 256), (512, 512)])
+    def test_the_trace_is_as_long_as_the_larger_of_the_two(self, floor,
+                                                             n_time):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            trace = self._tf(floor).to_time_trace(depth=25.0, range=100.0)
+            series = self._tf(floor).synthesize_time_series(
+                source_waveform=np.hanning(8), sample_rate=100.0)
+        assert trace.coords['time'].size == n_time
+        assert series.coords['time'].size == n_time
+
+    def test_a_sample_count_in_metadata_does_not_floor_the_grid(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            trace = self._tf(metadata={'n_samples': 512}).to_time_trace(
+                depth=25.0, range=100.0)
+        assert trace.coords['time'].size == 128
+
+
 class TestSynthesisAbsoluteAmplitude:
     """A flat ``H ≡ 1`` must reproduce the source waveform's amplitude,
     independent of ``nfft`` (Fourier synthesis is a Riemann sum of the
@@ -756,7 +1049,7 @@ class TestSynthesisAbsoluteAmplitude:
             model='Synthetic', source_depths=np.array([5.0]),
             frequencies=freqs,
             phase_reference=PhaseReference.TRAVELLING_WAVE,
-            metadata={'c0': C_WATER},
+            speeds=SoundSpeeds(surface=C_WATER),
         )
 
     @pytest.mark.parametrize('nfft', [None, 2048, 4096, 8192])
@@ -766,7 +1059,7 @@ class TestSynthesisAbsoluteAmplitude:
         src = (np.exp(-0.5 * ((t - 0.5) / 0.05) ** 2)
                * np.cos(2 * np.pi * 100.0 * (t - 0.5)))
         ts = self._flat_tf().synthesize_time_series(
-            src, fs, window='none', nfft=nfft, t_start=0.0,
+            src, fs, window=None, nfft=nfft, t_start=0.0,
         )
         peak = float(np.abs(ts.data).max())
         # A gate, not a precision budget: with H ≡ 1 the synthesis returns
@@ -778,8 +1071,8 @@ class TestSynthesisAbsoluteAmplitude:
 
     def test_impulse_response_grid_independent(self):
         tf = self._flat_tf()
-        a = tf.to_time_trace(window='none', nfft=4096, t_start=0.0)
-        b = tf.to_time_trace(window='none', nfft=8192, t_start=0.0)
+        a = tf.to_time_trace(window=None, nfft=4096, t_start=0.0)
+        b = tf.to_time_trace(window=None, nfft=8192, t_start=0.0)
         assert float(np.abs(a.data).max()) == pytest.approx(
             float(np.abs(b.data).max()), rel=1e-6,
         )
@@ -808,8 +1101,9 @@ class TestSourceSpectrumAtArbitraryFrequencies:
         )).sum(1) / fs
 
     def test_matches_rfft_on_the_native_grid(self):
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.acoustic_signal.spectrum_at import (
+            waveform_spectrum_at as _source_spectrum_at,
+        )
         wf, fs = self._wf()
         grid = np.fft.rfftfreq(wf.size, 1.0 / fs)
         np.testing.assert_allclose(
@@ -818,8 +1112,9 @@ class TestSourceSpectrumAtArbitraryFrequencies:
 
     @pytest.mark.parametrize('shift', [0.5, 0.25])
     def test_exact_on_a_half_bin_offset_grid(self, shift):
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.acoustic_signal.spectrum_at import (
+            waveform_spectrum_at as _source_spectrum_at,
+        )
         wf, fs = self._wf()
         native = np.fft.rfftfreq(wf.size, 1.0 / fs)
         grid = native[:-1] + shift * (native[1] - native[0])
@@ -828,8 +1123,9 @@ class TestSourceSpectrumAtArbitraryFrequencies:
             rtol=1e-9, atol=1e-12)
 
     def test_exact_on_a_finer_grid(self):
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.acoustic_signal.spectrum_at import (
+            waveform_spectrum_at as _source_spectrum_at,
+        )
         wf, fs = self._wf()
         grid = np.fft.rfftfreq(4 * wf.size, 1.0 / fs)
         grid = grid[grid <= fs / 2]
@@ -838,21 +1134,58 @@ class TestSourceSpectrumAtArbitraryFrequencies:
             rtol=1e-9, atol=1e-12)
 
     def test_out_of_band_frequencies_are_zero(self):
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.acoustic_signal.spectrum_at import (
+            waveform_spectrum_at as _source_spectrum_at,
+        )
         wf, fs = self._wf()
         out = _source_spectrum_at(wf, fs, np.array([-10.0, fs, 2 * fs]))
         assert np.all(out == 0)
 
-    def test_chunking_does_not_change_the_result(self):
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+    def test_chunking_does_not_change_the_result(self, monkeypatch):
+        from uacpy.acoustic_signal import spectrum_at
         wf, fs = self._wf()
         grid = np.linspace(10.0, 900.0, 137)
+        whole = spectrum_at.waveform_spectrum_at(wf, fs, grid)
+        monkeypatch.setattr(spectrum_at, '_SCRATCH_BLOCK_ELEMS', 1000)
         np.testing.assert_allclose(
-            _source_spectrum_at(wf, fs, grid, _max_elems=1000),
-            _source_spectrum_at(wf, fs, grid),
+            spectrum_at.waveform_spectrum_at(wf, fs, grid), whole,
             rtol=1e-12, atol=1e-15)
+
+    def test_a_complex_waveform_keeps_its_imaginary_part(self):
+        """A complex baseband tone ``exp(i 2 pi 100 t)`` over 1 s has
+        ``S(100) = 1`` and nothing at -100 Hz; casting it to real halves
+        ``S(100)`` to 0.5 and puts the other half at -100 Hz."""
+        from uacpy.acoustic_signal.spectrum_at import waveform_spectrum_at
+        fs = 1000.0
+        t = np.arange(1000) / fs
+        s = waveform_spectrum_at(np.exp(2j * np.pi * 100.0 * t), fs,
+                                 [100.0, -100.0, -250.0])
+        assert s[0] == pytest.approx(1.0, abs=1e-9)
+        assert abs(s[1]) < 1e-9
+        s_neg = waveform_spectrum_at(np.exp(-2j * np.pi * 100.0 * t), fs,
+                                     [-100.0, 100.0, -fs])
+        assert s_neg[0] == pytest.approx(1.0, abs=1e-9)
+        assert abs(s_neg[1]) < 1e-9 and s_neg[2] == 0
+        # The dense path (a non-uniform pair) agrees with the contour path.
+        dense = waveform_spectrum_at(np.exp(-2j * np.pi * 100.0 * t), fs,
+                                     [-100.0, 37.3, 400.0])
+        assert dense[0] == pytest.approx(1.0, abs=1e-9)
+
+    @pytest.mark.parametrize('bad', [
+        dict(sample_rate=0.0), dict(sample_rate=np.nan),
+        dict(waveform=np.array([])), dict(waveform=np.array([1.0, np.nan])),
+        dict(freqs=[np.inf])])
+    def test_bad_inputs_are_refused_by_name(self, bad):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.acoustic_signal.spectrum_at import waveform_spectrum_at
+        kw = dict(waveform=np.ones(16), sample_rate=1000.0, freqs=[100.0])
+        kw.update(bad)
+        name = next(iter(bad))
+        match = ('waveform_spectrum_at: waveform ' if name == 'waveform'
+                 else 'waveform_spectrum_at')
+        with pytest.raises(ConfigurationError, match=match):
+            waveform_spectrum_at(kw['waveform'], kw['sample_rate'],
+                                 kw['freqs'])
 
 
 def _outer_product_dtft(wf, fs, freqs):
@@ -920,8 +1253,9 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
     @pytest.mark.parametrize('label,n_wf,fs,grid', CASES,
                              ids=[c[0] for c in CASES])
     def test_it_matches_the_outer_product(self, label, n_wf, fs, grid):
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.acoustic_signal.spectrum_at import (
+            waveform_spectrum_at as _source_spectrum_at,
+        )
         wf = self._waveform(n_wf)
         ref = _outer_product_dtft(wf, fs, grid)
         got = _source_spectrum_at(wf, fs, grid)
@@ -931,15 +1265,17 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
         np.testing.assert_array_equal(got == 0, ref == 0)
 
     def test_an_all_zero_waveform_returns_exact_zeros(self):
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.acoustic_signal.spectrum_at import (
+            waveform_spectrum_at as _source_spectrum_at,
+        )
         got = _source_spectrum_at(np.zeros(64), 1000.0,
                                   np.linspace(0.0, 400.0, 11))
         assert np.array_equal(got, np.zeros(11, dtype=np.complex128))
 
     def test_a_non_uniform_grid_keeps_the_dense_sum(self):
-        from uacpy.acoustic_signal.estimate import (
-            _chirp_step, waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.acoustic_signal.spectrum_at import (
+            _chirp_step, waveform_spectrum_at as _source_spectrum_at,
+        )
         wf, fs = self._waveform(256), 2000.0
         grid = np.geomspace(20.0, 900.0, 64)          # ascending, not uniform
         np.testing.assert_allclose(
@@ -947,18 +1283,19 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
             _outer_product_dtft(wf, fs, grid), rtol=1e-13, atol=1e-16)
         assert _chirp_step(grid, wf.size, fs) is None
 
-    def test_the_dense_fallback_chunks_over_frequency(self):
-        # ``_max_elems`` bounds the phase matrix, and only the dense path
-        # builds one now — so the block arithmetic is exercised on a grid the
+    def test_the_dense_fallback_chunks_over_frequency(self, monkeypatch):
+        # ``_SCRATCH_BLOCK_ELEMS`` bounds the phase matrix, and only the dense
+        # path builds one — so the block arithmetic is exercised on a grid the
         # contour cannot serve rather than on the uniform one above, where
         # both calls would take the chirp-z route and agree vacuously.
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.acoustic_signal import spectrum_at
         wf, fs = self._waveform(256), 2000.0
         grid = np.geomspace(20.0, 900.0, 137)
+        whole = spectrum_at.waveform_spectrum_at(wf, fs, grid)
+        monkeypatch.setattr(spectrum_at, '_SCRATCH_BLOCK_ELEMS', 1000)
         np.testing.assert_allclose(
-            _source_spectrum_at(wf, fs, grid, _max_elems=1000),
-            _source_spectrum_at(wf, fs, grid), rtol=1e-13, atol=1e-16)
+            spectrum_at.waveform_spectrum_at(wf, fs, grid), whole,
+            rtol=1e-13, atol=1e-16)
 
     def test_the_chirp_contour_would_be_wrong_on_that_grid(self):
         # Why the fallback is not decoration: the contour is anchored at f[0]
@@ -976,7 +1313,7 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
         # The contour has to LAND on the frequencies, not merely resemble
         # them: a drift that a spacing-ratio test would wave through is a
         # phase error growing with waveform length.
-        from uacpy.acoustic_signal.estimate import _chirp_step
+        from uacpy.acoustic_signal.spectrum_at import _chirp_step
         grid = np.linspace(100.0, 900.0, 401)
         grid[200] += 1e-4                       # 1e-7 of the span
         assert _chirp_step(grid, 4096, 8000.0) is None
@@ -986,7 +1323,7 @@ class TestSourceSpectrumChirpZEqualsTheOuterProduct:
     def test_the_synthesised_trace_matches_the_dense_sum(self, monkeypatch):
         # End to end through the public entry point, against the same Field
         # synthesised with the dense sum forced back in.
-        import uacpy.acoustic_signal.estimate as S
+        import uacpy.acoustic_signal.spectrum_at as S
         from uacpy.core.results import Field, PhaseReference
         rng = np.random.default_rng(4)
         freqs = np.linspace(50.0, 2000.0, 256)
@@ -1037,7 +1374,7 @@ class TestSynthesisChecksTheFrequencyAxisBeforeUsingIt:
             self, monkeypatch):
         # The deferred import resolves the attribute at CALL time, so
         # the patch sits on the module that now owns the function.
-        import uacpy.acoustic_signal.estimate as S
+        import uacpy.acoustic_signal.spectrum_at as S
         monkeypatch.setattr(S, 'waveform_spectrum_at', _never_called)
         tf = self._tf([100.0, 110.0, 130.0, 140.0])
         with pytest.raises(ConfigurationError, match='uniformly spaced'):
@@ -1047,7 +1384,7 @@ class TestSynthesisChecksTheFrequencyAxisBeforeUsingIt:
     def test_a_descending_axis_is_refused_the_same_way(self, monkeypatch):
         # The deferred import resolves the attribute at CALL time, so
         # the patch sits on the module that now owns the function.
-        import uacpy.acoustic_signal.estimate as S
+        import uacpy.acoustic_signal.spectrum_at as S
         monkeypatch.setattr(S, 'waveform_spectrum_at', _never_called)
         with pytest.raises(ConfigurationError, match='uniformly spaced'):
             self._tf([300.0, 200.0, 100.0]).synthesize_time_series(
@@ -1073,7 +1410,7 @@ class TestNarrowBandWindowDoesNotAnnihilate:
                              'frequency': np.linspace(450.0, 550.0, n_freq)})
 
     def _trace(self, n_freq):
-        from uacpy.core.results.field import _ifft_to_trace
+        from uacpy.core.results._field_synthesis import _ifft_to_trace
         return np.asarray(_ifft_to_trace(
             self._tf(n_freq), depth=100.0, range=3000.0,
             source_spectrum=np.ones(n_freq, dtype=complex),
@@ -1093,7 +1430,6 @@ class TestNarrowBandWindowDoesNotAnnihilate:
         assert np.abs(y).max() > 0.0
 
 
-@pytest.mark.requires_binary
 def test_the_auto_derived_grid_says_how_long_a_record_it_bought():
     """The derived grid sets the record, and the record comes from the SOURCE
     pulse — not from the channel. A pulse shorter than the multipath spread
@@ -1101,36 +1437,32 @@ def test_the_auto_derived_grid_says_how_long_a_record_it_bought():
     to say so: quoting only the band and the spacing leaves the reader to
     work out that 1/df is the whole record they are getting. The number to
     quote is 1/df of the grid actually returned, which subdivision can make
-    longer than the pulse — here 1/12.5 Hz = 0.08 s from a 0.02 s burst."""
-    import warnings as _w
-    from uacpy.models.bellhop import Bellhop
-    from uacpy.models.base import RunMode
+    longer than the pulse — here the 350-650 Hz band of the 0.02 s burst
+    (7 bins at 50 Hz) is subdivided to 9 bins, 1/37.5 Hz = 0.02667 s."""
+    from uacpy.models._band import time_series_band
 
     fs, dur = 20000.0, 0.020            # 20 ms pulse -> a 20 ms record
     t = np.arange(0.0, dur, 1.0 / fs)
     wf = np.hanning(t.size) * np.sin(2 * np.pi * 500.0 * t)
-    with _w.catch_warnings(record=True) as record:
-        _w.simplefilter('always')
-        Bellhop()._resolve_time_series_frequencies(
-            RunMode.TIME_SERIES, None, wf, fs)
-    messages = [str(w.message) for w in record]
-    assert messages, "the derivation announced nothing"
-    text = ' '.join(messages)
+    text = time_series_band(wf, fs, model_name='Bellhop').notice
+    assert text, "the derivation announced nothing"
     assert 'record' in text, text
-    assert '0.08' in text, f"the 0.08 s record is not named: {text}"
+    assert '0.02667 s' in text, f"the 0.02667 s record is not named: {text}"
     assert 'output_duration' in text, text
 
 
 @pytest.mark.requires_binary  # runs a model
 def test_auto_derived_timeseries_grid_resolves_the_band():
-    """A 20 ms burst gives Delta f = 50 Hz, so a 450-550 Hz band derives only
-    3 bins — which the frequency-axis taper then collapses to a CW tone. The
-    derived grid must carry enough bins to represent an arrival."""
+    """A 20 ms burst gives Delta f = 50 Hz, so its 400-600 Hz band derives
+    only 5 bins — too few for the frequency-axis taper to leave an interior,
+    which collapses the trace to a CW tone. The derived grid must carry
+    enough bins to represent an arrival: the envelope over the record is not
+    flat."""
     import warnings as _w
     from scipy.signal import hilbert
     from uacpy import (Environment, SoundSpeedProfile, BoundaryProperties,
                        Source, Receiver, Kraken)
-    from uacpy.models.base import RunMode
+    from uacpy.core.run_settings import RunMode
 
     env = Environment(
         bathymetry=200.0,
@@ -1149,9 +1481,8 @@ def test_auto_derived_timeseries_grid_resolves_the_band():
             run_mode=RunMode.TIME_SERIES, source_waveform=wf, sample_rate=fs)
     y = np.real(np.asarray(r.data)).ravel()
     envelope = np.abs(hilbert(y))
-    tt = np.arange(y.size) / fs
-    core = envelope[(tt > 0.05) & (tt < 0.95)]
-    assert core.min() / core.max() < 0.5, (
+    assert r.run_settings.frequencies.size >= 9
+    assert envelope.min() / envelope.max() < 0.5, (
         "envelope is flat — the band collapsed to a CW tone rather than an "
         "impulse response")
 
@@ -1166,7 +1497,7 @@ class TestNoSincSquaredTaperOnTheFieldSpectrum:
     @staticmethod
     def _two_arrival_trace(df_data, dtau, a2=0.5):
         from uacpy.core.results import Field
-        from uacpy.core.results.field import _ifft_to_trace
+        from uacpy.core.results._field_synthesis import _ifft_to_trace
         freqs = np.arange(50.0, 450.0 + df_data, df_data)
         # exp(-2i pi f tau) is a unit impulse at t = tau.
         H = (np.exp(-2j * np.pi * freqs * 0.010)
@@ -1177,7 +1508,7 @@ class TestNoSincSquaredTaperOnTheFieldSpectrum:
         tr = _ifft_to_trace(
             tf, depth=50.0, range=1000.0,
             source_spectrum=np.ones(freqs.size, dtype=complex),
-            window='none', nfft=None, t_start=0.0)
+            window=None, nfft=None, t_start=0.0)
         return (np.asarray(tr.coords['time']),
                 np.abs(np.asarray(tr.data)).ravel())
 
@@ -1238,7 +1569,7 @@ class TestSynthesisBinAlignment:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             out = tf.synthesize_time_series(wf, self.FS, t_start=0.0,
-                                            window='none')
+                                            window=None)
         y = out.data[0, 0, :]
         ref = np.interp(out.coords['time'], t, wf, left=0.0, right=0.0)
         return float(np.max(np.abs(y[:ref.size] - ref)) / np.max(np.abs(wf)))
@@ -1274,13 +1605,10 @@ class TestSynthesisBinAlignment:
         than on waveform equality: the trace must sit at the frequency the
         caller asked for, not at that frequency minus the bin offset.
         """
-        model = uacpy.models.Bellhop.__new__(uacpy.models.Bellhop)
-        model.model_name = 'Bellhop'
+        from uacpy.models._band import time_series_band
         t, wf = self._source()
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            derived = model._resolve_time_series_frequencies(
-                RunMode.TIME_SERIES, None, wf, self.FS)
+        derived = time_series_band(wf, self.FS,
+                                   model_name='Bellhop').frequencies
         freqs = np.linspace(derived[0], derived[-1], 8)
         assert abs(self._bin_offset(freqs)) > 0.5, "grid is already aligned"
 
@@ -1291,7 +1619,7 @@ class TestSynthesisBinAlignment:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             out = tf.synthesize_time_series(wf, self.FS, t_start=0.0,
-                                            window='none')
+                                            window=None)
         y = out.data[0, 0, :]
         dt = float(out.coords['time'][1] - out.coords['time'][0])
         spec = np.abs(np.fft.rfft(y, 16384))
@@ -1308,48 +1636,50 @@ class TestSynthesisWindowAnchor:
 
     FREQS = np.arange(40.0, 81.0, 1.0)      # 1 Hz spacing -> 1 s record
 
-    def _trace(self, metadata, range_m=60000.0):
+    def _trace(self, speeds, range_m=60000.0, metadata=None):
         tf = uacpy.Field(
             data=np.ones((1, 1, self.FREQS.size), dtype=complex),
             coords={'depth': [100.0], 'range': [range_m],
                     'frequency': self.FREQS},
             model='RAM', frequencies=self.FREQS,
-            phase_reference='travelling_wave', metadata=metadata)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+            phase_reference='travelling_wave', speeds=speeds,
+            metadata=metadata)
+        with recorded_warnings() as caught:
             trace = tf.to_time_trace()
         return float(trace.coords['time'][0]), caught
 
-    def test_c_max_anchors_before_the_earliest_arrival(self):
-        t0, caught = self._trace({'c_min': 1500.0, 'c_max': 1550.0,
-                                  'c0': 1520.0})
+    def test_water_max_anchors_before_the_earliest_arrival(self):
+        t0, caught = self._trace(SoundSpeeds(water_min=1500.0,
+                                             water_max=1550.0,
+                                             surface=1520.0))
         assert t0 <= 60000.0 / 1550.0
         assert not [w for w in caught if 'wrap to the end' in str(w.message)]
 
-    def test_missing_c_max_warns_at_long_range(self):
-        _, caught = self._trace({'c_min': 1500.0, 'c0': 1520.0})
+    def test_missing_water_max_warns_at_long_range(self):
+        _, caught = self._trace(SoundSpeeds(water_min=1500.0, surface=1520.0))
         assert [w for w in caught if 'wrap to the end' in str(w.message)], (
             "a long-range trace with no c_max must say the window start is "
             "an estimate")
 
     def test_short_range_does_not_warn(self):
-        t0, caught = self._trace({'c0': 1500.0}, range_m=2000.0)
+        t0, caught = self._trace(SoundSpeeds(surface=1500.0), range_m=2000.0)
         assert t0 <= 2000.0 / 1500.0
         assert not [w for w in caught if 'wrap to the end' in str(w.message)]
 
-    def test_c_min_never_binds_the_anchor(self):
+    def test_water_min_never_binds_the_anchor(self):
         # Only fastest-speed candidates may anchor the window: r/c_min is an
         # upper bound on the arrival, and anchoring on it opens the window
         # early enough that the true arrival wraps to the end of the record.
-        t0, _ = self._trace({'c_min': 5000.0, 'c_max': 1550.0})
-        assert t0 == pytest.approx(60000.0 / 1550.0 - 0.5, abs=1e-9)
+        t0, _ = self._trace(SoundSpeeds(water_min=5000.0, water_max=1550.0))
+        assert t0 == pytest.approx(60000.0 / 1550.0 - 0.1, abs=1e-9)
 
     def test_pe_reference_speed_never_binds_the_anchor(self):
         # RAM stamps its Padé expansion point as 'pe_reference_speed'; it is
         # an algorithmic constant, often above every physical speed, so it
         # must not enter the physical-speed max.
-        t0, _ = self._trace({'pe_reference_speed': 1700.0, 'c_max': 1550.0})
-        assert t0 == pytest.approx(60000.0 / 1550.0 - 0.5, abs=1e-9)
+        t0, _ = self._trace(SoundSpeeds(water_max=1550.0),
+                            metadata={'pe_reference_speed': 1700.0})
+        assert t0 == pytest.approx(60000.0 / 1550.0 - 0.1, abs=1e-9)
 
 
 class TestAllNaNCellPropagatesNaN:
@@ -1370,7 +1700,7 @@ class TestAllNaNCellPropagatesNaN:
                     'frequency': freqs},
             model='Synthetic', frequencies=freqs,
             phase_reference=PhaseReference.TRAVELLING_WAVE,
-            metadata={'c0': 1500.0, 'c_max': 1520.0})
+            speeds=SoundSpeeds(surface=1500.0, water_max=1520.0))
 
     def test_to_time_trace_warns_and_returns_nan(self):
         tf = self._tf(np.full((1, 1, 16), np.nan, dtype=complex))
@@ -1411,9 +1741,10 @@ class TestBatchedSynthesisMatchesPerCellTraces:
 
     def test_grid_equals_per_cell_traces(self):
         from uacpy.core.results import Field, PhaseReference
-        from uacpy.core.results.field import _ifft_to_trace
-        from uacpy.acoustic_signal.estimate import (
-            waveform_spectrum_at as _source_spectrum_at)
+        from uacpy.core.results._field_synthesis import _ifft_to_trace
+        from uacpy.acoustic_signal.spectrum_at import (
+            waveform_spectrum_at as _source_spectrum_at,
+        )
         rng = np.random.default_rng(2)
         freqs = np.arange(40.0, 40.0 + 2.0 * 32, 2.0)
         depths = np.linspace(10.0, 40.0, 2)
@@ -1425,7 +1756,7 @@ class TestBatchedSynthesisMatchesPerCellTraces:
                             'frequency': freqs},
             model='Synthetic', frequencies=freqs,
             phase_reference=PhaseReference.TRAVELLING_WAVE,
-            metadata={'c0': 1500.0, 'c_max': 1520.0})
+            speeds=SoundSpeeds(surface=1500.0, water_max=1520.0))
         fs = 500.0
         wf = _gaussian_pulse(fc=70.0, fs=fs)
         out = tf.synthesize_time_series(wf, sample_rate=fs)
@@ -1436,7 +1767,7 @@ class TestBatchedSynthesisMatchesPerCellTraces:
             for ri in range(ranges.size):
                 tr = _ifft_to_trace(
                     tf, depth=float(depths[di]), range=float(ranges[ri]),
-                    source_spectrum=src, window='hann', nfft=nfft,
+                    source_spectrum=src, window=None, nfft=nfft,
                     t_start=t_start)
                 np.testing.assert_allclose(
                     out.data[di, ri], tr.data, rtol=0.0, atol=1e-12)
@@ -1448,69 +1779,54 @@ def _waveform():
 
 
 @pytest.mark.requires_binary
-class TestTimeSeriesGuardReturnsARealFloatWaveform:
-    """``_require_timeseries_signal`` admits a complex waveform whose
-    imaginary part is ~0 on purpose, and every downstream consumer casts
-    with ``dtype=float`` — a cast that raises a bare ``TypeError`` on a
-    complex Python list and emits ``ComplexWarning`` on a complex ndarray.
-    The guard therefore returns the waveform to run with: the float64 real
-    part for accepted complex input, the caller's object otherwise."""
+class TestAComplexPulseIsRefusedByTheOneWaveformRule:
+    """A model's TIME_SERIES run applies the one waveform rule
+    (``source_waveform_problem``) that every waveform entry point does: a
+    real, finite, 1-D array. A complex waveform is refused even when its
+    imaginary part is zero, and the time settings then store no pulse; a
+    real waveform is stored as its float64 samples."""
 
-    @pytest.mark.parametrize('kind', ['list', 'ndarray'])
-    def test_an_accepted_complex_waveform_comes_back_as_float64_real(
-            self, kind):
-        wf = [complex(v, 0.0) for v in _waveform()]
-        if kind == 'ndarray':
-            wf = np.asarray(wf)
-        m = Bellhop(verbose=False)
-        ret = m._require_timeseries_signal(RunMode.TIME_SERIES, wf, 1000.0)
-        assert isinstance(ret, np.ndarray)
-        assert ret.dtype == np.float64
-        assert np.array_equal(ret, _waveform())
-
-    @pytest.mark.parametrize('kind', ['list', 'ndarray'])
-    def test_downstream_casts_of_the_returned_waveform_stay_silent(
-            self, kind):
-        wf = [complex(v, 0.0) for v in _waveform()]
-        if kind == 'ndarray':
-            wf = np.asarray(wf)
-        m = Bellhop(verbose=False)
-        ret = m._require_timeseries_signal(RunMode.TIME_SERIES, wf, 1000.0)
+    @staticmethod
+    def _time(wf):
+        env, source, receiver = _make_env()
         with warnings.catch_warnings():
-            warnings.simplefilter('error')
-            padded = m._pad_waveform_to_duration(ret, 1000.0, 0.1)
-            freqs = m._resolve_time_series_frequencies(
-                RunMode.TIME_SERIES, np.array([50.0, 100.0]), ret, 1000.0)
-        assert np.asarray(padded).dtype == np.float64
-        assert freqs is not None
-
-    def test_prepare_timeseries_hands_downstream_the_coerced_waveform(self):
-        m = Bellhop(verbose=False)
-        wf, freqs = m._prepare_timeseries(
-            RunMode.TIME_SERIES, Source(depths=25.0, frequencies=100.0),
-            np.array([50.0, 100.0]), [complex(v, 0.0) for v in _waveform()],
-            1000.0)
-        assert np.asarray(wf).dtype == np.float64
+            warnings.simplefilter('ignore', UserWarning)
+            warnings.simplefilter('error', np.exceptions.ComplexWarning)
+            return Bellhop(verbose=False).run_settings(
+                env, source, receiver, RunMode.TIME_SERIES,
+                source_waveform=wf, sample_rate=1000.0).time
 
     @pytest.mark.parametrize('kind', ['list', 'ndarray'])
-    def test_a_significant_imaginary_part_is_refused(self, kind):
-        wf = [v + 0.5j for v in _waveform()]
+    def test_a_complex_waveform_with_zero_imaginary_part_is_refused(
+            self, kind):
+        wf = [complex(v, 0.0) for v in _waveform()]
         if kind == 'ndarray':
             wf = np.asarray(wf)
-        with pytest.raises(ConfigurationError, match='imaginary'):
+        with pytest.raises(ConfigurationError, match=r'np\.real'):
             Bellhop(verbose=False)._require_timeseries_signal(
                 RunMode.TIME_SERIES, wf, 1000.0)
 
-    def test_a_real_waveform_passes_through_as_the_same_object(self):
-        wf = _waveform()
-        ret = Bellhop(verbose=False)._require_timeseries_signal(
-            RunMode.TIME_SERIES, wf, 1000.0)
-        assert ret is wf
+    def test_a_real_waveform_runs_unchanged(self):
+        pulse = self._time(_waveform()).source_waveform
+        assert pulse.dtype == np.float64
+        assert np.array_equal(pulse, _waveform())
 
-    def test_broadband_with_no_waveform_returns_none(self):
-        ret = Bellhop(verbose=False)._require_timeseries_signal(
-            RunMode.BROADBAND, None, None)
-        assert ret is None
+    @pytest.mark.parametrize('bad', ['tuple', 'two_rows', 'column'])
+    def test_a_waveform_that_is_not_one_dimensional_is_refused(self, bad):
+        wf = np.asarray(_waveform())
+        wf = {'tuple': (np.arange(wf.size) / 1000.0, wf),
+              'two_rows': np.vstack([wf, wf]),
+              'column': wf[:, None]}[bad]
+        with pytest.raises(ConfigurationError, match=r'lfm_chirp\(\.\.\.\)\[1\]'):
+            Bellhop(verbose=False)._require_timeseries_signal(
+                RunMode.TIME_SERIES, wf, 1000.0)
+
+    @pytest.mark.parametrize('mode,wf,rate', [
+        (RunMode.TIME_SERIES, _waveform(), 1000.0),
+        (RunMode.BROADBAND, None, None)])
+    def test_the_guard_refuses_and_returns_nothing(self, mode, wf, rate):
+        assert Bellhop(verbose=False)._require_timeseries_signal(
+            mode, wf, rate) is None
 
 
 class TestUnsolvedBinsDoNotBecomeSilence:
@@ -1542,8 +1858,7 @@ class TestUnsolvedBinsDoNotBecomeSilence:
         assert np.isnan(np.asarray(trace.data)).all()
 
     def test_the_warning_counts_the_unsolved_bins(self):
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             self._tf_with_one_unsolved_bin().to_time_trace(
                 depth=20.0, range=1000.0)
         msgs = [str(w.message) for w in record if 'did not solve' in str(w.message)]
@@ -1566,3 +1881,315 @@ class TestUnsolvedBinsDoNotBecomeSilence:
             trace = f.to_time_trace(depth=20.0, range=1000.0)
         assert np.isfinite(np.asarray(trace.data)).all()
 
+
+
+
+# ── The synthesis window defaults to no window whenever a waveform is given ──
+# A window across the band of H(f) is a filter the channel does not contain:
+# with a flat H = 1 it must leave the transmitted pulse's energy unchanged,
+# and a Hann there removes 0.8-17 dB depending on where the pulse sits in the
+# band. The bare impulse response keeps the Hann, which suppresses band-edge
+# ringing.
+
+from uacpy.core.results import Field, PhaseReference  # noqa: E402
+from uacpy.models.ram import _band as ram_band
+
+_WFS = 16000.0
+def _wd_flat_field(f_lo, f_hi, n):
+    freqs = np.linspace(f_lo, f_hi, n)
+    return Field(
+        data=np.ones((1, 1, n), dtype=complex),
+        coords={'depth': np.array([10.0]), 'range': np.array([0.0]),
+                'frequency': freqs},
+        model='Synthetic', source_depths=np.array([10.0]), frequencies=freqs,
+        phase_reference=PhaseReference.TRAVELLING_WAVE,
+        speeds=SoundSpeeds(surface=1500.0),
+    )
+
+
+def _wd_burst(f0=500.0, dur=0.01, total=0.1):
+    t = np.arange(int(total * _WFS)) / _WFS
+    x = np.zeros_like(t)
+    n = int(dur * _WFS)
+    x[:n] = np.hanning(n) * np.sin(2 * np.pi * f0 * t[:n])
+    return x
+
+
+def _wd_energy_dB(x, dt):
+    return 10 * np.log10(np.sum(np.asarray(x) ** 2) * dt)
+
+
+class TestWaveformSynthesisIsUnwindowedByDefault:
+    def test_flat_channel_returns_the_pulse_energy(self):
+        wf = _wd_burst()
+        tf = _wd_flat_field(10.0, 4000.0, 400)
+        ts = tf.synthesize_time_series(wf, _WFS, t_start=0.0)
+        t = ts.coords['time']
+        got = _wd_energy_dB(ts.data[0, 0], t[1] - t[0])
+        assert got == pytest.approx(_wd_energy_dB(wf, 1 / _WFS), abs=0.05)
+        assert ts.synthesis_window is None
+
+    def test_a_hann_window_would_bias_the_same_pulse_low(self):
+        wf = _wd_burst()
+        tf = _wd_flat_field(10.0, 4000.0, 400)
+        ts = tf.synthesize_time_series(wf, _WFS, t_start=0.0, window='hann')
+        t = ts.coords['time']
+        loss = _wd_energy_dB(wf, 1 / _WFS) - _wd_energy_dB(ts.data[0, 0], t[1] - t[0])
+        assert loss > 5.0
+
+    def test_to_time_trace_with_a_waveform_is_unwindowed(self):
+        wf = _wd_burst()
+        tf = _wd_flat_field(10.0, 4000.0, 400)
+        tr = tf.to_time_trace(source_waveform=wf, sample_rate=_WFS, t_start=0.0)
+        assert tr.synthesis_window is None
+        t = tr.coords['time']
+        assert _wd_energy_dB(tr.data, t[1] - t[0]) == pytest.approx(
+            _wd_energy_dB(wf, 1 / _WFS), abs=0.05)
+
+    def test_bare_impulse_response_keeps_the_hann(self):
+        tf = _wd_flat_field(100.0, 1000.0, 91)
+        tr = tf.to_time_trace(t_start=0.0)
+        assert tr.synthesis_window == 'hann'
+
+    def test_an_explicit_none_is_rectangular_with_or_without_a_source(self):
+        """``window='auto'`` decides from the source; ``None`` never does:
+        it is the rectangular window on the bare impulse response too."""
+        tf = _wd_flat_field(100.0, 1000.0, 91)
+        assert tf.to_time_trace(t_start=0.0, window=None).synthesis_window is None
+        wf = _wd_burst()
+        tf = _wd_flat_field(10.0, 4000.0, 400)
+        tr = tf.to_time_trace(source_waveform=wf, sample_rate=_WFS, t_start=0.0,
+                              window=None)
+        assert tr.synthesis_window is None
+
+
+class TestBandEdgeRingingWarning:
+    def test_band_inside_the_pulse_spectrum_warns(self):
+        wf = _wd_burst()
+        tf = _wd_flat_field(450.0, 550.0, 11)   # cuts the burst's main lobe
+        with pytest.warns(UserWarning, match="cuts the source spectrum"):
+            tf.synthesize_time_series(wf, _WFS, t_start=0.0)
+
+    def test_band_holding_the_pulse_spectrum_is_silent(self):
+        wf = _wd_burst()
+        tf = _wd_flat_field(10.0, 4000.0, 400)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            tf.synthesize_time_series(wf, _WFS, t_start=0.0)
+
+    def test_an_explicit_window_does_not_warn_about_ringing(self):
+        wf = _wd_burst()
+        tf = _wd_flat_field(450.0, 550.0, 11)
+        with recorded_warnings() as rec:
+            tf.synthesize_time_series(wf, _WFS, t_start=0.0, window='hann')
+        assert not any("cuts the source spectrum" in str(w.message)
+                       for w in rec)
+
+    @staticmethod
+    def _edge_warnings(edge):
+        """Warnings from the band-edge check on a spectrum whose two edges
+        sit at ``edge`` re its unit peak, every RuntimeWarning an error."""
+        from uacpy.acoustic_signal._synthesis import (
+            warn_band_edge_cuts_spectrum)
+        spectrum = np.concatenate([[edge], np.ones(9), [edge]])
+        with recorded_warnings() as rec:
+            warnings.simplefilter("error", RuntimeWarning)
+            warn_band_edge_cuts_spectrum(spectrum, None, 'probe')
+        return [str(w.message) for w in rec]
+
+    def test_a_spectrum_zero_at_its_edges_is_not_cut(self):
+        """Nothing is cut where the spectrum is already zero, and the zero
+        edge takes no logarithm (a divide-by-zero RuntimeWarning escaped)."""
+        assert self._edge_warnings(0.0) == []
+
+    def test_a_small_nonzero_edge_below_the_threshold_is_silent(self):
+        assert self._edge_warnings(1e-3) == []          # -60 dB
+
+    def test_an_edge_at_the_threshold_is_silent(self):
+        assert self._edge_warnings(0.01) == []          # -40.0 dB exactly
+
+    def test_an_edge_above_the_threshold_warns_with_its_level(self):
+        messages = self._edge_warnings(0.0101)           # -39.9 dB
+        assert len(messages) == 1
+        assert "cuts the source spectrum at -39.9 dB" in messages[0]
+
+    def test_a_hann_spectrum_through_a_trace_raises_no_runtime_warning(self):
+        tf = _wd_flat_field(450.0, 550.0, 11)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            tf.to_time_trace(source_spectrum=np.hanning(11), t_start=0.0)
+
+
+class TestEveryWaveformEntryPointAppliesTheOneRule:
+    """Decision 38: the same waveform is accepted or refused alike by every
+    entry point that takes one — the five Field methods and the plain-array
+    ``synthesize_time_series``."""
+
+    _FS = 4000.0
+
+    @classmethod
+    def _entry_points(cls):
+        from uacpy.acoustic_signal import synthesize_time_series
+        tf = _wd_flat_field(100.0, 900.0, 81)
+        fs = cls._FS
+        return {
+            'to_time_trace': lambda w: tf.to_time_trace(
+                source_waveform=w, sample_rate=fs, t_start=0.0),
+            'synthesize_time_series': lambda w: tf.synthesize_time_series(
+                w, fs, t_start=0.0),
+            'broadband_loss': lambda w: tf.broadband_loss(
+                source_waveform=w, sample_rate=fs),
+            'sound_exposure_level': lambda w: tf.sound_exposure_level(
+                w, fs, t_start=0.0),
+            'peak_sound_pressure_level':
+                lambda w: tf.peak_sound_pressure_level(w, fs, t_start=0.0),
+            'array synthesize_time_series': lambda w: synthesize_time_series(
+                tf.data, frequencies=tf.coords['frequency'], source_waveform=w, sample_rate=fs),
+        }
+
+    @staticmethod
+    def _pulse():
+        t = np.arange(80) / 4000.0
+        return np.sin(2 * np.pi * 500.0 * t) * np.hanning(t.size)
+
+    @pytest.mark.parametrize('entry', [
+        'to_time_trace', 'synthesize_time_series', 'broadband_loss',
+        'sound_exposure_level', 'peak_sound_pressure_level',
+        'array synthesize_time_series'])
+    def test_a_real_one_dimensional_waveform_is_accepted(self, entry):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            self._entry_points()[entry](self._pulse())
+
+    @pytest.mark.parametrize('bad,match', [
+        ('tuple', r'lfm_chirp\(\.\.\.\)\[1\]'),
+        ('two_rows', r'lfm_chirp\(\.\.\.\)\[1\]'),
+        ('one_row', r'lfm_chirp\(\.\.\.\)\[1\]'),
+        ('column', r'lfm_chirp\(\.\.\.\)\[1\]'),
+        ('complex', r'np\.real'),
+        ('nan', 'non-finite')])
+    @pytest.mark.parametrize('entry', [
+        'to_time_trace', 'synthesize_time_series', 'broadband_loss',
+        'sound_exposure_level', 'peak_sound_pressure_level',
+        'array synthesize_time_series'])
+    def test_every_other_waveform_is_refused_alike(self, entry, bad, match):
+        wf = self._pulse()
+        wf = {'tuple': (np.arange(wf.size) / self._FS, wf),
+              'two_rows': np.vstack([wf, wf]),
+              'one_row': wf[None, :],
+              'column': wf[:, None],
+              'complex': wf + 0j,
+              'nan': np.where(np.arange(wf.size) == 3, np.nan, wf)}[bad]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with pytest.raises(ConfigurationError, match=match):
+                self._entry_points()[entry](wf)
+
+
+class TestSubCutoffBinsAreNamedAsSuch:
+    """A normal-mode model records ``Field.sub_cutoff_bins`` for bins
+    below the lowest mode's cutoff and leaves them NaN in H(f). Synthesising
+    that field by hand is all-NaN, and "re-run them" cannot help below
+    cutoff, so the warning names the cutoff and the remedies that do: a band
+    above it, Scooter, or RunMode.TIME_SERIES. Without the metadata the
+    ordinary unsolved-bin wording stays."""
+
+    @staticmethod
+    def _tf(sub_cutoff_bins):
+        from uacpy.core.results import Field, PhaseReference
+        freqs = np.linspace(100.0, 500.0, 9)
+        data = np.ones((1, 1, freqs.size), dtype=complex)
+        data[0, 0, :2] = np.nan
+        return Field(
+            data=data,
+            coords={'depth': np.array([20.0]), 'range': np.array([1000.0]),
+                    'frequency': freqs},
+            model='Synthetic', source_depths=np.array([5.0]),
+            frequencies=freqs, sub_cutoff_bins=sub_cutoff_bins,
+            phase_reference=PhaseReference.TRAVELLING_WAVE)
+
+    @staticmethod
+    def _messages(call):
+        with recorded_warnings() as record:
+            call()
+        return ' '.join(str(w.message) for w in record)
+
+    @pytest.mark.parametrize('route', ['trace', 'series'])
+    def test_recorded_sub_cutoff_bins_name_the_cutoff_and_the_remedies(
+            self, route):
+        tf = self._tf(2)
+        call = ((lambda: tf.to_time_trace(depth=20.0, range=1000.0))
+                if route == 'trace' else
+                (lambda: tf.synthesize_time_series(np.hanning(32), 2000.0)))
+        text = self._messages(call)
+        assert 'cutoff' in text and 'Scooter' in text
+        assert 'RunMode.TIME_SERIES' in text
+        assert 'Re-run them, or' not in text
+
+    @pytest.mark.parametrize('count', [None, 0])
+    def test_without_the_record_the_unsolved_wording_stays(self, count):
+        tf = self._tf(count)
+        text = self._messages(
+            lambda: tf.to_time_trace(depth=20.0, range=1000.0))
+        assert 'did not solve' in text and 'cutoff' not in text
+
+
+class TestTransferFunctionRoundTripGrid:
+    """``to_transfer_function`` returns the rfft bins ``k·Δf`` of the trace:
+    the model's own axis when the band started on a multiple of ``Δf``, the
+    integer-``Δf`` grid (with leakage) when it did not — the two measured
+    cases the method's docstring quotes."""
+
+    @staticmethod
+    def _round_trip(f0):
+        f = np.arange(f0, 1000.0, 1.0)
+        H = (0.01 * np.exp(-2j * np.pi * f * 0.5)
+             + 0.005 * np.exp(-2j * np.pi * f * 0.52))
+        field = Field(data=H[None, None, :],
+                      coords={'depth': np.array([10.0]),
+                              'range': np.array([750.0]), 'frequency': f},
+                      speeds=SoundSpeeds(water_max=1500.0), frequencies=f)
+        back = field.to_time_trace(depth=10.0, range=750.0, window=None,
+                                   t_start=0.0).to_transfer_function()
+        fb = back.coords['frequency']
+        truth = (0.01 * np.exp(-2j * np.pi * fb * 0.5)
+                 + 0.005 * np.exp(-2j * np.pi * fb * 0.52))
+        inner = (fb > 50.0) & (fb < 950.0)
+        return fb, np.max(np.abs(back.data.ravel() - truth)[inner]) / 0.015
+
+    def test_a_band_on_the_grid_round_trips_to_rounding(self):
+        fb, err = self._round_trip(25.0)
+        assert fb[0] == 25.0 and err < 1e-12
+
+    def test_an_offset_band_comes_back_on_the_integer_grid_with_leakage(self):
+        fb, err = self._round_trip(25.3)
+        assert fb[0] == 26.0
+        assert 1e-3 < err < 5e-3
+
+
+@pytest.mark.requires_binary
+def test_output_duration_pads_the_pulse_except_on_the_time_marcher():
+    """``output_duration=`` zero-pads the pulse the time settings record,
+    as the IFFT synthesis reads it (Scooter); SPARC's ``output_duration``
+    is the end of its own record, so its settings keep the pulse its STSFIL
+    carries, unpadded. Both record the duration asked for."""
+    import uacpy
+    from uacpy.models import SPARC, Scooter
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0,
+                            bottom=uacpy.BoundaryProperties(
+                                acoustic_type='rigid'))
+    src = uacpy.Source(depths=50.0, frequencies=100.0)
+    rcv = uacpy.Receiver(depths=[50.0], ranges=[1000.0])
+    fs = 4000.0
+    t = np.arange(400) / fs
+    pulse = np.sin(2 * np.pi * 100.0 * t) * np.hanning(t.size)
+    kw = dict(run_mode=RunMode.TIME_SERIES, source_waveform=pulse,
+              sample_rate=fs, output_duration=0.5)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        padded = Scooter(verbose=False).run_settings(env, src, rcv, **kw).time
+        marched = SPARC(verbose=False).run_settings(env, src, rcv, **kw).time
+    assert padded.source_waveform.size == 2000
+    assert marched.source_waveform.size == 400
+    np.testing.assert_array_equal(marched.source_waveform, pulse)
+    assert padded.output_duration == marched.output_duration == 0.5

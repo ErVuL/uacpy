@@ -12,6 +12,7 @@ plot_field · plot.plot_field_difference
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
@@ -32,21 +33,37 @@ env = uacpy.Environment(
                                     attenuation=0.5),
 )
 source = uacpy.Source(depths=25.0, frequencies=100.0)
+# Ranges start at 300 m: closer in, the deepest receivers see direct and
+# surface-reflected paths steeper than the band the PE propagates (28°).
 receiver = uacpy.Receiver(depths=np.linspace(2.0, 98.0, 30),
-                          ranges=np.linspace(200.0, 10000.0, 40))
+                          ranges=np.linspace(300.0, 10000.0, 39))
 
 # One accuracy budget, two reference speeds. The dispatcher picks mpiramS here
-# (fluid seabed, flat surface).
-pinned = uacpy.RAM(accuracy=1e-2, theta_max=20.0, c0=1500.0).run(
-    env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
-optimized = uacpy.RAM(accuracy=1e-2, theta_max=20.0).run(
-    env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+# (fluid seabed, flat surface). The budget sets dr, which is what this example
+# compares; dz is then raised to RAM's depth-grid cost floor (about λ/20 here),
+# where the predicted Padé error is about 0.99, far above the 1e-2 budget. A
+# pinned budget the grid does not meet warns, so both runs record that warning
+# and print it as a note: it is the expected outcome, not a fault.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    pinned = uacpy.RAM(accuracy=1e-2, angle_max=20.0, c0=1500.0).run(
+        env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+    optimized = uacpy.RAM(accuracy=1e-2, angle_max=20.0).run(
+        env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+for warning in caught:
+    text = ' '.join(str(warning.message).split())
+    if 'is not met on this grid' in text:
+        print(f"  noted: {text.split(' Set dr/dz')[0]}")
+    else:
+        warnings.showwarning(warning.message, warning.category,
+                             warning.filename, warning.lineno)
 
-# The grid the Padé optimizer settled on comes back in the field's metadata.
+# The grid the Padé optimizer settled on comes back in the run settings.
 for label, field in (('c₀=1500 pinned', pinned), ('c₀=Eq.(15)', optimized)):
-    grid = field.metadata
-    print(f"  {label:16s} c₀={grid['pe_reference_speed']:6.1f} m/s  "
-          f"dr={grid['dr']:7.2f} m  dz={grid['dz']:6.3f} m")
+    engine = field.run_settings.engine
+    grid = engine.grids[0]
+    print(f"  {label:16s} c₀={engine.c0:6.1f} m/s  "
+          f"dr={grid.dr:7.2f} m  dz={grid.dz:6.3f} m")
 
 rms = float(np.sqrt(np.nanmean((pinned.dB - optimized.dB) ** 2)))
 print(f"  RMS |ΔTL| between the two grids: {rms:.2f} dB")
@@ -54,10 +71,11 @@ print(f"  RMS |ΔTL| between the two grids: {rms:.2f} dB")
 fig, axes = plt.subplots(1, 3, figsize=(16, 4.4), sharey=True)
 for ax, field, title in ((axes[0], pinned, 'c₀=1500 (pinned)\nasymmetric ξ-range'),
                          (axes[1], optimized, 'c₀=Eq.(15) (default)\ncentred ξ-range')):
-    grid = field.metadata
-    uacpy.plot_field(field, ax=ax, env=env, vmin=40, vmax=100,
-                     title=f"{title}\nc₀={grid['pe_reference_speed']:.1f} m/s, "
-                           f"dr={grid['dr']:.2f} m, dz={grid['dz']:.3f} m")
+    engine = field.run_settings.engine
+    grid = engine.grids[0]
+    uacpy.plot.plot_field(field, ax=ax, env=env, vmin=40, vmax=100,
+                     title=f"{title}\nc₀={engine.c0:.1f} m/s, "
+                           f"dr={grid.dr:.2f} m, dz={grid.dz:.3f} m")
 # The signed residual, on a ±5 dB diverging window.
 uacpy.plot.plot_field_difference(pinned, optimized, axes[2], diff_vmax=5,
                                  title=f'pinned − optimized, RMS {rms:.2f} dB')

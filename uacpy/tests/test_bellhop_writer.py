@@ -24,16 +24,12 @@ import uacpy
 from uacpy.core.environment import Bottom, BoundaryProperties, SeabedColumn
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.bellhop_writer import write_bellhop_env_file
+from uacpy.core import Environment
+from uacpy.io.oalib_writer import write_ssp_section
+import io
+from uacpy.tests.conftest import warning_messages
 
 _RD_SSP = 'range-dependent SSP'
-
-
-def _messages(fn, needle):
-    """Run ``fn`` and return the warning messages containing ``needle``."""
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
-        fn()
-    return [str(w.message) for w in rec if needle in str(w.message)]
 
 
 def _write(tmp_path, env, ranges_max=20000.0):
@@ -111,7 +107,7 @@ def test_single_sample_altimetry_writes_ati(tmp_path):
 def _rd_ssp_env(ssp_range_max):
     ssp = uacpy.SoundSpeedProfile(
         depths=[0.0, 100.0],
-        data=np.array([[1500.0, 1495.0], [1490.0, 1488.0]]),
+        sound_speed=np.array([[1500.0, 1495.0], [1490.0, 1488.0]]),
         ranges=[0.0, ssp_range_max])
     return uacpy.Environment(
         bathymetry=100.0, ssp=ssp,
@@ -137,19 +133,19 @@ class TestRangeDependentSSPWarning:
         across the box margin beyond them is not a modelling choice the
         caller made — no receiver sits there."""
         with tempfile.TemporaryDirectory() as td:
-            msgs = _messages(lambda: _write_rd_ssp_deck(5000.0, 5000.0, td),
+            msgs = warning_messages(lambda: _write_rd_ssp_deck(5000.0, 5000.0, td),
                              _RD_SSP)
         assert msgs == []
 
     def test_a_receiver_one_metre_beyond_the_ssp_warns(self):
         with tempfile.TemporaryDirectory() as td:
-            msgs = _messages(lambda: _write_rd_ssp_deck(5000.0, 5001.0, td),
+            msgs = warning_messages(lambda: _write_rd_ssp_deck(5000.0, 5001.0, td),
                              _RD_SSP)
         assert len(msgs) == 1
 
     def test_an_ssp_one_metre_beyond_the_outermost_receiver_is_accepted(self):
         with tempfile.TemporaryDirectory() as td:
-            msgs = _messages(lambda: _write_rd_ssp_deck(5000.0, 4999.0, td),
+            msgs = warning_messages(lambda: _write_rd_ssp_deck(5000.0, 4999.0, td),
                              _RD_SSP)
         assert msgs == []
 
@@ -158,7 +154,7 @@ class TestRangeDependentSSPWarning:
         the check tests against ``r_box`` leaves the warning standing when
         followed. The target named here is the one that silences it."""
         with tempfile.TemporaryDirectory() as td:
-            msgs = _messages(lambda: _write_rd_ssp_deck(5000.0, 9000.0, td),
+            msgs = warning_messages(lambda: _write_rd_ssp_deck(5000.0, 9000.0, td),
                              _RD_SSP)
         assert len(msgs) == 1
         assert 'out to at least 9000 m' in msgs[0]
@@ -167,9 +163,9 @@ class TestRangeDependentSSPWarning:
 
     def test_following_the_remediation_silences_the_warning(self):
         with tempfile.TemporaryDirectory() as td:
-            assert len(_messages(
+            assert len(warning_messages(
                 lambda: _write_rd_ssp_deck(5000.0, 9000.0, td), _RD_SSP)) == 1
-            assert _messages(
+            assert warning_messages(
                 lambda: _write_rd_ssp_deck(9000.0, 9000.0, td), _RD_SSP) == []
 
     def test_the_ssp_file_extends_past_the_ray_box(self):
@@ -224,7 +220,7 @@ class TestBellhopHalfSpaceMatchesItsSiblings:
         import io as _io
         from uacpy.io.bellhop_writer import write_bellhop_env_file
         from uacpy.io.oalib_writer import write_bottom_section
-        from uacpy.core.constants import BoundaryType
+        from uacpy.core.boundary import BoundaryType
         env = self._env()
         bell = tmp_path / 'deck.env'
         write_bellhop_env_file(
@@ -278,7 +274,7 @@ class TestOneSeabedDescribesOneSeabed:
 
 class TestAltimetryFilesRoundTripInTheFileConvention:
     """``write_ati_file`` documents its input as positive-DOWN — Bellhop's z
-    axis — and ``read_altimetry`` returns the column as the file carries it.
+    axis — and ``read_altimetry`` returns the values as the file carries them.
     Neither negates, so the pair is an identity and the negation belongs to
     whoever owns the public positive-up convention (``bellhop_writer`` does
     it for ``Environment(altimetry=…)``)."""
@@ -288,9 +284,9 @@ class TestAltimetryFilesRoundTripInTheFileConvention:
         p = tmp_path / 's.ati'
         # +2 m is a surface 2 m BELOW MSL in this convention.
         write_ati_file(p, np.array([[0.0, 2.0], [1000.0, -3.0]]))
-        ati, _ = read_altimetry(p)
-        assert ati[1, 1] == pytest.approx(2.0)
-        assert ati[1, 2] == pytest.approx(-3.0)
+        ati = read_altimetry(p)
+        assert ati.depths[0] == pytest.approx(2.0)
+        assert ati.depths[1] == pytest.approx(-3.0)
 
     def test_the_bellhop_writer_owns_the_negation(self, tmp_path):
         """A crest 2 m above MSL in the public convention has to reach the
@@ -303,8 +299,8 @@ class TestAltimetryFilesRoundTripInTheFileConvention:
         out = tmp_path / 'r.env'
         write_bellhop_env_file(str(out), env, _source(),
                                uacpy.Receiver(depths=[50.0], ranges=[1000.0]))
-        ati, _ = read_altimetry(out.with_suffix('.ati'))
-        assert ati[1, 1] == pytest.approx(-2.0)
+        ati = read_altimetry(out.with_suffix('.ati'))
+        assert ati.depths[0] == pytest.approx(-2.0)
 
 
 def _source():
@@ -632,3 +628,279 @@ class TestALongFormatBtyWritesTheNearestColumnStep:
         # 2 dB allowance for the ray/PE treatment of the switch itself.
         assert rms_step <= rms_flat + 2.0, (rms_step, rms_flat)
         assert max_step <= max_flat + 3.0, (max_step, max_flat)
+
+
+class TestBellhopWriterReflectionStaging:
+    """``write_bellhop_env_file``'s user-error contracts and its ``.brc``/``.trc``
+    staging, which has to tolerate a table already sitting beside the ``.env``."""
+
+    @staticmethod
+    def _sr():
+        source = uacpy.Source(frequencies=100, depths=25)
+        receiver = uacpy.Receiver(depths=np.array([50.0]),
+                                  ranges=np.linspace(100.0, 5000.0, 20))
+        return source, receiver
+
+    @staticmethod
+    def _brc(path):
+        theta = np.linspace(0.0, 90.0, 91)
+        with open(path, 'w') as fh:
+            fh.write(f"{len(theta)}\n")
+            for t in theta:
+                fh.write(f"{t:12.6f}     0.500000     0.000000\n")
+        return path
+
+    @pytest.mark.parametrize('kwargs', [
+        {'interp_bathymetry': 'bogus'},
+        {'interp_altimetry': 'bogus'},
+    ])
+    def test_bad_geometry_interp_raises_configurationerror(self, tmp_path, kwargs):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
+        source, receiver = self._sr()
+        with pytest.raises(
+                ConfigurationError,
+                match="interp_(altimetry|bathymetry) must be 'linear' or 'curvilinear'"):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver,
+                                   **kwargs)
+        # The guard runs before the file opens, so a refused deck leaves no
+        # truncated .env behind.
+        assert not (tmp_path / 'run.env').exists()
+
+    def test_refused_irregular_grid_leaves_no_truncated_env(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(name='t', bathymetry=100, ssp=1500)
+        source, receiver = self._sr()   # 1 depth vs 20 ranges
+        with pytest.raises(ConfigurationError, match="grid_type='I'"):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver,
+                                   grid_type='I')
+        assert not (tmp_path / 'run.env').exists()
+
+    def test_bottom_file_without_reflection_file_raises_configurationerror(
+            self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            bottom=uacpy.BoundaryProperties(acoustic_type='file'))
+        source, receiver = self._sr()
+        with pytest.raises(ConfigurationError, match='reflection_file'):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+
+    def test_brc_already_beside_the_env_is_kept(self, tmp_path):
+        """A BOUNCE-produced ``run.brc`` in a pinned work_dir that Bellhop then
+        writes ``run.env`` into: source and destination are the same file."""
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        brc = self._brc(tmp_path / 'run.brc')
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            bottom=uacpy.BoundaryProperties(acoustic_type='file',
+                                            reflection_file=str(brc)))
+        source, receiver = self._sr()
+        write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+        assert brc.exists() and brc.stat().st_size > 0
+        assert "'F'" in (tmp_path / 'run.env').read_text()
+
+    def test_trc_already_beside_the_env_is_kept(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        trc = self._brc(tmp_path / 'run.trc')
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            surface=uacpy.BoundaryProperties(acoustic_type='file',
+                                             reflection_file=str(trc)))
+        source, receiver = self._sr()
+        write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+        assert trc.exists() and trc.stat().st_size > 0
+
+    def test_surface_file_without_reflection_file_raises_configurationerror(
+            self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            surface=uacpy.BoundaryProperties(acoustic_type='file'))
+        source, receiver = self._sr()
+        with pytest.raises(ConfigurationError, match='reflection_file'):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+
+    def test_missing_reflection_file_raises_configurationerror(self, tmp_path):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = uacpy.Environment(
+            name='t', bathymetry=100, ssp=1500,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='file',
+                reflection_file=str(tmp_path / 'nope.brc')))
+        source, receiver = self._sr()
+        with pytest.raises(ConfigurationError, match='not found'):
+            write_bellhop_env_file(tmp_path / 'run.env', env, source, receiver)
+
+
+class TestATSSPPointLimit:
+    """``misc/sspMod.f90:11`` dimensions every profile array to
+    ``MaxSSP = 20001``. Its read loop counts per medium but writes at a
+    cumulative index (``SSP%Loc`` accumulates at ``:325``), so the clean
+    ``ERROUT`` at ``:368`` only fires for a single medium — with sediment
+    layers the index runs off the end and gfortran dies inside the READ with
+    an unrelated "Bad real number in item 1 of list input". Bellhop's private
+    ``Bellhop/sspMod.f90:16`` holds 100001, so the same environment can be
+    fine for Bellhop and fatal for Kraken. uacpy already guards the sibling AT
+    limits (``MaxNfreq``, ``MaxBioLayers``, the mesh floor); this one was
+    missed."""
+
+    BOT = BoundaryProperties(acoustic_type='half-space', sound_speed=1800.0,
+                             density=1.8, attenuation=0.5)
+
+    def _env(self, n):
+        z = np.linspace(0.0, 200.0, n)
+        return Environment(bathymetry=200.0,
+                           ssp=list(zip(z, 1500.0 + 0.01 * z)), bottom=self.BOT)
+
+    def test_at_the_limit_writes(self):
+        # The discriminating counterpart: 20001 is legal and must not be
+        # refused. Off-by-one here would reject a valid environment.
+        buf = io.StringIO()
+        write_ssp_section(buf, self._env(20001), 200.0, ssp_topopt='C')
+        assert buf.getvalue()
+
+    @pytest.mark.parametrize('n', [20002, 25000])
+    def test_over_the_limit_is_refused_with_the_reason(self, n):
+        with pytest.raises(ConfigurationError, match='sspMod.f90:11'):
+            write_ssp_section(io.StringIO(), self._env(n), 200.0,
+                              ssp_topopt='C')
+
+    def _submerged_env(self, n):
+        z = np.linspace(10.0, 200.0, n)
+        return Environment(bathymetry=200.0,
+                           ssp=list(zip(z, 1500.0 + 0.01 * z)), bottom=self.BOT)
+
+    def test_the_z0_guard_row_counts_toward_the_limit(self):
+        # A profile starting under the surface gains a prepended z = 0 row,
+        # so 20001 tabulated samples put 20002 rows in the deck.
+        with pytest.raises(ConfigurationError, match='sspMod.f90:11'):
+            write_ssp_section(io.StringIO(), self._submerged_env(20001),
+                              200.0, ssp_topopt='C')
+
+    def test_a_submerged_profile_at_the_limit_writes_with_its_guard_row(self):
+        # The run announces the submerged start (models._checks
+        # .warn_on_ssp_start); the writer only adds the guard row.
+        buf = io.StringIO()
+        write_ssp_section(buf, self._submerged_env(20000), 200.0,
+                          ssp_topopt='C')
+        rows = [ln for ln in buf.getvalue().splitlines() if ln.endswith('/')]
+        assert len(rows) == 20001
+
+    def test_bellhop_is_untouched(self):
+        # Bellhop has its own reader and its own 100001 limit, so the guard
+        # must not reach its writer.
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        import inspect
+        assert 'reject_oversized_at_ssp' not in inspect.getsource(
+            write_bellhop_env_file)
+
+
+class TestBiologicalEdgesReachBothBellhopProfiles:
+    """Bellhop evaluates a Biological law at its SSP nodes only
+    (``Bellhop/sspMod.f90:906``), and a quad run pairs row ``iz`` of the
+    ``.ssp`` matrix with node ``iz`` of the ``.env`` (``:427-431``), so the
+    edge node pairs go into both, interpolated linearly in depth as
+    ``Quad`` interpolates."""
+
+    def test_the_env_rows_and_the_ssp_matrix_carry_the_same_pairs(
+            self, tmp_path):
+        env = _rd_ssp_env(20000.0)
+        env.absorption = uacpy.Biological(
+            layers=[(30.0, 70.0, 300.0, 4.0, 0.125)])
+        path = tmp_path / 'model.env'
+        src = uacpy.Source(depths=25.0, frequencies=200.0)
+        rcv = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 20),
+                             ranges=np.linspace(100.0, 15000.0, 30))
+        write_bellhop_env_file(path, env, src, rcv, interp_ssp='quad')
+        rows = [ln.split() for ln in path.read_text().splitlines()
+                if ln.strip().endswith('/') and len(ln.split()) == 7]
+        # The SSP block ends at the row on the deck depth; the bottom
+        # half-space row after it has the same field count.
+        depths = [float(r[0]) for r in rows]
+        depths = depths[:depths.index(100.0) + 1]
+        assert depths == [0.0, 29.99, 30.0, 70.0, 70.01, 100.0]
+        matrix = path.with_suffix('.ssp').read_text().splitlines()[2:]
+        assert len(matrix) == len(depths)
+        first_column = [float(ln.split()[1]) for ln in matrix]
+        np.testing.assert_allclose(
+            first_column, np.interp(depths, [0.0, 100.0], [1500.0, 1490.0]),
+            rtol=0, atol=1e-6)
+
+    def test_a_pinned_pchip_profile_refuses_an_interior_edge(self, tmp_path):
+        env = uacpy.Environment(
+            bathymetry=100.0, ssp=[(0.0, 1520.0), (100.0, 1500.0)],
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1600.0,
+                density=1.5, attenuation=0.5),
+            absorption=uacpy.Biological(
+                layers=[(30.0, 70.0, 300.0, 4.0, 0.125)]))
+        src = uacpy.Source(depths=25.0, frequencies=200.0)
+        rcv = uacpy.Receiver(depths=[50.0], ranges=[1000.0])
+        with pytest.raises(ConfigurationError, match="interp_ssp='linear'"):
+            write_bellhop_env_file(tmp_path / 'p.env', env, src, rcv,
+                                   interp_ssp='pchip')
+
+
+def test_a_cerveny_deck_with_no_knobs_writes_the_documented_defaults(tmp_path):
+    """The two Cerveny lines (ReadEnvironmentBell.f90:197, :217) of a
+    ``beam_type='C'`` deck given no beam knobs: space-filling width 'F',
+    double curvature 'D', epsilon multiplier 1, RLoop 1 km, one image,
+    window 4, pressure — the defaults the Bellhop model declares too."""
+    from uacpy import Bellhop
+    from uacpy.io.bellhop_writer import CERVENY_DEFAULTS
+    src = uacpy.Source(depths=25.0, frequencies=100.0)
+    rcv = uacpy.Receiver(depths=np.array([50.0]),
+                         ranges=np.linspace(1000.0, 5000.0, 5))
+    path = tmp_path / 'cerveny.env'
+    write_bellhop_env_file(path, Environment(bathymetry=100.0, ssp=1500.0),
+                           src, rcv, beam_type='C')
+    assert path.read_text().splitlines()[-2:] == [
+        "'FD' 1.000000 1.000000", "1 4 'P'"]
+    assert CERVENY_DEFAULTS == {
+        'beam_width_type': 'F', 'beam_curvature': 'D', 'component': 'P',
+        'eps_multiplier': 1.0, 'r_loop': 1000.0, 'n_image': 1, 'ib_win': 4}
+    model = Bellhop()
+    assert {name: getattr(model, name) for name in CERVENY_DEFAULTS} == \
+        CERVENY_DEFAULTS
+
+
+class TestARangeDependentProfileHoldsTheRange0Absorption:
+    """Under a range-dependent ``'Q'`` profile Bellhop takes the imaginary
+    sound speed from the ``.env`` rows alone (``Bellhop/sspMod.f90:520``),
+    the range-0 column: a law the rows carry is then the range-0 α(z) at
+    every range, and the writer says so — only when the law varies with
+    depth and the profile's speeds leave the range-0 column."""
+
+    @staticmethod
+    def _notices(absorption, speeds_at_2km):
+        from uacpy.core.environment import SoundSpeedProfile
+        from uacpy.core.exceptions import FallbackWarning
+        from uacpy.tests.conftest import recorded_warnings
+        ssp = SoundSpeedProfile(
+            depths=np.array([0.0, 100.0]),
+            sound_speed=np.array([[1500.0, speeds_at_2km[0]],
+                                  [1505.0, speeds_at_2km[1]]]),
+            ranges=np.array([0.0, 2000.0]))
+        env = Environment(name='rd', bathymetry=100.0, ssp=ssp,
+                          bottom='sand', absorption=absorption)
+        with tempfile.TemporaryDirectory() as d, recorded_warnings() as rec:
+            write_bellhop_env_file(
+                pathlib.Path(d) / 'rd.env', env,
+                uacpy.Source(depths=30.0, frequencies=4000.0),
+                uacpy.Receiver(depths=[20.0], ranges=[1000.0, 3000.0]))
+        return [str(w.message) for w in rec
+                if issubclass(w.category, FallbackWarning)
+                and 'range-0 alpha(z) is used at every range' in str(w.message)]
+
+    def test_a_profile_over_a_changing_column_is_announced(self):
+        from uacpy.tests.conftest import two_layer_absorption
+        (msg,) = self._notices(two_layer_absorption(), (1490.0, 1495.0))
+        assert 'Bellhop/sspMod.f90:520' in msg
+
+    def test_a_column_equal_to_range_0_is_silent(self):
+        from uacpy.tests.conftest import two_layer_absorption
+        assert self._notices(two_layer_absorption(), (1500.0, 1505.0)) == []
+
+    def test_a_law_with_a_letter_is_silent(self):
+        assert self._notices(uacpy.Thorp(), (1490.0, 1495.0)) == []

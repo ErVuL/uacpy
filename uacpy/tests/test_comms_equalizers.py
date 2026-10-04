@@ -25,17 +25,14 @@ import numpy as np
 import pytest
 
 from uacpy import comms
-from uacpy.comms.link import apply_channel
-from uacpy.comms.receive import mmse_equalizer
-from uacpy.comms.receive import evm
-from uacpy.comms.modulate import Modulator
-from uacpy.comms.modulate import (
-    estimate_channel,
-    ofdm_demodulate,
-    ofdm_modulate,
-    ofdm_symbol,
+from uacpy.comms.channel import apply_channel
+from uacpy.comms.equalize import mmse_equalizer
+from uacpy.comms.metrics import evm
+from uacpy.comms.constellations import Modulator
+from uacpy.comms.ofdm import (
+    estimate_channel, ofdm_demodulate, ofdm_modulate, ofdm_symbol,
 )
-from uacpy.comms.link import OFDMReceiver, OFDMTransmitter
+from uacpy.comms.transceiver import OFDMReceiver, OFDMTransmitter
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -77,7 +74,7 @@ class TestEqualizerFloorsAreScaleInvariant:
         out, sym = self._recovered(gain, snr_linear)
         base, _ = self._recovered(1.0, snr_linear)
         assert np.abs(out - base).max() < 1e-12
-        assert evm(out, sym) < 1e-5
+        assert evm(received=out, reference=sym) < 1e-5
 
     def test_the_relative_floor_matches_a_fixed_1e_12_on_a_unit_peak_channel(self):
         # The floor is 1e-12 of the peak |H|**2, so a channel normalized to
@@ -187,7 +184,7 @@ class TestEqualization:
     def test_dfe_opens_closed_eye(self):
         rng = np.random.default_rng(0xACED)
         h = comms.multipath_channel([1.0, 0.6, 0.3],
-                                    [0.0, 1 / 8000, 2 / 8000], 8000)
+                                    [0.0, 1 / 8000, 2 / 8000], sample_rate=8000)
         raw = comms.simulate_link("qpsk", 16.0, 40000, channel=h, rng=rng).ber
         dfe = comms.DFE(n_ff=12, n_fb=6, forget=0.995)
         eq = comms.simulate_link("qpsk", 16.0, 40000, channel=h,
@@ -209,13 +206,13 @@ class TestEqualization:
         rx = comms.apply_channel(tx, h)[: tx.size]
         eq = comms.mmse_equalizer(rx, h, 1e6)
         assert comms.bit_error_rate(
-            mod.demodulate(tx), mod.demodulate(eq)[: 2 * tx.size]) < 1e-3
+            reference=mod.demodulate(tx), received=mod.demodulate(eq)[: 2 * tx.size]) < 1e-3
 
     @pytest.mark.parametrize("snr_linear", [0.0, -1.0])
     def test_mmse_equalizer_rejects_nonpositive_snr(self, snr_linear):
         """1/snr is the Wiener regularizer: zero divides, negative un-damps
         the inverse. Neither may pass silently."""
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError, match='snr_linear must be > 0'):
             comms.mmse_equalizer(np.ones(8, complex), np.array([1.0, 0.3]),
                                  snr_linear)
 
@@ -225,7 +222,7 @@ class TestEqualization:
         tx = mod.modulate(rng.integers(0, 2, 2 * 1500))
         h = np.array([1.0, 0.5, 0.25])
         rx = comms.awgn(comms.apply_channel(tx, h)[: tx.size], 25.0, rng=rng)
-        raw = comms.evm(rx[-500:], tx[-500:])
+        raw = comms.evm(received=rx[-500:], reference=tx[-500:])
         eq_lms, mse_lms = comms.lms_equalizer(rx, mod.constellation,
                                               n_taps=11, step=0.01,
                                               train=tx[:400])
@@ -239,8 +236,8 @@ class TestEqualization:
         # EVM 0.073-0.080 for both adaptations, converged MSE 0.0054-0.0063.
         # The /3 and 0.02 floors keep 2-3x of margin on a reseed.
         assert raw > 0.4
-        assert comms.evm(eq_lms[-500:], tx[-500:]) < raw / 3
-        assert comms.evm(eq_rls[-500:], tx[-500:]) < raw / 3
+        assert comms.evm(received=eq_lms[-500:], reference=tx[-500:]) < raw / 3
+        assert comms.evm(received=eq_rls[-500:], reference=tx[-500:]) < raw / 3
         assert mse_lms[-500:].mean() < 0.02
         assert mse_rls[-500:].mean() < 0.02
         # Istepanian & Stojanovic put RLS convergence at ~2N against LMS's
@@ -274,7 +271,7 @@ class TestAdaptiveEqualisersAreScaleInvariant:
 
     @staticmethod
     def _link(seed=3, n_bits=2000, mod='16qam'):
-        from uacpy.comms.modulate import Modulator, constellation
+        from uacpy.comms.constellations import Modulator, constellation
         rng = np.random.default_rng(seed)
         syms = Modulator(mod).modulate(rng.integers(0, 2, n_bits))
         base = np.convolve(syms, np.array([1.0, 0.3, 0.1]))[:len(syms)]
@@ -283,7 +280,7 @@ class TestAdaptiveEqualisersAreScaleInvariant:
     @pytest.mark.parametrize('amplitude', LADDER)
     def test_the_dfe_answer_does_not_move_with_the_record_scale(self,
                                                                 amplitude):
-        from uacpy.comms.receive import DFE
+        from uacpy.comms.equalize import DFE
         syms, cst, base = self._link()
         ref, _ = DFE(n_ff=9, n_fb=3, step=0.02).equalize(
             base, cst, train=syms[:200])
@@ -293,7 +290,7 @@ class TestAdaptiveEqualisersAreScaleInvariant:
 
     @pytest.mark.parametrize('amplitude', LADDER)
     def test_both_linear_equalisers_are_invariant_too(self, amplitude):
-        from uacpy.comms.receive import lms_equalizer, rls_equalizer
+        from uacpy.comms.equalize import lms_equalizer, rls_equalizer
         syms, cst, base = self._link(mod='qpsk', n_bits=1200)
         for fn, kw in ((lms_equalizer, {'step': 0.01}),
                        (rls_equalizer, {'forget': 0.99})):
@@ -304,7 +301,7 @@ class TestAdaptiveEqualisersAreScaleInvariant:
     def test_a_unit_power_record_is_untouched(self):
         # The normalisation is a no-op at unit mean power, so an already
         # calibrated record must come back bit-identical.
-        from uacpy.comms.receive import DFE
+        from uacpy.comms.equalize import DFE
         syms, cst, base = self._link()
         unit = base / np.sqrt(np.mean(np.abs(base) ** 2))
         a, _ = DFE(n_ff=9, n_fb=3, step=0.02).equalize(unit, cst,
@@ -314,7 +311,7 @@ class TestAdaptiveEqualisersAreScaleInvariant:
         assert np.array_equal(a, b)
 
     def test_a_silent_record_stays_finite(self):
-        from uacpy.comms.receive import DFE
+        from uacpy.comms.equalize import DFE
         _, cst, _ = self._link()
         eq, mse = DFE(n_ff=9, n_fb=3, step=0.02).equalize(
             np.zeros(200, dtype=complex), cst)
@@ -325,24 +322,19 @@ class TestTheEqualiserDenominatorIsOneImplementation:
     """``conj(H)/(|H|^2 + eps)`` is divided by three consumers — OFDM
     demodulation, the single-carrier MMSE equaliser and the OFDM receiver
     object — and ``eps`` is one formula in the units of ``|H|^2``. It lives in
-    ``comms.receive`` so none of the three owns it and none imports
+    ``comms.equalize`` so none of the three owns it and none imports
     another to reach it."""
 
     def test_all_consumers_reach_the_same_object(self):
-        from uacpy.comms import receive as _equalizer_core
-        from uacpy.comms import receive as equalization
-        from uacpy.comms import modulate as ofdm
-        from uacpy.comms import link as transceiver
+        from uacpy.comms import equalize, ofdm, transceiver
         # The OFDM receiver reaches the denominator through the one
         # per-subcarrier equaliser it shares with ofdm_demodulate.
-        assert (ofdm.regularizer
-                is equalization.regularizer
-                is _equalizer_core.regularizer)
+        assert ofdm.regularizer is equalize.regularizer
         assert transceiver.equalize_subcarriers is ofdm.equalize_subcarriers
 
     def test_the_zero_forcing_floor_has_one_definition(self):
-        import uacpy.comms.modulate as ofdm_module
-        from uacpy.comms.receive import _ZF_REL_FLOOR
+        import uacpy.comms.ofdm as ofdm_module
+        from uacpy.comms.equalize import _ZF_REL_FLOOR
         assert _ZF_REL_FLOOR == 1e-12
         # A second same-named constant in a consumer is how a moved helper
         # silently rebinds: the callable moves, a copy of its constant stays,
@@ -351,20 +343,20 @@ class TestTheEqualiserDenominatorIsOneImplementation:
 
     def test_no_consumer_imports_another_to_reach_it(self):
         import pathlib
-        import uacpy.comms.receive as eq
+        import uacpy.comms.equalize as eq
         source = pathlib.Path(eq.__file__).read_text(encoding='utf-8')
-        assert 'from uacpy.comms.modulate import' not in source
+        assert 'from uacpy.comms.ofdm import' not in source
 
     @pytest.mark.parametrize('snr', [None, 10.0, 1000.0])
     def test_the_formula_matches_its_closed_form(self, snr):
-        from uacpy.comms.receive import _ZF_REL_FLOOR, regularizer
+        from uacpy.comms.equalize import _ZF_REL_FLOOR, regularizer
         h2 = np.array([4.0, 1.0, 0.25])
         expected = (_ZF_REL_FLOOR * h2.max() if snr is None
                     else h2.mean() / snr)
         assert regularizer(h2, snr) == pytest.approx(expected, rel=1e-15)
 
     def test_a_powerless_channel_returns_zero(self):
-        from uacpy.comms.receive import regularizer
+        from uacpy.comms.equalize import regularizer
         assert regularizer(np.zeros(4), 10.0) == 0.0
         assert regularizer(np.array([]), None) == 0.0
 
@@ -377,12 +369,12 @@ class TestAdaptiveOutputLagsByHalfTheFeedforwardSpan:
 
     @pytest.mark.parametrize('n_ff', [1, 2, 11, 12])
     def test_output_delay_is_the_centre_tap_index(self, n_ff):
-        from uacpy.comms.receive import DFE
+        from uacpy.comms.equalize import DFE
         assert DFE(n_ff=n_ff, n_fb=2).output_delay == n_ff // 2
 
     @staticmethod
     def _identity_link(n_taps, delay):
-        from uacpy.comms.receive import lms_equalizer
+        from uacpy.comms.equalize import lms_equalizer
         rng = np.random.default_rng(3)
         mod = Modulator('qpsk')
         tx = mod.modulate(rng.integers(0, 2, 2 * 600))

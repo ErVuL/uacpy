@@ -18,8 +18,8 @@ Three products, three consumers:
 
 Nothing in `uacpy.noise` imports matplotlib: it is pure computation, and the
 matching plotters — `plot_wenz`, `plot_weighting`, `plot_source_level` — live
-on `uacpy.plot` ([plotting](plotting.md)). A `WenzNoise` therefore has no
-`.plot()` of its own; you pass it to `plot_wenz`.
+on `uacpy.plot` ([plotting](plotting.md)). `WenzNoise.plot()` hands the
+object to `plot_wenz`, importing matplotlib only when it is called.
 
 ---
 
@@ -130,29 +130,31 @@ dominate exactly the band the wind otherwise owns; see
 ## 2. `WenzNoise` — building a spectrum
 
 ```python
-WenzNoise(frequencies, *, wind_speed_kn, rain_rate='no', water_depth='deep',
+WenzNoise(frequencies=None, *, wind_speed_kn, rain_rate='no', water_depth='deep',
           shipping_level='medium', wind_model=None, shipping_model=None,
           rain_model=None, thermal_model=None, turbulence_model=None)
 ```
 
 | Argument | Units / values | Default |
 |---|---|---|
-| `frequencies` | Hz, strictly `> 0`; the fits are published for **1 Hz – 100 kHz** and nothing enforces that | **required** |
-| `wind_speed_kn` | **knots**, `≥ 0`; keyword-only | **required** |
+| `frequencies` | Hz, strictly `> 0`; the fits are published for **1 Hz – 100 kHz** and nothing enforces that. `None` builds no spectrum: `band_level` and `decidecade_levels` need none, and the spectrum attributes, `as_psd` and `plot` refuse | `None` |
+| `wind_speed_kn` | **knots** at 10 m, `≥ 0`; keyword-only | **required** |
 | `shipping_level` | `'no'`, `'low'`, `'medium'`, `'high'` | `'medium'` |
 | `rain_rate` | `'no'`, `'light'`, `'moderate'`, `'heavy'`, `'veryheavy'` | `'no'` |
 | `water_depth` | `'deep'`, `'shallow'` | `'deep'` |
 | `*_model` | `None`, a name from the registry, or a callable | `None` |
 
-Wind speed is in **knots**, not m/s — the one wind speed in the package that is
-not in m/s, because every published coefficient in this family is fitted in
-knots (DRDC-RDDC-2022-D051 §2.3 eq. 8). `uacpy.data.fetch_wind` and
-`generate_sea_surface(wind_speed_mps=…)` both work in m/s;
-`uacpy.core.units.ms_to_knots` converts before you hand a value
-here. That is why the argument carries the `_kn`
-suffix, the same one `sonar.chapman_harris_surface(wind_speed_kn=…)` uses, and
-why it is **keyword-only**: a positional `WenzNoise(f, 10)` states no unit at
-all, and a 10 m/s reading passed as knots reads 5.7 dB low at 1 kHz.
+Wind speed is in **knots**, the unit `uacpy.data.fetch_wind` returns and
+`generate_sea_surface(wind_speed_kn=…)` takes. Every published coefficient
+in this family is fitted in knots (DRDC-RDDC-2022-D051 §2.3 eq. 8); the one
+stated in m/s (Coates) converts inside, and the unit rule for every wind
+argument is in [§5](#wind-speed-from-a-beaufort-force-or-a-sea-state). A
+reading in m/s converts with `uacpy.core.units.ms_to_knots`. That is why the
+argument carries the `_kn` suffix, the same one
+`sonar.chapman_harris_surface(wind_speed_kn=…)` uses, and why it is
+**keyword-only**: a positional `WenzNoise(f, 10)` states no unit at all, and a
+speed in the wrong unit is off by the knot ratio (a 10 m/s reading passed as
+knots measured 5.7 dB low at 1 kHz).
 
 Everything is computed in `__init__`, so a `WenzNoise` is a result object, not
 a solver:
@@ -164,7 +166,9 @@ a solver:
 | `wind`, `shipping`, `rain`, `thermal`, `turbulence` | per-source spectra, same units |
 | `components` | `NoiseComponents(total, wind, shipping, rain, thermal, turbulence)` |
 | `models` | the submodel name chosen per component |
-| `as_psd(ref=1.0)` | linear PSD; `10·log10(as_psd())` returns `total` to round-off |
+| `as_psd()` | linear PSD in SI Pa²/Hz; `10·log10(as_psd() / 1e-12)` returns `total` to round-off |
+| `band_level(freq_min, freq_max, *, component='total')` | band level, dB re 1 µPa²: the spectrum integrated over the band (submodels re-evaluated at 100 points per decade, so independent of `frequencies`) — the sonar-equation `NL` for a band source level |
+| `decidecade_levels(freq_min, freq_max, *, component='total')` | `BandLevels(centres, levels)`: `band_level` of every decidecade band overlapping the range, with the band edges and `ref` = 1 µPa |
 
 **A switched-off source is `-inf`, not zero.** `shipping_level='no'`,
 `rain_rate='no'` and `wind_speed_kn=0` all return `-inf` dB at every frequency, so
@@ -172,12 +176,12 @@ the incoherent sum drops them exactly (`10**(-inf/10) == 0`) rather than adding
 a 0 dB floor. That is why the hero figure's legend carries a "Rain noise (no
 rain)" entry with no line under it: the component exists, it is silent.
 
-`as_psd` is the bridge to time-domain work. The `ref` argument is the value of
-the dB reference (1 µPa) expressed in your output unit, so `ref=1e-6` gives SI
-Pa²/Hz:
+`as_psd` is the bridge to time-domain work. The levels are dB re 1 µPa²/Hz and
+the linear PSD is SI Pa²/Hz, the unit the synthesis takes for a signal in Pa
+(`ref` in uacpy only ever names the reference pressure of a dB level):
 
 ```python
-psd = wenz.as_psd(ref=1e-6)                  # Pa²/Hz
+psd = wenz.as_psd()                          # Pa²/Hz
 t, x, fs = uacpy.acoustic_signal.synthesize_noise_from_psd(
     psd, wenz.frequencies, sample_rate=96_000, duration=30.0)
 ```
@@ -220,18 +224,18 @@ that in anything above a moderate sea, getting the wind speed exactly right
 matters much less than it does in a calm. And 100 Hz and 1 kHz sit almost on
 top of each other, which is the plateau at the top of the left panel.
 
-`compute_windnoise` is the same wind term as a free function, without building
+`wind_noise_level` is the same wind term as a free function, without building
 a whole composite:
 
 ```python
-from uacpy.noise import compute_windnoise
+from uacpy.noise import wind_noise_level
 
-compute_windnoise(f, u=15.0, water_depth='deep')             # dB re 1 µPa²/Hz
-compute_windnoise(f, u=15.0, band_integrate=True)            # dB re 1 µPa²
+wind_noise_level(f, wind_speed_kn=15.0, water_depth='deep')             # dB re 1 µPa²/Hz
 ```
 
 `band_integrate=True` is the one place on the ambient side of `uacpy.noise`
-that hands back a **band** level rather than a spectral level — see
+that hands back a **band** level rather than a spectral level, and it wants
+analysis-band centres rather than a plotting grid like this `f` — see
 [§6](#6-spectral-level-vs-band-level).
 
 ---
@@ -338,7 +342,9 @@ are referred to **0.0002 dyne/cm² = 20 µPa**, needing +26.0 dB to become dB re
 1 µPa²/Hz, and the numbers printed beside the curves are **overall 0.1–10 kc
 levels**, not spectrum levels, sitting 38.2 dB above the 1 kHz spectrum level.
 Carry both through and the formula lands +1.6 dB biased, 2.0 dB rms against
-the seven published curves — inside the 4–5 dB standard deviation the paper
+the six published curves from force 1 up (+0.4 dB / 3.2 dB over all seven:
+force 0, a flat calm, reads 6.9 dB low and is below this straight line's
+reach) — inside the 4–5 dB standard deviation the paper
 reports for its own observations (`KNUDSEN_UNCERTAINTY_DB`). Those curves are
 the expected side of the model's tests, cross-checked against Hildebrand
 *et al.* (2021) Table IV so a misread figure cannot be checked against itself.
@@ -380,12 +386,22 @@ Selection accepts three things: `None` for the registry default, a `str` name,
 or a **callable** used directly:
 
 ```python
+from uacpy.noise import register_noise_model
+
 def my_wind(frequencies, *, wind_speed_kn, **_):
     return 44.0 + 20.0 * np.log10(wind_speed_kn) - 17.0 * np.log10(frequencies)
 
-WIND_MODELS['mine'] = my_wind                        # register by name
+register_noise_model('wind', 'mine', my_wind)       # register by name
+WenzNoise(f, wind_speed_kn=12.0, wind_model='mine')     # ...and select it
 WenzNoise(f, wind_speed_kn=12.0, wind_model=my_wind)    # or pass it directly
 ```
+
+The registries (`WIND_MODELS`, `SHIPPING_MODELS`, `RAIN_MODELS`,
+`THERMAL_MODELS`, `TURBULENCE_MODELS`) are read-only views, so a registration
+goes through `register_noise_model(kind, name, fn)`. It replaces a name you
+registered and refuses a shipped one, because every WenzNoise selecting that
+name, the defaults among them, would change with it. A registration lasts for
+the process.
 
 A submodel takes the whole parameter bundle (`wind_speed_kn`, `water_depth`,
 `shipping_level`, `rain_rate`) and ignores what it does not need via `**_`. It
@@ -401,7 +417,7 @@ validated, and then have no effect: `water_depth='shallow'` with
 **bit-identical** to the deep-water one, since neither Coates formula carries
 a depth term. Both are needed — the default `shipping_model='wenz'` *does*
 read `water_depth`, so switching the wind model alone still moves the total by
-5.4 dB. `WenzNoise` now says so rather than
+5.4 dB. `WenzNoise` says so rather than
 letting the setting look applied —
 
 ```
@@ -416,78 +432,38 @@ having one. `knudsen` has none either, its measurements being coastal.
 
 ### Wind speed from a Beaufort force or a sea state
 
-Every uacpy fetcher returns wind in **m/s** and every noise and scattering
-entry point takes **knots**, so `uacpy.core.units` carries the bridge:
-`ms_to_knots` / `knots_to_ms`, plus `beaufort_to_wind_speed`,
-`sea_state_to_wind_speed` and `wind_speed_to_beaufort` over the Urick (1984)
-`BEAUFORT_SCALE`. Reading a m/s value as knots is worth a measured **5.7 dB**
-at 1 kHz for 10 m/s, understating the total.
+Every uacpy fetcher returns wind in **knots**, and every wind argument takes
+it: the Wenz family (`WenzNoise`, `wind_noise_level`),
+`sonar.chapman_harris_surface`, `sonar.apl_uw_surface_backscatter`,
+`bubble_surface_loss` and `generate_sea_surface` all name it `wind_speed_kn`;
+the fits stated in m/s convert inside. A speed read in m/s converts first.
+`uacpy.core.units` carries the bridge: `ms_to_knots` / `knots_to_ms`, plus
+`beaufort_to_wind_speed`, `sea_state_to_wind_speed` and
+`wind_speed_to_beaufort` over the Urick (1983) `BEAUFORT_SCALE`. Passing a m/s
+value as knots is worth a measured **5.7 dB** at 1 kHz for 10 m/s, understating
+the total.
 
 ```python
-from uacpy.core.units import ms_to_knots, sea_state_to_wind_speed
-WenzNoise(f, wind_speed_kn=ms_to_knots(fetched_u10))
-WenzNoise(f, wind_speed_kn=sea_state_to_wind_speed(4))
+from uacpy.core.units import beaufort_to_wind_speed, sea_state_to_wind_speed
+from uacpy.data import fetch_wind
+
+point, date = (45.6, -6.2), '2026-07-15'
+u10 = fetch_wind(point, date=date)          # knots, like every fetcher
+WenzNoise(f, wind_speed_kn=u10)
+
+WenzNoise(f, wind_speed_kn=beaufort_to_wind_speed(5))      # 19.0 kn (9.77 m/s)
+WenzNoise(f, wind_speed_kn=sea_state_to_wind_speed(4))     # the same curve
 ```
 
 A force names a *band* of speeds, so `beaufort_to_wind_speed` returns its
 midpoint — a choice, not a conversion: at force 3 the band's ends move
 the default wind term at 1 kHz by −1.68 dB and +1.40 dB, 3.08 dB end to
-end. Pass a measured speed whenever you have one: Dahl *et al.* (2007)
-note that sea-surface noise "correlates much better with wind speed than with
-sea state".
-
-**A knob no selected submodel reads is reported.** That `**_` is convenient
-and it hides something: a submodel that carries no term for a parameter
-accepts it in silence. `water_depth='shallow'` with `wind_model='coates',
-shipping_model='coates'` returns a spectrum bit-identical to the deep-water
-one — neither Coates formula has a depth term, so the setting is validated,
-accepted and then has no effect at all. Both submodels matter here: the
-default `shipping_model='wenz'` does read `water_depth`, and leaving it in
-place moves the total by 5.4 dB. `knudsen` carries no depth term either, its
-measurements being coastal to begin with.
-
-`WenzNoise` now warns when a parameter you set away from its default is read
-by none of the submodels you selected, naming them:
-
-```
-WenzNoise: water_depth='shallow' was not used. None of the submodels
-selected (…, shipping='coates', wind='coates', …) carries a water_depth
-term, so the spectrum is identical to the one you would get with
-water_depth='deep'.
-```
-
-It invents nothing — a model without a depth term does not acquire one. It
-reports that the knob did nothing, which is the part you cannot otherwise
-see. A parameter left at its default is never reported, since only a value
-you chose can disappoint you.
-
-### Wind speed, Beaufort force and sea state
-
-Every fetcher in `uacpy.data` returns wind in **m/s**; `wind_speed_kn` and
-`chapman_harris_surface` take **knots**. That factor used to live as prose in
-two docstrings and in no callable, and reading a m/s value as knots
-understates the Wenz total by a measured **5.7 dB** at 1 kHz for 10 m/s.
-`uacpy.core.units` closes it:
-
-```python
-from uacpy.core.units import (ms_to_knots, knots_to_ms,
-                              beaufort_to_wind_speed, sea_state_to_wind_speed)
-
-u10 = fetch_wind(point, date=date)          # m/s, like every fetcher
-WenzNoise(f, wind_speed_kn=ms_to_knots(u10))
-
-WenzNoise(f, wind_speed_kn=beaufort_to_wind_speed(5))      # 19.0 kn
-WenzNoise(f, wind_speed_kn=sea_state_to_wind_speed(4))     # the same curve
-```
-
-`beaufort_to_wind_speed` returns the **midpoint** of the force's band. A force
-names a range, so that is a choice rather than a conversion — picking either
-end instead moves the wind term by up to 2.6 dB at force 3. Pass a measured
-wind speed whenever you have one; these exist for data that reports only a
-force or a sea state. Sea state 6 spans forces 7 and 8, and
-`sea_state_to_wind_speed` resolves it to 8, following Dahl *et al.* (2007) on
-the WMO correspondence — worth 3.2 dB at 1 kHz, so it is stated rather than
-left to chance.
+end. Sea state 6 spans forces 7 and 8, and `sea_state_to_wind_speed` resolves
+it to force 8 (37.0 kn), following Dahl *et al.* (2007) on the WMO
+correspondence; the force-7 midpoint (30.5 kn) would read 1.67 dB lower at
+1 kHz, so the choice is stated rather than left to chance. Pass a measured
+speed whenever you have one: Dahl *et al.* (2007) note that sea-surface noise
+"correlates much better with wind speed than with sea state".
 
 ---
 
@@ -504,10 +480,13 @@ integrated over a decidecade band. Differencing one against the other is a
 Two ways across:
 
 ```python
-from uacpy.noise import compute_windnoise
+from uacpy.acoustic_signal import decidecade_bands
+from uacpy.noise import wind_noise_level
 
-compute_windnoise(f, u=15.0, band_integrate=True)     # spectral -> band
-band_level = spectral_level + 10 * np.log10(bandwidth_hz)
+lower, centres, upper = decidecade_bands(100.0, 1000.0)
+wind_noise_level(centres, wind_speed_kn=15.0, band_integrate=True)    # spectral -> band
+spectral_level = wind_noise_level(centres, wind_speed_kn=15.0)
+band_level = spectral_level + 10 * np.log10(upper - lower)            # its own bandwidth
 ```
 
 **These two are peers only when `f` is a set of band centres.** The second form
@@ -519,7 +498,7 @@ grid spacing *is* the band structure. Hand it a plotting grid and each "band"
 becomes a PSD sample multiplied by whatever sliver of bandwidth the grid
 happened to carry there — a number with no analysis band behind it.
 
-Measured on `u=15.0` wind noise, reading the same 316.23 Hz point off three
+Measured on `wind_speed_kn=15.0` wind noise, reading the same 316.23 Hz point off three
 grids spanning the same 100 Hz – 1 kHz decade:
 
 | `f` passed | Spectral level | `band_integrate=True` at 316.23 Hz | Sum over the decade |
@@ -578,8 +557,8 @@ widths of their own centres. Sum the vector and you get the correct total;
 read its first or last entry as a band level and you are several dB low. Pad
 one band beyond the range you care about and discard the ends.
 
-`compute_windnoise` will tell you when you are on the wrong side of this: it
-emits a `UserWarning` whenever consecutive frequencies come **closer together
+`wind_noise_level` will tell you when you are on the wrong side of this: it
+emits a `NumericsWarning` whenever consecutive frequencies come **closer together
 than one decidecade** — the narrowest analysis band uacpy defines
 ([`decidecade_bands`](signal.md#3-spectra-levels-and-bands), IEC 61260-1).
 Centres at decidecade spacing or wider stay silent. Treat that warning as
@@ -593,7 +572,7 @@ from uacpy.acoustic_signal import decidecade_bands
 
 RHO = 10 ** 0.1                                       # one decidecade
 _, fc, _ = decidecade_bands(100.0 / RHO, 1000.0 * RHO)   # 13 centres: pad both ends
-nl_band = compute_windnoise(fc, u=15.0, band_integrate=True)[1:-1]
+nl_band = wind_noise_level(fc, wind_speed_kn=15.0, band_integrate=True)[1:-1]
 ```
 
 Padding one band past each end and slicing the ends off is what leaves all 11
@@ -638,7 +617,7 @@ point source a propagation model assumes:
 `d_s = 0.7 × draught` (Formula 1).
 
 ```python
-from uacpy.acoustic_signal.estimate import decidecade_bands
+from uacpy.acoustic_signal import decidecade_bands
 from uacpy.noise import (RNL_UNCERTAINTY_DB, radiated_noise_level,
                          nominal_source_depth, monopole_source_level,
                          lloyd_mirror_correction)
@@ -758,9 +737,9 @@ underwater spectrum.
 
 | Function | Takes | Returns |
 |---|---|---|
-| `auditory_weighting(f, group)` | frequency in **Hz** | `W(f)` in dB, peak 0 |
-| `apply_weighting(level, f, group)` | a level **spectrum** | `L(f) + W(f)`, still a spectrum |
-| `weighted_level(psd_dB, f, group)` | a level **density** | one broadband number |
+| `auditory_weighting(frequency, group)` | frequency in **Hz** | `W(f)` in dB, peak 0 |
+| `apply_weighting(level_dB, *, frequency, group)` | a level **spectrum** | `L(f) + W(f)`, still a spectrum |
+| `weighted_level(psd_dB, *, frequency, group)` | a level **density** | one broadband number |
 
 `weighted_level` integrates: `10·log₁₀(∫ 10^((L+W)/10) df)`. It takes a
 **density** (dB re ref²/Hz) precisely so that the answer does not depend on how
@@ -776,9 +755,9 @@ f = np.logspace(1.0, 5.0, 1200)              # 10 Hz - 100 kHz
 wenz = WenzNoise(f, wind_speed_kn=10.0, shipping_level='medium')
 
 unweighted = 10.0 * np.log10(np.trapezoid(10.0 ** (wenz.total / 10.0), f))
-weighted = {g: weighted_level(wenz.total, f, g) for g in in_water}
+weighted = {g: weighted_level(wenz.total, frequency=f, group=g) for g in in_water}
 
-apply_weighting(wenz.total, f, 'LF')         # the weighted spectrum itself
+apply_weighting(wenz.total, frequency=f, group='LF')   # the weighted spectrum itself
 ```
 
 ![Weighted vs unweighted](figures/noise_weighted_soundscape.png)
@@ -817,8 +796,10 @@ represents any of that. (`uacpy.data` does carry sea ice —
 `fetch_environment(surface_sources='seaice')` — but that sets the *surface
 boundary* of a propagation run. Nothing there feeds `uacpy.noise`.)
 
-**Wind speed is in knots.** Everywhere else in the package wind is m/s.
-`uacpy.data.fetch_wind` returns m/s; `ms_to_knots` converts.
+**Wind speed is in knots here, as everywhere.** The Wenz family,
+`sonar.chapman_harris_surface`, `sonar.apl_uw_surface_backscatter` and every
+`uacpy.data` fetcher use knots; the `_kn` suffix says so at every call, and
+`ms_to_knots` converts a reading in m/s.
 
 **`WenzNoise.total` is a density, ship levels are band levels.** They cannot be
 differenced directly. See [§6](#6-spectral-level-vs-band-level).
@@ -876,8 +857,10 @@ submodel:
   ANSI/ASA S12.64-2009 (harmonised RNL).
 - Southall, B. L., Finneran, J. J., Reichmuth, C., et al., "Marine Mammal Noise
   Exposure Criteria: Updated Scientific Recommendations for Residual Hearing
-  Effects", *Aquatic Mammals* 45(2), 2019, Table 5. Consistent with NMFS (2018)
-  Technical Guidance, NMFS-OPR-59.
+  Effects", *Aquatic Mammals* 45(2), 2019, Table 5. Its parameters agree with
+  NMFS (2018) Technical Guidance, NMFS-OPR-59, but its cetacean labels move one
+  step: NMFS LF / MF / HF / PW / OW are Southall LF / HF / VHF / PCW / OCW, so a
+  harbour porpoise (NMFS "HF") is `'VHF'` here.
 - Urick, R. J., *Principles of Underwater Sound*, 3rd ed., 1983 — chapter 7 for
   ambient noise, and the Beaufort/sea-state table reproduced in the `WenzNoise`
   docstring.

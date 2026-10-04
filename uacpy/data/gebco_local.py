@@ -7,15 +7,19 @@ backend. Unlike the API, there is no per-request rate limit, so arbitrarily
 large grids and transects sample instantly once downloaded.
 """
 
+import re
 import warnings
 from pathlib import Path
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import (
+    ConfigurationError, DataFetchError, FallbackWarning, IOWarning,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate, depth_from_elevation, lon_linspace
+from uacpy.core.geo import as_coordinate
+from uacpy.data._geo import depth_from_elevation, lon_linspace
 from uacpy.data._netcdf import NetcdfGrid, netcdf_lock
 
 __all__ = ['point_depth', 'depths_along', 'region_grid']
@@ -32,7 +36,7 @@ class _GebcoGrid(NetcdfGrid):
             super().__init__(path)
             self._elev = self.var('elevation', 'z')
         except KeyError as exc:
-            raise DataFetchError(
+            raise _cache.UnreadableCacheError(
                 f"GEBCO NetCDF {Path(path).name} is missing an expected "
                 f"variable ({exc}); its schema may have changed.",
                 remediation="Re-run ./install.sh --data gebco.",
@@ -84,19 +88,39 @@ class _GebcoGrid(NetcdfGrid):
         return lats, lons, np.hstack(blocks)
 
 
+#: A GEBCO release file name, ``GEBCO_<year>.nc`` (any case).
+_RELEASE_NAME = re.compile(r'^gebco_(\d{4})\.nc$', re.IGNORECASE)
+
+
 def _grid_path():
-    """The cached GEBCO ``.nc`` this process samples: the newest by name."""
+    """The cached GEBCO ``.nc`` this process samples: the newest release.
+
+    Only files named ``GEBCO_<year>.nc`` are GEBCO releases, ranked by year;
+    any other ``.nc`` in the directory is not sampled (and is named in a
+    warning), because provenance cites whatever is sampled as GEBCO. Your own
+    grid goes into an environment as a literal ``bathymetry=`` sampled with
+    :func:`uacpy.data.transect_waypoints`.
+    """
     path = _cache.require('gebco')
-    # Newest grid first: the files are named GEBCO_<year>.nc, so descending
-    # name order ranks releases; names are unique within the directory, and
-    # the warning below names the file chosen.
-    grids = sorted(path.glob('*.nc'), key=lambda p: p.name, reverse=True)
+    releases, others = [], []
+    for p in path.glob('*.nc'):
+        m = _RELEASE_NAME.match(p.name)
+        (releases.append((int(m.group(1)), p.name, p)) if m
+         else others.append(p))
+    if others:
+        warnings.warn(
+            f"gebco: {', '.join(sorted(p.name for p in others))} in {path} "
+            f"is not named GEBCO_<year>.nc, so it is not sampled as GEBCO.",
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    # Newest release first; the name breaks a same-year tie deterministically.
+    grids = [p for *_, p in sorted(releases, key=lambda t: t[:2],
+                                   reverse=True)]
     nc = grids[0] if grids else None
     if len(grids) > 1:
         warnings.warn(
             f"gebco: {len(grids)} grids are cached in {path} "
             f"({', '.join(p.name for p in grids)}); sampling {nc.name}.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if nc is None:
         # The cache dir exists but holds no .nc grid: raise the same typed
         # error require() gives for the canonical missing file.

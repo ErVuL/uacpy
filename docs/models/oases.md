@@ -13,8 +13,8 @@ seafloor see it — and because it exists at every frequency, an elastic wavegui
 never truly cuts off.
 [Scooter](scooter.md) shares the method and also accepts elastic layers; what
 only OASES gives you is the rest of the seismo-acoustic toolkit built on that
-kernel — reflection coefficients that resolve `P-SV` conversion, per-interface
-roughness, and the array covariance and matched-field replicas of `OASN`.
+kernel — reflection and transmission coefficients swept over frequency,
+per-interface roughness, and the array covariance and matched-field replicas of `OASN`.
 
 It is not one program but a suite, and uacpy wraps six of its executables —
 they share an engine and an environment description, and differ only in what
@@ -84,7 +84,7 @@ darker. No amount of tuning a fluid model's attenuation reproduces the
 **The price is stratification.** OASES is range-independent. Everything about
 it — the closed-form layer solutions, the single Hankel transform — assumes
 the medium varies only with depth. A sloping bottom or a range-varying SSP is
-collapsed to one representative column, with a `UserWarning` naming what was
+collapsed to one representative column, with a `FallbackWarning` naming what was
 dropped. If your problem's range dependence matters more than its seabed
 physics, use [RAM](ram.md) or [Bellhop](bellhop.md).
 
@@ -315,12 +315,14 @@ speed* rather than the layer thickness. Across 20°–60°, the angles that carr
 energy in a shallow-water waveguide, the elastic seabed reflects markedly
 less — `|R|` at 45° falls from 0.88 to 0.62.
 
-Sweep frequency and the layer's resonances become a fan:
+Sweep frequency and the layer's resonances become a fan. OASR reads its band
+from the source:
 
 ```python
-rc = OASR(angles=angles).run(
-    env, source, receiver, run_mode=RunMode.REFLECTION,
-    frequencies=np.linspace(20.0, 2000.0, 120))
+band = uacpy.Source(depths=source.depths,
+                    frequencies=np.linspace(20.0, 2000.0, 120))
+rc = OASR(angles=angles).run(env, band, receiver,
+                             run_mode=RunMode.REFLECTION)
 rc.plot()
 ```
 
@@ -352,11 +354,12 @@ seabed the two are interchangeable: over the shared sand half-space their
 `|R(θ)|` differ by at most 0.0012 across the whole angle range, and by 0.005
 over the fluid sand-over-granite stack — and there the disagreement is
 concentrated on the flank of the null, where the two angle grids differ most.
-Shear is where they part company, and where OASR earns its place — it carries
-the shear-converted coefficients BOUNCE has no counterpart for: BOUNCE marches
-elastic layers too, but emits the P-P coefficient only. If you need P-SV or
-P-Slow, OASR is the one that has them — and where the seabed has shear, do not
-assume the two agree to the fluid tolerance; run both.
+Shear is where they part company: both accept elastic layers and both return
+the P-P coefficient (a P-SV coefficient reflected into the water is identically
+zero, so OASR refuses it — see §10), but where the seabed has shear, do not
+assume the two agree to the fluid tolerance; run both. OASR also returns the
+transmission coefficient and sweeps frequency in one run, which BOUNCE does
+not.
 
 ---
 
@@ -401,13 +404,13 @@ synthesising anything. Slice it to a point and
 they do for [Bellhop](bellhop.md). See
 [broadband and time series](../guide/results.md) for how the two modes relate.
 
-**On frequency grids.** OASP expresses its band as `(fmin, fmax, N)`, so it
+**On frequency grids.** OASP expresses its band as `(freq_min, freq_max, N)`, so it
 always runs an *equispaced* sweep — and a single-frequency `COHERENT_TL` run
 integrates every bin of it (`n_time_samples/2` at the defaults) to return one;
 use [`OAST`](#5-oast--transmission-loss) for narrowband TL. In `TIME_SERIES` mode uacpy derives that
 band from the source waveform's own spectrum and tells you what it picked;
 pass `frequencies=` to pin it yourself. A non-equispaced `frequencies=` vector
-is resampled onto `linspace(fmin, fmax, N)` with a warning, because the file
+is resampled onto `linspace(freq_min, freq_max, N)` with a warning, because the file
 format cannot express anything else.
 
 ---
@@ -436,7 +439,8 @@ cov.plot()
 
 ![OASN surface-noise covariance](figures/oases_oasn_covariance.png)
 
-The diagonal is each element's power. Off the diagonal is the vertical spatial
+The covariance is in Pa²/Hz, the unit of a `csdm()` of Field pressures, and
+the diagonal is each element's power. Off the diagonal is the vertical spatial
 coherence of the noise field, and it does not simply decay — it oscillates with
 separation. Normalised as `|C_ij| / √(C_ii C_jj)` and averaged over the element
 pairs at each spacing, it runs 1.00, 0.64, 0.42 and 0.77 at 0, 3.0, 6.1 and
@@ -453,12 +457,12 @@ assumes, and that difference is where array gain is won or lost — see
 returns the array response. Those are matched-field templates.
 
 ```python
-replicas = OASN(xmin=500.0, xmax=6000.0, nx=111,
-                zmin=5.0, zmax=95.0, nz=46).compute_replicas(env, source, array)
+replicas = OASN(replica_xmin=500.0, replica_xmax=6000.0, replica_nx=111,
+                replica_zmin=5.0, replica_zmax=95.0, replica_nz=46).compute_replicas(env, source, array)
 ```
 
 The grid is a **constructor** argument, not a `run()` argument — like every
-model knob in uacpy. Sweep it with `model.copy(nx=...)`.
+model knob in uacpy. Sweep it with `model.copy(replica_nx=...)`.
 
 ### Matched-field processing
 
@@ -471,7 +475,7 @@ cov = OASN(
     discrete_sources=[{'depth': 40.0, 'x': 3000.0, 'y': 0.0, 'level': 100.0}],
 ).compute_covariance(env, source, array)
 
-bartlett = cov.bartlett(replicas)        # (n_freq, n_z, n_x, n_y)
+bartlett = cov.bartlett(replicas)   # ambiguity Field on (frequency, depth, x, y)
 capon = cov.mvdr(replicas)
 ```
 
@@ -507,7 +511,7 @@ That fetches `oases.tar.gz` from
 [acoustics.mit.edu](https://acoustics.mit.edu/faculty/henrik/oases.html),
 verifies it, builds it, and installs the executables to `uacpy/bin/oases/`.
 
-Constructing any OASES sub-model emits a one-time `UserWarning` naming the
+Constructing any OASES sub-model emits a one-time `ProvenanceWarning` naming the
 licence and the citation. It is deliberate: **verify the terms yourself before
 using OASES in commercial work.** For a fluid seabed, [Scooter](scooter.md)
 solves the same wavenumber integral under a permissive licence.
@@ -554,19 +558,18 @@ one. On `OASN` it is additive: the run mode's own letter (`N` for covariance,
 | `compute_contour` | `None` | `'C'`, range–depth contour output; unset → `False`. |
 | `compute_depth_average` | `None` | `'A'`, depth-averaged TL; unset → `False`. |
 | `integration_offset` | `0.0` | Wavenumber-contour offset (dB/wavelength). |
-| `nw_samples` | `-1` | Wavenumber samples; `-1` lets OASES choose. |
-| `plot_rmin`, `plot_rmax` | `None` | Range-axis bounds (m). |
+| `n_wavenumbers` | `None` | Wavenumber samples; `None` lets OASES choose. |
+| `range_min`, `range_max` | `None` | Range-axis bounds (m). |
 
 **`OASP`**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `n_time_samples` | `4096` | FFT length; must be a power of two. |
+| `n_time_samples` | `None` | FFT length (a power of two). `None`: 4096 for the default sweep; for a requested band (`frequencies=`, a TIME_SERIES pulse, COHERENT_TL's source frequency) the smallest power of two whose bins are as fine as the requested spacing. A value given is a floor. |
 | `freq_min`, `freq_max` | `0.0`, `None` | Sweep edges (Hz); `None` derives `2.5 × fc`. |
 | `center_frequency` | `None` | Pulse carrier; defaults to the midpoint of the run's frequency band (a single frequency is its own centre). |
-| `range_start` | `None` | First receiver range (m). |
-| `freq_output_increment` | `None` | Integrand-plot decimation; does **not** thin the `.trf`. |
-| `integration_offset`, `nw_samples` | `0.0`, `-1` | As OAST. |
+| `integrand_plot_step` | `None` | Integrand-plot decimation; does **not** thin the `.trf`. |
+| `integration_offset`, `n_wavenumbers` | `0.0`, `None` | As OAST. |
 
 **`OASR`**
 
@@ -575,7 +578,7 @@ one. On `OASN` it is additive: the run mode's own letter (`N` for covariance,
 | `angles` | `linspace(0, 90, 181)` | Angle grid, degrees. |
 | `angle_type` | `'grazing'` | `'grazing'` (native) or `'incidence'`. |
 | `reflection_type` | `None` | `'P-P'` (unset → this) or `'transmission'`; `'P-SV'` / `'P-Slow'` (Biot) are refused — see below. |
-| `angle_output_increment` | `None` | Decimate the output table. |
+| `plot_angle_step` | `None` | Decimate the output table. |
 | `interface_roughness` | `None` | Per-interface RMS roughness (m), top → bottom. |
 
 `reflection_type='P-SV'` and `'P-Slow'` raise `UnsupportedFeatureError` at
@@ -587,7 +590,7 @@ into the incident medium, and at the seabed that medium is the water column,
 a fluid, which carries none. Either way OASES would return a column of zeros
 dressed as a result, so the refusal is up front. The raw `options='S T'`
 escape hatch still runs P-SV: the deck is written verbatim, with a
-`UserWarning` that the zeros are coming.
+`ValidityWarning` that the zeros are coming.
 
 **`OASN`**
 
@@ -597,11 +600,10 @@ escape hatch still runs P-SV: the deck is written verbatim, with a
 | `white_noise_level` | `None` | Uncorrelated per-hydrophone noise. OASES adds it to the covariance diagonal unconditionally, so an explicit `0.0` is a literal 0 dB per sensor; `None` writes −200 dB (numerically nil). |
 | `deep_noise_level`, `deep_source_depth` | `0.0`, `None` | Deep broad-area sheet. |
 | `discrete_sources` | `None` | List of `{'depth', 'x', 'y', 'level'}`, metres. Any other key raises — OASES carries no per-source phase. |
-| `xmin`/`xmax`/`nx` | `None`/`None`/`50` | Replica grid in x (m); `None` → 100 m / 10 km. |
-| `ymin`/`ymax`/`ny` | `None`/`None`/`1` | Replica grid in y (m); `None` → 0 / 0. |
-| `zmin`/`zmax`/`nz` | `None`/`None`/`20` | Replica grid in depth (m); `None` → 10 m / `depth − 10`. |
+| `replica_xmin`/`replica_xmax`/`replica_nx` | `None`/`None`/`50` | Replica grid in x (m); `None` → 100 m / 10 km. |
+| `replica_ymin`/`replica_ymax`/`replica_ny` | `None`/`None`/`1` | Replica grid in y (m); `None` → 0 / 0. |
+| `replica_zmin`/`replica_zmax`/`replica_nz` | `None`/`None`/`20` | Replica grid in depth (m); `None` → 10 m / `depth − 10`. |
 | `c_low`, `c_high` | `None` | Phase-speed bounds for the integrations (m/s). |
-| `offdB` | `None` | Contour offset; shares OASES' field with `integration_offset`. |
 
 ---
 
@@ -612,12 +614,14 @@ grid of its own choosing, and writes only real TL in dB. If your
 `receiver.ranges` do not land on that grid, uacpy interpolates **in dB** and
 warns — which over-fills sharp interference minima, since a true −80 dB null
 between −40 dB neighbours reads back around −50 dB. Read
-`result.metadata['oast_native_ranges']` to see the grid, align to it, or use
+`result.metadata['native_ranges']` to see the grid, align to it, or use
 OASP when null depth matters.
 
 **Every deck carries one source depth, and (for OAST) one frequency.** A
-multi-frequency `Source` on `OAST.run` raises `ConfigurationError` pointing at
-`RunMode.BROADBAND` / `RunMode.TIME_SERIES`. A multi-depth `Source` on the
+multi-frequency `Source` on `OAST.run` raises `UnsupportedFeatureError` naming
+OASP: OAST rebuilds its range grid for every frequency and writes only real TL,
+so no single Field can carry the sweep, while OASP returns complex pressure on
+one range grid. A multi-depth `Source` on the
 field models (OAST, OASP, OASSP) runs once per depth inside `run()` and comes
 back as a `ResultStack` over `source_depth`. OASP and OASSP slabs are complex
 pressure, so `stack.superpose()` adds them with `Source.weights`; OAST returns
@@ -625,10 +629,20 @@ transmission loss in dB with no phase, so its stack holds the slabs but
 `superpose()` refuses. OASN, OASR and OASS take a single source depth per
 run and raise, naming the field modes that stack.
 
+**OASSP holds at most 4096 wavenumbers.** Its roughness branch rounds the
+wavenumber count up to a power of two and then indexes arrays sized for half of
+8192, so a count above 4096 crashes the binary or corrupts the `.trf`. The
+automatic count grows with `min(cref·NX·DT + 2·r_max, 6·r_max)`: over a
+200 m guide at 500 Hz band top, receivers out to 1.5 km need 2243, while out to
+3 km they need 4216. `run()` predicts the count from the deck and raises
+`ConfigurationError` before `oassp2` launches. The remedies are
+`n_wavenumbers=4096` (fewer samples under-resolve the integral), a shorter
+receiver range extent, or a shorter time window.
+
 **OASN ignores `receiver.ranges`.** OASN models a vertical array at
 `x = y = 0`; only `receiver.depths` reaches the deck. Horizontal aperture is
 expressed through the *replica* grid, not the receiver. Passing a non-zero
-range warns, and `plot_rmin` / `plot_rmax` / `vrec` raise outright — OASN's
+range warns, and OASN takes no `range_min` / `range_max` / `vrec` — its
 deck has no range axis and no receiver-velocity field to put them in.
 
 **OASN noise levels are not on a common scale with discrete-source levels.**
@@ -681,6 +695,8 @@ and you give up exact elasticity.
 **Shear is opt-in on the environment.** `from_presets(...)` and
 `from_preset(...)` drop shear unless you pass `elastic=True`. A "granite"
 seabed that behaves like a fast fluid is usually this.
+
+OASES's measured agreement with closed forms and the published benchmarks, and its known limits there, are on the [validation page](validation.md).
 
 ---
 

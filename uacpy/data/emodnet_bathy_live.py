@@ -8,9 +8,11 @@ the European seas, with a separate Caribbean tile. Licence **CC-BY-4.0**
 
 Coverage is regional: a point outside the European/Caribbean tiles raises
 ``DataFetchError`` so a fallback source (GMRT, GEBCO) can take over. Elevation is
-referenced to **Lowest Astronomical Tide (LAT)**, not mean sea level, so a
-returned depth is a few tenths of a metre to a couple of metres deeper than the
-MSL-referenced GEBCO/GMRT depth in shallow water — negligible offshore.
+referenced to **Lowest Astronomical Tide (LAT)** where the tide is significant,
+not mean sea level. LAT lies below MSL, so a returned depth is *shallower* than
+the MSL-referenced GEBCO/GMRT depth by the local MSL − LAT offset: nothing in
+the micro-tidal Mediterranean and Baltic, several metres on macrotidal Atlantic
+coasts — negligible offshore, not in shallow water.
 """
 
 import urllib.parse
@@ -18,9 +20,8 @@ import urllib.parse
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._geo import (
-    as_coordinate, depth_from_elevation, nearest_indices, normalize_lon,
-)
+from uacpy.core.geo import as_coordinate, normalize_lon
+from uacpy.data._geo import depth_from_elevation, nearest_indices
 from uacpy.data._http import erddap_last_value, http_get
 
 __all__ = ['point_depth', 'depths_along', 'region_grid', 'ERDDAP_URL',
@@ -142,22 +143,25 @@ def _subset(constraint, *, timeout, verbose):
 
     Tries each DTM tile in turn; the first that returns a grid wins, so a region
     in the Caribbean tile resolves after the European tile reports out-of-range.
+    When none does, the error names what each tile answered, so an
+    out-of-coverage region and a network failure read differently.
     """
-    errors = []
+    outcomes = []
     for dataset in DATASETS:
         url = _griddap_url(dataset, constraint)
         try:
             body = http_get(url, timeout=timeout, verbose=verbose,
                             source='bathymetry', user_agent=_USER_AGENT)
         except DataFetchError as exc:
-            errors.append(exc)
+            outcomes.append(f"{dataset}: {exc.message}")
             continue
         return _parse_grid_csv(body.decode('utf-8', 'replace'))
     raise DataFetchError(
-        "EMODnet DTM has no coverage over the requested region "
-        "(European seas + Caribbean only).",
-        remediation="Use bathymetry_sources='gmrt' or 'gebco' for global "
-                    "coverage.",
+        f"EMODnet DTM returned no grid over the requested region (covered: "
+        f"European seas + Caribbean) — {'; '.join(outcomes)}.",
+        remediation="Outside that coverage, use bathymetry_sources='gmrt' or "
+                    "'gebco'; a transport failure above is the network, not "
+                    "the region.",
     )
 
 

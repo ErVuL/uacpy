@@ -3,15 +3,17 @@ slabs add coherently through ``ResultStack.superpose``.
 
 Two sources are driven by adding the complex field of each one: the engines
 are linear in the source amplitude, so ``Σ wᵢ·pᵢ`` over unit-source slabs is
-the field of the weighted array. The tests here pin (a) that the per-depth
-loop changes nothing per slab, (b) that ``superpose`` is that linear sum,
-(c) that the sum behaves like a field of two sources, (d) the time-domain
-case, and (e) the guards on weights and on stacks that cannot add.
+the field of the weighted array. That every field engine's slab is its
+single-depth run, and that one weighted depth is ``w`` times the unit run, is
+held for every registered engine by ``test_engine_conformance.py``. The tests
+here pin (a) the single-depth contract and the stacking machinery, (b) that
+``superpose`` is that linear sum, (c) that the sum behaves like a field of two
+sources, (d) the time-domain case, and (e) the guards on weights and on
+stacks that cannot add.
 """
 
 from pathlib import Path
 
-import warnings
 
 import numpy as np
 import pytest
@@ -21,6 +23,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field, ResultStack
 from uacpy.models import RunMode
 from uacpy.tests.conftest import make_pekeris
+from uacpy.tests.conftest import recorded_warnings
 
 # 100 m Pekeris guide at 100 Hz on a 3-depth × 20-range receiver grid: the
 # smallest grid on which a Kraken, Scooter, RAM, OAST or Bellhop field is
@@ -42,7 +45,8 @@ def _layered_env():
     """A bottom Bellhop cannot write natively, so ``run()`` auto-routes
     through BOUNCE — the spawn the weights must not reach."""
     from uacpy.core import BoundaryProperties
-    from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
+    from uacpy.core.boundary import SedimentLayer
+    from uacpy.core.bottom import Bottom, SeabedColumn
     env = _env()
     env.bottom = Bottom(columns=[SeabedColumn(
         layers=[SedimentLayer(thickness=5.0, sound_speed=1550.0,
@@ -63,38 +67,9 @@ def _scooter():
     return Scooter(verbose=False)
 
 
-def _ram():
-    from uacpy.models.ram import RAM
-    return RAM(verbose=False)
-
-
-def _oast():
-    from uacpy.models.oases import OAST
-    return OAST(verbose=False)
-
-
 def _bellhop():
     from uacpy.models.bellhop import Bellhop
     return Bellhop(verbose=False)
-
-
-# (factory, slab tolerance). The looped engines write the same deck for a
-# slab and for its stand-alone run, so the two agree to round-off. Bellhop
-# writes both depths into one deck and its ``.shd`` is complex64, and the
-# parallel beam sum lands in a different order per run, so its slabs agree
-# to float32 round-off only.
-_FIELD_MODELS = [
-    pytest.param(_bellhop, 1e-5, id='Bellhop',
-                 marks=pytest.mark.requires_binary),
-    pytest.param(_kraken, 1e-9, id='Kraken',
-                 marks=pytest.mark.requires_binary),
-    pytest.param(_scooter, 1e-9, id='Scooter',
-                 marks=pytest.mark.requires_binary),
-    pytest.param(_ram, 1e-9, id='RAM', marks=pytest.mark.requires_binary),
-    pytest.param(_oast, 1e-9, id='OAST',
-                 marks=[pytest.mark.requires_binary,
-                        pytest.mark.requires_oases]),
-]
 
 
 def _relative_error(actual, reference):
@@ -130,34 +105,7 @@ def kraken_stack():
     return model.run(_env(), source, _receiver())
 
 
-# ── (a) the loop changes nothing per slab ───────────────────────────────
-
-
-@pytest.mark.parametrize('factory,tolerance', _FIELD_MODELS)
-def test_every_field_model_stacks_a_two_depth_source(factory, tolerance):
-    """Each slab of the stack is the single-source run at that depth: the
-    same environment, receiver and mode go to every depth, so nothing but
-    the source depth differs between a slab and its stand-alone run."""
-    model = factory()
-    env, receiver = _env(), _receiver()
-    depths = [30.0, 70.0]
-    stack = model.run(env, uacpy.Source(depths=depths, frequencies=F0),
-                      receiver)
-    assert isinstance(stack, ResultStack)
-    assert stack.n_slabs == 2
-    assert stack.slab_type is Field
-    assert stack.coordinate_name == 'source_depth'
-    np.testing.assert_array_equal(stack.coordinate, depths)
-    np.testing.assert_array_equal(stack.metadata['source_weights'],
-                                  [1.0, 1.0])
-    for i, z in enumerate(depths):
-        single = model.run(env, uacpy.Source(depths=z, frequencies=F0),
-                           receiver)
-        assert isinstance(single, Field)
-        assert stack[i].data.shape == single.data.shape
-        assert stack[i].is_complex == single.is_complex
-        assert _relative_error(stack[i].data, single.data) < tolerance
-        np.testing.assert_array_equal(stack[i].source_depths, [z])
+# ── (a) the single-depth contract and the stacking machinery ─────────
 
 
 @pytest.mark.requires_binary
@@ -169,7 +117,7 @@ def test_a_single_depth_source_returns_a_field_with_no_weight_stamp():
     field = model.run(_env(), uacpy.Source(depths=50.0, frequencies=F0),
                       _receiver())
     assert isinstance(field, Field)
-    assert 'source_weights' not in field.metadata
+    assert field.source_weights is None
     assert 'superposed_sources' not in field.metadata
     unit = model.run(_env(), uacpy.Source(depths=50.0, frequencies=F0,
                                           weights=1.0), _receiver())
@@ -177,93 +125,66 @@ def test_a_single_depth_source_returns_a_field_with_no_weight_stamp():
     assert 'superposed_sources' not in unit.metadata
 
 
-@pytest.mark.requires_binary
-def test_a_single_depth_source_applies_its_weight():
-    """One source is the ``n = 1`` case of the same rule: ``weights=2``
-    scales the field by 2, ``weights=1j`` rotates it, and the metadata
-    records the one depth and weight."""
-    model = _kraken()
-    unit = model.run(_env(), uacpy.Source(depths=50.0, frequencies=F0),
-                     _receiver())
-    for w in (2.0, 1j, -0.5 + 0.25j):
-        scaled = model.run(_env(), uacpy.Source(depths=50.0, frequencies=F0,
-                                                weights=w), _receiver())
-        assert isinstance(scaled, Field)
-        assert _relative_error(scaled.data, w * unit.data) < 1e-12
-        assert scaled.metadata['superposed_sources'] == {
-            'depths': [50.0], 'weights': [complex(w)]}
-
-
-def test_every_concrete_model_implements_run_single_and_inherits_run():
+def test_every_concrete_model_inherits_run_and_implements_the_stage_hooks():
     """``run`` is the base class's template method — validation, the
-    per-depth loop, the weight — and every concrete model implements the
-    one-source, one-mode body as ``_run_single`` with the same leading
-    signature. No wrapper redefines ``run``, so a subclass that overrides
-    it and delegates to ``super().run()`` passes through the template once.
+    per-depth loop, the weight — and no wrapper redefines it, so a subclass
+    that overrides it and delegates to ``super().run()`` passes through the
+    template once. Every engine implements the four stage hooks of
+    :class:`PropagationModel`.
     """
-    import inspect
-    from uacpy.models.base import PropagationModel
-    from uacpy.models.bellhop import Bellhop
-    from uacpy.models.kraken import Kraken
-    from uacpy.models.ram import RAM
-    from uacpy.models.scooter import Scooter
-    from uacpy.models.sparc import SPARC
-    from uacpy.models.bounce import Bounce
-    from uacpy.models.oases import OAST, OASN, OASR, OASP, OASSP, OASS
-    for cls in (Bellhop, Kraken, RAM, Scooter, SPARC, Bounce,
-                OAST, OASN, OASR, OASP, OASSP, OASS):
+    from uacpy.models._registry import engine_classes
+    from uacpy.models.base import PropagationModel, _STAGE_HOOKS
+    for cls in engine_classes().values():
         assert 'run' not in cls.__dict__, cls
         assert cls.run is PropagationModel.run, cls
-        assert '_run_single' in cls.__dict__, cls
-        names = list(inspect.signature(cls._run_single).parameters)
-        assert names[:5] == ['self', 'env', 'source', 'receiver', 'run_mode']
+        assert all(hook in cls.__dict__ for hook in _STAGE_HOOKS), cls
 
 
-def test_a_run_single_whose_run_mode_default_is_not_none_is_refused():
-    """The template calls ``_run_single(..., run_mode)`` with the value it
-    received, so a body declaring its own default for ``run_mode`` would
-    never see it; ``__init_subclass__`` refuses the declaration."""
+def test_a_run_override_whose_run_mode_default_is_not_none_is_refused():
+    """``super().run()`` resolves ``run_mode=None`` through
+    ``_default_run_mode()``, so an override declaring its own default for
+    ``run_mode`` would be a second decider of the default mode;
+    ``__init_subclass__`` refuses the declaration."""
     from uacpy.models.ram import RAM
     with pytest.raises(TypeError, match='run_mode'):
         class DefaultedMode(RAM):
-            def _run_single(self, env, source, receiver,
-                            run_mode=RunMode.COHERENT_TL, *,
-                            frequencies=None, source_waveform=None,
-                            sample_rate=None, output_duration=None):
+            def run(self, env, source, receiver,
+                    run_mode=RunMode.COHERENT_TL, *,
+                    frequencies=None, source_waveform=None,
+                    sample_rate=None, output_duration=None):
                 return None
 
 
-def test_a_run_single_with_a_var_positional_sink_is_refused():
+def test_a_run_override_with_a_var_positional_sink_is_refused():
     """The mirror of the ``**kwargs`` rule: a ``*args`` sink swallows
     exactly the unknown positional arguments the keyword-only rule below
     it exists to refuse."""
     from uacpy.models.ram import RAM
     with pytest.raises(TypeError, match=r'\*args'):
         class VarPositionalSink(RAM):
-            def _run_single(self, env, source, receiver, run_mode=None,
-                            *args, frequencies=None, source_waveform=None,
-                            sample_rate=None, output_duration=None):
+            def run(self, env, source, receiver, run_mode=None,
+                    *args, frequencies=None, source_waveform=None,
+                    sample_rate=None, output_duration=None):
                 return None
 
 
-def test_a_run_single_that_requires_run_mode_is_accepted():
-    """``run`` always passes ``run_mode`` positionally, so a body that
-    declares no default for it is callable — only a non-None default is a
-    lie, because the body could never see it."""
+def test_a_run_override_that_requires_run_mode_is_accepted():
+    """An override that declares no default for ``run_mode`` decides no
+    default mode, so it is accepted — only a non-None default is refused."""
     from uacpy.models.ram import RAM
 
     class RequiredMode(RAM):
-        def _run_single(self, env, source, receiver, run_mode, *,
-                        frequencies=None, source_waveform=None,
-                        sample_rate=None, output_duration=None):
+        def run(self, env, source, receiver, run_mode, *,
+                frequencies=None, source_waveform=None,
+                sample_rate=None, output_duration=None):
             return None
 
-    assert RequiredMode._run_single is not None
+    assert RequiredMode.run is not None
 
 
-def test_a_class_that_declares_no_spec_is_told_which_body_it_defined():
-    """The message names the body ``__init_subclass__`` actually saw, so a
-    class that defined ``run`` is not told it defined ``_run_single``."""
+def test_a_class_that_declares_no_spec_is_told_what_it_defined():
+    """The message names what ``__init_subclass__`` actually saw, so a
+    class that defined ``run`` is not told it defined the stage hooks."""
     from uacpy.models.base import PropagationModel
     with pytest.raises(TypeError, match=r'defines run\(\) but declares no'):
         type('OnlyRun', (PropagationModel,), {
@@ -357,6 +278,28 @@ def test_a_weight_on_a_db_only_field_is_refused_as_superpose_refuses_it():
     np.testing.assert_array_equal(unit.data, plain.data)
 
 
+@pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
+@pytest.mark.parametrize('mode, weight, refused', [
+    (RunMode.INCOHERENT_TL, 2.0, True),
+    (RunMode.INCOHERENT_TL, 1.0, False),
+    (RunMode.COHERENT_TL, 2.0, False),
+])
+def test_a_one_depth_weight_on_a_db_mode_is_refused_before_the_engine_runs(
+        mode, weight, refused):
+    """``validate_inputs`` stops at stage 3 and launches nothing, so the
+    dB refusal is reached there; a unit weight and a complex-pressure mode
+    pass."""
+    source = uacpy.Source(depths=50.0, frequencies=F0, weights=weight)
+    if refused:
+        with pytest.raises(ConfigurationError,
+                           match='a weight cannot scale it'):
+            _kraken().validate_inputs(_env(), source, _receiver(),
+                                      run_mode=mode)
+    else:
+        _kraken().validate_inputs(_env(), source, _receiver(),
+                                  run_mode=mode)
+
+
 @pytest.mark.requires_binary
 def test_a_pinned_work_dir_keeps_one_scratch_set_per_source_depth(tmp_path):
     """Each depth of the loop runs in its own ``source_depth_<z>m``
@@ -394,7 +337,7 @@ def test_the_native_engines_solve_once_for_every_source_depth(
 
     Both are exact. Scooter's depth mesh comes from the media, so a source
     depth touches no other depth's answer. Kraken's receivers are placed on
-    the mode-tabulation grid (``_write_field_env``) AND written to the
+    the mode-tabulation grid (``_resolve_field_launch``) AND written to the
     ``.flp`` in full rather than through FIELD's subtabulate shortcut, which
     would recompute them in single precision and leave them a few ULPs off
     their own nodes — enough to put the interpolation weight at ~1e-7
@@ -411,7 +354,7 @@ def test_the_native_engines_solve_once_for_every_source_depth(
     assert len(decks) == 1, decks
     assert not list(tmp_path.glob('source_depth_*')), \
         "the run was split into one deck per depth"
-    np.testing.assert_array_equal(stack.metadata['source_weights'], [1.0, 1.0])
+    np.testing.assert_array_equal(stack.source_weights, [1.0, 1.0])
     for i, z in enumerate(depths):
         single = factory().run(env, uacpy.Source(depths=z, frequencies=F0),
                                receiver, run_mode=mode)
@@ -514,8 +457,7 @@ def test_an_internal_spawn_never_sees_the_callers_weights():
     weighted = uacpy.Source(depths=[30.0, 70.0], frequencies=F0,
                             weights=[1.0, -1.0])
     layered = _layered_env()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
+    with recorded_warnings() as caught:
         _bellhop().run(layered, weighted, receiver)
     spurious = [str(w.message) for w in caught
                 if 'is not applied' in str(w.message)]
@@ -527,7 +469,7 @@ def test_a_complex_weight_needs_a_phase_reference_not_just_complex_data():
     artefact of AT's storage (``phase_reference`` is None). Rotating it by
     a complex weight would record a source phase the field cannot carry,
     so a complex weight is refused there; a real one still scales it."""
-    from uacpy.core.results.field import _check_field_weightable
+    from uacpy.core.results.stack import _check_field_weightable
     artefact = Field(
         data=np.full((2, 3), 1.0 + 1.0j),
         coords={'depth': [10.0, 20.0], 'range': [100.0, 200.0, 300.0]},
@@ -549,7 +491,7 @@ def test_a_stack_with_unapplied_weights_warns_on_its_level_views():
     weighted = ResultStack([_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)],
                            [10.0, 20.0])
     for slab in weighted.slabs:
-        slab.metadata['source_weights'] = np.array([1.0, -1.0])
+        slab.source_weights = np.array([1.0, -1.0])
     with pytest.warns(UserWarning, match=r'weights.*superpose'):
         weighted.dB
     with pytest.warns(UserWarning, match=r'weights.*superpose'):
@@ -557,7 +499,7 @@ def test_a_stack_with_unapplied_weights_warns_on_its_level_views():
     unit = ResultStack([_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)],
                        [10.0, 20.0])
     for slab in unit.slabs:
-        slab.metadata['source_weights'] = np.array([1.0, 1.0])
+        slab.source_weights = np.array([1.0, 1.0])
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter('error')
@@ -584,7 +526,7 @@ def test_superpose_is_the_weighted_sum_of_the_slabs(kraken_stack):
 def test_superpose_reads_the_source_weights_by_default(kraken_stack):
     """With no argument the stack sums with the weights the ``Source``
     carried, here ``[1, -1]``: the same result as applying them by hand."""
-    np.testing.assert_array_equal(kraken_stack.metadata['source_weights'],
+    np.testing.assert_array_equal(kraken_stack.source_weights,
                                   [1.0, -1.0])
     by_default = kraken_stack.superpose()
     by_hand = kraken_stack[0].data - kraken_stack[1].data
@@ -606,7 +548,7 @@ def test_the_superposed_field_carries_the_stack_identity(kraken_stack):
     assert summed.metadata['superposed_sources'] == {
         'depths': [30.0, 70.0], 'weights': [1.0 + 0j, 1.0 + 0j],
         'coherent': True}
-    assert 'source_weights' not in summed.metadata
+    assert summed.source_weights is None
     assert 'source_depth' not in summed.pinned
     # The sum is complex pressure, so its dB view is defined.
     assert np.isfinite(summed.dB).any()
@@ -664,7 +606,7 @@ def _time_slab(z, trace):
                 'time': np.arange(len(trace)) / 1000.0},
         model='Test', frequencies=[90.0, 100.0, 110.0],
         source_depths=[z], phase_reference=None,
-        metadata={'source_weights': np.array([1.0, -1.0])},
+        source_weights=np.array([1.0, -1.0]),
     )
 
 
@@ -754,9 +696,10 @@ def _bellhop_time_series_setup():
 
 @pytest.mark.requires_binary
 def test_a_window_that_ends_before_the_first_echo_names_its_arrival():
-    """``output_duration=1.0`` at 2 km ends before the 1.32 s first echo,
-    so every trace is silence and the warning names that arrival time and
-    the window; a window that holds the echoes raises no window notice."""
+    """A window opened at ``t_start=0`` with ``output_duration=1.0`` at 2 km
+    ends before the 1.32 s first echo, so every trace is silence and the
+    warning names that arrival time and the window; a window that holds the
+    echoes raises no window notice."""
     env, receiver, waveform, fs = _bellhop_time_series_setup()
     model = _bellhop()
     source = uacpy.Source(depths=30.0, frequencies=F0)
@@ -766,17 +709,15 @@ def test_a_window_that_ends_before_the_first_echo_names_its_arrival():
         short = model.run(env, source, receiver,
                           run_mode=RunMode.TIME_SERIES,
                           source_waveform=waveform, sample_rate=fs,
-                          output_duration=1.0)
+                          t_start=0.0, output_duration=1.0)
     assert not np.any(short.data)
     assert any('all of the received energy' in str(w.message)
                for w in record)
-    import warnings
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
+    with recorded_warnings() as record:
         wide = model.run(env, source, receiver,
                          run_mode=RunMode.TIME_SERIES,
                          source_waveform=waveform, sample_rate=fs,
-                         output_duration=2.0)
+                         t_start=0.0, output_duration=2.0)
     assert np.any(wide.data)
     assert not any('window does not hold' in str(w.message) for w in record)
 
@@ -863,7 +804,7 @@ def test_source_repr_shows_weights_only_when_not_all_ones():
                              weights=[1.0, 1.0])) == repr(plain)
     weighted = uacpy.Source(depths=[10.0, 20.0], frequencies=F0,
                             weights=[1.0, -1.0])
-    assert 'weights=[(1+0j), (-1+0j)]' in repr(weighted)
+    assert 'weights [1, -1]' in repr(weighted)
 
 
 def test_at_depth_copies_one_depth_with_unit_weight():
@@ -1013,17 +954,17 @@ def test_superpose_refuses_non_field_slabs():
 
 
 @pytest.mark.requires_binary
-def test_a_multi_depth_source_in_a_non_field_mode_keeps_its_refusal():
-    """Mode shapes have no per-source sum, so ``MODES`` on a two-depth
-    ``Source`` still raises and names the field modes that do stack."""
+def test_a_multi_depth_source_in_modes_solves_the_modes_once():
+    """The modes do not depend on the source depth, so ``MODES`` on a
+    two-depth ``Source`` is one solve and one mode set (not a stack),
+    tabulated at both depths — what ``compute_modes`` returns too."""
     model = _kraken()
     source = uacpy.Source(depths=[30.0, 70.0], frequencies=F0)
-    with pytest.raises(ConfigurationError,
-                       match='single source depth per MODES run'):
-        model.run(_env(), source, _receiver(), run_mode=RunMode.MODES)
-    with pytest.raises(ConfigurationError, match='field modes'):
-        model.validate_inputs(_env(), source, _receiver(),
-                              run_mode=RunMode.MODES)
+    model.validate_inputs(_env(), source, _receiver(),
+                          run_mode=RunMode.MODES)
+    modes = model.run(_env(), source, _receiver(), run_mode=RunMode.MODES)
+    assert isinstance(modes, uacpy.Modes)
+    assert np.any(np.isclose(modes.depths, 70.0))
 
 
 @pytest.mark.requires_binary

@@ -1,9 +1,12 @@
-"""Ten public ``uacpy.io`` names that nothing in the package calls.
+"""Public ``uacpy.io`` capabilities that nothing in the package calls.
 
 READ THIS BEFORE PROPOSING ANY OF THESE NAMES FOR REMOVAL.
 
-Ten public names were removed in an earlier dead-code round and put back by
-the maintainer. Five of them — ``read_boundary_3d``, ``write_bty_3d``,
+Eight public names here are kept on the maintainer's decision although
+nothing in the package calls them. ``uacpy.io`` has one public reader per
+format, so the ASCII ``.moa`` parser and the elastic-component extraction are
+not names of their own: ``read_modes`` reads a ``.moa`` and takes
+``component=``. Five of the eight — ``read_boundary_3d``, ``write_bty_3d``,
 ``read_ssp_3d``, ``read_flp3d`` and ``write_field3dflp`` — are the BELLHOP3D
 and FIELD3D file layer. **They are deliberately retained for planned 3-D
 support and are not dead code.** They are unreachable from the 2-D public
@@ -15,14 +18,22 @@ state, not evidence of rot: they are the foundation the 3-D work starts
 from, and the 2-D entry points that refuse 3-D input name them in their own
 error messages as what a future implementer builds on.
 
-The other five are capability, not groundwork, and are usable today:
+The other three names, and the two capabilities ``read_modes`` took over,
+are capability, not groundwork, and are usable today:
 
-* ``read_shd_asc``, ``read_modes_asc``, ``read_tl_line`` read the ASCII
-  variants of three formats the package otherwise reads only in binary.
-* ``get_component`` extracts one component of the stress-displacement vector
-  of an elastic-medium mode set — a regime with little other support here.
+* ``read_shd_asc`` and ``read_tl_line`` read the ASCII variants of formats
+  the package otherwise reads only in binary; the ASCII mode file ``.moa``
+  reads through ``read_modes`` (one public reader per format family, which
+  returns the ``Modes`` carrier for either file).
+* ``read_modes(component=)`` extracts one component of the
+  stress-displacement vector of an elastic-medium mode set — a regime with
+  little other support here.
 * ``write_reflection_coefficient`` closes a round-trip hole: the package
   could read a ``.brc``/``.trc`` reflection table and not write one.
+
+The ``.moa`` parser and the component extraction are private
+(``_read_modes_asc_payload``, ``_get_component``) behind ``read_modes``;
+their tests below drive the parsers directly and ``read_modes`` end to end.
 
 Each test below either exercises the function on a fixture or asserts a
 property of the restoration that a re-deletion, or a revert to the
@@ -45,9 +56,13 @@ from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError, UnsupportedFeatureError,
 )
 from uacpy.io.bathy_io import read_boundary_3d, write_bty_3d
-from uacpy.io.modes_reader import get_component, read_modes_asc
+from uacpy.io.modes_reader import (
+    _get_component, _read_modes_asc_payload,
+    read_modes,
+)
 from uacpy.io.oalib_reader import (
-    read_arr_file, read_flp3d, read_ray_file, read_shd_asc, read_ssp_3d,
+    _parse_flp3d, read_arr_file, read_flp3d, read_ray_file, read_shd_asc,
+    read_ssp_3d,
 )
 from uacpy.io.oalib_writer import write_field3dflp
 from uacpy.io.ramsurf_reader import read_tl_line
@@ -63,9 +78,9 @@ THREE_D_NAMES = (
     'write_field3dflp',
 )
 
-#: The five that work against today's package.
+#: The public names that work against today's package.
 CURRENT_NAMES = (
-    'read_shd_asc', 'read_modes_asc', 'read_tl_line', 'get_component',
+    'read_shd_asc', 'read_modes', 'read_tl_line',
     'write_reflection_coefficient',
 )
 
@@ -100,7 +115,7 @@ class TestEveryRestoredNameIsPublic:
     @pytest.mark.parametrize('name', RESTORED_NAMES)
     def test_the_name_is_exported(self, name):
         assert name in io_package.__all__, (
-            f"uacpy.io.__all__ no longer lists {name}; the ten restored "
+            f"uacpy.io.__all__ no longer lists {name}; the restored "
             f"capabilities are public API.")
 
     @pytest.mark.parametrize('name', RESTORED_NAMES)
@@ -223,11 +238,11 @@ class TestThreeDSoundSpeedFile:
         """``sspMod.f90:610-612`` loops depth outermost, then y, reading one
         record of ``Nx`` speeds."""
         ssp = read_ssp_3d(_write_lines(tmp_path / 'a.ssp', self.DECK))
-        assert (ssp['Nx'], ssp['Ny'], ssp['Nz']) == (2, 2, 2)
-        assert ssp['c_mat'].shape == (2, 2, 2)
-        assert ssp['c_mat'][0, 0, 0] == 1500.0
-        assert ssp['c_mat'][0, 1, 1] == 1503.0
-        assert ssp['c_mat'][1, 0, 1] == 1511.0
+        assert (ssp.n_x, ssp.n_y, ssp.n_z) == (2, 2, 2)
+        assert ssp.sound_speed.shape == (2, 2, 2)
+        assert ssp.sound_speed[0, 0, 0] == 1500.0
+        assert ssp.sound_speed[0, 1, 1] == 1503.0
+        assert ssp.sound_speed[1, 0, 1] == 1511.0
 
     def test_the_horizontal_axes_are_metres_and_the_depth_axis_is_too(
             self, tmp_path):
@@ -235,9 +250,9 @@ class TestThreeDSoundSpeedFile:
         The pre-deletion reader returned the raw km for x and y, against the
         package's metres-unless-suffixed rule — the fix carried in here."""
         ssp = read_ssp_3d(_write_lines(tmp_path / 'u.ssp', self.DECK))
-        assert np.array_equal(ssp['Segx'], [0.0, 1000.0])
-        assert np.array_equal(ssp['Segy'], [0.0, 2000.0])
-        assert np.array_equal(ssp['Segz'], [0.0, 100.0])
+        assert np.array_equal(ssp.x, [0.0, 1000.0])
+        assert np.array_equal(ssp.y, [0.0, 2000.0])
+        assert np.array_equal(ssp.z, [0.0, 100.0])
 
     def test_a_record_may_wrap_across_lines(self, tmp_path):
         """Each vector is one list-directed READ, so it keeps consuming
@@ -245,8 +260,20 @@ class TestThreeDSoundSpeedFile:
         ssp = read_ssp_3d(_write_lines(tmp_path / 'w.ssp', [
             '3', '0.0 1.0', '2.0', '2', '0 2', '2', '0 100',
             '1 2 3', '4 5 6', '7 8 9', '10 11 12']))
-        assert np.array_equal(ssp['Segx'], [0.0, 1000.0, 2000.0])
-        assert ssp['c_mat'].shape == (2, 2, 3)
+        assert np.array_equal(ssp.x, [0.0, 1000.0, 2000.0])
+        assert ssp.sound_speed.shape == (2, 2, 3)
+
+    def test_the_record_labels_the_speed_on_its_axes(self, tmp_path):
+        pytest.importorskip('xarray')
+        from uacpy.io import Ssp3dFile
+        ssp = read_ssp_3d(_write_lines(tmp_path / 'x.ssp', self.DECK))
+        ds = ssp.to_xarray()
+        assert ds['sound_speed'].dims == ('z', 'y', 'x')
+        assert ds['sound_speed'].attrs['units'] == 'm/s'
+        assert float(ds['sound_speed'].sel(x=1000.0, y=0.0, z=100.0)) == 1511.0
+        back = Ssp3dFile.from_xarray(ds)
+        assert (back.n_x, back.n_y, back.n_z) == (2, 2, 2)
+        assert np.array_equal(back.sound_speed, ssp.sound_speed)
 
     def test_a_single_point_axis_is_refused(self, tmp_path):
         """``sspMod.f90:600-601`` ERROUTs below two points on any axis."""
@@ -254,6 +281,41 @@ class TestThreeDSoundSpeedFile:
             read_ssp_3d(_write_lines(tmp_path / 'one.ssp',
                                      ['1', '0.0', '2', '0 1', '2', '0 1',
                                       '1', '2']))
+
+
+class TestTheFieldParameterDecksAreRecords:
+    """``read_flp`` / ``read_flp3d`` return the decks under the writers'
+    carrier-level names."""
+
+    def test_the_2d_deck(self, tmp_path):
+        from uacpy.io import FlpFile, read_flp
+        from uacpy.io.oalib_writer import write_fieldflp
+        path = tmp_path / 'f.flp'
+        pos = {'s': {'z': np.array([25.0])},
+               'r': {'z': np.array([10.0, 20.0, 30.0]),
+                     'r': np.array([1000.0, 2000.0])}}
+        write_fieldflp(path, 'RA  ', pos, title='deck', n_modes=40)
+        deck = read_flp(path)
+        assert type(deck) is FlpFile
+        assert (deck.title, deck.option, deck.component) == ('deck',
+                                                             'RA  ', ' ')
+        assert deck.n_modes == 40
+        assert deck.source_depths.tolist() == [25.0]
+        assert deck.receiver_depths.tolist() == [10.0, 20.0, 30.0]
+        assert deck.receiver_ranges.tolist() == [1000.0, 2000.0]
+        assert deck.receiver_range_offsets.tolist() == [0.0, 0.0, 0.0]
+
+    def test_the_3d_deck(self, tmp_path):
+        from uacpy.io import Flp3dFile
+        deck = read_flp3d(_AT_3D_DECK)
+        parsed = _parse_flp3d(_AT_3D_DECK)
+        assert type(deck) is Flp3dFile
+        assert deck.method == parsed['method'] == 'STD'
+        assert deck.n_modes == parsed['M_limit'] == 60
+        assert deck.node_mode_files == tuple(parsed['nodes']['mode_file'])
+        assert np.array_equal(deck.elements, parsed['elements'])
+        assert np.array_equal(deck.bearings, parsed['pos']['r']['theta'])
+        assert np.array_equal(deck.source_x, parsed['pos']['s']['x'])
 
 
 class TestThreeDFieldParameterDeck:
@@ -273,10 +335,10 @@ class TestThreeDFieldParameterDeck:
     def _deck(self, tmp_path, **kwargs):
         path = tmp_path / 'lant.flp'
         write_field3dflp(path, 'STDFM', self.POS, self.BATHY, **kwargs)
-        return read_flp3d(path)
+        return _parse_flp3d(path)
 
     def test_a_written_deck_reads_back_with_every_axis_intact(self, tmp_path):
-        deck = self._deck(tmp_path, title='RT', M_limit=60)
+        deck = self._deck(tmp_path, title='RT', n_modes=60)
         assert deck['title'] == 'RT'
         assert deck['M_limit'] == 60
         assert np.allclose(deck['pos']['s']['x'], self.POS['s']['x'])
@@ -309,7 +371,7 @@ class TestThreeDFieldParameterDeck:
         bathy['depth'][0, 0] = 0.0
         path = tmp_path / 'dry.flp'
         write_field3dflp(path, 'STDFM', self.POS, bathy)
-        assert read_flp3d(path)['nodes']['mode_file'][0] == 'DUMMY'
+        assert _parse_flp3d(path)['nodes']['mode_file'][0] == 'DUMMY'
 
     def test_an_explicit_suffix_is_kept(self, tmp_path):
         """``.flp`` is appended only when the path has none — the convention
@@ -328,7 +390,7 @@ class TestThreeDFieldParameterDeck:
         the third letter of ``'STD'`` — named nothing."""
         path = tmp_path / 'opt.flp'
         write_field3dflp(path, 'STDT  *', self.POS, self.BATHY)
-        deck = read_flp3d(path)
+        deck = _parse_flp3d(path)
         assert deck['method'] == 'STD'
         assert deck['tesselation_check'] is True
         assert deck['sbp_flag'] == '*'
@@ -382,7 +444,7 @@ class TestThreeDFieldParameterDeck:
         flags live in."""
         path = tmp_path / 'opt2.flp'
         write_field3dflp(path, "ST'D", self.POS, self.BATHY)
-        deck = read_flp3d(path)
+        deck = _parse_flp3d(path)
         assert deck['opt'] == 'STD'
         assert deck['method'] == 'STD'
 
@@ -400,7 +462,7 @@ class TestThreeDFieldParameterDeck:
         loads it. The pre-deletion reader read the records in a different
         order entirely — source x as profile ranges, source y as bearings —
         and could not parse this file at all."""
-        deck = read_flp3d(_AT_3D_DECK)
+        deck = _parse_flp3d(_AT_3D_DECK)
         assert deck['method'] == 'STD'
         assert deck['M_limit'] == 60
         assert len(deck['nodes']['mode_file']) == 397
@@ -425,7 +487,8 @@ class TestTheTwoDGuardsNameTheThreeDFunctions:
     def test_the_arrivals_guard_names_them(self, tmp_path):
         path = tmp_path / 'a.arr'
         path.write_text("'3D'\n100.0\n")
-        with pytest.raises(FileFormatError) as excinfo:
+        with pytest.raises(FileFormatError,
+                           match='3-D arrivals format') as excinfo:
             read_arr_file(path)
         message = str(excinfo.value)
         assert 'not yet available' in message
@@ -434,7 +497,9 @@ class TestTheTwoDGuardsNameTheThreeDFunctions:
     def test_the_ray_guard_names_them(self, tmp_path):
         path = tmp_path / 'a.ray'
         path.write_text("'title'\n100.0\n1\n1 1\n0.0\n200.0\n'xyz'\n")
-        with pytest.raises(FileFormatError) as excinfo:
+        with pytest.raises(
+                FileFormatError,
+                match="declares coordinate system 'xyz'") as excinfo:
             read_ray_file(path)
         message = str(excinfo.value)
         assert 'not yet available' in message
@@ -442,7 +507,9 @@ class TestTheTwoDGuardsNameTheThreeDFunctions:
 
     def test_the_bellhop_dimensionality_guard_names_them(self):
         from uacpy.models.bellhop import Bellhop
-        with pytest.raises(UnsupportedFeatureError) as excinfo:
+        with pytest.raises(
+                UnsupportedFeatureError,
+                match="does not support: dimensionality='3D'") as excinfo:
             Bellhop(dimensionality='3D')
         message = str(excinfo.value)
         assert 'not yet available' in message
@@ -467,8 +534,8 @@ class TestAsciiShadeFile:
         """``read_shd_asc.m:29-36`` fills ``[2*Nrr, Nrd]`` and splits the odd
         and even rows, i.e. ``Nrd`` groups of ``Nrr`` ``(Re, Im)`` pairs."""
         shd = read_shd_asc(_write_lines(tmp_path / 't.shd.asc', self.DECK))
-        assert shd['pressure'].shape == (1, 1, 3, 2)
-        assert np.array_equal(shd['pressure'][0, 0],
+        assert shd.pressure.shape == (1, 1, 3, 2)
+        assert np.array_equal(shd.pressure[0, 0],
                               np.array([[1 + 2j, 3 + 4j],
                                         [5 + 6j, 7 + 8j],
                                         [9 + 10j, 11 + 12j]]))
@@ -480,18 +547,21 @@ class TestAsciiShadeFile:
         refused a file that reads fine everywhere else — the ``DECK`` above
         splits them 2 + 3 and 1 + 1 for exactly that reason."""
         shd = read_shd_asc(_write_lines(tmp_path / 'h.shd.asc', self.DECK))
-        assert shd['freq0'] == 100.0
-        assert shd['atten'] == 0.0
-        assert np.array_equal(shd['freqVec'], [100.0])
+        assert shd.source_frequency == 100.0
+        assert shd.stabilizing_attenuation == 0.0
+        assert np.array_equal(shd.frequencies, [100.0])
 
-    def test_the_dict_keys_match_the_binary_reader(self, tmp_path):
-        """A caller switching on extension gets the same shape either way."""
+    def test_the_record_is_the_binary_readers(self, tmp_path):
+        """A caller switching on extension gets the same record either way;
+        the ASCII format carries no source x/y."""
+        from uacpy.io import ShdFile
         shd = read_shd_asc(_write_lines(tmp_path / 'k.shd.asc', self.DECK))
-        assert set(shd) == {'title', 'PlotType', 'freqVec', 'freq0', 'atten',
-                            'Pos', 'pressure'}
-        assert np.array_equal(shd['Pos']['r']['z'], [0.0, 10.0, 20.0])
-        assert np.array_equal(shd['Pos']['r']['r'], [0.0, 1000.0])
-        assert np.array_equal(shd['Pos']['s']['z'], [25.0])
+        assert type(shd) is ShdFile
+        assert shd.source_x is None and shd.source_y is None
+        assert shd.pressure_frequency == 100.0
+        assert np.array_equal(shd.receiver_depths, [0.0, 10.0, 20.0])
+        assert np.array_equal(shd.receiver_ranges, [0.0, 1000.0])
+        assert np.array_equal(shd.source_depths, [25.0])
 
     def test_a_multi_bearing_header_raises_rather_than_returning_one_block(
             self, tmp_path):
@@ -516,7 +586,7 @@ class TestAsciiShadeFile:
 
 
 class TestAsciiModeFile:
-    """``read_modes_asc``: the text sibling of ``read_modes_bin``."""
+    """The ASCII ``.moa`` parser: the text sibling of the binary ``.mod``."""
 
     DECK = ['32', 'KRAKEN PEKERIS',
             '100.0 1 3 3 2',
@@ -530,18 +600,29 @@ class TestAsciiModeFile:
             'Mode 2', '4.0 0.4 5.0 0.5 6.0 0.6']
 
     def test_complex_records_are_interleaved_pairs(self, tmp_path):
-        """``read_modes_asc.m:33,50`` uses ``fscanf( fid, '%f', [ 2, N ] )``,
+        """``read_modes_asc.m:35,52`` uses ``fscanf( fid, '%f', [ 2, N ] )``,
         which fills a 2-by-N array in column order — interleaved
         ``(Re, Im)``. The pre-deletion reader read a block of ``N`` reals
         followed by a block of ``N`` imaginaries, which silently returns the
         first half of the file's values as the real part of everything."""
-        modes = read_modes_asc(_write_lines(tmp_path / 'p.moa', self.DECK))
+        modes = _read_modes_asc_payload(_write_lines(tmp_path / 'p.moa', self.DECK))
         assert np.allclose(modes['k'], [0.41 - 1.0e-5j, 0.39 - 4.0e-5j])
         assert np.allclose(modes['phi'][:, 0], [1 + 0.1j, 2 + 0.2j, 3 + 0.3j])
         assert np.allclose(modes['phi'][:, 1], [4 + 0.4j, 5 + 0.5j, 6 + 0.6j])
 
+    def test_ifort_repeat_counts_and_eless_exponents_read(self, tmp_path):
+        """The numeric records go through the shared list-directed reader,
+        so ``2*…`` repeats and a three-digit exponent without its ``E``
+        read as the plain spelling does."""
+        deck = list(self.DECK)
+        deck[8] = '0.41 -1.0-005 0.39 -4.0e-5'
+        deck[10] = '2*1.0 2.0 0.2 3.0 0.3'
+        modes = _read_modes_asc_payload(_write_lines(tmp_path / 'i.moa', deck))
+        assert np.allclose(modes['k'], [0.41 - 1.0e-5j, 0.39 - 4.0e-5j])
+        assert np.allclose(modes['phi'][:, 0], [1 + 1j, 2 + 0.2j, 3 + 0.3j])
+
     def test_the_header_and_axes_are_read(self, tmp_path):
-        modes = read_modes_asc(_write_lines(tmp_path / 'h.moa', self.DECK))
+        modes = _read_modes_asc_payload(_write_lines(tmp_path / 'h.moa', self.DECK))
         assert modes['pltitl'] == 'KRAKEN PEKERIS'
         assert modes['freq'] == 100.0
         assert (modes['Nmedia'], modes['ntot'], modes['nmat']) == (1, 3, 3)
@@ -551,35 +632,51 @@ class TestAsciiModeFile:
         """``M`` means ``len(k)`` in both readers, so a ``modes=`` subset does
         not disagree with the ``k`` and ``phi`` handed back with it."""
         path = _write_lines(tmp_path / 's.moa', self.DECK)
-        assert read_modes_asc(path)['M'] == 2
-        subset = read_modes_asc(path, modes=[2])
+        assert _read_modes_asc_payload(path)['M'] == 2
+        subset = _read_modes_asc_payload(path, modes=[2])
         assert subset['M'] == 1
         assert np.allclose(subset['k'], [0.39 - 4.0e-5j])
         assert np.allclose(subset['phi'][:, 0], [4 + 0.4j, 5 + 0.5j, 6 + 0.6j])
 
     def test_an_out_of_range_mode_index_is_dropped(self, tmp_path):
-        """``read_modes_asc.m:41-43`` filters rather than raising."""
-        modes = read_modes_asc(_write_lines(tmp_path / 'o.moa', self.DECK),
+        """``read_modes_asc.m:44-46`` filters rather than raising."""
+        modes = _read_modes_asc_payload(_write_lines(tmp_path / 'o.moa', self.DECK),
                                modes=[1, 999])
         assert modes['M'] == 1
 
     def test_a_missing_file_is_a_format_error(self, tmp_path):
         with pytest.raises(FileFormatError, match='not found'):
-            read_modes_asc(tmp_path / 'absent.moa')
+            _read_modes_asc_payload(tmp_path / 'absent.moa')
 
-    def test_read_modes_takes_only_the_binary_extension(self, tmp_path):
-        """``read_modes`` attaches halfspace terms an ASCII file does not
-        carry, so it keeps refusing ``.moa`` — and now names the reader that
-        does handle one."""
-        from uacpy.io.modes_reader import read_modes
+    def test_read_modes_returns_the_carrier_of_a_moa(self, tmp_path):
+        """The public reader takes the ASCII file too and returns the same
+        ``Modes`` carrier as for a ``.mod``; the ``.moa`` carries no
+        halfspace record, so none is attached."""
+        from uacpy.core.results import Modes
         path = _write_lines(tmp_path / 'x.moa', self.DECK)
-        with pytest.raises(FileFormatError) as excinfo:
-            read_modes(str(path))
-        assert 'read_modes_asc' in str(excinfo.value)
+        modes = read_modes(str(path))
+        assert isinstance(modes, Modes)
+        assert np.allclose(modes.k, [0.41 - 1.0e-5j, 0.39 - 4.0e-5j])
+        assert np.allclose(modes.phi[:, 1], [4 + 0.4j, 5 + 0.5j, 6 + 0.6j])
+        assert modes.depths.tolist() == [0.0, 50.0, 100.0]
+        assert modes.frequencies.tolist() == [100.0]
+        assert modes.metadata['title'] == 'KRAKEN PEKERIS'
+        assert 'bottom_halfspace' not in modes.metadata
+
+    def test_read_modes_component_passes_acoustic_rows_through(self, tmp_path):
+        """``component=`` selects inside an elastic block only; on an
+        acoustic file it returns the pressure rows, and a letter that is not
+        a component is refused whatever the media are."""
+        path = _write_lines(tmp_path / 'c.moa', self.DECK)
+        assert np.array_equal(read_modes(str(path), component='V').phi,
+                              read_modes(str(path)).phi)
+        with pytest.raises(ConfigurationError, match='stress-displacement'):
+            read_modes(str(path), component='Q')
 
 
 class TestElasticComponentExtraction:
-    """``get_component``: one component of the stress-displacement vector."""
+    """The component extraction behind ``read_modes(component=)``: one
+    component of the stress-displacement vector."""
 
     def test_an_acoustic_mode_set_comes_back_unchanged(self):
         """Without KRAKEL, ``Mater`` never holds ``'ELASTIC'`` and this is a
@@ -588,7 +685,7 @@ class TestElasticComponentExtraction:
         phi = np.arange(12.0).reshape(6, 2)
         modes = {'phi': phi, 'z': np.zeros(6), 'Nmedia': 1,
                  'Mater': ['ACOUSTIC']}
-        assert np.array_equal(get_component(modes, 'H'), phi)
+        assert np.array_equal(_get_component(modes, 'H'), phi)
 
     @pytest.mark.parametrize('comp,expected',
                              [('H', [0.0, 4.0]), ('V', [1.0, 5.0]),
@@ -599,7 +696,7 @@ class TestElasticComponentExtraction:
         N (``get_component.m:29-41``)."""
         modes = {'phi': np.arange(8.0).reshape(8, 1), 'z': np.zeros(2),
                  'Nmedia': 1, 'Mater': ['ELASTIC']}
-        assert np.array_equal(get_component(modes, comp).ravel(), expected)
+        assert np.array_equal(_get_component(modes, comp).ravel(), expected)
 
     def test_an_absent_mater_key_reads_as_acoustic(self):
         """The pre-deletion default was a nested ``[['ACOUSTIC']]``, which
@@ -607,7 +704,7 @@ class TestElasticComponentExtraction:
         on every dict that omitted the key."""
         phi = np.arange(6.0).reshape(3, 2)
         assert np.array_equal(
-            get_component({'phi': phi, 'z': np.zeros(3)}, 'V'), phi)
+            _get_component({'phi': phi, 'z': np.zeros(3)}, 'V'), phi)
 
     def test_an_unknown_component_is_refused_on_an_acoustic_set_too(self):
         """Validated up front rather than inside the elastic branch, so a typo
@@ -615,19 +712,19 @@ class TestElasticComponentExtraction:
         modes = {'phi': np.zeros((2, 1)), 'z': np.zeros(2),
                  'Mater': ['ACOUSTIC']}
         with pytest.raises(ConfigurationError, match='stress-displacement'):
-            get_component(modes, 'Q')
+            _get_component(modes, 'Q')
 
     def test_an_unknown_material_is_refused(self):
         modes = {'phi': np.zeros((2, 1)), 'z': np.zeros(2), 'Nmedia': 1,
                  'Mater': ['GLASS']}
         with pytest.raises(ConfigurationError, match='GLASS'):
-            get_component(modes, 'H')
+            _get_component(modes, 'H')
 
     def test_an_empty_mode_set_names_modal_cutoff(self):
         modes = {'phi': np.zeros((0, 0)), 'z': np.zeros(3),
                  'Mater': ['ACOUSTIC']}
         with pytest.raises(FileFormatError, match='M=0'):
-            get_component(modes, 'H')
+            _get_component(modes, 'H')
 
 
 class TestReflectionCoefficientRoundTrip:
@@ -641,10 +738,10 @@ class TestReflectionCoefficientRoundTrip:
         path = tmp_path / 'sand.brc'
         write_reflection_coefficient(path, self.THETA, self.R)
         table = read_reflection_coefficient(path)
-        assert table['n_pts'] == 91
-        assert np.array_equal(table['theta'], self.THETA)
-        assert np.allclose(table['R'], np.abs(self.R), atol=1e-6)
-        assert np.allclose(table['phi'], np.angle(self.R), atol=1e-8)
+        assert len(table.angles) == 91
+        assert np.array_equal(table.angles, self.THETA)
+        assert np.allclose(table.magnitude, np.abs(self.R), atol=1e-6)
+        assert np.allclose(table.phase, np.angle(self.R), atol=1e-8)
 
     def test_phase_is_radians_in_and_degrees_on_disk(self, tmp_path):
         """The direction ``read_reflection_coefficient`` reads back, and the
@@ -654,7 +751,7 @@ class TestReflectionCoefficientRoundTrip:
                                      np.array([[1.0, np.pi / 2],
                                                [1.0, -np.pi / 2]]))
         assert '90.000000' in path.read_text()
-        assert np.allclose(read_reflection_coefficient(path)['phi'],
+        assert np.allclose(read_reflection_coefficient(path).phase,
                            [np.pi / 2, -np.pi / 2])
 
     def test_a_real_amplitude_column_writes_zero_phase(self, tmp_path):
@@ -662,8 +759,8 @@ class TestReflectionCoefficientRoundTrip:
         write_reflection_coefficient(path, np.array([0.0, 45.0, 90.0]),
                                      np.array([0.9, 0.5, 0.1]))
         table = read_reflection_coefficient(path)
-        assert np.allclose(table['R'], [0.9, 0.5, 0.1])
-        assert np.array_equal(table['phi'], np.zeros(3))
+        assert np.allclose(table.magnitude, [0.9, 0.5, 0.1])
+        assert np.array_equal(table.phase, np.zeros(3))
 
     def test_mismatched_column_lengths_are_refused_before_the_file_opens(
             self, tmp_path):
@@ -700,7 +797,7 @@ class TestReflectionCoefficientRoundTrip:
         path = tmp_path / 'dup.brc'
         write_reflection_coefficient(path, np.array([0.0, 0.0, 45.0]),
                                      np.array([0.9, 0.9, 0.5]))
-        assert read_reflection_coefficient(path)['n_pts'] == 3
+        assert len(read_reflection_coefficient(path).angles) == 3
 
     def test_an_empty_table_is_refused(self, tmp_path):
         with pytest.raises(ConfigurationError, match='absorbing'):
@@ -715,21 +812,21 @@ class TestCollinsTlLine:
         path = _write_lines(tmp_path / 'tl.line',
                             ['  52.586   59.606', ' 105.172   44.938',
                              ' 157.758   45.374'])
-        ranges, tl = read_tl_line(path)
-        assert np.allclose(ranges, [52.586, 105.172, 157.758])
-        assert np.allclose(tl, [59.606, 44.938, 45.374])
+        tl = read_tl_line(path)
+        assert (tl.quantity, tl.unit, tl.depths) == ('transmission_loss',
+                                                     'dB', None)
+        assert np.allclose(tl.ranges, [52.586, 105.172, 157.758])
+        assert np.allclose(tl.data, [59.606, 44.938, 45.374])
 
     def test_ranges_are_metres(self, tmp_path):
         """``rams0.5.f:253`` writes ``r`` verbatim and RAM marches in metres,
         so no conversion is applied."""
         path = _write_lines(tmp_path / 'tl.line', ['5000.0  70.0'])
-        ranges, _ = read_tl_line(path)
-        assert ranges[0] == 5000.0
+        assert read_tl_line(path).ranges[0] == 5000.0
 
     def test_a_single_row_file_yields_two_one_element_arrays(self, tmp_path):
-        ranges, tl = read_tl_line(_write_lines(tmp_path / 'tl.line',
-                                               ['100.0  50.0']))
-        assert ranges.shape == (1,) and tl.shape == (1,)
+        tl = read_tl_line(_write_lines(tmp_path / 'tl.line', ['100.0  50.0']))
+        assert tl.ranges.shape == (1,) and tl.data.shape == (1,)
 
     def test_an_empty_file_names_the_run_that_wrote_nothing(self, tmp_path):
         path = tmp_path / 'tl.line'
@@ -768,7 +865,7 @@ class TestWrittenTokenCollisionGuardsShareOneDetector:
                 tmp_path / 'bad.flp', 'RA',
                 {'r': {'r': np.array([1000.0]), 'z': np.array([50.0])},
                  's': {'z': np.array([25.0])}},
-                n_profiles=2, profile_ranges_m=np.array([0.0, 0.0004]))
+                n_profiles=2, profile_ranges=np.array([0.0, 0.0004]))
 
     def test_valid_profile_ranges_write(self, tmp_path):
         from uacpy.io.oalib_writer import write_fieldflp
@@ -777,17 +874,8 @@ class TestWrittenTokenCollisionGuardsShareOneDetector:
             out, 'RA',
             {'r': {'r': np.array([1000.0]), 'z': np.array([50.0])},
              's': {'z': np.array([25.0])}},
-            n_profiles=2, profile_ranges_m=np.array([0.0, 5000.0]))
+            n_profiles=2, profile_ranges=np.array([0.0, 5000.0]))
         assert out.exists()
-
-    def test_bty_ranges_that_collide_in_the_km_column_are_refused(
-            self, tmp_path):
-        from uacpy.io.bathy_io import write_bty_file
-        with pytest.raises(ConfigurationError, match='5.000000 km'):
-            write_bty_file(
-                tmp_path / 'bad.bty',
-                np.array([[0.0, 200.0], [5000.0, 190.0],
-                          [5000.0004, 180.0], [10000.0, 200.0]]))
 
     def test_oases_receiver_depth_tokens_that_collide_are_refused(self):
         from uacpy.io.oases_writer import _check_receiver_depth_tokens

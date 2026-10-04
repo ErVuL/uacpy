@@ -13,7 +13,7 @@ storage puts on ``dω/dk_r`` is
 and shrinking the frequency step raises it. Measured on an analytic Pekeris
 guide (D = 100 m, c 1500/1800 m/s, ρ 1.0/1.8, f₀ = 100 Hz) with exact
 longdouble roots and a complex-step reference, against
-``Modes.compute_group_velocity``:
+``Modes.group_velocity_between``:
 
     Δf (Hz)      steps      floor      measured error of v_g
        1.0      140844    7.1e-06                   7.29e-06
@@ -52,7 +52,7 @@ arrived in, so a float32-sourced array that a caller has already promoted to
 float64 is still measured against the float32 spacing.
 
 This module sits in ``core`` because :meth:`uacpy.core.results.Modes.
-compute_group_velocity` and :func:`uacpy.acoustic_signal.modal_group_velocity`
+group_velocity_between` and :func:`uacpy.acoustic_signal.modal_group_velocity`
 both difference the same wavenumbers, from different layers.
 """
 
@@ -61,6 +61,7 @@ import warnings
 import numpy as np
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import NumericsWarning
 
 #: Relative accuracy above which the *storage* of ``k_r`` is worth reporting as
 #: a floor under ``dω/dk_r``. Placed at the optimum measured above: at 1e-5 the
@@ -75,9 +76,9 @@ GROUP_VELOCITY_REL_FLOOR = 1e-5
 #: wavenumber a solver wrote are as good as random, so the chance that every
 #: one of ``_DYADIC_MIN_SIZE`` values is a multiple of this many spacings is
 #: ``16**-n``; an array built in float64 out of exact eighths is a multiple of
-#: every one of them. Without the test, ``1.0 + arange(64)/128`` — full float64
-#: precision — was reported as sitting on a 1.19e-07 grid, nine decades from
-#: the truth.
+#: every one of them. The test is what keeps ``1.0 + arange(64)/128`` — full
+#: float64 precision — from reading as a 1.19e-07 grid, nine decades from the
+#: truth.
 _DYADIC_LOW_BITS = 16
 _DYADIC_MIN_SIZE = 4
 
@@ -169,7 +170,7 @@ def coarser_step_multiple(omega, kr):
     return max(k // 2, 1)
 
 
-def warn_if_storage_under_resolves(kr_ref, dk, v_g, caller, *, grid=None):
+def warn_if_storage_under_resolves(kr_ref, dk, v_g, who, *, grid=None):
     """Warn when the stored ``k_r`` puts a floor under ``v_g`` worth reporting.
 
     Names the worst floor and the number of storage steps the difference spans.
@@ -220,7 +221,7 @@ def warn_if_storage_under_resolves(kr_ref, dk, v_g, caller, *, grid=None):
                 f"storage-limited side of the optimum.")
 
     warnings.warn(
-        f"{caller}: the wavenumber difference spans as few as "
+        f"{who}: the wavenumber difference spans as few as "
         f"{1.0 / worst:.0f} steps of the coarsest grid these k_r could have "
         f"been stored on ({spacing:.3g} 1/m), so the storage puts a floor of "
         f"{worst:.1e} relative ({worst * speed:.3g} m/s) under "
@@ -229,5 +230,5 @@ def warn_if_storage_under_resolves(kr_ref, dk, v_g, caller, *, grid=None):
         f"truncation error of the difference is separate and may be larger or "
         f"smaller; the floor alone falls in proportion to the frequency step. "
         + remedy,
-        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )

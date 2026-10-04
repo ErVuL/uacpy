@@ -5,7 +5,7 @@ Noise Level (RNL) and the equivalent Monopole Source Level (MSL), per
 ISO 17208-1/-2. The MSL removes the sea-surface (Lloyd's mirror) interference
 assuming a pressure-release surface, giving the omni-directional point-source
 description that long-range propagation models consume. Levels are reported in
-decidecade bands (see :mod:`uacpy.acoustic_signal.estimate`).
+decidecade bands (see :mod:`uacpy.acoustic_signal.bands`).
 
 Standards
 ---------
@@ -30,6 +30,7 @@ import numpy as np
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._validate import require_positive_finite_scalar
 
 # Combined RNL measurement uncertainty by band (ISO 17208-2:2019 §5), in dB.
 # Reference figures to report alongside a measured level; no function here
@@ -46,7 +47,14 @@ def radiated_noise_level(received_spl_dB, distance_m):
 
     ``L_RN = L_p + 20*log10(r)`` — the received decidecade-band SPL plus spherical
     (``20 log r``) spreading. ``distance_m`` is the slant range from the ship
-    reference point to the hydrophone. Returns dB re 1 µPa·m.
+    reference point to the hydrophone. Returns dB re 1 µPa²·m².
+
+    Parameters
+    ----------
+    received_spl_dB : float or array_like
+        Received decidecade-band SPL (dB re 1 µPa²).
+    distance_m : float or array_like
+        Slant range (m) from the ship reference point.
     """
     r = np.asarray(distance_m, dtype=float)
     # Written as the negation of the admissible condition so NaN is refused
@@ -63,12 +71,22 @@ def radiated_noise_level(received_spl_dB, distance_m):
 
 
 def nominal_source_depth(draught_m):
-    """Nominal monopole source depth ``d_s = 0.7 * draught`` (ISO 17208-2 Formula 1)."""
-    if not (np.isfinite(draught_m) and draught_m > 0):
+    """Nominal monopole source depth ``d_s = 0.7 * draught`` (ISO 17208-2 Formula 1).
+
+    ``draught_m`` may be one draught (a float comes back) or an array of
+    them (a fleet).
+
+    Parameters
+    ----------
+    draught_m : float or array_like
+        Ship draught (m).
+    """
+    d = np.asarray(draught_m, dtype=float)
+    if not np.all(np.isfinite(d) & (d > 0)):
         raise ConfigurationError(
             f"nominal_source_depth: draught must be > 0 m and finite; got "
             f"{draught_m!r}.")
-    return 0.7 * float(draught_m)
+    return 0.7 * float(d) if d.ndim == 0 else 0.7 * d
 
 
 def lloyd_mirror_correction(frequency, source_depth, sound_speed=DEFAULT_SOUND_SPEED):
@@ -81,25 +99,33 @@ def lloyd_mirror_correction(frequency, source_depth, sound_speed=DEFAULT_SOUND_S
 
     ``frequency`` is the decidecade band centre [Hz]. ΔL → -3.01 dB at high
     frequency (incoherent source+image) and grows large and positive at low
-    frequency (the surface dipole suppresses radiation).
+    frequency (the surface dipole suppresses radiation). ``frequency`` and
+    ``source_depth`` broadcast against each other.
+
+    Parameters
+    ----------
+    frequency : float or array_like
+        Decidecade band centre (Hz).
+    source_depth : float or array_like
+        Source depth (m).
+    sound_speed : float, optional
+        Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
     # ``kd`` enters only as even powers, so a negative depth returns exactly
     # what its positive twin does: an upstream sign error would be invisible.
     # Zero is admitted — it is the physical surface-mounted limit the
     # ``errstate`` below is for — and NaN is refused by the negated form.
-    if not (np.isfinite(source_depth) and source_depth >= 0):
+    d = np.asarray(source_depth, dtype=float)
+    if not np.all(np.isfinite(d) & (d >= 0)):
         raise ConfigurationError(
             f"lloyd_mirror_correction: source_depth must be >= 0 m and "
             f"finite; got {source_depth!r}. The correction depends on "
             f"(k*d)**2 and (k*d)**4 only, so a negative depth would return "
             f"the same value as its positive twin.")
-    c = float(sound_speed)
-    if not (np.isfinite(c) and c > 0):
-        raise ConfigurationError(
-            f"lloyd_mirror_correction: sound_speed must be > 0 m/s and "
-            f"finite; got {sound_speed!r}.")
+    c = require_positive_finite_scalar(
+        sound_speed, "lloyd_mirror_correction", "sound_speed", " m/s")
     k = 2.0 * np.pi * np.asarray(frequency, dtype=float) / c
-    kd = k * float(source_depth)
+    kd = k * d
     num = 2.0 * kd ** 4 + 14.0 * kd ** 2
     den = 14.0 + 2.0 * kd ** 2 + kd ** 4
     # At kd→0 (surface-mounted source) num→0 and ΔL→+inf: the pressure-release
@@ -113,7 +139,18 @@ def monopole_source_level(rnl_dB, frequency, source_depth, sound_speed=DEFAULT_S
     """Equivalent Monopole Source Level ``L_s = L_RN + ΔL`` (ISO 17208-2 Formula 2).
 
     ``frequency`` is the decidecade band centre(s) [Hz]; ``source_depth`` the
-    nominal source depth (``0.7 * draught``). Returns dB re 1 µPa·m.
+    nominal source depth (``0.7 * draught``). Returns dB re 1 µPa²·m².
+
+    Parameters
+    ----------
+    rnl_dB : float or array_like
+        Radiated noise level (dB re 1 µPa²·m²).
+    frequency : float or array_like
+        Decidecade band centre(s) (Hz).
+    source_depth : float or array_like
+        Nominal source depth (m).
+    sound_speed : float, optional
+        Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
     return np.asarray(rnl_dB, dtype=float) + lloyd_mirror_correction(
         frequency, source_depth, sound_speed)

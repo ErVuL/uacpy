@@ -84,6 +84,32 @@ def package_python_files(root):
     )
 
 
+def engines_missing_from(paths, models_dir):
+    """Keys of the registered engines that no file in ``paths`` belongs to.
+
+    A sweep of ``models_dir`` that read no file of an engine measures
+    nothing about that engine: ``glob('*.py')`` over an engine laid out as a
+    package reads none of its code and stays green. A file belongs to an
+    engine when its dotted name is the engine's registered module
+    (``ENGINES[key].module``) or lies under it. Dotted names are taken
+    relative to the directory two levels above ``models_dir``, so a copy of
+    the tree elsewhere resolves the same way.
+    """
+    from uacpy.models._registry import ENGINES
+
+    root = Path(models_dir).parent.parent
+    dotted = set()
+    for path in paths:
+        parts = Path(path).relative_to(root).with_suffix('').parts
+        if parts[-1] == '__init__':
+            parts = parts[:-1]
+        dotted.add('.'.join(parts))
+    return sorted(
+        key for key, entry in ENGINES.items()
+        if not any(name == entry.module or name.startswith(entry.module + '.')
+                   for name in dotted))
+
+
 def _repo_markdown() -> dict:
     """Every Markdown file in the repo, indexed by basename."""
     by_name: dict = {}

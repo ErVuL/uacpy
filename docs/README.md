@@ -47,6 +47,9 @@ Every model in the package follows that shape.
 **→ [Model index and capability matrix](models/README.md)** — start here if you
 are choosing a model.
 
+**→ [Validation](models/validation.md)** — each engine's measured agreement
+with closed forms and the published benchmarks, and where it falls short.
+
 | | | |
 |---|---|---|
 | [Bellhop](models/bellhop.md) | Gaussian-beam rays | rays, eigenrays, arrivals; high frequency |
@@ -72,6 +75,9 @@ are choosing a model.
 - **[Results](guide/results.md)** — `Field`, `Rays`, `Modes` and friends; how
   `Field.kind` / `.unit` / `.data.dtype` describe one container, and how `.at` /
   `.isel` / `.max` slice an axis into `.pinned`.
+- **[Broadband products](theory/broadband_products.md)** — why `truncate_response`,
+  `sound_exposure_level`, `broadband_loss` and the arrival transforms are defined as they are: the
+  literature and the measured tables behind their rules.
 - **[Plotting](guide/plotting.md)** — the `.plot()` convention, `plot_field`'s
   three render branches, overlays and composition.
 
@@ -110,7 +116,11 @@ python docs/generate_model_figures.py
 ```
 
 The worked example shown on a page **is** the code that generated its figures —
-not a re-typed approximation of it. The model pages also share a small set of
+not a re-typed approximation of it. To paste one, run it with `docs/` on
+`sys.path` and import the shared names it uses from
+[`figure_scripts/_common.py`](figure_scripts/_common.py): the scenarios
+(`shallow_water()`, `layered_elastic()`, …) and the figure sizes `WIDE` and
+`TALL` (`from figure_scripts._common import shallow_water, WIDE, TALL`). The model pages also share a small set of
 canonical environments, so comparing two models' plots compares the same water
 rather than two different setups.
 
@@ -134,8 +144,9 @@ python docs/check_structure.py
 ## Conventions
 
 - **Units**: metres, m/s, g/cm³, Hz, dB re 1 µPa.
-  Range and depth are metres — kilometres appear only on plot axes and inside
-  the native file formats.
+  Range and depth are metres — kilometres appear only on plot axes, inside
+  the native file formats, and in the data fetchers' `max_distance_km`
+  offset limit (named for its unit).
 - **Depth is positive down**; sea-surface altimetry is positive up.
 - **Range is measured from the source**, which sits at `r = 0`.
 - **Results carry no carriers.** A result knows its model, backend, provenance
@@ -146,4 +157,4 @@ python docs/check_structure.py
 
 **Reference:** [`DOCUMENTATION.md`](../DOCUMENTATION.md) ·
 **Internals:** [`DEV.md`](DEV.md) ·
-**Examples:** [`uacpy/examples/`](../uacpy/examples/) (39 runnable scripts)
+**Examples:** [`uacpy/examples/`](../uacpy/examples/) (numbered, runnable scripts)

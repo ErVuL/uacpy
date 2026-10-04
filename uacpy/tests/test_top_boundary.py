@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 import uacpy
-from uacpy.core.constants import parse_boundary_type
+from uacpy.io.at_codes import boundary_code
 from uacpy.core.environment import BoundaryProperties, SoundSpeedProfile
 from uacpy.io.oalib_writer import get_top_bc_code
 from uacpy.io.bellhop_writer import write_bellhop_env_file
@@ -18,6 +18,8 @@ from uacpy.io.oases_writer import (
     _format_upper_halfspace,
     write_oast_input, write_oasn_input, write_oasp_input,
 )
+from uacpy.models.kraken import _launch
+from uacpy.models.ram import _domain as ram_domain
 
 
 def _ice() -> BoundaryProperties:
@@ -56,10 +58,8 @@ def src_rcv():
 ])
 def test_get_top_bc_code_routes_each_acoustic_type(surface, expected_code):
     """Pin the boundary-code routing for every model that consumes env.surface."""
-    # parse_boundary_type -> to_acoustics_toolbox_code is the single lookup
-    # path every writer takes.
-    assert parse_boundary_type(
-        'half-space').to_acoustics_toolbox_code() == 'A'
+    # io.at_codes.boundary_code is the single lookup path every writer takes.
+    assert boundary_code('half-space') == 'A'
     assert get_top_bc_code(_basic_env(surface)) == expected_code
 
 
@@ -122,10 +122,11 @@ def test_kraken_family_env_writes_top_bc_for_halfspace_surface(
     model_cls = getattr(uacpy.models, model_cls_name)
     model = model_cls(verbose=False, rmax_m=1000.0)
     out = tmp_path / f'{model_cls_name.lower()}_ice.env'
-    model._write_kraken_env(
-        out, _basic_env(_ice()), src,
-        receiver_obj=uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
-    )
+    rcv = uacpy.Receiver(depths=[50.0], ranges=[1000.0])
+    launch = model.run_settings(_basic_env(_ice()), src,
+                                rcv).engine.launches[0]
+    _launch.write_modes_deck(out, _basic_env(_ice()), src, rcv, launch,
+                             interp_ssp=model.interp_ssp)
     text = out.read_text()
     quoted = [
         line for line in text.splitlines()
@@ -141,9 +142,8 @@ def test_ram_drops_surface_shear_with_warning():
     an elastic ice surface must be collapsed to vacuum with a UserWarning
     that names the shear."""
     env = _basic_env(_ice())
-    ram = uacpy.models.RAM(verbose=False)
     with pytest.warns(UserWarning, match="surface shear is not supported"):
-        env_collapsed = ram._collapse_surface_to_pressure_release(env)
+        env_collapsed = ram_domain.collapse_surface_to_pressure_release(env)
     assert env_collapsed.surface.acoustic_type == 'vacuum'
     assert env_collapsed.surface.shear_speed == 0.0
     assert env_collapsed.surface.shear_attenuation == 0.0

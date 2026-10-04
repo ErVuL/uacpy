@@ -47,19 +47,22 @@ fig.savefig(OUT / 'example_09_wenz_components.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
-# n_fft is the IFFT chunk size and sets the synthesis bin width
-# df = sample_rate / n_fft. The Wenz target starts at 1 Hz, so the chunk has to
+# nfft is the IFFT chunk size and sets the synthesis bin width
+# df = sample_rate / nfft. The Wenz target starts at 1 Hz, so the chunk has to
 # be long enough for the low-frequency shape to survive resampling onto the
-# FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz. (The library clamps n_fft
+# FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz. (The library clamps nfft
 # to [16, 262144], so a token value like 1 would silently become the default.)
-sample_rate, n_fft, duration = 96000, 65536, 30.0
-frequencies = np.linspace(1.0, 5e4, 10000)
+sample_rate, nfft, duration = 96000, 65536, 30.0
+frequencies = np.linspace(1.0, sample_rate / 2, 10000)   # up to Nyquist
 wenz = WenzNoise(frequencies, **conditions)
+# A seeded generator: every run draws the same realisation, so the printed
+# levels and the saved figures reproduce.
+rng = np.random.default_rng(0)
 t, pressure, fs = synthesize_noise_from_psd(
-    wenz.as_psd(ref=UPA), frequencies, sample_rate=sample_rate,
-    duration=duration, scale=1.0, n_fft=n_fft)
+    wenz.as_psd(), frequencies, sample_rate=sample_rate,
+    duration=duration, amplitude_factor=1.0, nfft=nfft, rng=rng)
 print(f"  synthesised {duration:.0f} s @ {fs / 1e3:.1f} kHz "
-      f"({pressure.size:,} samples), df = {fs / n_fft:.2f} Hz")
+      f"({pressure.size:,} samples), df = {fs / nfft:.2f} Hz")
 
 fig, ax = plt.subplots(figsize=(10, 4))
 ax.plot(t[:int(0.2 * fs)] * 1e3, pressure[:int(0.2 * fs)] / UPA, lw=0.5,
@@ -76,15 +79,15 @@ plt.close(fig)
 # Stationary noise: the spectrogram should look the same at every time.
 f_spec, t_spec, power = spectrogram(pressure, fs, nperseg=4096, noverlap=2048)
 fig, _ = uacpy.plot.plot_spectrogram(f_spec, t_spec, power, ref=UPA,
-                                     title=label, ymin=10, ymax=fs / 2,
+                                     title=label, freq_min=10, freq_max=fs / 2,
                                      vmin=20, vmax=120)
 fig.savefig(OUT / 'example_09_ssrp_spectrogram.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
 fig, ax = uacpy.plot.plot_ppsd(
-    probabilistic_welch(pressure, fs, ref=UPA, seg_duration=1.0, overlap_pct=50, ddB=1.0,
-         lvlmin=20, lvlmax=140),
+    probabilistic_welch(pressure, fs, ref=UPA, segment_duration=1.0, segment_overlap_percent=50, level_step_dB=1.0,
+         level_min_dB=20, level_max_dB=140),
     title=label, ymin=20, ymax=120)
 # The check: the analytic curve the realisation came from, over its own PPSD.
 ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
@@ -96,14 +99,14 @@ plt.close(fig)
 # The constant-Q twin of that PPSD: geometric bins, so the resolution follows
 # the decades a soundscape spans rather than a fixed Hz spacing.
 # The density doors are what make the levels comparable to a Wenz curve, which
-# is a density; fmax below Nyquist keeps the near-Nyquist bins (which read a
+# is a density; freq_max below Nyquist keeps the near-Nyquist bins (which read a
 # coherent tone high) out of the picture.
-cq_kw = dict(fmin=20.0, fmax=20000.0, bins_per_octave=24)
+cq_kw = dict(freq_min=20.0, freq_max=20000.0, bins_per_octave=24)
 cq_hist = probabilistic_constant_q(
-    pressure, fs, ref=UPA, lvlmin=20, lvlmax=140, **cq_kw)
+    pressure, fs, ref=UPA, level_min_dB=20, level_max_dB=140, **cq_kw)
 cq_mean = constant_q(pressure, fs, **cq_kw)
 
-# vmax: the plotter defaults to 1/binwidth_dB — the largest density a 1 dB bin
+# vmax: the plotter defaults to 1/level_step_dB — the largest density a 1 dB bin
 # could hold — which suits a Welch-averaged PPSD. A single-look constant-Q
 # histogram is far broader (median per-bin std 5.5 dB against 0.9 dB for the
 # linear PPSD above), so its peak density is 0.164 and the default would render
@@ -136,7 +139,7 @@ print(f"  constant-Q: power mean "
 # SEL is the time-integral of p²(t) (ISO 18405) — the cumulative energy dose of
 # the record, per decidecade band, in dB re 1 µPa²·s. The broadband total is
 # the incoherent (energy) sum across bands.
-exposure = sound_exposure(pressure, fs, fmin=10.0, fmax=fs / 2.0)
+exposure = sound_exposure(pressure, fs, freq_min=10.0, freq_max=fs / 2.0)
 print(f"  SEL: broadband "
       f"{10 * np.log10(exposure.power.sum() / UPA ** 2):.1f} dB "
       f"re 1 µPa²·s over {pressure.size / fs:.0f} s across "

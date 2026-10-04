@@ -13,10 +13,11 @@ import pytest
 from uacpy.core.exceptions import ConfigurationError
 
 import uacpy
-from uacpy.core.results import Arrivals, Field, Modes, PhaseReference, Rays
-from uacpy.models.sources import MODEL_SOURCES, model_source
+from uacpy.core.results import (Arrivals, Field, Modes, PhaseReference, Rays,
+                                 SoundSpeeds)
+from uacpy.models.provenance import MODEL_PROVENANCE, model_provenance
 
-_SRC = model_source('acoustics_toolbox')
+_SRC = model_provenance('acoustics_toolbox')
 _FREQS = np.linspace(100.0, 300.0, 32)
 
 
@@ -30,7 +31,8 @@ def _broadband():
                 'frequency': _FREQS},
         model='Synthetic', source_depths=np.array([5.0]), frequencies=_FREQS,
         phase_reference=PhaseReference.TRAVELLING_WAVE,
-        model_source=_SRC, metadata={'c0': 1500.0},
+        model_source=_SRC, run_mode='broadband',
+        speeds=SoundSpeeds(surface=1500.0),
     )
 
 
@@ -38,10 +40,10 @@ def _rays():
     return Rays(
         rays=[{'r': np.linspace(0, 2000, 50),
                'z': 50 + 10 * np.sin(np.linspace(0, 5, 50)),
-               'alpha': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0},
+               'launch_angle': 0.0, 'n_top_bounces': 0, 'n_bot_bounces': 0},
               {'r': np.linspace(0, 2000, 50),
                'z': 50 + 20 * np.cos(np.linspace(0, 6, 50)),
-               'alpha': 3.0, 'n_top_bounces': 1, 'n_bot_bounces': 1}],
+               'launch_angle': 3.0, 'n_top_bounces': 1, 'n_bot_bounces': 1}],
         receiver_depths=np.array([50.0]), receiver_ranges=np.array([2000.0]),
         source_depths=np.array([10.0]), model='Bellhop', model_source=_SRC,
     )
@@ -50,8 +52,8 @@ def _rays():
 def _arrivals():
     mk = lambda d, a, tb, bb: {                                  # noqa: E731
         'delay': d, 'amplitude': a, 'phase': 0.0,
-        'n_top_bounces': tb, 'n_bot_bounces': bb, 'src_angle': 0,
-        'rcv_angle': 0, 'kind': 'direct' if not (tb or bb) else 'both',
+        'n_top_bounces': tb, 'n_bot_bounces': bb, 'source_angle': 0,
+        'receiver_angle': 0, 'kind': 'direct' if not (tb or bb) else 'both',
         'src_idx': 0, 'depth_idx': 0, 'range_idx': 0}
     return Arrivals(
         arrivals=[mk(0.5, 1.0, 0, 0), mk(0.7, 0.4, 1, 1)],
@@ -100,9 +102,9 @@ def test_modes_derivations_keep_model_source():
     m = _modes()
     assert m.first_n(2).model_source is _SRC
     assert m.with_attenuation(0.1).model_source is _SRC
-    field = m.modal_propagation_loss(
+    field = m.modal_pressure_field(
         source_depth=25.0, receiver_depths=np.linspace(5, 95, 6),
-        ranges_m=np.linspace(100, 2000, 8))
+        ranges=np.linspace(100, 2000, 8))
     assert field.model_source is _SRC
 
 
@@ -125,13 +127,14 @@ def test_filtered_arrivals_plot_shows_credit():
 
 # ── plotters that take a single result still draw the credit ────────────────
 
-def _se_field():
+def _se_field(kind='signal_excess'):
     d = np.linspace(5, 95, 8)
     r = np.linspace(100, 5000, 12)
     return Field(
         data=np.tile(np.linspace(20.0, -20.0, 12), (8, 1)),
         coords={'depth': d, 'range': r},
         model='Synthetic', frequencies=100.0, model_source=_SRC,
+        kind=kind,
     )
 
 
@@ -141,7 +144,7 @@ def test_plot_signal_excess_shows_credit():
 
 
 def test_plot_detection_probability_shows_credit():
-    pd = _se_field()
+    pd = _se_field(kind='probability_of_detection')
     pd.data = np.clip(pd.data / 40.0 + 0.5, 0.0, 1.0)
     fig, _ = uacpy.plot.plot_detection_probability(pd)
     assert _credits(fig)
@@ -150,7 +153,9 @@ def test_plot_detection_probability_shows_credit():
 # ── the identity surface itself ──────────────────────────────────────────────
 
 _ID_FIELDS = ('model', 'backend', 'source_depths', 'frequencies',
-              'phase_reference', 'model_source', 'metadata')
+              'phase_reference', 'model_source', 'run_mode',
+              'source_level_dB', 'source_weights', 'metadata',
+              'run_settings')
 
 
 def test_id_kwargs_lives_on_result_and_covers_every_identity_field():
@@ -176,6 +181,35 @@ def test_every_spawn_path_carries_the_whole_identity_surface(spawn):
     assert set(derived.id_kwargs()) == set(_ID_FIELDS)
 
 
+def test_derived_fields_keep_the_run_mode_of_their_run():
+    from uacpy.core.run_settings import RunMode
+    H = _broadband()
+    wf = np.zeros(64)
+    wf[0] = 1.0
+    for derived in (H.at(depth=25.0), H.to_time_trace(),
+                    H.synthesize_time_series(wf, sample_rate=4000.0)):
+        assert derived.run_mode == RunMode.BROADBAND
+
+
+def test_run_mode_survives_savez_and_xarray_round_trips(tmp_path):
+    from uacpy.core.run_settings import RunMode
+    H = _broadband()
+    path = tmp_path / 'h.npz'
+    np.savez(path, **H.to_dict())
+    back = Field.from_dict(dict(np.load(path, allow_pickle=True)))
+    assert back.run_mode == RunMode.BROADBAND
+    xr = pytest.importorskip('xarray')
+    assert isinstance(H.to_xarray(), xr.DataArray)
+    assert Field.from_xarray(H.to_xarray()).run_mode == RunMode.BROADBAND
+
+
+def test_a_run_mode_that_is_not_a_string_is_refused():
+    with pytest.raises(ConfigurationError, match='run_mode'):
+        Field(data=np.ones((1, 1)), coords={'depth': np.array([1.0]),
+                                            'range': np.array([1.0])},
+              run_mode=3)
+
+
 def test_synthesize_time_series_stamps_source_model():
     """``to_time_trace`` and ``synthesize_time_series`` both produce p(t) from
     an H(f), so both record which model produced that H(f)."""
@@ -187,24 +221,25 @@ def test_synthesize_time_series_stamps_source_model():
     assert H.to_time_trace().metadata['source_model'] == H.model
 
 
-class TestModelSourceLookup:
+class TestModelProvenanceLookup:
     """``model_source`` maps an id to its catalogue entry, keeps the
     None-if-unset convention, and refuses an unknown id with a
     :class:`ConfigurationError` that names it and the catalogued ids."""
 
     def test_none_returns_none(self):
-        assert model_source(None) is None
+        assert model_provenance(None) is None
 
     def test_each_catalogued_id_returns_its_entry(self):
-        for source_id, entry in MODEL_SOURCES.items():
-            assert model_source(source_id) is entry
+        for source_id, entry in MODEL_PROVENANCE.items():
+            assert model_provenance(source_id) is entry
 
     def test_an_unknown_id_is_a_configuration_error_naming_the_ids(self):
-        with pytest.raises(ConfigurationError) as excinfo:
-            model_source('not_a_catalogued_engine')
+        with pytest.raises(ConfigurationError,
+                           match='Unknown model source id') as excinfo:
+            model_provenance('not_a_catalogued_engine')
         message = str(excinfo.value)
         assert 'not_a_catalogued_engine' in message
-        for source_id in MODEL_SOURCES:
+        for source_id in MODEL_PROVENANCE:
             assert source_id in message
 
 
@@ -226,15 +261,15 @@ class TestBellhopCreditsTheBinaryThatRan:
     def test_each_engine_is_credited_to_its_own_catalogue_entry(
             self, version, expected_id):
         model = uacpy.Bellhop(verbose=False, backend=version)
-        if model.version != version:
+        if model._resolved_backend != version:
             pytest.skip(f"the {version} binary is not built on this machine")
         assert model.provenance.id == expected_id
 
     def test_the_ported_engines_do_not_carry_porters_authorship(self):
         """The two entries name different people, so crediting the wrong one
         is visible rather than cosmetic."""
-        toolbox = model_source('acoustics_toolbox')
-        port = model_source('bellhopcxx')
+        toolbox = model_provenance('acoustics_toolbox')
+        port = model_provenance('bellhopcxx')
         assert 'Porter' in toolbox.authors
         assert 'Porter' not in port.authors
         assert 'Scripps' in port.authors
@@ -243,11 +278,10 @@ class TestBellhopCreditsTheBinaryThatRan:
         assert port.license == toolbox.license
 
 
-class TestKindAndUnitAreDocumentedForEveryModel:
-    """``kind`` and ``unit`` are written on Fields by producers across the
-    package, not only by the OASES wrappers, and ``Field`` reads both back.
-    ``list_metadata()`` is documented to describe every entry on
-    ``result.metadata``, so it must describe these two whatever the model is.
+class TestTheQuantityIsAttributesNotMetadata:
+    """``kind`` and ``unit`` are the Field's own attributes, whatever model
+    produced it: they are not metadata, so ``list_metadata()`` does not list
+    them, and the OASS sign convention is stated on the quantity registry.
     """
 
     @staticmethod
@@ -256,7 +290,7 @@ class TestKindAndUnitAreDocumentedForEveryModel:
             data=np.ones((1, 1)),
             coords={'depth': np.array([25.0]), 'range': np.array([1000.0])},
             model=model, frequencies=100.0,
-            metadata={'kind': kind, 'unit': unit},
+            kind=kind, unit=unit,
         )
 
     @pytest.mark.parametrize('model,kind,unit', [
@@ -264,17 +298,39 @@ class TestKindAndUnitAreDocumentedForEveryModel:
         ('Bellhop', 'probability_of_detection', '1'),
         ('OASS', 'reverberation', 'dB'),
     ])
-    def test_both_keys_carry_a_description(self, model, kind, unit):
-        described = self._field(model, kind, unit).list_metadata()
-        for key in ('kind', 'unit'):
-            assert described[key]['description'], (
-                f"{model}: metadata['{key}'] is undocumented")
-            assert described[key]['documented_type'] == 'str'
+    def test_both_are_attributes_and_neither_is_metadata(self, model, kind,
+                                                         unit):
+        field = self._field(model, kind, unit)
+        assert (field.kind, field.unit) == (kind, unit)
+        described = field.list_metadata()
+        assert not set(described) & {'kind', 'unit', 'coherent'}
 
-    def test_the_oass_kind_note_wins_over_the_universal_one(self):
-        """The model-specific entry is the one that pins OASS's sign
-        convention; the universal entry must not shadow it."""
-        oass = self._field('OASS', 'reverberation', 'dB').list_metadata()
-        ram = self._field('RAM', 'pressure', 'dB').list_metadata()
-        assert 'oassun26.f' in oass['kind']['description']
-        assert 'oassun26.f' not in ram['kind']['description']
+    def test_the_oass_sign_convention_is_on_the_quantity_registry(self):
+        from uacpy.core.results import quantities
+        assert 'oassun26.f:853-858' in quantities.__doc__
+
+
+@pytest.mark.requires_binary
+class TestEveryRunStampsItsRunMode:
+    """``PropagationModel.run`` records the mode it ran on every result it
+    returns, every slab of a stack included, whatever the storage."""
+
+    @staticmethod
+    def _case(depths=50.0):
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+        src = uacpy.Source(depths=depths, frequencies=100.0)
+        rcv = uacpy.Receiver(depths=np.array([20.0, 50.0]),
+                             ranges=np.array([1000.0, 2000.0]))
+        return env, src, rcv
+
+    @pytest.mark.parametrize('run_mode', ['coherent_tl', 'incoherent_tl',
+                                          'modes'])
+    def test_kraken(self, run_mode):
+        from uacpy.core.run_settings import RunMode
+        r = uacpy.Kraken(verbose=False).run(*self._case(), run_mode=run_mode)
+        assert r.run_mode is RunMode(run_mode)
+
+    def test_default_mode_and_every_slab_of_a_stack(self):
+        from uacpy.core.run_settings import RunMode
+        stack = uacpy.Scooter(verbose=False).run(*self._case([30.0, 60.0]))
+        assert [s.run_mode for s in stack.slabs] == [RunMode.COHERENT_TL] * 2

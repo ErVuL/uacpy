@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal.generate import gaussian_pulse
+from uacpy.acoustic_signal import gaussian_pulse
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -43,15 +43,16 @@ receiver = uacpy.Receiver(depths=np.linspace(5, 95, 40),
 # OAST — transmission loss.
 tl = uacpy.OAST().run(env, source, receiver)
 print(f"  OAST TL {np.nanmin(tl.dB):.1f}-{np.nanmax(tl.dB):.1f} dB")
-fig, _ = uacpy.plot_field(tl, env=env)
+fig, _ = uacpy.plot.plot_field(tl, env=env)
 fig.savefig(OUT / 'example_13_oast_tl.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 # OASN — spatial covariance. Without surface_noise_level the covariance
 # collapses to the 0 dB white-noise floor (the identity); 70 dB is about the
 # Wenz amplitude at 100 Hz.
+# OASN models a vertical array at x = y = 0, so it takes the depths alone.
 covariance = uacpy.OASN(surface_noise_level=70.0).compute_covariance(
-    env, source, receiver)
+    env, source, uacpy.Receiver(depths=receiver.depths, ranges=0.0))
 print(f"  OASN covariance: {covariance.n_receivers} receivers × "
       f"{covariance.n_frequencies} frequency")
 fig, _ = covariance.plot()
@@ -65,11 +66,11 @@ reflection = uacpy.OASR(angles=np.linspace(0, 90, 91)).run(env, source,
 one_frequency = (reflection.at(
     frequency=reflection.frequencies[len(reflection.frequencies) // 2])
     if reflection.is_broadband else reflection)
-print(f"  OASR |R| in [{one_frequency.R.min():.3f}, "
-      f"{one_frequency.R.max():.3f}] at {one_frequency.f0:.1f} Hz")
+print(f"  OASR |R| in [{one_frequency.magnitude.min():.3f}, "
+      f"{one_frequency.magnitude.max():.3f}] at {one_frequency.f0:.1f} Hz")
 fig, _ = one_frequency.plot(
     show_phase=True,
-    title=f"OASR {reflection.metadata.get('reflection_type', 'P-P')} "
+    title=f"OASR {reflection.reflection_type or 'P-P'} "
           f"@ {one_frequency.f0:.1f} Hz")
 fig.savefig(OUT / 'example_13_oasr_reflection.png', dpi=150,
             bbox_inches='tight')
@@ -90,7 +91,7 @@ centre = float(frequencies[len(frequencies) // 2])
 print(f"  OASP H(f) {transfer.data.shape} over "
       f"{frequencies[0]:.0f}-{frequencies[-1]:.0f} Hz")
 
-fig, _ = uacpy.plot_field(transfer.at(frequency=centre), env=env)
+fig, _ = uacpy.plot.plot_field(transfer.at(frequency=centre), env=env)
 fig.savefig(OUT / 'example_13_oasp_tl.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
@@ -105,6 +106,6 @@ pulse = (np.sin(2 * np.pi * centre * (t - t[-1] / 2))
 trace = transfer.synthesize_time_series(source_waveform=pulse,
                                         sample_rate=fs).at(
     depth=float(source.depths[0]), range=5000.0)
-fig, _ = uacpy.plot_field(trace)
+fig, _ = uacpy.plot.plot_field(trace)
 fig.savefig(OUT / 'example_13_oasp_trace.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

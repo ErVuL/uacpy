@@ -15,13 +15,16 @@ typed failure mode.
 import functools
 import re
 import struct
+import unicodedata
 import warnings
 from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
 
-from uacpy.core.exceptions import FileFormatError
+from uacpy.core.exceptions import (
+    ConfigurationError, FileFormatError, IOWarning,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 
@@ -67,6 +70,26 @@ def _bound_counts(filepath, file_size, min_item_bytes, **counts):
         )
 
 
+def deck_title(name) -> str:
+    """``name`` as a deck title the engines can carry: ASCII only.
+
+    The engines hold titles in fixed-width byte fields and cut them in
+    bytes — Bellhop writes ``Title(1:70)`` to the ``.ray`` header
+    (``Bellhop/ReadEnvironmentBell.f90:557``), OASES reads the record as
+    ``20A4`` (``unoast31.f:117``) — and echo them into text outputs and
+    stdout. A UTF-8 character cut in half there reaches Python as bytes it
+    cannot decode (measured: ``'x' + 'é'*79`` made OASP/OASN/OASR raise
+    ``UnicodeDecodeError`` and OAST stop in ``unoast31.f:119``). Accents are
+    folded to their base letter (``'é' -> 'e'``) and any other non-ASCII
+    character becomes ``'?'``, so one character is one byte and every
+    character-count limit is also the byte limit. ``Environment.name`` keeps
+    its Unicode; only the deck copy is folded.
+    """
+    decomposed = unicodedata.normalize('NFKD', str(name))
+    kept = ''.join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return ''.join(ch if ord(ch) < 128 else '?' for ch in kept)
+
+
 def list_directed_int(line: str) -> int:
     """First value of a list-directed integer READ.
 
@@ -79,7 +102,7 @@ def list_directed_int(line: str) -> int:
     tokens = strip_fortran_comment(line).replace(',', ' ').split()
     if not tokens:
         raise FileFormatError(
-            f"list-directed integer read on an empty record: {line!r}")
+            f"list-directed integer read on an empty record: {line!r}.")
     # A scalar READ takes the first value of an ``r*c`` repeat group too
     # (``'2*5'`` reads as 5); see :func:`expand_repeat_counts`.
     return int(next(expand_repeat_counts(tokens)))
@@ -215,8 +238,9 @@ def typed_format_error(reader):
     written it (:class:`~uacpy.core.exceptions.FileFormatError` states the
     rule) — and a decorator wrapped around fourteen readers of both kinds
     knows neither. Each reader therefore states its own provenance:
-    :func:`require_model_output` for the readers of model output, an explicit
-    ``ConfigurationError`` for the readers of user-authored decks.
+    :func:`require_model_output` for the readers of model output,
+    :func:`require_user_input` or an explicit ``ConfigurationError`` for the
+    readers of user-authored decks.
     """
     @functools.wraps(reader)
     def wrapper(*args, **kwargs):
@@ -249,6 +273,22 @@ def require_model_output(filepath, reader: str) -> None:
             f"{reader}: file not found: {filepath}.",
             remediation="Check the path; for a model output, the run "
                         "may have failed before writing this file.",
+        )
+
+
+def require_user_input(filepath, reader: str) -> None:
+    """Raise :class:`~uacpy.core.exceptions.ConfigurationError` when a
+    user-authored input file is absent.
+
+    The counterpart to :func:`require_model_output` for the readers of files
+    a user writes and an engine reads (``.ssp``, ``.flp``): an absent path is
+    a wrong argument, not a failed run.
+    """
+    if not Path(filepath).exists():
+        raise ConfigurationError(
+            f"{reader}: no file at {str(filepath)!r}.",
+            remediation="Check the path; an input deck is read exactly as "
+                        "named.",
         )
 
 
@@ -438,7 +478,7 @@ def _warn_non_little_endian(detected: str, source: str) -> None:
         warnings.warn(
             f"{source}: detected big-endian Fortran record framing; uacpy "
             "decodes it correctly but this byte order is not validated by CI.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         _ENDIAN_WARN_EMITTED = True
 
@@ -524,7 +564,7 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     payload = f.read(nbytes)
     if len(payload) < nbytes:
         raise FileFormatError(
-            f"Short read: expected {nbytes} bytes, got {len(payload)}"
+            f"Short read: expected {nbytes} bytes, got {len(payload)}."
         )
     tail = f.read(4)
     if len(tail) < 4:
@@ -545,9 +585,67 @@ def read_fortran_record(f, fmt=None, raw=False, endian='<'):
     expected = struct.calcsize(endian + fmt)
     if expected != nbytes:
         raise FileFormatError(
-            f"Fortran record payload {nbytes} != fmt '{fmt}' size {expected}"
+            f"Fortran record payload {nbytes} != fmt '{fmt}' size {expected}."
         )
     return struct.unpack(endian + fmt, payload)
+
+
+class DirectAccessFile:
+    """A Fortran DIRECT-access file open for reading: fixed-length records and
+    no record markers, record ``n`` (0-based) starting at byte
+    ``n * record_bytes``.
+
+    The ``.shd``/``.grn`` (``misc/RWSHDFile.f90:100-102``) and ``.mod``
+    (``Kraken/kraken.f90:587``) formats open with ``RECL = 4 * LRecl``, the
+    record length counted in 4-byte words, and store that word count first.
+    The byte order is detected from those first 4 bytes
+    (:func:`detect_endian`, whose notices name ``source``);
+    :attr:`record_words` is the stored count.
+    """
+
+    def __init__(self, fid, source: str):
+        self.fid = fid
+        head = fid.read(4)
+        fid.seek(0)
+        self.endian = detect_endian(head, source=source)
+        self.i4 = np.dtype(self.endian + 'i4')
+        self.f4 = np.dtype(self.endian + 'f4')
+        self.f8 = np.dtype(self.endian + 'f8')
+        fid.seek(0, 2)
+        self.file_size = fid.tell()
+        fid.seek(0)
+        self.record_words = int(np.fromfile(fid, dtype=self.i4, count=1)[0])
+
+    @property
+    def record_bytes(self) -> int:
+        """Bytes per record: ``4 * record_words``."""
+        return 4 * self.record_words
+
+    def seek(self, record: int, offset: int = 0) -> None:
+        """Position at byte ``offset`` of record ``record`` (0-based)."""
+        self.fid.seek(record * self.record_bytes + offset, 0)
+
+    def values(self, dtype, count: int) -> np.ndarray:
+        """``count`` values of ``dtype`` from the current position."""
+        return np.fromfile(self.fid, dtype=dtype, count=count)
+
+    def vector(self, record: int, dtype, count: int) -> np.ndarray:
+        """``count`` values of ``dtype`` at the head of record ``record``."""
+        self.seek(record)
+        return self.values(dtype, count)
+
+    def integer(self) -> int:
+        """One default-kind integer from the current position."""
+        return int(self.values(self.i4, 1)[0])
+
+    def real8(self) -> float:
+        """One ``REAL(KIND=8)`` from the current position."""
+        return float(self.values(self.f8, 1)[0])
+
+    def text(self, nbytes: int) -> str:
+        """``nbytes`` of ASCII text from the current position; bytes that do
+        not decode are dropped."""
+        return self.fid.read(nbytes).decode("ascii", errors="ignore")
 
 
 def _read_vector_values(fid, Nx: int) -> Tuple[np.ndarray, bool]:

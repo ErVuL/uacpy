@@ -11,45 +11,28 @@ import os
 import shutil
 import socket
 import subprocess
+import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
+from pathlib import Path
 from typing import Union
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._cache import staging_path
 from uacpy._log import log_message
 
-__all__ = ['http_get', 'curl_download', 'erddap_griddap_url', 'erddap_last_value',
-           'checked_member_size', 'raise_substantive', 'MAX_MEMBER_BYTES']
+__all__ = ['http_get', 'curl_download', 'fetch_file', 'download_grid_file',
+           'download_member', 'extract_member', 'erddap_griddap_url',
+           'erddap_last_value', 'erddap_point', 'checked_member_size',
+           'MAX_MEMBER_BYTES']
 
-
-def raise_substantive(errors):
-    """Raise the most substantive error collected by a source-fallback chain.
-
-    A :class:`DataFetchError` (no coverage / on land / live service failure)
-    is raised in preference to a bare ``ConfigurationError`` ("cache not
-    installed", missing prerequisite), so the caller sees the real cause
-    rather than the last fallback's complaint. Ties keep the first
-    ``DataFetchError``, else the last error.
-
-    An empty ``errors`` means the chain ran no source at all — an empty source
-    list, not a fetch failure — so it raises :class:`ConfigurationError`
-    rather than an ``IndexError`` off the end of the list.
-    """
-    if not errors:
-        raise ConfigurationError(
-            "No data source was tried, so no fetch error explains the "
-            "failure.",
-            remediation="Pass at least one source: an empty sequence "
-                        "(bottom_sources=(), source=(), …) selects none.",
-        )
-    data_errs = [e for e in errors if isinstance(e, DataFetchError)]
-    raise (data_errs[0] if data_errs else errors[-1])
 
 # HTTP status codes worth retrying (transient rate-limit / availability /
 # gateway hiccups — the urllib3/requests default transient set).
@@ -68,6 +51,12 @@ _MAX_RETRIES = 4
 #: grid of a multi-file build.
 _REFUSED_RETRIES = 1
 _REFUSED_WAIT_S = 1.0
+#: A connection that did not open within ``timeout`` is not retried: the
+#: kernel already retransmits the SYN inside that wait, and a host that drops
+#: packets (a firewall) would otherwise cost ``5·timeout + 18.5 s`` per URL on
+#: the ladder. A timeout after the connection opened (a slow read) keeps the
+#: ladder.
+_CONNECT_TIMEOUT_RETRIES = 0
 
 
 def download_grid_file(name: str, url: str, filename: str, banner: str,
@@ -82,15 +71,90 @@ def download_grid_file(name: str, url: str, filename: str, banner: str,
     dest = _cache.prepare_download(name, banner, cache_dir=cache_dir,
                                    verbose=verbose)
     out = dest / filename
-    # curl first: NCEI and Zenodo both throttle Python's urllib. The urllib
-    # fallback stages, so an interrupt leaves no truncated grid at ``out``.
-    if not curl_download(url, out, timeout=timeout, verbose=verbose):
-        with _cache.atomic_write(out) as part:
-            part.write_bytes(http_get(url, timeout=timeout, verbose=verbose,
-                                      source=name))
+    fetch_file(url, out, source=name, timeout=timeout, verbose=verbose)
     _cache.invalidate_grids()          # the next read picks up the new file
     log_message(name, f"{done} → {out}", verbose=verbose)
     return out
+
+
+def fetch_file(url: str, out, *, source: str, timeout: float = 300.0,
+               verbose=False) -> Path:
+    """Fetch ``url`` into the file ``out`` and return its path.
+
+    curl first, because NCEI, Zenodo and PANGAEA throttle Python's urllib;
+    urllib where curl is absent or fails. Both stage beside ``out``, so an
+    interrupt leaves no truncated file there. ``source`` names the dataset
+    in the log and in a ``DataFetchError``.
+    """
+    out = Path(out)
+    if not curl_download(url, out, timeout=timeout, verbose=verbose):
+        with _cache.atomic_write(out) as part:
+            part.write_bytes(http_get(url, timeout=timeout, verbose=verbose,
+                                      source=source))
+    return out
+
+
+def extract_member(archive, member: str, out, *, name: str) -> Path:
+    """Write the member of ``archive`` whose base name is ``member`` to
+    ``out`` and return its path.
+
+    ``archive`` is a zip, or a tar in any compression :mod:`tarfile` reads.
+    The member's declared size passes :func:`checked_member_size` before any
+    of its bytes is read (a tar is walked lazily), and it is written through
+    :func:`uacpy.data._cache.atomic_write`. ``name`` is the dataset the
+    archive belongs to, named in the ``DataFetchError`` of an archive that
+    lacks the member or holds it as something other than a regular file.
+    """
+    missing = DataFetchError(
+        f"The {name} archive has no {member} member; its layout may have "
+        f"changed.",
+        remediation=(f"Retry, or pass url= for a copy of the archive that "
+                     f"carries {member}."),
+    )
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as zf:
+            info = next((i for i in zf.infolist()
+                         if Path(i.filename).name == member
+                         and not i.is_dir()), None)
+            if info is None:
+                raise missing
+            checked_member_size(info.file_size, info.filename)
+            body = zf.read(info)
+    else:
+        with tarfile.open(archive, 'r:*') as tar:
+            info = next((m for m in tar if Path(m.name).name == member),
+                        None)
+            if info is None:
+                raise missing
+            checked_member_size(info.size, info.name)
+            src = tar.extractfile(info)
+            if src is None:
+                raise DataFetchError(
+                    f"The {name} archive member {info.name!r} is not a "
+                    f"regular file.",
+                    remediation=(f"Retry, or pass url= for a copy of the "
+                                 f"archive that carries {member}."),
+                )
+            body = src.read()
+    with _cache.atomic_write(out) as part:
+        part.write_bytes(body)
+    return Path(out)
+
+
+def download_member(name: str, url: str, member: str, out, *,
+                    timeout: float = 300.0, verbose=False) -> Path:
+    """Fetch the archive at ``url`` and write its member ``member`` to
+    ``out`` (:func:`extract_member`); return ``out``.
+
+    The archive goes through :func:`fetch_file` into a temporary directory
+    beside ``out`` — a large one must not land in a tmpfs ``/tmp`` — and is
+    deleted with it. ``name`` is the dataset.
+    """
+    out = Path(out)
+    with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
+        archive = fetch_file(url, Path(tmp) / 'archive', source=name,
+                             timeout=timeout, verbose=verbose)
+        return extract_member(archive, member, out, name=name)
 
 
 def _chain_any(exc, predicate) -> bool:
@@ -131,6 +195,16 @@ def _is_connection_refused(exc) -> bool:
     return _chain_any(exc, lambda e: (
         isinstance(e, ConnectionRefusedError)
         or getattr(e, 'errno', None) == errno.ECONNREFUSED))
+
+
+def _is_connect_timeout(exc) -> bool:
+    """True when the connection itself timed out. ``urlopen`` wraps a
+    failure while opening and sending in ``URLError``; a timeout waiting for
+    or reading the response arrives unwrapped, so only the wrapped one is the
+    connect phase."""
+    return isinstance(exc, urllib.error.URLError) and _chain_any(
+        exc.reason, lambda e: (isinstance(e, TimeoutError)
+                               or getattr(e, 'errno', None) == errno.ETIMEDOUT))
 _MAX_BACKOFF_S = 8.0
 # Only network schemes — never ``file://`` / ``ftp://`` (which urlopen and curl
 # both honour), so a user-supplied ``url=`` / ``base_url=`` cannot turn into
@@ -190,14 +264,17 @@ def http_get(
     timeout, truncated body, remote disconnect — with exponential backoff). So a
     public host's rate limit (e.g. OpenTopoData ≤1 req/s) or a mid-stream network
     hiccup is ridden out rather than failing the whole fetch. Permanent failures
-    (4xx other than 429, an over-size body, a blocked scheme) are not retried.
+    (4xx other than 429, an over-size body, a blocked scheme) are not retried;
+    a refused connection gets one quick retry, and a connection that does not
+    open within ``timeout`` (a host that drops packets) none, so it costs one
+    ``timeout``.
 
     Parameters
     ----------
     url : str
         Fully-formed request URL (caller is responsible for encoding).
     timeout : float, optional
-        Network timeout in seconds.
+        Network timeout in seconds, per attempt.
     verbose : bool or str, optional
         Logging gate forwarded to ``log_message``.
     source : str, optional
@@ -242,8 +319,9 @@ def http_get(
                             "where the reader looks. Every download_*_db "
                             "fetcher takes an address override (url=, or "
                             "base_url= where it builds many requests: "
-                            "emodnet, seaice), as do the ERDDAP fetchers "
-                            "(argo, bathymetry).",
+                            "emodnet, seaice), as do the live Argo, WOA23, "
+                            "GEBCO (OpenTopoData), EMODnet and MARS fetchers "
+                            "(base_url=).",
             ) from exc
         except _TRANSIENT_EXC as exc:
             # Connection reset / timeout / truncated body / remote disconnect —
@@ -259,7 +337,9 @@ def http_get(
                                 "(offline hosts resolve nothing).",
                 ) from exc
             refused = _is_connection_refused(exc)
-            retries = _REFUSED_RETRIES if refused else _MAX_RETRIES
+            retries = (_REFUSED_RETRIES if refused
+                       else _CONNECT_TIMEOUT_RETRIES if _is_connect_timeout(exc)
+                       else _MAX_RETRIES)
             if attempt < retries:
                 wait = (_REFUSED_WAIT_S if refused
                         else min(_MAX_BACKOFF_S, 1.5 * (2 ** attempt)))
@@ -417,6 +497,28 @@ def erddap_last_value(body: str) -> float:
         return np.nan
 
 
+def erddap_point(body: str):
+    """``(lat, lon, value)`` of an ERDDAP griddap ``.csv`` point response:
+    the node the nearest-node selectors landed on and the requested variable
+    there (the last column). ``value`` is ``NaN`` when it is missing; the
+    node is ``None`` when the body names no latitude/longitude column."""
+    rows = [ln for ln in body.splitlines() if ln.strip()]
+    if len(rows) < 3:
+        return None, None, np.nan
+    head = [h.strip().lower() for h in rows[0].split(',')]
+    cells = rows[-1].split(',')
+    try:
+        value = float(cells[-1])
+    except (ValueError, IndexError):
+        value = np.nan
+    try:
+        lat = float(cells[head.index('latitude')])
+        lon = float(cells[head.index('longitude')])
+    except (ValueError, IndexError):
+        return None, None, value
+    return lat, ((lon + 180.0) % 360.0) - 180.0, value
+
+
 def checked_member_size(
     declared_size: int, name: str, *, max_bytes: int = MAX_MEMBER_BYTES,
 ) -> int:
@@ -461,7 +563,7 @@ def erddap_griddap_url(base_url: str, dataset: str, var: str, when,
     names that node. The ``[(...)]`` value selectors snap each axis to its
     nearest node, and the longitude axis is [0, 360).
     """
-    from uacpy.data._time import parse_date
+    from uacpy.core.geo import parse_date
     constraint = (f"{var}[({parse_date(when)}T00:00:00Z)][({level})]"
                   f"[({lat})][({lon % 360.0})]")
     query = urllib.parse.quote(constraint, safe='[]():.,-TZ')

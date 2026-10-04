@@ -1,7 +1,7 @@
 # Array processing — steering, beamforming and bearing estimation
 
-> `uacpy.acoustic_signal.arrays` · `steering_vectors` · `beamform` ·
-> `sample_covariance` · `bartlett_spectrum` · `mvdr_spectrum` ·
+> `uacpy.acoustic_signal` · `steering_vectors` · `beamform` ·
+> `sample_covariance` · `bartlett` · `mvdr` ·
 > `music_spectrum` · `shading_taper`
 
 A single hydrophone measures pressure. An array of them measures pressure
@@ -18,7 +18,7 @@ cares which.
 
 ```python
 from uacpy.acoustic_signal import (
-    bartlett_spectrum, beamform, music_spectrum, mvdr_spectrum,
+    bartlett, beamform, music_spectrum, mvdr,
     sample_covariance, shading_taper, steering_vectors,
 )
 ```
@@ -28,111 +28,20 @@ namespace.
 
 | Call | Takes | Returns |
 |---|---|---|
-| `steering_vectors(positions_m, angles_deg, frequency, c=1500.0)` | element coordinates (m), scan angles (deg) | `(n_angles, n_elements)` complex, unit-norm rows |
-| `beamform(pressure, phone_coords, frequency, angles=None, SL=150.0, NL=0.0, c=1500.0)` | `(n_phones, n_cols)` pressure | `BeamformResult(snr, angles, peak_snr)` |
+| `steering_vectors(positions_m, angles_deg, frequency, sound_speed=1500.0)` | element coordinates (m), scan angles (deg) | `(n_angles, n_elements)` complex, unit-norm rows |
+| `beamform(pressure, positions_m, angles_deg, frequency, *, source_level_dB, noise_level_dB, sound_speed=1500.0)` | `(n_phones, n_cols)` pressure | `BeamformResult(snr, angles, peak_snr)` |
 | `snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None, window=None)` | `(n_samples, n_elements)` record | `Snapshots(frequency, data)` — the bin used, and `(n_elements, n_snapshots)` |
 | `sample_covariance(snapshots, *, diagonal_loading=0.0)` | `(n_elements, n_snapshots)` | Hermitian `R`, `(N, N)` |
-| `bartlett_spectrum(R, steering)` | covariance + manifold | conventional power per angle |
-| `mvdr_spectrum(R, steering, *, diagonal_loading=1e-6)` | covariance + manifold | Capon power per angle |
-| `music_spectrum(R, steering, n_sources)` | covariance + manifold + model order | pseudospectrum per angle |
+| `bartlett(covariance, weights, *, normalize=None)` | covariance + manifold (any rows of element weights, row-major `(..., N)`) | conventional power per row, each row unit-normalised; `normalize='trace'` divides by `tr R` |
+| `mvdr(covariance, weights, *, diagonal_loading=1e-6, normalize=None)` | covariance + manifold | Capon power per row; `normalize='max'` scales it to peak at 1; NaN where it is undefined |
+| `music_spectrum(covariance, steering, n_sources)` | covariance + manifold + model order | pseudospectrum per angle |
 | `shading_taper(n_elements, window='hann')` | element count, any `scipy.signal.get_window` spec | RMS-normalised amplitude weights |
-| `beamform(..., weights=None)` | as above + per-element shading | shaded `BeamformResult` |
-| `beamform_field(pressure, positions_m, angles_deg, frequency, *, c, weights=None)` | `(n_elements, *grid)` pressure; `frequency` scalar **or band** | `BeamformedField(response, angles, element_power, frequencies)` |
+| `beamform(..., weights=None, ranges=None)` | as above + per-element shading; `ranges` (m), one per column, rides on the result as `.ranges` | shaded `BeamformResult` |
+| `beamform_field(pressure, positions_m, angles_deg, frequency, *, sound_speed=1500.0, weights=None, grid_coords=None)` | `(n_elements, *grid)` pressure; `frequency` scalar **or band**; `grid_coords`, one 1-D array per grid axis (e.g. `{'depth': z, 'range': r}`), rides on the result as `.grid_coords` | `BeamformedField(response, angles, element_power, frequencies)` |
+| `realised_array_gain(response, element_power)` | a beam output `(n_angles, *grid)` and the mean element power `(*grid,)` | best beam over mean element (dB), what `BeamformedField.array_gain()` returns |
 | `plane_wave_array_gain(weights)` | element shading | scalar AG (dB) on a matched plane wave |
 | `matched_replica_gain(pressure)` | `(n_elements, *grid)` pressure | the `10log10(N)` ceiling, per point |
-| `independent_beams(positions_m, angles_deg, frequency, c=1500.0)` | geometry + scanned sector | count of orthogonal looks |
-
-## 3a. Beamforming a whole field
-
-`beamform` answers "what does this array hear along one range line", in dB SNR.
-A coverage map asks the other question — "what does it hear at **every** point
-of a modelled field" — and needs the beam power itself and the look angle that
-won, neither of which `beamform` returns. That is `beamform_field`:
-
-```python
-scan = beamform_field(pressure, element_depths, angles, freq,
-                      weights=shading_taper(n, 'hann'))
-scan.power         # (n_angles, *grid) — every grid axis carried through
-scan.best          # winning beam at each point: a scanning detector's output
-scan.best_angle    # where it was looking
-scan.array_gain()  # dB, best beam against the MEAN element power
-```
-
-The reference is the mean element power, not any one element's: a lone
-hydrophone can sit in an interference null, which reads as enormous "gain" from
-an array whose ceiling is `10log10(N)`.
-
-### Broadband: steer every bin, and hear the result
-
-Pass a frequency **array** and the last axis of `pressure` is the frequency
-axis — the shape a `RunMode.BROADBAND` run returns — and every bin is steered
-at its own frequency. That is not a nicety: a beam delay is a
-frequency-dependent phase, so a single steering vector at the band centre
-mis-steers both edges.
-
-Because the complex `response` is kept rather than only its power, the beam's
-own **reception** can be synthesised — what this array, steered this way,
-actually hears from that source radiating that signal:
-
-    H = Kraken().run(env, source, array, run_mode=RunMode.BROADBAND)
-    beams = beamform_field(H.data[:, 0, :], element_depths, angles,
-                           H.coords['frequency'], weights=taper)
-    y = beams.to_time_trace(-10.0, range_m=5000.0,
-                            source_spectrum=S, t_start=3.2)
-
-`to_time_trace` hands off to `Field.to_time_trace`, so the window, time base
-and `source_spectrum` convolution are the package's own. Set `t_start`: the
-default window is anchored on a nominal sound speed, and a faster path
-arrives before the window and wraps to the end of the record — uacpy warns
-when it has to guess.
-
-### Three numbers that bound a scan
-
-```python
-plane_wave_array_gain(w)        # what the weights give on a matched plane wave
-matched_replica_gain(p)         # the ceiling: 10log10(N), exactly
-scan.array_gain()               # what the scan actually realises
-```
-
-`plane_wave_array_gain` is `|Σw|² / ‖w‖²` — **not** `-10log10(Σ|w|⁴)`, which
-agrees for a boxcar and is about 1.1 dB out for a Hann taper. `matched_replica_gain`
-correlates the field with itself normalised, which returns `10log10(N)` for any
-field whatever: that is what makes it the bound. The gap between it and
-`scan.array_gain()` belongs to the **plane-wave replica**, not to the channel —
-in a waveguide the right replica is the Green's function, which is
-[matched-field processing](sonar.md).
-
-### Counting looks, not angles
-
-Scanning 361 angles does not buy 361 independent looks. Orthogonal beams sit
-`λ/(N·d)` apart in `sin θ`, so a sector holds `span · N·d / λ` resolution cells
-however finely it is sampled — and the aperture form `λ/((N−1)·d)` is the
-tempting mistake: it leaves neighbours correlated (|corr| = 1/N — 0.042
-for 24 elements, against 1e-16 at the orthogonal spacing) and, being wider,
-counts *fewer* cells (16.26 against 16.97 for a 24-element ±45° scan), so a
-threshold set from it is optimistic. Feed the
-count to `per_look_false_alarm`, because a detector that keeps the largest look
-false-alarms at the scan's rate:
-
-```python
-n = independent_beams(element_depths, angles, freq)     # e.g. 17, not 361
-dt = sonar.detection_threshold_energy(
-    pd=0.5, pf=sonar.per_look_false_alarm(1e-4, n), bandwidth_hz=10.0,
-    integration_time_s=10.0)
-```
-
-**Shading costs looks.** Two beams' noise outputs correlate as the array
-factor of `|w|²`, not of `w`, so a taper widens the cell by more than the
-beam pattern suggests: `hann²` reaches its first null at three DFT bins
-against the rectangular window's one. Pass `weights=` and the count follows —
-for the 24-element ±45° scan above, 16.97 looks unshaded against **5.42** with
-a Hann taper, worth 0.26 dB of detection threshold. Omitting `weights` on a
-shaded array over-counts and is therefore safe but wasteful.
-
-Note this is deliberately *not* the resolution criterion (FNBW/2, Balanis §2),
-which asks whether two **sources** can be told apart. A false-alarm count asks
-when two beams' **noise** stops being shared. The two coincide only for an
-unshaded array.
+| `independent_beams(positions_m, angles_deg, frequency, sound_speed=1500.0, *, weights=None)` | geometry + scanned sector (+ the shading, which widens each cell) | count of orthogonal looks |
 
 Every figure on this page is generated by
 [`docs/figure_scripts/arrays.py`](../figure_scripts/arrays.py); the snippets
@@ -159,7 +68,7 @@ e_n(θ) = exp(−j·k·z_n·sin θ) / √N          k = 2πf/c
 ```python
 positions = np.arange(16) * 0.5            # 16 elements, 0.5 m apart
 angles = np.linspace(-90.0, 90.0, 361)
-e = steering_vectors(positions, angles, frequency=1500.0, c=1500.0)
+e = steering_vectors(positions, angles, frequency=1500.0, sound_speed=1500.0)
 e.shape                                    # (361, 16)
 ```
 
@@ -255,10 +164,11 @@ positions depend on frequency while the true bearing does not. Processing a
 band rather than a tone lets you vote the aliases down; a single-frequency
 covariance cannot.
 
-That is a loop you write yourself. `steering_vectors` and `beamform` both take
-a **scalar** `frequency`, and uacpy has no cross-frequency combiner: build one
-manifold per FFT bin, scan each bin on its own, normalise each spectrum to its
-own peak and average the powers. That incoherent average is what makes the
+`beamform_field` steers a band bin by bin ([§3a](#3a-beamforming-a-whole-field)),
+but the incoherent combiner is a loop you write yourself: `steering_vectors`
+and `beamform` take a **scalar** `frequency`, and uacpy has no cross-frequency
+combiner. Build one manifold per FFT bin (or take `beamform_field`'s per-bin
+power), normalise each spectrum to its own peak and average the powers. That incoherent average is what makes the
 aliases fall away — the true bearing lands at the same angle in every bin and
 reinforces, while the aliases sit at `u₀ − λ/d` and move as the frequency does.
 
@@ -293,7 +203,7 @@ DI = 10·log10(N)
 ```
 
 — 12.04 dB for `N = 16`, 15.05 dB for `N = 32`, 20.0 dB for `N = 100`. That is
-the number you pass as `directivity_index=` to
+the number you pass as `directivity_index_dB=` to
 `passive_signal_excess_field`, `active_signal_excess_field` and
 `figure_of_merit`. Close the elements below λ/2 and it falls away (9.1 dB at
 λ/4 for the same 16 elements); the moment the noise stops being isotropic, `DI`
@@ -321,8 +231,8 @@ In covariance form that is
 P_bartlett(θ) = eᴴ(θ) · R · e(θ)
 ```
 
-which is what `bartlett_spectrum(R, steering)` computes, one value per row of
-`steering`. It is the baseline every other processor is measured against: no
+which is what `bartlett(R, steering)` computes, one value per row of
+`steering` (each row scaled to unit norm, which the manifold already is). It is the baseline every other processor is measured against: no
 free parameters, no matrix inverse, no assumption about how many sources there
 are, and it never fails — it just may not resolve.
 
@@ -372,30 +282,34 @@ Three rules come straight out of that table:
 
 ### `beamform` — the model-facing entry point
 
-`bartlett_spectrum` wants a covariance. `beamform` wants the raw pressure, and
+`bartlett` wants a covariance. `beamform` wants the raw pressure, and
 is the call to reach for when your data is a column-per-column set of complex
 measurements — a modelled field along a receiver array, or a block of measured
 snapshots:
 
 ```python
-res = beamform(pressure, phone_coords, frequency,
-               angles=None, SL=150.0, NL=0.0, c=1500.0)
+res = beamform(pressure, positions_m, np.arange(-90, 91), frequency,
+               source_level_dB=150.0, noise_level_dB=60.0, sound_speed=1500.0)
 res.snr        # (n_angles, n_cols) dB
-res.angles     # the scan angles used; default -90:1:90
+res.angles     # the scan angles used
 res.peak_snr   # scalar max over the whole thing
 ```
 
-It computes `20·log10|eᴴ·p| + SL − NL` per column, so with `SL=0, NL=0` you get
-the receive level alone. Because the steering vectors are unit-norm, the array
-gain `10·log10(N)` is already inside `|eᴴ·p|` — do **not** pre-correct `NL` for
-the element count. `NL` is a per-element, wideband level; for a noise PSD in
+The first four arguments are in `beamform_field`'s order. The two levels are
+keyword-only and have no default: the SNR is only as right as they are.
+
+It computes `20·log10|eᴴ·p| + source_level_dB − noise_level_dB` per column,
+so with both levels 0 you get the receive level alone. Because the steering
+vectors are unit-norm, the array gain `10·log10(N)` is already inside
+`|eᴴ·p|` — do **not** pre-correct `noise_level_dB` for the element count. It
+is a per-element, wideband level; for a noise PSD in
 dB re 1 µPa²/Hz, multiply by the integration bandwidth first. See
 [`noise.md`](noise.md) for where that number comes from.
 
 That is the same `10·log10(N)` the sonar equation carries as `DI`
 ([§2](#that-gain-against-isotropic-noise-is-the-sonar-equations-di)), counted
 in the other place: `beamform` collects it by actually summing the elements, so
-you leave `NL` alone; the sonar equation has no elements to sum, so it credits
+you leave `noise_level_dB` alone; the sonar equation has no elements to sum, so it credits
 the gain as a `+DI` term instead. Exactly one of the two, never both.
 
 The shape contract `(n_phones, n_cols) → (n_angles, n_cols)` is what lets a
@@ -408,8 +322,8 @@ receiver = uacpy.Receiver(depths=array_depths,
                           ranges=np.linspace(500.0, 3000.0, 6))
 p = Bellhop(n_beams=3000).run(env, source, receiver)
 
-res = beamform(p.p, array_depths, 1500.0,
-               angles=np.arange(-90.0, 90.1, 1.0), SL=0.0, NL=0.0)
+res = beamform(p.p, array_depths, np.arange(-90.0, 90.1, 1.0), 1500.0,
+               source_level_dB=0.0, noise_level_dB=0.0)
 res.snr.shape                                       # (181, 6) — one beam fan per range
 ```
 
@@ -417,9 +331,107 @@ res.snr.shape                                       # (181, 6) — one beam fan 
 perfectly happy with. [OASN](../models/oases.md) goes further and hands you an
 array **covariance** computed from a full seismo-acoustic model, as a
 `Covariance` result with its own `.bartlett()` / `.mvdr()` against a replica
-bank — that is matched-field processing, and [`sonar.md`](sonar.md) owns it.
+bank — the same two functions over replica rows instead of plane-wave
+steering; that is matched-field processing, and [`sonar.md`](sonar.md) owns it.
 Bearing estimation, this page's subject, asks a strictly smaller question: one
 angle, no range, no depth, no environment model.
+
+## 3a. Beamforming a whole field
+
+`beamform` answers "what does this array hear along one range line", in dB SNR.
+A coverage map asks the other question — "what does it hear at **every** point
+of a modelled field" — and needs the beam power itself and the look angle that
+won, neither of which `beamform` returns. That is `beamform_field`:
+
+```python
+scan = beamform_field(pressure, element_depths, angles, freq,
+                      weights=shading_taper(n, 'hann'))
+scan.power         # (n_angles, *grid) — every grid axis carried through
+scan.best          # winning beam at each point: a scanning detector's output
+scan.best_angle    # where it was looking
+scan.array_gain()  # dB, best beam against the MEAN element power
+```
+
+`scan.array_gain()` is `realised_array_gain(scan.response, scan.element_power)`,
+which takes plain arrays.
+
+The reference is the mean element power, not any one element's: a lone
+hydrophone can sit in an interference null, which reads as enormous "gain" from
+an array whose ceiling is `10log10(N)`.
+
+### Broadband: steer every bin, and hear the result
+
+Pass a frequency **array** and the last axis of `pressure` is the frequency
+axis — the shape a `RunMode.BROADBAND` run returns — and every bin is steered
+at its own frequency. That is not a nicety: a beam delay is a
+frequency-dependent phase, so a single steering vector at the band centre
+mis-steers both edges.
+
+Because the complex `response` is kept rather than only its power, the beam's
+own **reception** can be synthesised — what this array, steered this way,
+actually hears from that source radiating that signal:
+
+    H = Kraken().run(env, source, array, run_mode=RunMode.BROADBAND)
+    beams = beamform_field(H.data[:, 0, :], element_depths, angles,
+                           H.coords['frequency'], weights=taper)
+    y = beams.to_time_trace(-10.0, range=5000.0,
+                            source_spectrum=S, t_start=3.2)
+
+`to_time_trace` runs the synthesis `Field.to_time_trace` runs, so the window,
+time base and `source_spectrum` convolution are the package's own; the trace
+comes back as a `Field` over `time` with the separation pinned as its `range`
+(a beam has no depth, so none is pinned). Set `t_start`: the
+default window is anchored on a nominal sound speed, and a faster path
+arrives before the window and wraps to the end of the record — uacpy warns
+when it has to guess.
+
+### Three numbers that bound a scan
+
+```python
+plane_wave_array_gain(w)        # what the weights give on a matched plane wave
+matched_replica_gain(p)         # the ceiling: 10log10(N), exactly
+scan.array_gain()               # what the scan actually realises
+```
+
+`plane_wave_array_gain` is `|Σw|² / ‖w‖²` — **not** `-10log10(Σ|w|⁴)`, which
+agrees for a boxcar and is about 1.1 dB out for a Hann taper. `matched_replica_gain`
+correlates the field with itself normalised, which returns `10log10(N)` for any
+field whatever: that is what makes it the bound. The gap between it and
+`scan.array_gain()` belongs to the **plane-wave replica**, not to the channel —
+in a waveguide the right replica is the Green's function, which is
+[matched-field processing](sonar.md).
+
+### Counting looks, not angles
+
+Scanning 361 angles does not buy 361 independent looks. Orthogonal beams sit
+`λ/(N·d)` apart in `sin θ`, so a sector holds `span · N·d / λ` resolution cells
+however finely it is sampled — and the aperture form `λ/((N−1)·d)` is the
+tempting mistake: it leaves neighbours correlated (|corr| = 1/N — 0.042
+for 24 elements, against 1e-16 at the orthogonal spacing) and, being wider,
+counts *fewer* cells (16.26 against 16.97 for a 24-element ±45° scan), so a
+threshold set from it is optimistic. Feed the
+count to `per_look_false_alarm`, because a detector that keeps the largest look
+false-alarms at the scan's rate:
+
+```python
+n = independent_beams(element_depths, angles, freq)     # e.g. 17, not 361
+dt = sonar.detection_threshold_energy(
+    pd=0.5, pf=sonar.per_look_false_alarm(1e-4, n), bandwidth_hz=10.0,
+    integration_time_s=10.0)
+```
+
+**Shading costs looks.** Two beams' noise outputs correlate as the array
+factor of `|w|²`, not of `w`, so a taper widens the cell by more than the
+beam pattern suggests: `hann²` reaches its first null at three DFT bins
+against the rectangular window's one. Pass `weights=` and the count follows —
+for the 24-element ±45° scan above, 16.97 looks unshaded against **5.42** with
+a Hann taper, worth 0.30 dB of detection threshold. Omitting `weights` on a
+shaded array over-counts and is therefore safe but wasteful.
+
+Note this is deliberately *not* the resolution criterion (FNBW/2, Balanis §2),
+which asks whether two **sources** can be told apart. A false-alarm count asks
+when two beams' **noise** stops being shared. The two coincide only for an
+unshaded array.
 
 ---
 
@@ -433,7 +445,7 @@ into the manifold before the scan:
 ```python
 weights = shading_taper(32, 'hann')                # or ('chebwin', 50)
 e = steering_vectors(positions, angles, FREQ, C) * weights
-power = bartlett_spectrum(R, e)
+power = bartlett(R, e)
 ```
 
 ![Array shading](figures/arrays_shading.png)
@@ -503,7 +515,7 @@ the covariance wants `(n_elements, n_snapshots)`. Between the two sit five
 steps, and the last two fail quietly:
 
 ```python
-f_bin, data = snapshots(record, fs, 200.0, nperseg=1024)
+f_bin, data = snapshots(record, fs, 200.0, nperseg=1024)  # window=None: rectangular
 R = sample_covariance(data, diagonal_loading=1e-3)
 replicas = steering_vectors(positions, angles, f_bin, c)   # f_bin, not 200.0
 ```
@@ -529,7 +541,7 @@ replica — a different operation, not a wider window here.
 
 `sample_covariance` computes `R̂ = x·xᴴ / K` and, optionally, adds
 `diagonal_loading · trace(R̂)/N` to the diagonal. Note the default here is
-**0.0** — no loading — whereas `mvdr_spectrum` loads by `1e-6` by default. Load
+**0.0** — no loading — whereas `mvdr` loads by `1e-6` by default. Load
 in one place, not both.
 
 The rule of thumb is **`K ≳ 2N`**, and it pays to know what it buys. `K = 2N`
@@ -559,8 +571,8 @@ Three processors, one covariance, one scan:
 R = sample_covariance(x)
 steering = steering_vectors(positions, angles, FREQ, C)
 
-bartlett_spectrum(R, steering)         # eᴴ R e
-mvdr_spectrum(R, steering)             # 1 / (eᴴ R⁻¹ e)
+bartlett(R, steering)         # eᴴ R e
+mvdr(R, steering)             # 1 / (eᴴ R⁻¹ e)
 music_spectrum(R, steering, 2)         # 1 / (eᴴ Eₙ Eₙᴴ e)
 ```
 
@@ -670,7 +682,7 @@ happens to `R̂` at `K = N`. What breaks is the **inverse**: below `N` snapshots
 
 ### Diagonal loading
 
-`mvdr_spectrum(..., diagonal_loading=α)` adds `α·trace(R)/N` to the diagonal
+`mvdr(..., diagonal_loading=α)` adds `α·trace(R)/N` to the diagonal
 before inverting — a small amount of artificial white noise that lifts the
 zero eigenvalues off the floor. The default is `1e-6`, which is enough to make
 the inverse well-defined without meaningfully changing the answer. The
@@ -826,12 +838,13 @@ The conventional panel is built with `beamform` and power-averaged over the
 block:
 
 ```python
-snr = beamform(block, positions, FREQ, angles=scan, SL=0.0, NL=0.0).snr
+snr = beamform(block, positions, scan, FREQ, source_level_dB=0.0,
+               noise_level_dB=0.0).snr
 column = 10.0 * np.log10(np.mean(10.0 ** (snr / 10.0), axis=1))
 ```
 
 That average is not an approximation of the conventional spectrum — it **is**
-`bartlett_spectrum(sample_covariance(block), steering)`, to within 3 × 10⁻¹³ dB.
+`bartlett(sample_covariance(block), steering)`, to within 3 × 10⁻¹³ dB.
 Averaging beam power over snapshots and beamforming the sample covariance are
 the same arithmetic in a different order, which is a useful thing to know when
 you have a processor written one way and a theory written the other.
@@ -857,12 +870,12 @@ to the noise subspace. Normalise it, plot it, read bearings off it — never rea
 a source level or a level ratio off it. Use MVDR, or Bartlett, when you need
 power.
 
-**`K < N` makes `R̂` singular, and `mvdr_spectrum`'s default loading hides it.**
+**`K < N` makes `R̂` singular, and `mvdr`'s default loading hides it.**
 The default `diagonal_loading=1e-6` means you get a finite, plausible-looking
 spectrum from a rank-deficient covariance rather than an error. Check `K` and
 `N` yourself; nothing downstream will.
 
-**Load in one place.** Both `sample_covariance` and `mvdr_spectrum` take
+**Load in one place.** Both `sample_covariance` and `mvdr` take
 `diagonal_loading`, with defaults `0.0` and `1e-6` respectively. Setting both
 compounds them.
 
@@ -898,7 +911,7 @@ during your averaging time is contributing to the covariance of a scene that no
 longer exists.
 
 **The BLAS thread count changes the last bits.** Every processor on this page
-ends in a matrix product — `sample_covariance` is a GEMM, `mvdr_spectrum`
+ends in a matrix product — `sample_covariance` is a GEMM, `mvdr`
 inverts, `music_spectrum` eigendecomposes — and OpenBLAS partitions a large
 GEMM across threads, so the order its partial sums are accumulated in follows
 the thread count. Change `OPENBLAS_NUM_THREADS` or `OMP_NUM_THREADS` and the
@@ -935,7 +948,7 @@ changes the thread count and with it the last digits.
   plane-wave manifold with a **modelled** field and localises in range and
   depth rather than in bearing. Also the sonar equation and detection theory —
   it *consumes* the `DI` that [§2](#that-gain-against-isotropic-noise-is-the-sonar-equations-di)
-  derives, as the `directivity_index=` keyword.
+  derives, as the `directivity_index_dB=` keyword.
 - **[Noise](noise.md)** — where `NL` comes from: Wenz curves, wind and shipping
   noise, and what "per-element noise level" means in a real ocean.
 - **[OASES](../models/oases.md)** — OASN computes an array covariance and a

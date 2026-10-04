@@ -23,13 +23,16 @@ from __future__ import annotations
 import numpy as np
 
 import warnings
+from typing import Optional
 
 from scipy.optimize import brentq
 
 from uacpy.core.acoustics import bubble_surface_loss
-from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.units import KNOTS_PER_M_PER_S
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
+from uacpy.core._validate import require_positive_finite_scalar
+from uacpy.core.units import knots_to_ms, ms_to_knots
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.constants import DEFAULT_SOUND_SPEED
 
 # Mackenzie (1961) deep-water bottom backscattering constant 10*log10(mu) [dB].
 # He measured it constant at this value for both 530 and 1030 Hz (Etter,
@@ -39,10 +42,9 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 # pick another point in that range.
 LAMBERT_MU_DB = -27.0
 
-#: 1 international knot in m/s, for comparing against JKPS' m/s ceiling.
-#: Read from the one home rather than restated: uacpy.core.units holds
-#: the knot, and a second declaration is a second thing to keep right.
-_KNOT_TO_MS = 1.0 / KNOTS_PER_M_PER_S
+#: Energy conservation caps Lambert's coefficient at mu = 1/pi (-4.97 dB):
+#: the diffuse-scattering ceiling (sonar guide §7).
+_LAMBERT_MU_CEILING_DB = 10.0 * np.log10(1.0 / np.pi)
 
 #: Grazing angle past which Lambert's law stops matching the data. Etter
 #: Sect. 9.2: the relationship "appears to provide a good approximation to the
@@ -56,18 +58,20 @@ _LAMBERT_GOOD_GRAZING_DEG = 45.0
 #: speed up to 15 m/s".
 _CH_FIT_FREQ_HZ = (400.0, 6400.0)
 
-#: Wind-speed ceiling of that fit, from the same sentence. Converted to knots
-#: at the call site because this module's argument is in knots.
+#: Wind-speed ceiling of that fit, from the same sentence.
 _CH_MAX_WIND_MS = 15.0
 
-#: Grazing angle past which JKPS Sect. 1.7.1 says the formula stops working:
+#: Grazing angle past which the formula is an extrapolation. JKPS Sect. 1.7.1:
 #: "This simplified formula performs well for grazing angles below 40-50 deg,
-#: but fails to account for the high-angle roughness effects." The stricter end
-#: of that range is the one worth warning at.
-_CH_GOOD_GRAZING_DEG = 50.0
+#: but fails to account for the high-angle roughness effects." Abraham
+#: Sect. 3.5.3 settles the range: "the Chapman-Harris model was derived from
+#: measurements with less than a 40 deg grazing angle". The fitted data's
+#: edge is the one to warn at, as the 400-6400 Hz band check does for
+#: frequency.
+_CH_GOOD_GRAZING_DEG = 40.0
 
 #: Outer grazing angle Chapman & Scott (1964) took DATA to, which is a wider
-#: claim than accuracy. Etter Sect. 9.2: "Chapman and Scott (1964) later
+#: claim than accuracy. Etter Sect. 9.3.1: "Chapman and Scott (1964) later
 #: validated these results over the frequency range 0.1 kHz to 6.4 kHz for
 #: grazing angle below 80 deg." Quoted in the message, not used as the
 #: threshold — a measurement range is not an accuracy bound.
@@ -87,7 +91,7 @@ _CH_SCOTT_FREQ_HZ = (100.0, 6400.0)
 _RAYLEIGH_PERTURBATION_LIMIT = 1.0
 
 
-def rayleigh_parameter(frequency, rms_roughness, grazing_deg, sound_speed=1500.0):
+def rayleigh_parameter(frequency, rms_roughness, grazing_deg, sound_speed=DEFAULT_SOUND_SPEED):
     """RMS phase deviation a rough interface imposes, in radians.
 
     ``P = 2 k sigma sin(theta)`` with ``k = 2 pi f / c`` the acoustic
@@ -150,10 +154,8 @@ def rayleigh_parameter(frequency, rms_roughness, grazing_deg, sound_speed=1500.0
     f = np.asarray(frequency, dtype=float)
     sigma = np.asarray(rms_roughness, dtype=float)
     theta = np.asarray(grazing_deg, dtype=float)
-    c = float(sound_speed)
-    if c <= 0:
-        raise ConfigurationError(
-            f"rayleigh_parameter: sound_speed must be positive, got {c:g} m/s.")
+    c = require_positive_finite_scalar(
+        sound_speed, "rayleigh_parameter", "sound_speed", " m/s")
     if np.any(sigma < 0):
         raise ConfigurationError(
             "rayleigh_parameter: rms_roughness is an RMS height and cannot be "
@@ -163,7 +165,7 @@ def rayleigh_parameter(frequency, rms_roughness, grazing_deg, sound_speed=1500.0
 
 
 def coherent_reflection_factor(frequency, rms_roughness, grazing_deg,
-                               sound_speed=1500.0):
+                               sound_speed=DEFAULT_SOUND_SPEED):
     """Factor a rough interface multiplies the COHERENT reflection by.
 
     ``exp(-0.5 P**2)`` with ``P`` from :func:`rayleigh_parameter` — JKPS
@@ -177,12 +179,23 @@ def coherent_reflection_factor(frequency, rms_roughness, grazing_deg,
     decays far faster than reality once ``P`` passes 1. Brekhovskikh & Lysanov
     Sect. 1 report that the measured coherence parameter follows ``exp(-P^2)``
     well, and that for ``P >> 1`` the coherent component is close to zero.
+
+    Parameters
+    ----------
+    frequency : float or array_like
+        Frequency (Hz).
+    rms_roughness : float
+        RMS interface roughness (m).
+    grazing_deg : float or array_like
+        Grazing angle (deg).
+    sound_speed : float, optional
+        Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
     p = rayleigh_parameter(frequency, rms_roughness, grazing_deg, sound_speed)
     return np.exp(-0.5 * p ** 2)
 
 
-def perturbative_grazing_limit(frequency, rms_roughness, sound_speed=1500.0):
+def perturbative_grazing_limit(frequency, rms_roughness, sound_speed=DEFAULT_SOUND_SPEED):
     """Steepest grazing angle (deg) at which roughness is still a perturbation.
 
     Solves ``P = 2 k sigma sin(theta) = 1`` for ``theta``. Below the returned
@@ -199,16 +212,22 @@ def perturbative_grazing_limit(frequency, rms_roughness, sound_speed=1500.0):
     survives is shallow-grazing, so a limit of a few tens of degrees still
     leaves the long-range multipath inside the theory while putting steep
     backscatter outside it.
+
+    Parameters
+    ----------
+    frequency : float
+        Frequency (Hz).
+    rms_roughness : float
+        RMS interface roughness (m).
+    sound_speed : float, optional
+        Sound speed (m/s). Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
     f = np.asarray(frequency, dtype=float)
     sigma = np.asarray(rms_roughness, dtype=float)
-    c = float(sound_speed)
     # Without these an invalid input returned 90.0 -- "perturbative at every
     # angle" -- which is the most reassuring answer the function can give.
-    if c <= 0:
-        raise ConfigurationError(
-            f"perturbative_grazing_limit: sound_speed must be positive, got "
-            f"{c:g} m/s.")
+    c = require_positive_finite_scalar(
+        sound_speed, "perturbative_grazing_limit", "sound_speed", " m/s")
     if np.any(sigma < 0):
         raise ConfigurationError(
             "perturbative_grazing_limit: rms_roughness is an RMS height and "
@@ -223,10 +242,24 @@ def perturbative_grazing_limit(frequency, rms_roughness, sound_speed=1500.0):
     return np.degrees(np.arcsin(np.clip(sin_theta, 0.0, 1.0)))
 
 
-def warn_if_roughness_is_not_perturbative(caller: str, frequency,
-                                          rms_roughness, sound_speed=1500.0,
+def warn_if_roughness_is_not_perturbative(who: str, frequency,
+                                          rms_roughness, sound_speed=DEFAULT_SOUND_SPEED,
                                           grazing_deg=None) -> None:
-    """Warn where a perturbation treatment of roughness is being over-driven.
+    """Warn where a perturbation treatment of roughness is being over-driven:
+    :func:`non_perturbative_roughness_notice`, said as a ValidityWarning."""
+    notice = non_perturbative_roughness_notice(
+        who, frequency, rms_roughness, sound_speed=sound_speed,
+        grazing_deg=grazing_deg)
+    if notice is not None:
+        warnings.warn(notice, ValidityWarning,
+                      skip_file_prefixes=USER_FRAME_SKIP)
+
+
+def non_perturbative_roughness_notice(who: str, frequency, rms_roughness,
+                                      sound_speed=DEFAULT_SOUND_SPEED,
+                                      grazing_deg=None) -> Optional[str]:
+    """The notice for a perturbation treatment of roughness being
+    over-driven, or ``None`` inside the theory.
 
     Small-roughness perturbation theory has no failure mode a caller can see:
     it returns a smooth, plausible scattered field well past the point where
@@ -240,7 +273,7 @@ def warn_if_roughness_is_not_perturbative(caller: str, frequency,
     """
     sigma = np.asarray(rms_roughness, dtype=float)
     if not np.any(np.isfinite(sigma) & (sigma > 0.0)):
-        return
+        return None
 
     if grazing_deg is not None:
         p = np.asarray(rayleigh_parameter(frequency, rms_roughness,
@@ -248,7 +281,7 @@ def warn_if_roughness_is_not_perturbative(caller: str, frequency,
                        dtype=float)
         p = p[np.isfinite(p)]
         if not p.size or float(np.max(np.abs(p))) <= _RAYLEIGH_PERTURBATION_LIMIT:
-            return
+            return None
         where = (f"reaches {float(np.max(np.abs(p))):.2f} at the requested "
                  f"grazing angles")
     else:
@@ -256,21 +289,19 @@ def warn_if_roughness_is_not_perturbative(caller: str, frequency,
             frequency, rms_roughness, sound_speed), dtype=float)
         finite = limit[np.isfinite(limit)]
         if not finite.size or float(np.min(finite)) >= 90.0:
-            return
+            return None
         where = (f"passes {_RAYLEIGH_PERTURBATION_LIMIT:g} above "
                  f"{float(np.min(finite)):.1f} deg grazing")
 
-    warnings.warn(
-        f"{caller}: the Rayleigh parameter P = 2*k*sigma*sin(theta) {where}, "
+    return (
+        f"{who}: the Rayleigh parameter P = 2*k*sigma*sin(theta) {where}, "
         f"where small-roughness perturbation theory stops applying "
         f"(JKPS Sect. 1.7; Abraham Sect. 3.2.7.6: the facet reflections "
         f"\"span more than one cycle\" once P exceeds about one). Shallower "
         f"angles remain inside the theory, so a long-range multipath answer "
         f"can be sound while steep backscatter from the same run is not. "
         f"uacpy.sonar.rayleigh_parameter and perturbative_grazing_limit "
-        f"compute these directly.",
-        UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-    )
+        f"compute these directly.")
 
 
 def _warn_outside_chapman_harris_fit(theta, frequency_hz: float,
@@ -289,7 +320,7 @@ def _warn_outside_chapman_harris_fit(theta, frequency_hz: float,
 
     The two corpus sources do not agree on the grazing limit, so both are
     carried. JKPS Sect. 1.7.1 is the accuracy statement and sets the threshold
-    (40-50 deg); Etter Sect. 9.2 reports the wider angle Chapman & Scott
+    (40-50 deg); Etter Sect. 9.3.1 reports the wider angle Chapman & Scott
     (1964) took DATA over (80 deg), which is a claim about measurement
     coverage rather than about the formula being right there.
     """
@@ -298,24 +329,25 @@ def _warn_outside_chapman_harris_fit(theta, frequency_hz: float,
         s_lo, s_hi = _CH_SCOTT_FREQ_HZ
         extra = ("" if s_lo <= frequency_hz <= s_hi else
                  f" It is also outside the {s_lo:g}-{s_hi:g} Hz range Chapman "
-                 f"& Scott (1964) validated (Etter Sect. 9.2).")
+                 f"& Scott (1964) validated (Etter Sect. 9.3.1).")
         warnings.warn(
             f"chapman_harris_surface: frequency {frequency_hz:g} Hz is "
             f"outside the {lo:g}-{hi:g} Hz band Chapman & Harris (1962) "
             f"fitted (JKPS Sect. 1.7.1); the value is an extrapolation of an "
             f"empirical fit and carries no validated error bound.{extra} "
             f"apl_uw_surface_backscatter covers 10-100 kHz.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
-    wind_ms = float(wind_speed_kn) * _KNOT_TO_MS
+    wind_ms = float(knots_to_ms(wind_speed_kn))
     if wind_ms > _CH_MAX_WIND_MS:
         warnings.warn(
-            f"chapman_harris_surface: wind speed {wind_speed_kn:g} kn "
-            f"({wind_ms:.1f} m/s) exceeds the {_CH_MAX_WIND_MS:g} m/s ceiling "
+            f"chapman_harris_surface: wind speed {float(wind_speed_kn):g} kn "
+            f"exceeds the {float(ms_to_knots(_CH_MAX_WIND_MS)):.3g} kn "
+            f"({_CH_MAX_WIND_MS:g} m/s) ceiling "
             f"of the measurements Chapman & Harris (1962) fitted "
             f"(JKPS Sect. 1.7.1).",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     steep = np.asarray(theta, dtype=float)
@@ -324,13 +356,14 @@ def _warn_outside_chapman_harris_fit(theta, frequency_hz: float,
         warnings.warn(
             f"chapman_harris_surface: {steep.size} grazing angle(s) exceed "
             f"{_CH_GOOD_GRAZING_DEG:g} deg (steepest "
-            f"{float(steep.max()):g} deg). JKPS Sect. 1.7.1: the formula "
-            f"\"performs well for grazing angles below 40-50 deg, but fails "
-            f"to account for the high-angle roughness effects\". Chapman & "
-            f"Scott (1964) took data out to {_CH_SCOTT_GRAZING_DEG:g} deg "
-            f"(Etter Sect. 9.2), but that is measurement coverage, not an "
-            f"accuracy bound.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            f"{float(steep.max()):g} deg). The model was derived from "
+            f"measurements below 40 deg (Abraham Sect. 3.5.3), and JKPS "
+            f"Sect. 1.7.1 says it \"performs well for grazing angles below "
+            f"40-50 deg, but fails to account for the high-angle roughness "
+            f"effects\". Chapman & Scott (1964) took data out to "
+            f"{_CH_SCOTT_GRAZING_DEG:g} deg (Etter Sect. 9.3.1), but that is "
+            f"measurement coverage, not an accuracy bound.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
 
@@ -339,7 +372,7 @@ def lambert_bottom(grazing_deg, mu_dB: float = LAMBERT_MU_DB):
 
     ``S_b(theta) = 10*log10(mu) + 10*log10(sin^2 theta) = mu_dB + 20*log10(sin theta)``
 
-    Etter Sect. 9.2, citing Urick (1983) Ch. 8: the relationship "appears to
+    Etter Sect. 9.3.3, citing Urick (1983) Ch. 8: the relationship "appears to
     provide a good approximation to the observed data for many deep-water
     bottoms at grazing angles below about 45 deg". Steeper angles warn.
 
@@ -369,29 +402,37 @@ def lambert_bottom(grazing_deg, mu_dB: float = LAMBERT_MU_DB):
     theta_deg = np.asarray(grazing_deg, dtype=float)
     # Negative and non-finite angles reach the same warning the surface law
     # gives them, for the same reason: ``sin`` of a negative angle is negative
-    # and ``sin(inf)`` is NaN, so both return a non-finite level. Until now the
-    # -10 deg case carried only numpy's bare "invalid value encountered in
-    # log10", which names neither this function nor the argument, and the NaN
-    # case carried nothing at all. theta = 0 stays the documented -inf, so this
-    # warns rather than raising.
+    # and ``sin(inf)`` is NaN, so both return a non-finite level; this warning
+    # names the function and the argument, which numpy's "invalid value
+    # encountered in log10" does not. theta = 0 stays the documented -inf, so
+    # this warns rather than raising.
+    if mu_dB > _LAMBERT_MU_CEILING_DB:
+        warnings.warn(
+            f"lambert_bottom: mu_dB={mu_dB:g} dB is above "
+            f"{_LAMBERT_MU_CEILING_DB:.2f} dB (mu = 1/pi), the ceiling energy "
+            f"conservation puts on Lambert's coefficient, so the bottom "
+            f"scatters back more than it receives. Measured deep-water values "
+            f"sit near {LAMBERT_MU_DB:g} dB.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if np.any(~np.isfinite(theta_deg) | ~(theta_deg >= 0)):
         warnings.warn(
             "lambert_bottom: grazing angle(s) that are negative or non-finite "
             "return a non-finite level — grazing angles are measured from "
             "horizontal and must be >= 0 and finite.",
-            UserWarning, stacklevel=2)
-    # Same gap the surface law had: a documented bound that nothing enforced.
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    # The documented steep-angle bound, enforced as the surface law enforces
+    # its own.
     steep = theta_deg[np.isfinite(theta_deg)
                       & (theta_deg > _LAMBERT_GOOD_GRAZING_DEG)]
     if steep.size:
         warnings.warn(
             f"lambert_bottom: {steep.size} grazing angle(s) exceed "
             f"{_LAMBERT_GOOD_GRAZING_DEG:g} deg (steepest "
-            f"{float(steep.max()):g} deg). Etter Sect. 9.2: Lambert's law "
+            f"{float(steep.max()):g} deg). Etter Sect. 9.3.3: Lambert's law "
             f"\"appears to provide a good approximation to the observed data "
             f"for many deep-water bottoms at grazing angles below about "
             f"45 deg\"; above it the sin^2 form is an extrapolation.",
-            UserWarning, stacklevel=2,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     theta = np.deg2rad(theta_deg)
     # ``invalid`` joins ``divide`` because the warning above names the cases
@@ -403,7 +444,8 @@ def lambert_bottom(grazing_deg, mu_dB: float = LAMBERT_MU_DB):
         return mu_dB + 20.0 * np.log10(np.sin(theta))
 
 
-def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
+def chapman_harris_surface(*, frequency: float, grazing_deg,
+                           wind_speed_kn: float):
     """Sea-surface backscattering strength, Chapman & Harris (1962).
 
     ``S_s = 3.3*beta*log10(theta/30) - 42.4*log10(beta) + 2.6``
@@ -419,21 +461,23 @@ def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
       Sect. 1.7.1). This is what the grazing warning uses.
     * **Data coverage**: Chapman & Scott (1964) "validated these results over
       the frequency range 0.1 kHz to 6.4 kHz for grazing angle below 80 deg"
-      (Etter Sect. 9.2). A wider measurement range is not a wider accuracy
-      bound, so it is reported rather than used as the threshold.
+      (Etter Sect. 9.3.1). A wider measurement range is not a wider accuracy
+      bound, so it is reported rather than used as the threshold. The
+      0.4-6.4 kHz band is Chapman & Harris's fit; Chapman & Scott's data
+      reach down to 0.1 kHz.
 
-    Note the earlier docstring attributed "0.4-6.4 kHz" to Chapman & Scott;
-    that band is Chapman & Harris's fit, and Chapman & Scott reach down to
-    0.1 kHz.
+    Every argument is keyword-only, in the order
+    :func:`apl_uw_surface_backscatter` takes them, so switching between the two
+    models is a change of name and wind unit, never of argument position.
 
     Parameters
     ----------
+    frequency : float
+        Acoustic frequency (Hz), > 0.
     grazing_deg : float or array
         Grazing angle from the horizontal (degrees).
     wind_speed_kn : float
-        Near-surface wind speed (knots), > 0.
-    frequency : float
-        Acoustic frequency (Hz), > 0.
+        Near-surface wind speed (knots), > 0: the fit's own unit.
 
     Returns
     -------
@@ -443,9 +487,9 @@ def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
     See Also
     --------
     uacpy.sonar.apl_uw_surface_backscatter : the TR 9407 bubble-plus-roughness
-        model for 10-100 kHz (wind speed in m/s there).
+        model for 10-100 kHz (its fit converts the knots to m/s).
     """
-    v = float(wind_speed_kn)
+    v = float(wind_speed_kn)       # the fit's v_kn
     f = float(frequency)
     # Negated admissible condition so NaN is refused: ``nan <= 0`` is False and
     # a NaN wind speed or frequency would return a silent NaN scattering
@@ -458,10 +502,11 @@ def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
             or not np.isfinite(f) or not (f > 0.0)):
         raise ConfigurationError(
             f"chapman_harris_surface: wind_speed_kn and frequency must be > 0 "
-            f"and finite; got wind_speed_kn={v!r}, frequency={f!r}"
+            f"and finite; got wind_speed_kn={float(wind_speed_kn)!r}, "
+            f"frequency={f!r}."
         )
     theta = np.asarray(grazing_deg, dtype=float)
-    _warn_outside_chapman_harris_fit(theta, f, v)
+    _warn_outside_chapman_harris_fit(theta, f, float(wind_speed_kn))
     beta = 158.0 * (v * f ** (1.0 / 3.0)) ** (-0.58)
     # -42.4 with beta = 158*(v_kn*f^(1/3))^-0.58 is Abraham, *Underwater
     # Acoustic Signal Processing*, eq. (2.69) — the form implemented here, wind
@@ -487,7 +532,7 @@ def chapman_harris_surface(grazing_deg, wind_speed_kn: float, frequency: float):
             "chapman_harris: grazing angle(s) that are negative or non-finite "
             "return a non-finite level — grazing angles are measured from "
             "horizontal and must be >= 0 and finite.",
-            UserWarning, stacklevel=2)
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     with np.errstate(divide="ignore", invalid="ignore"):
         return 3.3 * beta * np.log10(theta / 30.0) - 42.4 * np.log10(beta) + 2.6
 
@@ -514,7 +559,7 @@ def column_scattering_strength(sv_dB, thickness_m: float):
     if not np.isfinite(thickness_m) or not (thickness_m > 0.0):
         raise ConfigurationError(
             f"column_scattering_strength: thickness_m must be > 0 and finite; "
-            f"got {thickness_m!r}"
+            f"got {thickness_m!r}."
         )
     return np.asarray(sv_dB, dtype=float) + 10.0 * np.log10(thickness_m)
 
@@ -550,6 +595,11 @@ _FACET_LOBE_DB = 15.0
 _EXTRAPOLATE_BELOW_DEG = 0.5
 #: Band the handbook covers; its comparisons ran 12-70 kHz (II.B.5.b).
 _FREQUENCY_LIMITS_HZ = (10e3, 100e3)
+#: Strongest wind the report compared the model with data at: NOREX85,
+#: U = 17 m/s (Figure 8, p. II-14). Its accuracy statement (II.B.5.b) is
+#: "for wind speeds greater than about 8 m/s" with no upper bound, so the
+#: data coverage is the only ceiling it gives.
+_MAX_COMPARED_WIND_MPS = 17.0
 
 
 def _bubble_cross_section(theta_rad, f_khz: float, wind_mps: float):
@@ -589,11 +639,13 @@ def _facet_transition_deg(s2: float) -> float:
     """The smallest grazing angle at which the facet lobe has fallen
     ``_FACET_LOBE_DB`` below its vertical peak (p. II-9), found on the
     continuous lobe rather than on the 1-degree grid the report's plots
-    used: ``tan^2(g)/s^2 - 4 ln cos(g) = 1.5 ln 10``."""
+    used. With Eq. 11, ``ln[sigma_f(g)/sigma_f(0)] = -4 ln cos(g) -
+    tan^2(g)/s^2``, so the edge is ``tan^2(g)/s^2 + 4 ln cos(g) = 1.5 ln 10``
+    (``g = 90 deg - theta``)."""
     target = _FACET_LOBE_DB / 10.0 * np.log(10.0)
 
     def excess(g):
-        return np.tan(g) ** 2 / s2 - 4.0 * np.log(np.cos(g)) - target
+        return np.tan(g) ** 2 / s2 + 4.0 * np.log(np.cos(g)) - target
 
     g = brentq(excess, 1e-9, np.pi / 2.0 - 1e-9)
     return 90.0 - np.degrees(g)
@@ -614,15 +666,15 @@ def _strength(theta_deg: np.ndarray, f_hz: float, wind_mps: float) -> np.ndarray
     sigma_r1 = fx * sigma_f + (1.0 - fx) * sigma_sc              # Eq. 14
     # Eq. 16: the two-way passage through the bubble layer. SBL is a power
     # loss; the helper returns the amplitude multiplier 10^(-SBL/20), so its
-    # square is 10^(-SBL/10). It takes the angle from the surface normal.
-    extinction = bubble_surface_loss(wind_mps, f_hz, np.pi / 2.0 - theta) ** 2
+    # square is 10^(-SBL/10).
+    extinction = bubble_surface_loss(ms_to_knots(wind_mps), f_hz, grazing_deg=theta_deg) ** 2
     sigma_r = sigma_r1 * extinction
     with np.errstate(divide='ignore'):
         return 10.0 * np.log10(sigma_r + sigma_b)
 
 
-def apl_uw_surface_backscatter(grazing_deg, frequency: float,
-                               wind_speed_mps: float):
+def apl_uw_surface_backscatter(*, frequency: float, grazing_deg,
+                               wind_speed_kn: float):
     """Sea-surface backscattering strength, TR 9407 II.B (Eqs. 1-16), dB.
 
     ``S_s = 10 log10(sigma_r + sigma_b)``: the near-surface bubble layer
@@ -632,19 +684,24 @@ def apl_uw_surface_backscatter(grazing_deg, frequency: float,
     the facet lobe's -15 dB angle (Eqs. 13-15) and attenuated by the two-way
     passage through the bubble layer (Eq. 16).
 
+    Every argument is keyword-only, in the order
+    :func:`chapman_harris_surface` takes them.
+
     Parameters
     ----------
-    grazing_deg : float or array
-        Grazing angle from the horizontal, 0-90 degrees. Below 0.5 deg the
-        value is extrapolated linearly from those at 1 and 0.5 deg, as
-        II.B.5.a recommends; the model itself tends to -inf at zero grazing.
     frequency : float
         Acoustic frequency (Hz). The handbook's band is 10-100 kHz and its
         comparisons ran 12-70 kHz with no frequency trend in accuracy;
         outside the band the call warns.
-    wind_speed_mps : float
-        Wind speed 10 m above the surface (m/s), >= 0. Note the unit:
-        :func:`chapman_harris_surface` takes knots.
+    grazing_deg : float or array
+        Grazing angle from the horizontal, 0-90 degrees. Below 0.5 deg the
+        value is extrapolated linearly from those at 1 and 0.5 deg, as
+        II.B.5.a recommends; the model itself tends to -inf at zero grazing.
+    wind_speed_kn : float
+        Wind speed 10 m above the surface (knots), >= 0; the report's fits
+        are in m/s and take it converted. Above 17 m/s (33 kn) — the
+        strongest wind the report compared the model with (NOREX85, Figure
+        8, p. II-14) — the call warns.
 
     Returns
     -------
@@ -666,23 +723,28 @@ def apl_uw_surface_backscatter(grazing_deg, frequency: float,
         raise ConfigurationError(
             f"apl_uw_surface_backscatter: grazing angles must be finite and "
             f"within 0-90 deg; got {grazing_deg!r}.")
-    f = float(frequency)
-    u = float(wind_speed_mps)
-    if not (np.isfinite(f) and f > 0.0):
-        raise ConfigurationError(
-            f"apl_uw_surface_backscatter: frequency must be > 0 and finite "
-            f"(Hz); got {frequency!r}.")
+    f = require_positive_finite_scalar(
+        frequency, "apl_uw_surface_backscatter", "frequency", " Hz")
+    u = float(knots_to_ms(wind_speed_kn))    # TR 9407's U, in m/s
     if not (np.isfinite(u) and u >= 0.0):
         raise ConfigurationError(
-            f"apl_uw_surface_backscatter: wind_speed_mps must be >= 0 and "
-            f"finite (m/s); got {wind_speed_mps!r}.")
+            f"apl_uw_surface_backscatter: wind_speed_kn must be >= 0 and "
+            f"finite (knots); got {wind_speed_kn!r}.")
     lo, hi = _FREQUENCY_LIMITS_HZ
     if not lo <= f <= hi:
         warnings.warn(
             f"apl_uw_surface_backscatter: frequency {f:g} Hz is outside the "
             f"{lo/1e3:g}-{hi/1e3:g} kHz band of TR 9407 (compared with data at "
             f"12-70 kHz, II.B.5.b); the value is an extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    if u > _MAX_COMPARED_WIND_MPS:
+        warnings.warn(
+            f"apl_uw_surface_backscatter: wind_speed_kn {float(wind_speed_kn):g} "
+            f"kn is above the {float(ms_to_knots(_MAX_COMPARED_WIND_MPS)):.3g} kn "
+            f"({_MAX_COMPARED_WIND_MPS:g} m/s) of the strongest wind TR 9407 "
+            f"compared the model with (NOREX85, Figure 8, p. II-14); the "
+            f"value is an extrapolation with no accuracy statement.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     out = _strength(np.maximum(theta_deg, _EXTRAPOLATE_BELOW_DEG), f, u)
     low = theta_deg < _EXTRAPOLATE_BELOW_DEG

@@ -16,7 +16,7 @@ from figure_scripts._common import (deep_water, shallow_water,
 
 import uacpy
 from uacpy.acoustic_signal import lfm_chirp, spectrogram, welch
-from uacpy.visualization.plots import shared_colorbar
+from uacpy.plot import shared_colorbar
 from uacpy.comms import Modulator, awgn, constellation
 from uacpy.models import Bellhop, Kraken, RunMode
 
@@ -29,23 +29,30 @@ CUT_RANGE = 3000.0      # m — the range the depth cut is taken at
 def _time_series():
     """``p(depth, range, time)`` — the field every render branch is drawn from."""
     env, _, _ = shallow_water()
+    # A Hann-shaded chirp, as a projector transmits it: the abrupt ends of an
+    # unshaded one leave sinc skirts that stay above -40 dB out to 1.5 kHz.
+    # Shaded, it is 40 dB down by 87 and 511 Hz, inside the 80-520 Hz band
+    # H is computed over, so the band's edges cut nothing.
+    _, chirp = lfm_chirp(150.0, 450.0, 0.04, sample_rate=4000.0)
+    waveform = chirp * np.hanning(chirp.size)
     source = uacpy.Source(depths=25.0,
-                          frequencies=np.arange(150.0, 450.1, 0.5))
+                          frequencies=np.arange(80.0, 520.1, 0.5))
     receiver = uacpy.Receiver(depths=CUT_DEPTH,
                               ranges=np.linspace(1000.0, 3000.0, 9))
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         H = Bellhop(n_beams=3000).run(env, source, receiver,
                                       run_mode=RunMode.BROADBAND)
-    _, waveform = lfm_chirp(150.0, 450.0, 0.04, 4000.0)
-    return H.synthesize_time_series(waveform, 4000.0)
+    # Δf = 0.5 Hz makes the record 1/Δf = 2 s long; opened at 0.5 s it holds
+    # every arrival, from the first at 1 km (0.67 s) to the 3 km tail (2.29 s).
+    return H.synthesize_time_series(waveform, 4000.0, t_start=0.5)
 
 
 def dispatch():
     """Carriers and results, one convention: every object has ``.plot()``."""
     env, source, receiver = shallow_water()
     tl = Bellhop(n_beams=3000).run(env, source, receiver).to_dB()
-    rays = Bellhop(n_beams=25, alpha=(-12.0, 12.0)).run(
+    rays = Bellhop(n_beams=25, launch_angles=(-12.0, 12.0)).run(
         env, source, receiver, run_mode=RunMode.RAYS)
 
     fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.4))
@@ -80,6 +87,10 @@ def render_branches():
     panel = series.isel(depth=0)                 # coords {range, time}
 
     fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.2))
+    # Constrained layout spaces the heatmap's colorbar with its label, which
+    # tight_layout does not: the bar's 'p(t) (Pa)' ran into the next panel's
+    # y label.
+    fig.set_layout_engine('constrained', wspace=0.12)
     panel.plot(ax=axes[0],
                title="2 axes  →  heatmap")
     panel.at(range=CUT_RANGE).plot(ax=axes[1],
@@ -90,7 +101,6 @@ def render_branches():
         ax.title.set_fontsize(10)
     fig.suptitle('plot_field picks its branch from Field.coords',
                  fontweight='bold', fontsize=13)
-    fig.tight_layout()
     return fig
 
 
@@ -233,8 +243,12 @@ def dsp_plotters():
     # 170 dB re 1 µPa @ 1 m projector so the dB axes read physically.
     p_t = 316.0 * np.asarray(trace.data, dtype=float)
 
-    f_s, t_s, S = spectrogram(p_t, sample_rate, nperseg=256)
-    f_p, P = welch(p_t, sample_rate, nperseg=1024)
+    # detrend=False on both: the synthesised pressure has no DC to remove,
+    # and taking each segment's mean off a segment holding part of the
+    # pulse leaves a Hann-shaped residue in the lowest bins.
+    f_s, t_s, S = spectrogram(p_t, sample_rate, nperseg=256, detrend=False)
+    t_s = t_s + float(trace.coords['time'][0])   # from the record's own start
+    f_p, P = welch(p_t, sample_rate, nperseg=1024, detrend=False)
 
     mod = Modulator('16qam')
     bits = rng.integers(0, 2, size=4 * 600)
@@ -242,7 +256,7 @@ def dsp_plotters():
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.0))
     uacpy.plot.plot_spectrogram(f_s, t_s, S, ax=axes[0][0], vmin=30, vmax=85,
-                                ymax=800.0,
+                                freq_max=800.0,
                                 title='plot_spectrogram — chirp at 1 km')
     uacpy.plot.plot_psd(f_p, P, ax=axes[0][1], ymin=0, ymax=80,
                         title='plot_psd — same trace')

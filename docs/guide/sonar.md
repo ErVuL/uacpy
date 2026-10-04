@@ -59,7 +59,7 @@ Two sign details worth pinning down:
   the beam width is already baked into `RL` through the scattering-cell size
   ([§7](#7-reverberation)). This follows Urick Ch. 8, and `active_signal_excess`
   enforces it.
-- Give it **both** `noise_level` and `reverberation_level` and the two
+- Give it **both** `noise_level_dB` and `reverberation_level_dB` and the two
   backgrounds are **power-summed**, `10·log10(10^((NL−DI)/10) + 10^(RL/10))`,
   per range. In practice that tracks whichever is louder, with a ~3 dB shoulder
   where they cross.
@@ -121,21 +121,44 @@ from uacpy import sonar
 
 | Call | Returns |
 |---|---|
-| `echo_level(source_level, tl, target_strength)` | `EL` |
-| `noise_background(noise_level, directivity_index=None, *, array_gain=None)` | `NL − DI` |
-| `passive_signal_excess(source_level, tl, noise_level, directivity_index=None, detection_threshold=0.0, *, array_gain=None, processing_loss_dB=0.0)` | `SE` |
-| `active_signal_excess(source_level, tl, target_strength, *, noise_level=None, directivity_index=None, reverberation_level=None, detection_threshold=0.0, array_gain=None, processing_loss_dB=0.0)` | `SE` |
-| `figure_of_merit(source_level, noise_level, directivity_index=None, detection_threshold=0.0, *, array_gain=None, processing_loss_dB=0.0)` | `FOM` |
+| `echo_level(source_level_dB, tl_dB, target_strength_dB)` | `EL` |
+| `noise_background(noise_level_dB, directivity_index_dB=None, *, array_gain_dB=None)` | `NL − DI` |
+| `passive_signal_excess(source_level_dB, tl_dB, noise_level_dB, directivity_index_dB=None, *, detection_threshold_dB, array_gain_dB=None, processing_loss_dB=0.0)` | `SE` |
+| `active_signal_excess(source_level_dB, tl_dB, target_strength_dB, *, detection_threshold_dB, noise_level_dB=None, directivity_index_dB=None, reverberation_level_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | `SE` |
+| `figure_of_merit(source_level_dB, noise_level_dB, directivity_index_dB=None, *, detection_threshold_dB, array_gain_dB=None, processing_loss_dB=0.0)` | `FOM` |
+| `SonarBudget(mode, source_level_dB, detection_threshold_dB, noise_level_dB=None, target_strength_dB=None, reverberation_level_dB=None, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | one budget: every term but `TL` |
 
-`directivity_index` defaults to `None`, treated as 0 dB. `None` rather than
+`directivity_index_dB` defaults to `None`, treated as 0 dB. `None` rather than
 `0.0` so that "not supplied" stays distinguishable from a legitimate per-angle
-`DI` array that happens to contain a zero. `array_gain` **replaces** it — passing
+`DI` array that happens to contain a zero. `array_gain_dB` **replaces** it — passing
 both raises `ConfigurationError`, because they are two parametrisations of the
 same term. `AG = DI` only for isotropic noise; anisotropic noise or signal
 coherence loss across the array makes `AG < DI`.
 
-`active_signal_excess` with neither `noise_level` nor `reverberation_level`
+`active_signal_excess` with neither `noise_level_dB` nor `reverberation_level_dB`
 raises: a signal excess against no background is not a number.
+
+`detection_threshold_dB` has **no default** on any budget. It is a statement
+about the detector — §5 derives it — and a budget run without it would report
+the `SNR = 0 dB` boundary as if it were an operating point. Pass `0.0`
+explicitly when that bare boundary is what you want.
+
+A `SonarBudget` holds the terms of one budget, `mode='passive'` or
+`mode='active'`, and checks them once: a passive budget needs `NL` and takes no
+`TS` or `RL`, an active one needs `TS` and a background. It evaluates itself
+through the functions above: `.signal_excess(tl_dB)` is `passive_signal_excess`
+or `active_signal_excess` with its terms (a per-range `RL` runs along
+`range_axis`, the last axis by default), `.figure_of_merit()` is the loss at
+which `SE = 0` (one-way `TL` for a passive budget, two-way `2·TL` for an active
+one), and `.signal_excess_field(tl_field)` is the §2 map. `.to_dict()` and
+`SonarBudget.from_dict()` round-trip it; `.summary()` is one line.
+
+```python
+>>> budget = sonar.SonarBudget('passive', source_level_dB=160.0,
+...                            noise_level_dB=60.0, detection_threshold_dB=10.0)
+>>> float(budget.signal_excess(70.0)), float(budget.figure_of_merit())
+(20.0, 90.0)
+```
 
 ---
 
@@ -150,14 +173,23 @@ evaluate the sonar equation at every `(depth, range)` sample of it:
 
 | Call | Takes | Gives |
 |---|---|---|
-| `passive_signal_excess_field(tl_field, *, source_level, noise_level, directivity_index=None, detection_threshold=0.0, array_gain=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
-| `active_signal_excess_field(tl_field, *, source_level, target_strength, noise_level=None, reverberation_level=None, directivity_index=None, detection_threshold=0.0, array_gain=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
-| `probability_of_detection_field(se_field, *, sigma_dB)` | an `SE` `Field` | `P_D` `Field` |
-| `detection_range_by_depth(se_field)` | an `SE` `Field` | `(depths, ranges)` |
+| `passive_signal_excess_field(tl_field, *, source_level_dB, noise_level_dB, detection_threshold_dB, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
+| `active_signal_excess_field(tl_field, *, source_level_dB, target_strength_dB, detection_threshold_dB, noise_level_dB=None, reverberation_level_dB=None, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
+| `transition_probability_field(se_field, *, sigma_dB)` | an `SE` `Field` | `P_D` `Field` |
+| `detection_ranges_by_depth(se_field, *, crossing='outermost')` | an `SE` `Field` | `(depths, ranges)` |
+| `detection_range_from_field(se_field, *, crossing='outermost')` | a 1-D `SE` `Field` over range, e.g. `se.at(depth=z)` | detection range (m) |
 
-### `array_gain` may be a grid
+The two map functions build a `SonarBudget` from their keywords and evaluate
+it (`budget.signal_excess_field(tl_field)` is the same map).
+`transition_probability_field` and `detection_ranges_by_depth` are the Field
+forms of two array functions: `transition_probability(signal_excess_dB, *,
+sigma_dB)` and `detection_ranges(ranges_m, *, signal_excess_dB, axis=-1,
+crossing='outermost')`, which applies `detection_range` along one axis of any
+signal-excess array.
 
-On the field forms, `array_gain` takes either one number or an array
+### `array_gain_dB` may be a grid
+
+On the field forms, `array_gain_dB` takes either one number or an array
 broadcasting to the TL grid. The scalar is the textbook case and assumes what
 the textbook assumes: that the signal reaches the array as a single plane wave,
 so every element sees it in phase and the beamformer collects all of it. A
@@ -168,23 +200,27 @@ beamformer *realises* therefore changes from one point of the map to the next.
 Ainslie (*Sonar Performance Modelling*, eq. 6.70) prescribes the measurement:
 compute the signal-to-noise ratio "not just once, but twice, with and without
 the effects of the beamformer", which on a modelled field is the best beam's
-output against the per-element mean. Passing that grid as `array_gain` puts the
+output against the per-element mean. Passing that grid as `array_gain_dB` puts the
 result into the sonar equation sample by sample:
 
 ```python
 best = (np.abs(weights.conj() @ p) ** 2).max(axis=0)   # p: (n_elements, ...)
 ag = 10.0 * np.log10(best / np.mean(np.abs(p) ** 2, axis=0))
-se = sonar.passive_signal_excess_field(tl, source_level=120.0,
-                                       noise_level=75.0, array_gain=ag,
-                                       detection_threshold=dt)
+se = sonar.passive_signal_excess_field(tl, source_level_dB=120.0,
+                                       noise_level_dB=75.0, array_gain_dB=ag,
+                                       detection_threshold_dB=dt)
 ```
 
-A grid is summarised as `{'min', 'median', 'max'}` in
-`se.metadata['sonar_budget']['array_gain']`, where a single number would
-misdescribe it; a scalar is still stored as a scalar. `example_42` measures
+The budget records a grid in full: `se.sonar_budget['array_gain_dB']`
+holds it as nested lists, so `SonarBudget.from_dict` rebuilds the budget that
+made the map, and `SonarBudget.summary()` describes the grid by its span and
+median, where a single number would misdescribe it. A scalar is stored as a
+scalar. `example_42` measures
 both on one channel: 11.9 dB assumed against 8.7 dB realised on the target's
-own row (9.0 dB over the whole water column), which is a 43 % overestimate of
-detection range and twice the area called detectable.
+own row (9.0 dB over the whole water column). The assumed gain puts the
+detection range at 60 m at 4.0 km against 2.5 km realised, so 38 % of the
+predicted range is range the realised gain does not reach, and it calls twice
+the area detectable (22 % against 11 %).
 
 The shortfall is a property of the *replica*, not of the channel. A
 conventional beamformer is the matched filter for a plane wave, which is the
@@ -202,16 +238,17 @@ import numpy as np
 import uacpy
 from uacpy import sonar
 from uacpy.models import Bellhop, Kraken, RunMode
-from uacpy.visualization import (
+from uacpy.plot import (
     plot_detection_probability, plot_roc, plot_signal_excess)
 
 from figure_scripts._common import deep_water, shallow_water
 
 DT_PASSIVE = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0)     # −7.79 dB
+    0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0)     # −7.55 dB
 
-PASSIVE_DEEP = dict(source_level=125.0, noise_level=65.0,
-                    directivity_index=15.0, detection_threshold=DT_PASSIVE)
+PASSIVE_DEEP = dict(source_level_dB=125.0, noise_level_dB=65.0,
+                    directivity_index_dB=15.0,
+                    detection_threshold_dB=DT_PASSIVE)
 
 env, source, receiver = deep_water()
 tl = Bellhop(beam_type='G', n_beams=0, backend='fortran').run(
@@ -227,8 +264,8 @@ plot_signal_excess(
 
 A Munk profile 5000 m deep, source at 1000 m, 50 Hz, receivers out to 100 km.
 Warm is detectable, cool is not, and the black contour labelled `SE 0 dB` is
-the detection boundary. With `FOM = 82.8 dB` for this budget, that contour is
-**exactly the 82.8 dB TL contour** of the Bellhop field — the sonar equation has
+the detection boundary. With `FOM = 82.6 dB` for this budget, that contour is
+**exactly the 82.6 dB TL contour** of the Bellhop field — the sonar equation has
 done nothing but relabel the colour axis.
 
 What that buys you is the shape. The detectable region is a solid lobe filling
@@ -250,27 +287,33 @@ right through there. It is a property of the ray fan, not of the sonar — raise
 recorded for you:
 
 ```python
->>> se.metadata['sonar_budget']
-{'mode': 'passive', 'source_level': 125.0, 'noise_level': 65.0,
- 'directivity_index': 15.0, 'detection_threshold': -7.79..., 'processing_loss_dB': 0.0}
+>>> se.sonar_budget
+{'mode': 'passive', 'source_level_dB': 125.0, 'detection_threshold_dB': -7.55...,
+ 'noise_level_dB': 65.0, 'target_strength_dB': None, 'reverberation_level_dB': None,
+ 'directivity_index_dB': 15.0, 'array_gain_dB': None, 'processing_loss_dB': 0.0}
+>>> sonar.SonarBudget.from_dict(se.sonar_budget).summary()
+'passive: SL 125 dB, NL 65 dB, DI 15 dB, DT -7.55... dB, L_sp 0 dB'
 ```
+
+That dict is `SonarBudget.to_dict()`: every term, `None` for one not supplied.
 
 ---
 
 ## 3. Figure of merit and detection range
 
 ```python
-PASSIVE_SHELF = dict(source_level=110.0, noise_level=75.0,
-                     directivity_index=15.0, detection_threshold=DT_PASSIVE)
+PASSIVE_SHELF = dict(source_level_dB=110.0, noise_level_dB=75.0,
+                     directivity_index_dB=15.0,
+                     detection_threshold_dB=DT_PASSIVE)
 
 env, source, receiver = shallow_water()
 tl = Kraken().run(env, source, receiver, run_mode=RunMode.INCOHERENT_TL)
 se = sonar.passive_signal_excess_field(tl, **PASSIVE_SHELF)
 
-fom = sonar.figure_of_merit(**PASSIVE_SHELF)              # 57.79 dB
+fom = sonar.figure_of_merit(**PASSIVE_SHELF)              # 57.55 dB
 cut = se.at(depth=60.0)
-r_det = sonar.detection_range(cut.coords['range'], cut.data)   # 3141.6 m
-depths, ranges = sonar.detection_range_by_depth(se)
+r_det = sonar.detection_range_from_field(cut)                      # 3013.3 m
+depths, ranges = sonar.detection_ranges_by_depth(se)
 ```
 
 ![Figure of merit and detection range](figures/sonar_detection_range.png)
@@ -283,22 +326,22 @@ sonar equation does not notice the change**: swap the model and the same
 `passive_signal_excess_field` call takes its output.
 
 **Left:** the FOM as a horizontal line on a TL plot. TL climbs from 37 dB at
-the first sampled range through the 57.8 dB FOM at 3.14 km. Everything to the
+the first sampled range through the 57.6 dB FOM at 3.01 km. Everything to the
 left of the crossing is detectable; everything to the right is not. That picture is the
 entire passive budget, and it is why `figure_of_merit` is worth having as its
 own call — one number, comparable across sonars, that you can cross with any
 model's TL.
 
 **Right:** the same crossing repeated at every receiver depth.
-`detection_range_by_depth` applies `detection_range` to each depth row of the
+`detection_ranges_by_depth` applies `detection_range` to each depth row of the
 2-D field. The profile is not flat and not monotonic:
 
 | Receiver depth | Detection range |
 |---|--:|
-| 1 m (shallowest) | 0.46 km |
-| 24.8 m | **4.24 km** |
-| 74.3 m | 1.85 km |
-| 99 m (seabed) | 3.12 km |
+| 1 m (shallowest) | 0.45 km |
+| 24.8 m | **4.08 km** |
+| 74.3 m | 1.79 km |
+| 99 m (seabed) | 2.99 km |
 
 The best depth is 24.8 m, which is where the source is — put your hydrophone at
 the target's depth and the modal excitation matches. The worst is the shallowest
@@ -307,102 +350,58 @@ near 74 m. A 9× swing in detection range across the water column, from one
 environment and one budget: that is the argument for computing a field instead
 of quoting a radius.
 
-`detection_range` returns `np.inf` when `SE ≥ 0` at every sampled range and
-`np.nan` when it is negative everywhere, so guard with `np.isfinite` before you
-put it in a table.
+`detection_range` reports the outermost crossing by default; in deep water,
+where a convergence zone gives + / − / + along range, `crossing='first'` gives
+the range of first loss of detection instead, and `detection_annuli(ranges_m,
+signal_excess_dB)` lists every `(start_m, end_m)` interval where SE ≥ 0.
 
-**`np.isfinite` is not enough on its own.** There is a third case, and it does
-not announce itself with a sentinel. If `SE` goes negative somewhere in the
-middle of your grid and comes back positive at the **far edge** — a convergence
-zone, a bottom-bounce lobe — then there is no crossing-down left to interpolate,
-and the function returns the **last sampled range**. That is an ordinary finite
-number in metres. It sails through `np.isfinite`, plots without complaint, and
-is simply your `receiver.ranges[-1]` wearing a detection range's clothes.
+`detection_range` returns `np.nan` when `SE` is negative everywhere, and
+`np.inf` whenever the outermost crossing lies **beyond the grid** — that is,
+whenever `SE ≥ 0` at the last sampled range with data. `np.isfinite` on the
+result therefore answers "did the grid contain the crossing?", and a finite
+number is a crossing the model located — with one exception: when the
+outermost `SE ≥ 0` sample is followed by no-data (`NaN`) cells before the next
+negative one, the crossing sits somewhere inside that hole and the function
+returns the positive sample's range as it is, a lower bound bracketed by the
+hole rather than an interpolated crossing.
 
-It is a **lower bound**, not an answer, and the bound can be far below the
-truth. On the deep-water budget of [§2](#2-signal-excess-over-a-modelled-tl-field)
-(`FOM = 82.8 dB`), at the 462 m receiver depth:
+The `inf` covers two different pictures, and the function tells them apart
+for you. If `SE ≥ 0` at every sampled range, the target is detectable
+everywhere the model looked. If `SE` went negative somewhere in the middle and
+came back positive at the far edge — a convergence zone, a bottom-bounce lobe —
+the outermost crossing is still beyond the grid, but there is a **shadow zone
+inside it**, and a `NumericsWarning` names where it starts and ends and points at
+`detection_annuli` and `crossing='first'` for that structure. On the deep-water
+budget of [§2](#2-signal-excess-over-a-modelled-tl-field) (`FOM = 82.6 dB`),
+at the 462 m receiver depth, `SE` goes negative at 10 km and resurfaces in the
+convergence-zone lobes: a grid out to 60 km ends at `+0.8 dB` and returns
+`inf` with that warning, and a grid out to 100 km locates the outermost
+crossing at `99167.8 m`. Widen `receiver.ranges` until the answer is finite.
 
-| `receiver.ranges` out to | `detection_range` returns |
-|---|--:|
-| 60 km | `60000.0 m` — *exactly the last sample* |
-| 100 km | `99183.2 m` |
+"The last range with data" is what the function tests, not `ranges[-1]`:
+`detection_range` masks the no-data cells (`NaN`, the package's no-data
+convention — a Bellhop cell no ray reached is exactly that,
+[results](results.md#9-gotchas)) before it looks at the far edge, so a far-edge
+recovery on a 20 km grid with three trailing no-data cells returns `inf`, and
+the warning quotes `17000 m` as the outermost range the model filled.
 
-The 60 km run is not wrong about its own grid: `SE` goes negative at 10 km,
-resurfaces in the convergence-zone lobes, and really is `+0.7 dB` at 60 km.
-It just never saw the outermost crossing, which sits at 99.2 km. A 1.65×
-understatement, reported as a clean finite number.
-
-So `np.isfinite` needs a second test beside it — but **not** the obvious
-`r < ranges[-1]`. That comparison is right only while every range cell carries
-data, and where the assumption fails it fails *quietly*.
-
-**Compare against the last range with data, not the last range.**
-`detection_range` masks the no-data cells out *before* it goes looking for the
-far edge, so the number it returns on a far-edge recovery is the outermost
-sampled range **that has data** — which equals `ranges[-1]` only when the outer
-cells are filled. Give a 20 km grid three trailing no-data cells and a far-edge
-recovery comes back as `17000.0 m`; `17000 < 20000` is true, so the `ranges[-1]`
-test reports that lower bound as a trustworthy crossing. It fails in the
-reassuring direction, which is the direction that costs you. And a TL field with
-empty outer cells is ordinary, not exotic: `NaN` is the package's no-data
-convention, and a Bellhop cell no ray reached is exactly that
-([results](results.md#9-gotchas)).
-
-Two guards do hold. Either compare against the last range the model actually
-filled:
-
-```python
-r_det = sonar.detection_range(cut.coords['range'], cut.data)
-
-known = np.isfinite(cut.data)                    # cells the model filled
-last_known = cut.coords['range'][known][-1]      # 17000.0 m, not 20000.0 m
-if np.isfinite(r_det) and r_det >= last_known:
-    ...      # a lower bound — widen receiver.ranges and re-run
-```
-
-or catch the `UserWarning` the function raises for exactly this case, which is
-the code's own mechanism and needs no bookkeeping of yours:
-
-```python
-import warnings
-
-with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter('always')
-    r_det = sonar.detection_range(cut.coords['range'], cut.data)
-
-if any(issubclass(w.category, UserWarning) for w in caught):
-    ...      # a lower bound — widen receiver.ranges and re-run
-```
-
-Either way, widen `receiver.ranges` until the answer stops moving. Neither guard
-fires on a genuine interpolated crossing.
-
-**`detection_range_by_depth` has no single number to compare against at all.**
-It applies `detection_range` to each depth row independently, and each row masks
-its own no-data cells, so "the last range with data" is a *per-row* quantity,
-not a property of the field. On one 20 km grid, two depth rows that both recover
-positive at their far edges returned `17000.0 m` and `12000.0 m` — two different
-lower bounds, neither of them `ranges[-1]`, and a profile-wide `r < ranges[-1]`
-passes both. Do the comparison row by row against
-`ranges[np.isfinite(se_field.data[i])][-1]`, or read the warnings — with one
-caveat. The function raises one warning per affected row, but the message quotes
-that row's edge range, so under Python's default filter two rows sharing an edge
-are deduplicated to a single warning: two rows both pinned at 17 km reported
-**2** warnings under `simplefilter('always')` and **1** under the default filter.
-Count rows, not warnings, unless you have set `'always'`.
+`detection_ranges_by_depth` applies the same rule row by row, so each depth's
+entry is `inf` exactly when that row's crossing lies beyond its own last filled
+cell. The warnings quote each row's own edge, and under Python's default filter
+two rows sharing an edge are deduplicated to one warning: count `inf` rows, not
+warnings, unless you have set `simplefilter('always')`.
 
 It also **interpolates** linearly between the two samples that straddle the
-crossing: `3141.6 m` sits between grid points at 3131.3 and 3151.2 m, on a
+crossing: `3013.3 m` sits between grid points at 3012.0 and 3031.9 m, on a
 range axis spaced 19.9 m. Crossings quoted later on this page from a plotted curve
 rather than from `detection_range` — the reverberation orderings in
 [§7](#7-reverberation), the reverberation-limited edge in
 [§8](#8-the-active-budget-end-to-end) — are the **grid sample** where the sign
 changes, and the two conventions can differ by up to one cell.
 
-### Where `noise_level` comes from — `WenzNoise` into the budget
+### Where `noise_level_dB` comes from — `WenzNoise` into the budget
 
-Every budget on this page passes `noise_level=` as a bare literal, which is fine
+Every budget on this page passes `noise_level_dB=` as a bare literal, which is fine
 for teaching and useless for a real site. [`uacpy.noise`](noise.md) is where the
 number actually comes from, and joining the two takes one conversion — the
 [band-reference rule](#the-band-reference-rule), applied:
@@ -414,9 +413,9 @@ BW = 50.0                                            # the processing band, Hz
 wenz = WenzNoise(frequencies=200.0, wind_speed_kn=10.0, shipping_level='medium')
 nl_band = float(wenz.total[0]) + 10 * np.log10(BW)   # 64.53 -> 81.52 dB
 
-fom = sonar.figure_of_merit(source_level=110.0, noise_level=nl_band,
-                            directivity_index=15.0,
-                            detection_threshold=DT_PASSIVE)   # 51.27 dB
+fom = sonar.figure_of_merit(source_level_dB=110.0, noise_level_dB=nl_band,
+                            directivity_index_dB=15.0,
+                            detection_threshold_dB=DT_PASSIVE)   # 51.03 dB
 ```
 
 `WenzNoise.total` is a **spectral** level — 64.53 dB re 1 µPa²/Hz at 200 Hz for
@@ -425,10 +424,18 @@ that; it just subtracts whatever you hand it. So `SL = 110.0` here has to be a
 **band** level too, dB re 1 µPa²·m² over the same 50 Hz — which is why the
 `+ 10·log10(BW)` line exists, and why it must not be skipped.
 
-Skip it, pass the raw 64.53, and `figure_of_merit` returns **68.26 dB** instead
-of 51.27. Nothing raises, nothing warns, and the budget is 16.99 dB
+Skip it, pass the raw 64.53, and `figure_of_merit` returns **68.02 dB** instead
+of 51.03. Nothing raises, nothing warns, and the budget is 16.99 dB
 (`= 10·log10(50)`) optimistic — the one error [§1](#the-band-reference-rule)
 opens by naming, in the place where a newcomer is most likely to make it.
+
+`wenz.band_level(175.0, 225.0)` does the conversion by integrating the spectrum
+over the band instead of treating it as flat: **81.61 dB** here, 0.09 dB above
+the flat estimate, because 50 Hz is a narrow band. Over a decade the slope
+matters — `band_level(100, 1000)` is 92.39 dB against 91.73 dB from the level at
+the geometric centre plus `10·log10(900)`. `decidecade_levels(freq_min, freq_max)`
+gives the same integral per decidecade band, and both take `component=` for one
+source of the five.
 
 ---
 
@@ -443,7 +450,16 @@ built for `P_D = 0.9` still reports 0.5 on its own `SE = 0` contour and the two
 statements stop agreeing. Recompute `DT` at 0.5, or read the surface as a
 relative one.
 
-`probability_of_detection_field` applies the **log-normal** transition curve:
+Shifting the curve to `Φ(SE/σ + Φ⁻¹(P_D))` so that the contour reads the
+design value is **not** the repair. It is tempting and wrong, because `σ` here
+is the channel's fluctuation while the shift belongs to the width of the
+detector's own transition. An exact energy detector (`M = 100`,
+`P_F = 10⁻⁴`, Gaussian-fluctuating signal) with `DT` designed at `P_D = 0.9`,
+averaged over a 5.6 dB log-normal channel, detects **0.624** of the time on
+its `SE = 0` contour. The shifted curve claims 0.900, the unshifted one
+0.500. The unshifted curve is the conservative one of the two.
+
+`transition_probability_field` applies the **log-normal** transition curve:
 the decision statistic is taken log-normal, so in dB it is Gaussian with
 standard deviation `sigma_dB`, giving
 
@@ -454,7 +470,7 @@ P_D = Φ(SE / sigma_dB)
 ```python
 env, se = _passive_deep()      # the §2 run, factored into a helper
 for sigma in (5.6, 9.0):
-    pd = sonar.probability_of_detection_field(se, sigma_dB=sigma)
+    pd = sonar.transition_probability_field(se, sigma_dB=sigma)
     plot_detection_probability(pd, env=env,
                                title=f'Detection probability, σ = {sigma:g} dB')
 ```
@@ -505,11 +521,11 @@ that turns that promise into decibels.
 | Call | Gives |
 |---|---|
 | `deflection_coefficient(pd, pf)` | `d' = Φ⁻¹(P_D) − Φ⁻¹(P_F)` — separation in noise σ |
-| `detection_index(pd, pf)` | `d = (d')²` — Urick's detection index |
-| `probability_of_detection(deflection, pf)` | `P_D = Q(Q⁻¹(P_F) − d')`; `pf` may be an array |
+| `detection_index(pd, pf)` | `d = (d')²` — Urick's detection index; the square of the deflection, so not an input to `probability_of_detection` (pass `np.sqrt(d)`) |
+| `probability_of_detection(deflection, pf)` | `P_D = Q(Q⁻¹(P_F) − d')`, the inverse of `deflection_coefficient`; `pf` may be an array |
 | `roc_curve(deflection, n_points=200)` | `(P_F, P_D)` arrays, `P_F` log-spaced over `[1e-6, ~1]` |
 | `albersheim_snr(pd, pf, n_pulses=1)` | required per-sample SNR (dB), envelope detector |
-| `detection_threshold_energy(pd, pf, bandwidth_hz, integration_time_s)` | `DT` (dB), energy detector |
+| `detection_threshold_energy(pd, pf, bandwidth_hz, integration_time_s, *, exact=True)` | `DT` (dB), energy detector: the exact Gamma-statistic threshold; `exact=False` gives Abraham's large-`M` form `5·log10(d/(w·t))`, optimistic at small `w·t` and warned outside 1 dB |
 | `per_look_false_alarm(pf_scan, n_looks)` | per-look `P_F` holding a scan at `pf_scan` |
 | `scan_false_alarm(pf_look, n_looks)` | rate a max-over-looks detector achieves |
 
@@ -530,7 +546,7 @@ dt = sonar.detection_threshold_energy(
 `n_looks` counts **independent** looks. One beam is `λ/L` wide in `sin θ`, so
 a sector holds that many resolution cells however finely the steering grid is
 sampled — a 361-point scan of ±45° on a 24-element λ/2 array is about 16
-independent beams, worth +0.70 dB of `DT`. Shaded beams overlap and are
+independent beams, worth +0.79 dB of `DT`. Shaded beams overlap and are
 correlated, so the orthogonal-beam count is the conservative choice.
 
 ```python
@@ -540,8 +556,11 @@ pd_axis = np.linspace(0.1, 0.99, 200)
 d = [sonar.detection_index(p, 1e-4) for p in pd_axis]
 
 wt = np.logspace(0.0, 5.0, 200)
-dt = [sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=m,
-                                       integration_time_s=1.0) for m in wt]
+d = sonar.detection_index(0.5, 1e-4)
+dt_large_m = 5.0 * np.log10(d / wt)                          # eq. (2.77)
+dt_exact = [sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=m,
+                                             integration_time_s=1.0, exact=True)
+            for m in wt]
 ```
 
 ![Detection theory](figures/sonar_detection_theory.png)
@@ -561,31 +580,39 @@ is why the three curves converge to the right. False alarms are cheapest to
 suppress on a sonar that is already asking for high detection probability. The
 curves also steepen as `P_D → 1`: the last few percent are the expensive ones.
 
-**Right — where integration pays it back.** `DT = 5·log10(d / (w·t))` for an
-incoherent energy detector, plotted against the time-bandwidth product. The
-lines are straight with slope **−5 dB per decade**: every tenfold increase in
-`w·t` relaxes the required SNR by 5 dB. That is the entire reason a passive
-sonar integrates. The two curves are `P_D = 0.5` and `P_D = 0.9`, separated by
-only ~1.3 dB — cheap compared to what integration buys.
+**Right — where integration pays it back.** The detection threshold of an
+incoherent energy detector against the time-bandwidth product. The dashed lines
+are Abraham's large-`M` form `DT = 5·log10(d / (w·t))`, straight with slope
+**−5 dB per decade**: every tenfold increase in `w·t` relaxes the required SNR
+by 5 dB. That is the entire reason a passive sonar integrates. The solid curves
+are the exact threshold (`exact=True`), which the straight line approaches from
+below: 0.5 dB optimistic at `w·t = 100` and `P_D = 0.5`, but 5.2 dB at
+`w·t = 1` (12.4 dB at `P_D = 0.9`), the single-look short pulse. That is why
+the sweep calls the formula directly for the dashed line —
+`detection_threshold_energy(exact=False)` warns at every point outside its 1 dB envelope.
+At large `w·t` the two `P_D` curves are separated by only ~1.3 dB — cheap
+compared to what integration buys.
 
 This is where the page's `DT` values come from:
 
 ```python
 DT_PASSIVE = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0)     # −7.79 dB
+    0.5, 1e-4, bandwidth_hz=50.0, integration_time_s=10.0)     # −7.55 dB
 DT_ACTIVE  = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5)     # −2.79 dB
+    0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5)     # −2.05 dB
 ```
 
 Both aim at the same `(0.5, 10⁻⁴)` operating point. The passive sonar's
 `w·t = 500` earns a **negative** `DT` — it detects signals below the noise, which
 is the normal state of affairs for a narrowband passive system. The active
-sonar's half-second ping over 100 Hz gives `w·t = 50` and 5 dB less relief.
+sonar's half-second ping over 100 Hz gives `w·t = 50` and 5.5 dB less relief
+(5 dB on the large-`M` line; the exact threshold bends up as `w·t` falls).
 
 ### Which `DT` you are holding
 
-`detection_threshold_energy` returns `DT = 5·log10(d / (w·t))`, the required
-ratio of signal to noise **power spectral density**. It is a unitless power
+`detection_threshold_energy` returns the exact energy-detector threshold (its
+large-`M` form is `DT = 5·log10(d / (w·t))`), the required ratio of signal to
+noise **power spectral density**. It is a unitless power
 ratio, valid whenever `SL` and `NL` share a reference — the rule from
 [§1](#the-band-reference-rule).
 
@@ -594,9 +621,12 @@ referenced to noise in a 1 Hz band (Abraham's `DT_Hz`, units dB re Hz). The two
 differ by `10·log10(w)`. If you are transcribing a `DT` out of a textbook,
 check which one it is before it costs you 20 dB.
 
-Both forms are the large-`w·t` Gaussian (CLT) approximation to the
-energy-detector statistic, so the left-hand end of the right-hand panel above —
-`w·t` near 1 — is the least trustworthy part of that plot.
+Both closed forms are the large-`w·t` Gaussian (CLT) approximation to the
+energy-detector statistic, which is why the function returns the exact
+threshold `S = Ginv(1−Pf; M)/Ginv(1−Pd; M) − 1` by default (same
+fluctuating-signal model, same unitless ratio): at `w·t` near 1 the
+approximation is several dB optimistic (the dashed lines above). `exact=False`
+returns the large-`M` form, and warns where it is off by more than 1 dB.
 
 Two more transcription traps. Modern sonar-modelling literature calls this term
 the **recognition differential** `RD` and measures the threshold SNR at the
@@ -604,7 +634,7 @@ display rather than at the receiver input terminals, which is where `DT` is
 measured; the page's `L_sp` covers most of that gap. And Urick subscripts it
 `RD_N` and `RD_R` — **the required margin is not the same number against noise
 as against reverberation** — while `active_signal_excess` takes a single
-`detection_threshold` for both backgrounds. If the two differ for your system,
+`detection_threshold_dB` for both backgrounds. If the two differ for your system,
 run the noise-limited and reverberation-limited budgets separately.
 
 `albersheim_snr` answers a different question: the per-sample SNR required by a
@@ -630,16 +660,16 @@ put on it comes back, in dB re 1 m².
 
 | Call | Formula | Aspect | Regime |
 |---|---|---|---|
-| `ts_sphere(radius_m, *, frequency_hz=None, sound_speed=1500.0)` | `10·log10(a²/4)` | flat | `ka > 10` |
-| `ts_convex(radius1_m, radius2_m, *, frequency_hz=None, sound_speed=1500.0)` | `10·log10(a₁a₂/4)` | one aspect | `ka > 10` on the smaller radius |
-| `ts_ellipsoid(a_m, b_m, c_m, *, frequency_hz=None, sound_speed=1500.0)` | `20·log10(bc/2a)` | viewed along `a` | `ka > 10` on `min(b²/a, c²/a)` — **not on any semi-axis** |
-| `ts_cylinder(radius_m, length_m, frequency_hz, *, angle_deg=0.0, sound_speed=1500.0)` | `10·log10[(aL²/2λ)·sinc²β·cos²θ]` | **from broadside** | `ka > 1` |
-| `ts_plate(width_m, height_m, frequency_hz, *, angle_deg=0.0, sound_speed=1500.0)` | `10·log10[(wh/λ)²·sinc²β·cos²θ]` | **from normal incidence** | `k·min(w,h) > 2π`, i.e. both dimensions at least a wavelength |
+| `ts_sphere(radius_m, *, frequency=None, sound_speed=1500.0)` | `10·log10(a²/4)` | flat | `ka > 10` |
+| `ts_convex(radius1_m, radius2_m, *, frequency=None, sound_speed=1500.0)` | `10·log10(a₁a₂/4)` | one aspect | `ka > 10` on the smaller radius |
+| `ts_ellipsoid(a_m, b_m, c_m, *, frequency=None, sound_speed=1500.0)` | `20·log10(bc/2a)` | viewed along `a` | `ka > 10` on `min(b²/a, c²/a)` — **not on any semi-axis** |
+| `ts_cylinder(radius_m, length_m, *, frequency, angle_deg=0.0, sound_speed=1500.0)` | `10·log10[(aL²/2λ)·sinc²β·cos²θ]` | **from broadside** | `ka > 1` |
+| `ts_plate(width_m, height_m, *, frequency, angle_deg=0.0, sound_speed=1500.0)` | `10·log10[(wh/λ)²·sinc²β·cos²θ]` | **from normal incidence** | `k·min(w,h) > 2π`, i.e. both dimensions at least a wavelength |
 
 The split runs down the middle of that table. The first three are
 **frequency-flat**: a rigid convex body in the geometric regime returns the same
 strength whatever you ping it with, and `ts_ellipsoid` is literally
-`ts_convex(b²/a, c²/a)`. Their `frequency_hz` argument is optional and is used
+`ts_convex(b²/a, c²/a)`. Their `frequency` argument is optional and is used
 for **nothing but the validity warning** — pass it and you get told when `ka`
 has fallen below the geometric regime; omit it and you get the formula with no
 check. The last two are finite apertures, so they carry a wavelength and a
@@ -674,10 +704,10 @@ holds the test, not reporting a call you did not make.
 freq = 5000.0
 angles = np.linspace(-30.0, 30.0, 2401)
 
-plate     = sonar.ts_plate(4.0, 2.0, freq, angle_deg=angles)
-cylinder  = sonar.ts_cylinder(1.0, 8.0, freq, angle_deg=angles)
-sphere    = sonar.ts_sphere(2.0, frequency_hz=freq)                    #  0.0 dB
-ellipsoid = sonar.ts_ellipsoid(20.0, 4.0, 4.0, frequency_hz=freq)      # −8.0 dB
+plate     = sonar.ts_plate(4.0, 2.0, frequency=freq, angle_deg=angles)
+cylinder  = sonar.ts_cylinder(1.0, 8.0, frequency=freq, angle_deg=angles)
+sphere    = sonar.ts_sphere(2.0, frequency=freq)                    #  0.0 dB
+ellipsoid = sonar.ts_ellipsoid(20.0, 4.0, 4.0, frequency=freq)      # −8.0 dB
 ```
 
 ![Geometric-regime target strength](figures/sonar_target_strength.png)
@@ -726,16 +756,19 @@ volume:    RL(r) = SL − 2·TL(r) + S_v + 10·log10(Ψ · r²  · cτ/2)
 two-way solid-angle beamwidth (sr). A boundary cell is an annular patch that
 grows as `r`; a volume cell is a shell segment that grows as `r²`.
 
-A boundary annulus is strictly `cτ/(2·cos θ_g)` wide down-range;
-`boundary_reverberation` uses the `θ_g → 0` limit `cτ/2`, the usual convention.
-That under-states the cell by `−10·log₁₀(cos θ_g)` — 1.5 dB at 45° grazing,
-0.3 dB at 20°, nothing below 10° — so it matters only in the first few cells
-after the ping.
+`ranges_m` is the **slant** range from the sonar to the cell, and with it the
+boundary cell is exact at any grazing angle: the annulus is `cτ/(2·cos θ_g)`
+wide down-range, but its arc is `Φ·r·cos θ_g`, and the two cosines cancel to
+`Φ·r·cτ/2`. A **horizontal** range `x` in its place under-states the cell by
+`−10·log₁₀(cos θ_g)` — 1.5 dB at 45° grazing, 0.29 dB at 20.6°, nothing below
+10° — and takes the default spherical spreading to the wrong distance, so a
+sonar `h` above the boundary passes `np.hypot(x, h)`, as both examples on this
+page do.
 
 | Call | |
 |---|---|
-| `boundary_reverberation(ranges_m, source_level, scattering_strength_dB, *, pulse_length_s, horizontal_beamwidth_rad, sound_speed=1500.0, tl_dB=None)` | surface or bottom |
-| `volume_reverberation(ranges_m, source_level, scattering_strength_dB, *, pulse_length_s, solid_angle_beamwidth_sr, sound_speed=1500.0, tl_dB=None)` | scattering layers |
+| `boundary_reverberation(ranges_m, source_level_dB, scattering_strength_dB, *, pulse_length_s, horizontal_beamwidth_rad, sound_speed=1500.0, tl_dB=None)` | surface or bottom |
+| `volume_reverberation(ranges_m, source_level_dB, scattering_strength_dB, *, pulse_length_s, solid_angle_beamwidth_sr, sound_speed=1500.0, tl_dB=None)` | scattering layers |
 | `total_reverberation(*levels_dB)` | incoherent (power) sum |
 
 `tl_dB=None` falls back to spherical spreading, `20·log10(r)`. Pass an array or
@@ -747,11 +780,11 @@ exactly that.
 | Call | |
 |---|---|
 | `lambert_bottom(grazing_deg, mu_dB=-27.0)` | `S_b = µ_dB + 20·log10(sin θ)`, the **monostatic** case of `S_b = 10·log10(µ sin θ_i sin θ_s)`; Mackenzie's −27 dB; holds below ~45° grazing |
-| `chapman_harris_surface(grazing_deg, wind_speed_kn, frequency)` | wind-driven sea surface; fitted by Chapman & Harris over 0.4–6.4 kHz, validated by Chapman & Scott over 0.1–6.4 kHz for θ < 80°, though the underlying data are all below 40° grazing |
+| `chapman_harris_surface(*, frequency, grazing_deg, wind_speed_kn)` | wind-driven sea surface; fitted by Chapman & Harris over 0.4–6.4 kHz, validated by Chapman & Scott over 0.1–6.4 kHz for θ < 80°, though the underlying data are all below 40° grazing |
 | `column_scattering_strength(sv_dB, thickness_m)` | `S_v + 10·log10(h)` — a scattering layer as an equivalent area strength |
 | `apl_uw_bottom_backscatter(grazing_deg, frequency, params, *, water_sound_speed=1500.0)` | APL-UW TR 9407 seabed model, 10–100 kHz: interface roughness (Kirchhoff, composite, large) plus sediment volume scattering from the six `BottomParameters` |
 | `apl_uw_bottom_loss(grazing_deg, params)` | TR 9407 forward reflection loss, a lossy Rayleigh coefficient; no frequency dependence |
-| `apl_uw_surface_backscatter(grazing_deg, frequency, wind_speed_mps)` | TR 9407 sea-surface model, 10–100 kHz: bubble layer + Bragg ripples + specular facets, with bubble-layer extinction; wind in **m/s** |
+| `apl_uw_surface_backscatter(*, frequency, grazing_deg, wind_speed_kn)` | TR 9407 sea-surface model, 10–100 kHz: bubble layer + Bragg ripples + specular facets, with bubble-layer extinction; wind in **knots** (converted to the report's m/s), warns above the 17 m/s (33 kn) of the strongest wind the report compared with data |
 | `BottomParameters.from_sediment(name)` / `.from_grain_size(Mz)` / `.from_geoacoustics(...)` | the six seabed inputs (ρ, ν, δ, σ₂, γ, w₂) from TR 9407 Table 2, its grain-size relations, or measured cp / ρ / attenuation |
 | `BottomParameters.from_environment(env, *, range=0.0, method='auto')` / `.from_bottom(seabed, *, water_sound_speed, ...)` | the same six inputs from a uacpy seabed — a fetched `Environment`, a `Bottom` at a range, a `SeabedColumn` or a `BoundaryProperties` — off its grain size when it has one, else its geoacoustics against the water at the seafloor |
 
@@ -764,18 +797,20 @@ incident and the scattered grazing angle, and nothing in `uacpy.sonar` takes
 two.
 
 ```python
-ranges = np.linspace(50.0, 8000.0, 700)
-grazing = np.rad2deg(np.arctan2(50.0, ranges))   # sonar 50 m off each boundary
+ranges = np.linspace(50.0, 8000.0, 700)          # horizontal
+slant = np.hypot(ranges, 50.0)   # sonar 50 m off each boundary
+grazing = np.rad2deg(np.arctan2(50.0, ranges))
 
 bottom = sonar.boundary_reverberation(
-    ranges, 210.0, sonar.lambert_bottom(grazing),
+    slant, 210.0, sonar.lambert_bottom(grazing),
     pulse_length_s=0.02, horizontal_beamwidth_rad=0.15, sound_speed=1500.0)
 surface = sonar.boundary_reverberation(
-    ranges, 210.0,
-    sonar.chapman_harris_surface(grazing, wind_speed_kn=25.0, frequency=5000.0),
+    slant, 210.0,
+    sonar.chapman_harris_surface(frequency=5000.0, grazing_deg=grazing,
+                                 wind_speed_kn=25.0),
     pulse_length_s=0.02, horizontal_beamwidth_rad=0.15, sound_speed=1500.0)
 volume = sonar.volume_reverberation(
-    ranges, 210.0, -70.0,
+    slant, 210.0, -70.0,
     pulse_length_s=0.02, solid_angle_beamwidth_sr=0.01, sound_speed=1500.0)
 
 total = sonar.total_reverberation(bottom, surface, volume)
@@ -800,8 +835,10 @@ grazing = np.linspace(1.0, 90.0, 180)
 params = sonar.BottomParameters.from_sediment(name)
 ax_b.plot(grazing, sonar.apl_uw_bottom_backscatter(grazing, 30e3, params),
           ls=style, color='C1', lw=1.4, label=f'APL-UW {name}')
-ax_s.plot(grazing, sonar.apl_uw_surface_backscatter(grazing, 25e3, wind_mps),
-          ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_mps:g} m/s')
+ax_s.plot(grazing,
+          sonar.apl_uw_surface_backscatter(frequency=25e3, grazing_deg=grazing,
+                                           wind_speed_kn=wind_kn),
+          ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_kn:g} kn')
 ```
 
 ![The APL-UW boundary models beside the low-frequency laws](figures/sonar_boundary_scattering.png)
@@ -842,14 +879,15 @@ angles, once a documented constant is applied to the Kirchhoff level (the
 module explains it); the handbook's own uncertainty is about 3 dB for
 characterised sand and silt and 10 dB for rock and gravel.
 
-The surface model's inputs are wind speed in m/s and frequency. Bubble
-scattering dominates below about 60° and saturates above about 8 m/s, which
-is why the 8 and 15 m/s curves sit within a few dB of each other while the
-3 m/s one is 20 dB down at 30°; the specular facets take over near vertical,
-where every wind ends between +3 and +8 dB. Chapman–Harris at the same 8 m/s,
-read 20 kHz above its band, lands within 1 dB of the model at 30° and 5 dB
-below it at 10°, the region where the bubbles carry the model. The handbook
-quotes ±4 dB above 8 m/s and ±5 dB below, and recommends running a ±1 m/s
+The surface model's inputs are wind speed in knots and frequency (the
+handbook's fits are in m/s and take it converted). Bubble scattering dominates
+below about 60° and saturates above about 8 m/s (16 kn), which is why the 16
+and 30 kn curves sit within a few dB of each other while the 6 kn one is
+20 dB down at 30°; the specular facets take over near vertical, where every
+wind ends between +3 and +8 dB. Chapman–Harris at the same 16 kn, read 20 kHz
+above its band, lands within 1 dB of the model at 30° and 5.5 dB below it at
+10°, the region where the bubbles carry the model. The handbook quotes ±4 dB
+above 8 m/s (16 kn) and ±5 dB below, and recommends running a ±1 m/s (2 kn)
 spread about the measured wind.
 
 Two handbook cautions carry over. Its forward-loss model treats the interface
@@ -859,17 +897,17 @@ soft bottoms the backscatter is set mostly by σ₂, which is an empirical fit
 that varies an order of magnitude between sites of the same name — the
 handbook's advice is to fit it to any backscatter data you have.
 
-A 20 ms ping at 5 kHz, plotted against two-way travel time with range on the
-top axis. The two boundary terms dominate at the start — 139 dB surface and
-133 dB bottom at 50 m, against 98 dB of volume — but they decay **at three
+A 20 ms ping at 5 kHz, plotted against two-way travel time with slant range
+on the top axis. The two boundary terms dominate at the start — 135 dB surface
+and 128 dB bottom 50 m out (71 m slant), against 95 dB of volume — but they decay **at three
 different rates**, and the rates are not empirical. They fall straight out of
 the cell geometry:
 
 | Component | at 1 km | at 8 km | decay | why |
 |---|--:|--:|--:|---|
-| surface — Chapman–Harris, 25 kn | 81.6 dB | 40.6 dB | −45.5 dB/decade | −30 geometry, −15.5 from `S_s(θ)` |
-| bottom — Lambert, µ = −27 dB | 70.4 dB | 25.3 dB | −50.0 dB/decade | −30 geometry, −20 from `20·log10(sin θ)` |
-| volume — `S_v` = −70 dB re 1/m | 71.7 dB | 53.7 dB | −20.0 dB/decade | −40 spreading, +20 from the `r²` cell |
+| surface — Chapman–Harris, 25 kn | 81.7 dB | 40.6 dB | −45.5 dB/decade | −30 geometry, −15.5 from `S_s(θ)` |
+| bottom — Lambert, µ = −27 dB | 70.5 dB | 25.3 dB | −50.0 dB/decade | −30 geometry, −20 from `20·log10(sin θ)` |
+| volume — `S_v` = −70 dB re 1/m | 71.8 dB | 53.7 dB | −20.0 dB/decade | −40 spreading, +20 from the `r²` cell |
 
 With spherical spreading, `−2·TL` contributes `−40 dB/decade`. The volume cell
 gives `+20` back, leaving `−20`. A boundary cell gives only `+10`, leaving
@@ -886,10 +924,10 @@ ratio **stops improving with range altogether**. Pass `tl_dB=` a modelled TL, as
 [§8](#8-the-active-budget-end-to-end) does, and the rate comes out right without
 your having to know which regime you are in.
 
-So the ordering **inverts with range**. Volume overtakes bottom at 914 m and
-surface at 2.47 km, and by 8 km the grey total is within 0.22 dB of the volume
+So the ordering **inverts with range**. Volume overtakes bottom at 906 m and
+surface at 2.46 km, and by 8 km the grey total is within 0.22 dB of the volume
 term alone: the two boundary components have stopped mattering. Bottom
-reverberation crosses below the `NL − DI` line at 5.13 km (6.85 s) — past that
+reverberation crosses below the `NL − DI` line at 5.13 km (6.84 s) — past that
 it is quieter than the ambient noise and there is no point modelling it.
 
 The practical reading: **boundary reverberation is a near-field problem, volume
@@ -905,7 +943,7 @@ from §6, a reverberation curve from §7, and a `DT` from §5.
 
 ```python
 DT_ACTIVE = sonar.detection_threshold_energy(
-    0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5)      # −2.79 dB
+    0.5, 1e-4, bandwidth_hz=100.0, integration_time_s=0.5)      # −2.05 dB
 ACTIVE_SL, ACTIVE_NL, DIRECTIVITY = 170.0, 60.0, 15.0
 PULSE_S, BEAMWIDTH_RAD, SONAR_HEIGHT = 0.5, 0.3, 75.0
 
@@ -917,28 +955,31 @@ ranges = receiver.ranges
 tl = tl_field.at(depth=60.0).data
 tl_bottom = tl_field.at(depth=99.0).data
 
-ts = sonar.ts_cylinder(2.0, 8.0, 200.0)                         # 9.3 dB
+ts = sonar.ts_cylinder(2.0, 8.0, frequency=200.0)            # 9.3 dB
 el = sonar.echo_level(ACTIVE_SL, tl, ts)
 nl_di = sonar.noise_background(ACTIVE_NL, DIRECTIVITY)          # 45.0 dB
 
 grazing = np.rad2deg(np.arctan2(SONAR_HEIGHT, ranges))
 rl = sonar.boundary_reverberation(
-    ranges, ACTIVE_SL, sonar.lambert_bottom(grazing),
+    np.hypot(ranges, SONAR_HEIGHT), ACTIVE_SL, sonar.lambert_bottom(grazing),
     pulse_length_s=PULSE_S, horizontal_beamwidth_rad=BEAMWIDTH_RAD,
     tl_dB=tl_bottom)
 
 se_noise = sonar.active_signal_excess(
-    ACTIVE_SL, tl, ts, noise_level=ACTIVE_NL,
-    directivity_index=DIRECTIVITY, detection_threshold=DT_ACTIVE)
+    ACTIVE_SL, tl, ts, noise_level_dB=ACTIVE_NL,
+    directivity_index_dB=DIRECTIVITY, detection_threshold_dB=DT_ACTIVE)
 se_both = sonar.active_signal_excess(
-    ACTIVE_SL, tl, ts, noise_level=ACTIVE_NL, directivity_index=DIRECTIVITY,
-    reverberation_level=rl, detection_threshold=DT_ACTIVE)
+    ACTIVE_SL, tl, ts, noise_level_dB=ACTIVE_NL, directivity_index_dB=DIRECTIVITY,
+    reverberation_level_dB=rl, detection_threshold_dB=DT_ACTIVE)
 ```
 
 Note `tl_dB=tl_bottom` on the reverberation call: the scattering patch is on the
 seabed, so its two-way loss is the modelled TL **at the seabed**, not spherical
 spreading and not the TL to the target at 60 m. And the grazing angle falls as
-the range grows, because the sonar sits 75 m above the bottom.
+the range grows, because the sonar sits 75 m above the bottom — which is also
+why the cell is sized on the slant range `np.hypot(ranges, SONAR_HEIGHT)`: the
+TL field's range axis is horizontal, and at 200 m that is 0.29 dB of cell
+([§7](#7-reverberation)).
 
 The `TS` is the weak number here. `ka = 1.7` at 200 Hz on a 2 m radius: above
 `ts_cylinder`'s stated `ka > 1` floor, so it does not warn, but inside the
@@ -950,18 +991,19 @@ the reverberation crossover untouched.
 ![The active sonar equation, term by term](figures/sonar_active_budget.png)
 
 **Top — the echo against its two backgrounds.** `EL` and `RL` are on top of each
-other at 200 m — 92.8 and 93.2 dB — and separate as they go out, because `RL`
+other at 200 m — 92.8 and 93.5 dB — and separate as they go out, because `RL`
 decays faster (§7). `NL − DI` is flat at 45 dB. The shaded band marks where
 reverberation is the louder background: inside 4.19 km. `EL` crosses the noise
-floor at 12.1 km, and detection survives 2.3 km past that, out to 14.4 km,
-because `DT_ACTIVE` is −2.79 dB: the integration gain of §5 is a credit that
+floor at 12.2 km, and detection survives 1.6 km past that, out to 13.8 km,
+because `DT_ACTIVE` is −2.05 dB: the integration gain of §5 is a credit that
 buys margin *below* the noise floor.
 
 **Bottom — what that does to signal excess.** Without reverberation (green), `SE`
-starts at 50.6 dB and falls monotonically. With it (red), `SE` at 200 m is
-48.2 dB lower — **2.3 dB** of margin instead of 51 — and then it *rises* with
-range to a peak of 15.1 dB at 3.6 km before rejoining the noise-limited curve.
-Both curves reach `SE = 0` at **exactly the same 14.44 km**.
+starts at 49.9 dB and falls monotonically. With it (red), `SE` at 200 m is
+48.5 dB lower — **1.4 dB** of margin instead of 50 — and then it *rises* with
+range to a peak of 14.5 dB at 3.5 km before rejoining the noise-limited curve.
+Both curves reach `SE = 0` at **the same 13.8 km**, to within 10 m (13.840 km
+without reverberation, 13.831 km with it).
 
 That is the whole lesson of reverberation-limited operation, and it survives
 inspection of the equations:
@@ -983,7 +1025,7 @@ sonar is noise-limited, `SL` works normally again, and that is where the
 detection range is actually set.
 
 The field-grid counterpart of the same call is `active_signal_excess_field`,
-which takes the whole TL `Field` and accepts `reverberation_level` as either a
+which takes the whole TL `Field` and accepts `reverberation_level_dB` as either a
 scalar or a 1-D per-range array matching the field's `'range'` axis.
 
 ---
@@ -1002,18 +1044,26 @@ surface** is the localisation estimate.
 
 | Call | Gives |
 |---|---|
-| `synthesize_replica(modes, src_depth, ranges, array_depths)` | one replica, `(N, R)` |
-| `replica_bank(modes, array_depths, candidate_depths, candidate_ranges)` | `(N, n_z, n_r)` from Kraken modes |
-| `replica_bank_from_field(field, *, array_depths=None)` | `(N, *grid)` from any coherent `Field`/`ResultStack` |
+| `synthesize_replica(modes, *, source_depth, ranges, array_depths)` | one replica, `(N, R)` |
+| `replica_bank(modes, *, array_depths, candidate_depths, candidate_ranges)` | a one-frequency `Replicas` from Kraken modes: `candidates={'depth', 'range'}`, `replicas` `(1, n_z, n_r, N)` |
+| `replica_bank_from_field(field, *, array_depths=None)` | a one-frequency `Replicas` from any coherent `Field`/`ResultStack` |
 | `csdm(snapshots)` | `(N, N)` from `(N, L)` complex snapshots |
-| `bartlett(K, replicas)` | `P_B = eᴴKe / (eᴴe · tr K)`, normalised to `[0, 1]` |
-| `mvdr(K, replicas, diagonal_loading=1e-2)` | `P_MV = 1 / (eᴴK⁻¹e)`, max scaled to 1 |
+| `bartlett(covariance, replicas)` | `P_B = eᴴKe / (eᴴe · tr K)` (`K` = `covariance`), in `[0, 1]`, as an ambiguity `Field` on the candidates: `kind='ambiguity'` in dB re its peak, `.max()` the estimate, its coordinates in `.pinned` (and its repr), `.reference` the peak `P_B` itself |
+| `mvdr(covariance, replicas, *, diagonal_loading=1e-2)` | `P_MV = 1 / (eᴴK⁻¹e)`, max scaled to 1, as the same kind of Field |
 
 `replica_bank` evaluates the Kraken far-field modal sum directly, so the
 eigenpairs are computed once and every grid point is a cheap analytic re-sum. It
 models a **vertical line array**: every element shares the candidate range. Both
 processors unit-normalise each replica, so the omitted global source scalar
 divides out.
+
+The two processors are `uacpy.acoustic_signal.bartlett` /
+`mvdr` over the replicas' rows, with `normalize='trace'` / `'max'`: call those
+for the linear surface as an array, and
+`uacpy.core.results.ambiguity_field(surface, candidates, *, reference_unit)` to
+turn one into the same Field. The Field keeps the peak power it is relative
+to as `reference` (in `reference_unit`), so
+`field.reference * 10**(field.data / 10)` is the linear surface again.
 
 ### Bartlett vs MVDR, matched and mismatched
 
@@ -1025,7 +1075,9 @@ CAND_RANGES = np.linspace(500.0, 5000.0, 226)
 
 env, source, _ = shallow_water()
 modes = Kraken().compute_modes(env, source)                  # 14 modes
-bank = sonar.replica_bank(modes, ARRAY_DEPTHS, CAND_DEPTHS, CAND_RANGES)
+bank = sonar.replica_bank(modes, array_depths=ARRAY_DEPTHS,
+                          candidate_depths=CAND_DEPTHS,
+                          candidate_ranges=CAND_RANGES)
 
 # The data come from a channel that is really 102 m deep; the bank is built
 # for the 100 m on the chart.
@@ -1056,7 +1108,7 @@ ocean, the replicas from another.
 ![Matched-field ambiguity surfaces](figures/sonar_matched_field.png)
 
 Four surfaces on one −20 dB colour scale — each is
-`plot_matched_field(replica_ranges, replica_depths, surface, …)`, which is in
+`plot_matched_field(surface, …)`, which is in
 dB **re its own peak**, so the bar reads the same on all four — with the true
 source under uacpy's red star and each processor's own peak under a black
 cross.
@@ -1111,8 +1163,9 @@ ray_bank = sonar.replica_bank_from_field(stack, array_depths=ARRAY_DEPTHS)
 The same measured CSDM — synthesised from Kraken modes — processed against two
 independently built banks. **Both localise the source exactly**, (62 m, 3.20 km).
 
-The peak heights differ, and both are informative. The Kraken bank reaches
-**0.92**, which is the ceiling rather than a good score: Bartlett normalises by
+The peak heights differ, and both are informative (each is the surface's
+`reference`, the peak Bartlett power its dB values are relative to). The Kraken
+bank reaches **0.92**, which is the ceiling rather than a good score: Bartlett normalises by
 `tr K`, so at 10 dB SNR on 16 elements a perfectly matched replica tops out
 around `(10 + 1/16)/11 = 0.915`, and the observed 0.92 is that value within
 finite-snapshot scatter. Read it as a sanity check on the wiring — a matched
@@ -1130,8 +1183,9 @@ carrier geometry standing on its head relative to a normal TL run — see
 `replica_bank_from_field` accepts either a single `Field` whose axes are a
 subset of `{source_depth, depth, range}`, or a `ResultStack` over `source_depth`
 — which is exactly what a multi-depth [Bellhop](../models/bellhop.md) run
-returns. `depth` is the array axis and is moved to position 0; the remaining
-axes become the candidate grid, in order. Pass `array_depths=` and the depth
+returns. `depth` is the array axis and becomes the element axis, last; the
+remaining axes become the candidates, in order, with the field's
+`source_depth` named `'depth'`. Pass `array_depths=` and the depth
 axis is checked against it rather than trusted.
 
 Two things it will not do for you. It requires `kind='pressure'` — **coherent**
@@ -1180,27 +1234,23 @@ is tagged rather than derived, because signal excess is neither pressure nor a
 loss — see [results](results.md#2-field--one-container-described-on-three-axes).
 That tag is what keeps `.max()` reporting the *best* cell: transmission loss
 is the one quantity where less is louder, and signal excess must not inherit
-that inversion. `metadata['sonar_budget']` carries the term-by-term budget.
-`probability_of_detection_field` likewise returns
+that inversion. `se.sonar_budget` carries the term-by-term budget
+(`SonarBudget.to_dict()`).
+`transition_probability_field` likewise returns
 `kind='probability_of_detection'`, `unit='1'` — dimensionless, not dB.
 
-**`detection_range` returns `inf` and `nan`, not exceptions.** `np.inf` when
-`SE ≥ 0` at every sampled range, `np.nan` when it is negative everywhere. Guard
-with `np.isfinite` before formatting.
-
-**…but a finite answer can still be the grid edge.** When `SE` recovers positive
-at the far edge without crossing back down, there is nothing to interpolate and
-you get the outermost sampled range back — a plausible finite number that
-`np.isfinite` waves through. **Compare against the last range *with data*, not
-`ranges[-1]`:** the no-data cells are masked out before the far edge is located,
-so on a 20 km grid whose outer three cells are empty the return is `17000.0 m`,
-and testing it against `ranges[-1] = 20000.0` passes a lower bound off as a
-crossing. Catching the `UserWarning` the function raises is the guard that does
-not depend on the outer cells being filled.
-[§3](#3-figure-of-merit-and-detection-range) has both guards, measures one such
-case at 60 km where the answer is 99 km, and covers `detection_range_by_depth`,
-where each depth row masks independently and there is no single edge range to
-compare a whole profile against.
+**`detection_range` returns `inf` and `nan`, not exceptions.** `np.inf`
+whenever `SE ≥ 0` at the last sampled range *with data* — the outermost
+crossing lies beyond the grid, and any finite number there would be the grid's
+own edge, moving with `receiver.ranges` — and `np.nan` when `SE` is negative
+everywhere. Guard with `np.isfinite` before formatting. When `SE` went negative
+inside the grid before recovering at the far edge, the `inf` comes with a
+`NumericsWarning` naming that shadow zone. "The last range with data" is the
+test, not `ranges[-1]`: no-data cells are masked first, so a far-edge recovery
+on a 20 km grid with three trailing no-data cells returns `inf`, and the
+warning quotes `17000 m` as the outermost range the model filled. [§3](#3-figure-of-merit-and-detection-range) measures one such case
+at 60 km where the answer is 99 km, and covers `detection_ranges_by_depth`,
+where each depth row masks its own no-data cells.
 
 **`detection_range` takes the *outermost* crossing.** That is deliberate: a
 convergence zone giving `+, −, +` is genuinely detectable at the far lobe, and
@@ -1215,14 +1265,25 @@ squarely on the shortest path into the package. On the deep-water budget of
 same 60 km field gives **45.9 km** coherent against **31.7 km** incoherent: 45 %
 too far, from one keyword. Pass `run_mode=RunMode.INCOHERENT_TL` whenever the
 answer you want is a detection range rather than an interference pattern.
+`passive_signal_excess_field` and `active_signal_excess_field` warn when handed
+coherent pressure (a complex field with a phase reference); filter the warning
+when the coherent field is what you intend.
 
-**`sigma_dB` has no default.** `probability_of_detection_field` requires it,
+**The `*_field` budgets read `Field.kind`.** The TL argument must be a
+propagation loss (a model run, or `Field.broadband_loss()`): a received
+`'level'` field (already SL − TL), a `'signal_excess'` field (the budget's own
+output) or a `'reverberation'` loss is refused by name, since each is a dB grid
+that would otherwise pass for TL. `transition_probability_field`, and the two
+plotters `plot_signal_excess` / `plot_detection_probability`, likewise take only
+the kind their builder tags.
+
+**`sigma_dB` has no default.** `transition_probability_field` requires it,
 because it is a claim about the channel. 5–9 dB covers most one-way
 measurements; Dyer's saturated-multipath value is 5.6 dB.
 
 **Frequency on the flat TS forms is a checker, not a parameter.**
 `ts_sphere`, `ts_convex` and `ts_ellipsoid` return the same number whatever you
-pass; `frequency_hz` only enables the `ka > 10` warning. Omit it and you lose
+pass; `frequency` only enables the `ka > 10` warning. Omit it and you lose
 the warning, not accuracy. The `a` in that `ka` is a **radius of curvature**,
 which is the radius only for `ts_sphere`: `ts_convex` tests the smaller of the
 two you passed, and `ts_ellipsoid` tests `min(b²/a, c²/a)`, which can sit a
@@ -1280,8 +1341,8 @@ mismatch behaviour visible.
   backscattering model (bubbles, Bragg ripples, facets; Eqs. 1–16), Section IV
   for the seabed forward-loss (Eqs. 29–33) and backscattering (Eqs. 34–66)
   models, Tables 1–3 for their inputs and reference values. Mourad, P. D. &
-  Jackson, D. R., "High frequency sediment acoustic scattering: a model", *Oceans
-  '89*, 1989, and Jackson, Winebrenner & Ishimaru, "Application of the composite
+  Jackson, D. R., "High frequency sonar equation models for bottom backscatter and
+  forward loss", *Oceans '89*, 1168–1175, 1989, and Jackson, Winebrenner & Ishimaru, "Application of the composite
   roughness model to high-frequency bottom backscattering", *JASA* 79, 1410–1422,
   1986 — the basis of the seabed model; McDaniel, S. T., "Sea surface
   reverberation: a review", *JASA* 94, 1905–1922, 1993 — of the surface one.

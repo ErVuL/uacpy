@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 import uacpy
-from uacpy.acoustic_signal.estimate import decidecade_bands
+from uacpy.acoustic_signal.bands import decidecade_bands
 from uacpy.noise import (
     HEARING_GROUPS,
     RNL_UNCERTAINTY_DB,
@@ -70,7 +70,7 @@ def wind_sea_state():
                       label=f'{u:g} kn')
     ax_s.set_xlabel('Frequency [Hz]')
     ax_s.set_ylabel(r'Wind noise [dB re 1 µPa$^2$/Hz]')
-    ax_s.set_title('Wind component vs wind speed', loc='left',
+    ax_s.set_title('Wind component vs wind speed',
                    fontweight='bold', fontsize=11)
     ax_s.grid(which='both', alpha=0.3)
     ax_s.legend(fontsize=8, ncol=2)
@@ -92,7 +92,7 @@ def wind_sea_state():
     ax_u.set_ylim(20.0, 75.0)
     ax_u.set_xlabel('Wind speed [kn]')
     ax_u.set_ylabel(r'Wind noise [dB re 1 µPa$^2$/Hz]')
-    ax_u.set_title('Level vs wind speed, with Beaufort force', loc='left',
+    ax_u.set_title('Level vs wind speed, with Beaufort force',
                    fontweight='bold', fontsize=11)
     ax_u.grid(alpha=0.3)
     ax_u.legend(fontsize=8, loc='lower right')
@@ -116,7 +116,7 @@ def shipping_and_rain():
     ax_s.set_ylim(20.0, 100.0)
     ax_s.set_xlabel('Frequency [Hz]')
     ax_s.set_ylabel(r'Shipping noise [dB re 1 µPa$^2$/Hz]')
-    ax_s.set_title('Shipping — traffic density and water depth', loc='left',
+    ax_s.set_title('Shipping — traffic density and water depth',
                    fontweight='bold', fontsize=11)
     ax_s.grid(which='both', alpha=0.3)
     ax_s.legend(fontsize=8, ncol=2)
@@ -132,7 +132,7 @@ def shipping_and_rain():
     ax_r.set_ylim(20.0, 100.0)
     ax_r.set_xlabel('Frequency [Hz]')
     ax_r.set_ylabel(r'Rain noise [dB re 1 µPa$^2$/Hz]')
-    ax_r.set_title('Rain — rate, against a 15 kn wind', loc='left',
+    ax_r.set_title('Rain — rate, against a 15 kn wind',
                    fontweight='bold', fontsize=11)
     ax_r.grid(which='both', alpha=0.3)
     ax_r.legend(fontsize=8)
@@ -156,7 +156,7 @@ def component_models():
     ax_w.set_ylim(10.0, 80.0)
     ax_w.set_xlabel('Frequency [Hz]')
     ax_w.set_ylabel(r'Wind noise [dB re 1 µPa$^2$/Hz]')
-    ax_w.set_title("WIND_MODELS", loc='left', fontweight='bold', fontsize=11)
+    ax_w.set_title("WIND_MODELS", fontweight='bold', fontsize=11)
     ax_w.grid(which='both', alpha=0.3)
     ax_w.legend(fontsize=8)
 
@@ -172,7 +172,7 @@ def component_models():
     ax_s.set_ylim(10.0, 100.0)
     ax_s.set_xlabel('Frequency [Hz]')
     ax_s.set_ylabel(r'Shipping noise [dB re 1 µPa$^2$/Hz]')
-    ax_s.set_title('SHIPPING_MODELS', loc='left', fontweight='bold',
+    ax_s.set_title('SHIPPING_MODELS', fontweight='bold',
                    fontsize=11)
     ax_s.grid(which='both', alpha=0.3)
     ax_s.legend(fontsize=8)
@@ -214,8 +214,7 @@ def ship_source_level():
     ax_d.set_ylim(-6.0, 25.0)
     ax_d.set_xlabel('Decidecade band centre [Hz]')
     ax_d.set_ylabel(r'$\Delta L = L_s - L_{RN}$ [dB]')
-    ax_d.set_title('Lloyd-mirror correction vs nominal source depth',
-                   loc='left')
+    ax_d.set_title('Lloyd-mirror correction vs nominal source depth')
     ax_d.grid(which='both', alpha=0.3)
     ax_d.legend(fontsize=8)
 
@@ -244,18 +243,18 @@ def weighted_soundscape():
     in_water = ['LF', 'HF', 'VHF', 'SI', 'PCW', 'OCW']
 
     unweighted = 10.0 * np.log10(np.trapezoid(10.0 ** (wenz.total / 10.0), f))
-    weighted = {g: weighted_level(wenz.total, f, g) for g in in_water}
+    weighted = {g: weighted_level(wenz.total, frequency=f, group=g) for g in in_water}
 
     fig, (ax_s, ax_b) = plt.subplots(1, 2, figsize=(11.0, 4.4))
     ax_s.semilogx(f, wenz.total, color='black', linewidth=2.0,
                   label=f'unweighted ({unweighted:.0f} dB)')
     for i, g in enumerate(['LF', 'HF', 'VHF']):
-        ax_s.semilogx(f, apply_weighting(wenz.total, f, g), color=f'C{i}',
+        ax_s.semilogx(f, apply_weighting(wenz.total, frequency=f, group=g), color=f'C{i}',
                       label=f'{g}-weighted ({weighted[g]:.0f} dB)')
     ax_s.set_ylim(0.0, 100.0)
     ax_s.set_xlabel('Frequency [Hz]')
     ax_s.set_ylabel(r'Level density [dB re 1 µPa$^2$/Hz]')
-    ax_s.set_title('Ambient spectrum, weighted', loc='left',
+    ax_s.set_title('Ambient spectrum, weighted',
                    fontweight='bold', fontsize=11)
     ax_s.grid(which='both', alpha=0.3)
     ax_s.legend(fontsize=8)
@@ -271,7 +270,7 @@ def weighted_soundscape():
     ax_b.set_xticks(range(len(in_water)), in_water)
     ax_b.set_ylim(75.0, 102.0)
     ax_b.set_ylabel(r'Broadband level [dB re 1 µPa$^2$]')
-    ax_b.set_title('Same ocean, per hearing group', loc='left',
+    ax_b.set_title('Same ocean, per hearing group',
                    fontweight='bold', fontsize=11)
     ax_b.grid(axis='y', alpha=0.3)
 

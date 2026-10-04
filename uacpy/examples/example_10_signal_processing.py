@@ -6,7 +6,7 @@ seen through a constant-Q transform — log-frequency, resolution scaling with
 frequency, the way hearing does (Brown 1991).
 
 Uses: acoustic_signal.lfm_chirp / hfm_chirp / ricker_wavelet / gaussian_pulse ·
-generate.mseq · constant_q_transform · constant_q_spectrogram ·
+m_sequence · constant_q_transform · constant_q_spectrogram ·
 constant_q · plot_constant_q_transform ·
 plot_constant_q_spectrogram · plot_constant_q_psd
 """
@@ -19,24 +19,22 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal import (constant_q,
-                                   constant_q_spectrogram,
-                                   constant_q_transform)
-from uacpy.acoustic_signal.generate import mseq
-from uacpy.acoustic_signal.generate import (gaussian_pulse, hfm_chirp,
-                                             lfm_chirp, ricker_wavelet)
+from uacpy.acoustic_signal import (constant_q, constant_q_spectrogram,
+                                   constant_q_transform, gaussian_pulse,
+                                   hfm_chirp, lfm_chirp, m_sequence,
+                                   ricker_wavelet)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
 OUT.mkdir(parents=True, exist_ok=True)
 
 fs, duration = 10000, 0.5
-t_lfm, lfm = lfm_chirp(fmin=100, fmax=1000, duration=duration, sample_rate=fs)
-t_hfm, hfm = hfm_chirp(fmin=100, fmax=1000, duration=duration, sample_rate=fs)
-t = np.linspace(0, duration, int(fs * duration))
+t_lfm, lfm = lfm_chirp(freq_start=100, freq_end=1000, duration=duration, sample_rate=fs)
+t_hfm, hfm = hfm_chirp(freq_start=100, freq_end=1000, duration=duration, sample_rate=fs)
+t = np.arange(int(round(fs * duration))) / fs      # the (t, x) builders' step
 ricker = ricker_wavelet(t, frequency=500)
 gaussian = gaussian_pulse(t, delay=duration / 2, duration=0.1)
-sequence = mseq(m=7)                                   # 127 bits
+sequence = m_sequence(7)                               # 127 bits
 print(f"  {t_lfm.size} samples per chirp @ {fs} Hz, "
       f"m-sequence length {sequence.size}")
 
@@ -69,36 +67,36 @@ axes[1, 2].grid(True, alpha=0.3)
 axes[1, 2].set_xlim([0, min(2000, frequencies[-1])])
 
 # Constant-Q: the sweep traces a curve whose resolution scales with frequency.
-cqt = constant_q_spectrogram(lfm, fs, fmin=80, fmax=2000, bins_per_octave=24)
+cqt = constant_q_spectrogram(lfm, fs, freq_min=80, freq_max=2000, bins_per_octave=24,
+                             scaling='spectrum')
 # dB re 1 µPa: the chirp peaks near 116 dB, so a 60 dB window shows the sweep
 # hot while pushing the weak low-frequency constant-Q leakage (long windows at
-# low fmin) to the floor instead of saturating everything above 60 dB.
+# low freq_min) to the floor instead of saturating everything above 60 dB.
 uacpy.plot.plot_constant_q_spectrogram(cqt.frequencies, cqt.times, cqt.power,
-                                       ax=axes[2, 0], show_colorbar=False,
+                                       ax=axes[2, 0], scaling='spectrum',
+                                       show_colorbar=False,
                                        vmin=60, vmax=120)
-axes[2, 0].set_title('', loc='left')       # drop the plotter's own left title
 axes[2, 0].set_title('LFM constant-Q spectrogram', fontweight='bold')
 
-cq_psd = constant_q(lfm, fs, scaling='spectrum', fmin=80, fmax=2000,
+cq_psd = constant_q(lfm, fs, scaling='spectrum', freq_min=80, freq_max=2000,
                              bins_per_octave=24)
 # The same 60 dB window as the spectrogram: the in-band bins peak near 107 dB.
 uacpy.plot.plot_constant_q_psd(cq_psd.frequencies, cq_psd.power,
-                               ax=axes[2, 1], ymin=60, ymax=120)
-axes[2, 1].set_title('', loc='left')
-axes[2, 1].set_title('LFM constant-Q band power', fontweight='bold')
+                               ax=axes[2, 1], ymin=60, ymax=120,
+                               title='LFM constant-Q band power')
+axes[2, 1].title.set_fontweight('bold')          # as the other eight panels
 
 # The raw transform the two panels above are built from: one frame, centred on
 # the record, complex coefficients on the same geometric bin grid. The frame
 # centre is mid-sweep, where a linear chirp is at the mean of its limits, and
 # that is the bin the magnitude peaks in.
 f_mid = 0.5 * (100 + 1000)
-cqt = constant_q_transform(lfm, fs, fmin=80, fmax=2000, bins_per_octave=24)
+cqt = constant_q_transform(lfm, fs, freq_min=80, freq_max=2000, bins_per_octave=24)
 magnitude = np.abs(cqt.coefficients)
 uacpy.plot.plot_constant_q_transform(cqt.frequencies, cqt.coefficients,
                                      ax=axes[2, 2], lw=1.3)
 axes[2, 2].axvline(f_mid, color='crimson', ls='--', lw=1.1,
                    label=f'{f_mid:.0f} Hz at the frame centre')
-axes[2, 2].set_title('', loc='left')
 axes[2, 2].set_title('LFM constant-Q frame (raw |X|)', fontweight='bold')
 axes[2, 2].legend(loc='upper left', fontsize='small')
 print(f"  raw constant-Q frame peaks at "

@@ -10,7 +10,7 @@ shallow-range columns place receivers inside the sub-bottom and come back NaN.
 Every number below is NaN-aware and says how much of the grid is water.
 
 Uses: Bottom.from_halfspaces (range-dependent seabed) · a bathymetry array ·
-env.is_range_dependent flags · RAM(accuracy=) · plot_field(contours=) ·
+env.is_range_dependent flags · RAM · plot_field(contours=) ·
 compare_models · plot.plot_field_difference
 """
 
@@ -30,7 +30,8 @@ OUT.mkdir(parents=True, exist_ok=True)
 # Warm stratified water: 20 °C at the surface, ~8 °C deep, through Medwin's
 # simplified c(T, z) — lead constant rounded from 1449.2 and the salinity term
 # dropped at its S = 35 PSU reference value (Stergiopoulos, Advanced Signal
-# Processing Handbook, Table 10.1).
+# Processing Handbook, Table 10.1). For a calibrated seawater equation use
+# SoundSpeedProfile.from_temperature_salinity(depths, temperature, salinity).
 depths = np.array([0., 25, 50, 75, 100, 120, 150])
 temperature = 8 + 12 * np.exp(-depths / 50)
 sound_speed = (1449 + 4.6 * temperature - 0.055 * temperature ** 2
@@ -54,18 +55,17 @@ env = uacpy.Environment(
     bottom=bottom,
 )
 print(f"  range-dependent: {env.is_range_dependent} "
-      f"(ssp {env.has_range_dependent_ssp}, "
-      f"bottom {env.has_range_dependent_bottom})")
+      f"(ssp {env.ssp.is_range_dependent}, "
+      f"bottom {env.bottom.is_range_dependent})")
 
 source = uacpy.Source(depths=50.0, frequencies=100.0)
+# Ranges start at 700 m: closer in, the deepest receivers see direct and
+# surface-reflected paths steeper than Kraken's mode window keeps (17.8°).
 receiver = uacpy.Receiver(depths=np.linspace(5, 145, 30),
-                          ranges=np.linspace(100, 3000, 30))
+                          ranges=np.linspace(700, 3000, 24))
 
-# accuracy is the Lytaev optimiser's per-run Padé error budget; 1e-1 is 100×
-# looser than the default, so it picks a coarser dr/dz and the example runs
-# quickly. Leave it at the default for production work.
-fields = {'RAM': uacpy.RAM(accuracy=1e-1).run(env, source, receiver),
-          'Bellhop': uacpy.Bellhop().run(env, source, receiver),
+fields = {'RAM': uacpy.RAM().run(env, source, receiver),
+          'Bellhop': uacpy.Bellhop(backend='fortran').run(env, source, receiver),
           'Kraken': uacpy.Kraken().run(env, source, receiver)}
 
 for name, field in fields.items():
@@ -91,13 +91,13 @@ fig, _ = env.plot()
 fig.savefig(OUT / 'example_05_environment.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, ax = uacpy.plot_field(fields['RAM'], env=env, contours=[70, 85, 100],
+fig, ax = uacpy.plot.plot_field(fields['RAM'], env=env, contours=[70, 85, 100],
                            vmin=40, vmax=100,
                            title='RAM — sediment transition, sloping shelf')
 fig.savefig(OUT / 'example_05_result.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, _ = uacpy.compare_models(
+fig, _ = uacpy.plot.compare_models(
     fields, env=env, vmin=40, vmax=100,
     title='Three models — sediment transition + sloping shelf')
 fig.savefig(OUT / 'example_05_comparison.png', dpi=150)

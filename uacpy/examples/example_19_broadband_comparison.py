@@ -18,15 +18,17 @@ Three things make the comparison fair:
   dispersive, so slower modal group velocities arrive after the first arrival
   and build a real coda that df has to resolve. The RAM backends size their
   grid from (Q, T) and the rest from the frequencies array; both land here.
-* SPARC is the stated exception: it accepts only vacuum/rigid boundaries, so
-  uacpy converts the half-space to rigid and warns. Its trace shows the
-  time-marching method, not the same physics.
+* SPARC is the stated exception: it accepts only vacuum/rigid boundaries and
+  refuses the half-space, so it runs over the same water with a rigid floor
+  chosen explicitly. Its trace shows the time-marching method, not the same
+  physics.
 
-Two things in the figures are worth reading carefully. Bellhop's |H| sits about
-2.7 dB under the six full-wave models: this 100 m guide is only D/λ = 3-10
-wavelengths deep over 50-150 Hz, far outside the D/λ ≳ 100 that ray theory
-wants, and the gap closes to 0.1 dB by D/λ = 67 and 0.0 dB by D/λ = 200
-(measured). The phase panel removes the bulk travel time with
+Two things in the figures are worth reading carefully. Bellhop's |H|, with its
+default hat beams, sits 0.3 dB from Scooter's on average although this 100 m
+guide is only D/λ = 3-10 wavelengths deep over 50-150 Hz; with
+beam_type='B' it sits 3.3 dB under, because a Gaussian beam's width is
+floored at πλ, a sizeable part of so shallow a duct (measured at the 12
+receiver depths, 5 km). The phase panel removes the bulk travel time with
 Field.remove_delay before plotting, because the raw phase of a 3.3 s delay is
 aliased on any grid this coarse — see the comment at that panel.
 
@@ -39,20 +41,21 @@ OASP needs OASES (./install.sh --oases yes); without it the example runs
 the other models and says so.
 
 Uses: RunMode.BROADBAND across six models · RunMode.TIME_SERIES (SPARC native,
-Bellhop delay-and-sum with source_waveform=) · RAM(Q=, T=, backend=) ·
+Bellhop delay-and-sum with source_waveform=) · RAM(q_factor=, record_duration=, backend=) ·
 Field.to_time_trace · Field.at(frequency=) · Field.remove_delay(sound_speed=) ·
-plot.compare(value='mag'/'phase')
+plot.compare(value='magnitude'/'phase')
 """
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal.generate import lfm_chirp
+from uacpy.acoustic_signal import lfm_chirp
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -73,12 +76,12 @@ print(f"  {env.depth:.0f} m Pekeris, source {source.depths[0]:.0f} m, "
       f"{frequencies[0]:.0f}-{frequencies[-1]:.0f} Hz at "
       f"df={frequencies[1] - frequencies[0]:.0f} Hz")
 
-# Six transfer-function models on the shared grid.
+# Three transfer-function models on the shared grid.
 fields = {
     name: model.run(env, source, receiver,
                     run_mode=uacpy.RunMode.BROADBAND, frequencies=frequencies)
     for name, model in (
-        ('Bellhop', uacpy.Bellhop()),
+        ('Bellhop', uacpy.Bellhop(backend='fortran')),
         ('Scooter', uacpy.Scooter()),
         ('Kraken', uacpy.Kraken()),
     )
@@ -86,12 +89,21 @@ fields = {
 # OASP rebuilds an equispaced grid of its own, so its sweep bounds go on the
 # constructor. It needs the OASES binaries; without them the comparison runs
 # on the other models.
+# OASP says which ladder it returned; that notice is printed, any other
+# warning is shown as usual.
 try:
-    fields['OASP'] = uacpy.OASP(
-        n_time_samples=512, freq_max=float(frequencies[-1]),
-        freq_min=float(frequencies[0])).run(
-        env, source, receiver, run_mode=uacpy.RunMode.BROADBAND,
-        frequencies=frequencies)
+    with warnings.catch_warnings(record=True) as caught:
+        fields['OASP'] = uacpy.OASP(
+            n_time_samples=512, freq_max=float(frequencies[-1]),
+            freq_min=float(frequencies[0])).run(
+            env, source, receiver, run_mode=uacpy.RunMode.BROADBAND,
+            frequencies=frequencies)
+    for warning in caught:
+        if 'FFT ladder' in str(warning.message):
+            print(f"  noted: {str(warning.message).split('. OASP is')[0]}")
+        else:
+            warnings.showwarning(warning.message, warning.category,
+                                 warning.filename, warning.lineno)
 except uacpy.ExecutableNotFoundError:
     print("  OASP skipped: OASES executable not found (./install.sh --oases yes)")
 
@@ -99,7 +111,7 @@ except uacpy.ExecutableNotFoundError:
 # mpiramS; the same fluid Pekeris carrying a flat z=0 altimetry line →
 # ramsurf1.5 (the altimetry only selects the code path); backend='ramgeo'
 # forces the third. Only the broadband window (Q, T) is supplied — dr and dz
-# come from the Lytaev optimizer. Q=2, T=1 gives fc ± 50 Hz at df = 1 Hz, the
+# come from the Lytaev optimizer. q_factor=2, record_duration=1 give fc ± 50 Hz at df = 1 Hz, the
 # same grid as the frequencies array above.
 flat_env = env
 altimetry_env = uacpy.Environment(name='Pekeris-fluid-altimetry',
@@ -110,7 +122,7 @@ for label, ram_env, kwargs in (
         ('RAM (mpiramS)', flat_env, {}),
         ('RAM (ramgeo)', flat_env, {'backend': 'ramgeo'}),
         ('RAM (ramsurf1.5)', altimetry_env, {})):
-    model = uacpy.RAM(Q=2.0, T=1.0, **kwargs)
+    model = uacpy.RAM(q_factor=2.0, record_duration=1.0, **kwargs)
     print(f"  {label:18s} → backend {model.select_backend(ram_env)}")
     fields[label] = model.run(ram_env, source, receiver,
                               run_mode=uacpy.RunMode.BROADBAND)
@@ -119,21 +131,25 @@ for name, field in fields.items():
     print(f"  {name:18s} H{field.data.shape} over "
           f"{field.frequencies[0]:.0f}-{field.frequencies[-1]:.0f} Hz")
 
-# SPARC marches time directly. n_t_out sets the output rate, n_t_out / t_max:
+# SPARC marches time directly. n_time_samples sets the output rate, n_time_samples / time_max:
 # 4800 over 4 s is 1200 Hz (Nyquist 600 Hz), above the 200 Hz top of the source
 # band. 1001 would give 250 Hz and alias p(t).
 sparc_receiver = uacpy.Receiver(depths=np.array([50.0]),
                                 ranges=np.linspace(500, 5000, 5))
-sparc = uacpy.SPARC(n_t_out=4800, t_max=4.0, f_min=50.0, f_max=200.0).run(
-    env, source, sparc_receiver, run_mode=uacpy.RunMode.TIME_SERIES)
+rigid_floor_env = uacpy.Environment(
+    name='Pekeris water, rigid floor (SPARC)', bathymetry=100, ssp=1500,
+    bottom=uacpy.BoundaryProperties(acoustic_type='rigid'))
+sparc = uacpy.SPARC(n_time_samples=4800, time_max=4.0, freq_min=50.0, freq_max=200.0).run(
+    rigid_floor_env, source, sparc_receiver,
+    run_mode=uacpy.RunMode.TIME_SERIES)
 print(f"  SPARC              p{sparc.data.shape}, dt={sparc.dt * 1e3:.3f} ms "
       f"(rigid bottom — see the module docstring)")
 
 # Bellhop's other time-domain route: delay-and-sum of its arrivals against a
 # real source waveform.
 fs, chirp_duration = 2000.0, 0.1
-t_chirp, chirp = lfm_chirp(50.0, 150.0, chirp_duration, fs)
-chirp_response = uacpy.Bellhop().run(
+t_chirp, chirp = lfm_chirp(50.0, 150.0, chirp_duration, sample_rate=fs)
+chirp_response = uacpy.Bellhop(backend='fortran').run(
     env, source,
     uacpy.Receiver(depths=np.array([TARGET_DEPTH]),
                    ranges=np.array([TARGET_RANGE])),
@@ -146,7 +162,7 @@ mid_depth = float(receiver.depths[receiver.depths.size // 2])
 spectra = [f.at(depth=mid_depth, range=TARGET_RANGE) for f in fields.values()]
 fig, (ax_mag, ax_phase) = plt.subplots(2, 1, figsize=(11, 8), sharex=True,
                                        gridspec_kw={'hspace': 0.25})
-uacpy.plot.compare(spectra, labels=list(fields), value='mag', ax=ax_mag,
+uacpy.plot.compare(spectra, labels=list(fields), value='magnitude', ax=ax_mag,
                    title='Magnitude |H(f)|')
 # The RAW phase cannot be read on this grid, for any model. The bulk travel
 # time is r/c0 = 3.3 s, and a phase sampled every df Hz is unambiguous only for

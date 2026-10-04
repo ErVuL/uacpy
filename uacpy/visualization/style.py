@@ -11,7 +11,6 @@ DB_VIEW_COLORMAPS = {
     # so LOW TL (loud, near) is red and HIGH TL (quiet, far) is blue —
     # measured, jet_r(0.0) = (0.5, 0, 0) and jet_r(1.0) = (0, 0, 0.5).
     'pressure': 'jet_r',
-                               # Matches Acoustic Toolbox standard: flipud(jet)
     'reverberation': 'jet_r',
     'signal_excess': 'RdBu_r',  # diverging: the SE = 0 dB detection boundary is the midpoint
     'difference': 'RdBu_r',     # diverging: zero difference is the midpoint
@@ -21,7 +20,8 @@ DB_VIEW_COLORMAPS = {
     'ambiguity': 'turbo',
 }
 
-# Every linear view (magnitude, real, imaginary part) of a SIGNED quantity.
+# The signed linear views (real, imaginary part) of any quantity. The
+# unsigned modulus takes its dB view's ordered map instead (plots/fields.py).
 LINEAR_VIEW_COLORMAP = 'seismic'
 
 # A probability is bounded [0, 1] and unsigned, so the signed diverging map
@@ -139,7 +139,7 @@ def reversed_cmap(name: str) -> str:
     """The mirror of a named colormap — ``'jet_r'`` <-> ``'jet'``.
 
     A dB view carrying a LEVEL runs the opposite way to one carrying a LOSS:
-    ``mag_dB`` is ``-field.dB``, the same water with the sign flipped. It
+    ``level`` is ``-field.dB``, the same water with the sign flipped. It
     therefore needs the same colours in the opposite order, or the loud end
     of one view is painted the colour the other reserves for silence.
     """
@@ -154,8 +154,8 @@ def cmap_for_field(kind: str, *, dB: bool) -> str:
     kind : str
         The field's ``kind`` — what quantity it carries.
     dB : bool
-        Whether the dB view is being rendered. Every linear view shares one
-        signed colormap regardless of quantity, so only the dB view varies:
+        Whether the dB view is being rendered. The signed linear views share
+        one colormap regardless of quantity, so only the dB view varies:
         transmission loss wants the Acoustic-Toolbox reversed jet, signal
         excess a diverging map centred on its detection boundary.
 

@@ -1,19 +1,14 @@
 """
-Readers for Kraken normal-mode files (binary ``.mod``, ASCII ``.moa``).
+Reader for Kraken normal-mode files (binary ``.mod``, ASCII ``.moa``).
 
-* ``read_modes`` — read a ``.mod`` and attach the halfspace parameters.
-* ``read_modes_bin`` — binary ``.mod``.
-* ``read_modes_asc`` — ASCII ``.moa``.
-* ``get_component`` — one component of the stress-displacement vector of an
-  elastic-medium mode set.
-
-The binary direct-access ``.mod`` is the only mode format any
-Acoustics-Toolbox program *writes*, so :func:`read_modes` takes ``.mod``
-only and a non-``.mod`` path raises
-:class:`~uacpy.core.exceptions.FileFormatError`. :func:`read_modes_asc` is
-the reader for an ASCII ``.moa`` produced elsewhere — the AT Matlab tools or
-another OALIB-family code — and is called directly, not through
-:func:`read_modes`.
+:func:`read_modes` is the one public reader: it takes either format and
+returns the :class:`~uacpy.core.results.Modes` carrier ``Kraken`` itself
+returns. The file-layout parsers behind it (``_read_modes_payload`` for the
+binary direct-access ``.mod`` — the only mode format any Acoustics-Toolbox
+program writes — and ``_read_modes_asc_payload`` for an ASCII ``.moa`` from
+the AT Matlab tools) return the raw OALIB-shaped dicts, and
+``_get_component`` pulls one stress-displacement component out of an elastic
+block, which ``read_modes(component=)`` exposes.
 """
 
 import os
@@ -23,12 +18,32 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 
 from uacpy.core.acoustics import pekeris_root
+from uacpy.core.results import MediaTable, Modes
 from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
 from uacpy.io._fortran_helpers import (
-    detect_endian, list_directed_int, require_model_output, typed_format_error,
+    DirectAccessFile, list_directed_int, read_list_directed_values,
+    require_model_output, typed_format_error,
 )
+
+
+def _frequency_index(freq_vec, frequency, filename) -> int:
+    """Index of the ``freqVec`` entry ``frequency`` names (the closest one).
+
+    ``None`` names the only frequency of a single-frequency file; on a
+    multi-frequency file it raises rather than silently take the first.
+    """
+    freq_vec = np.atleast_1d(np.asarray(freq_vec, dtype=float))
+    if frequency is None:
+        if freq_vec.size > 1:
+            raise ConfigurationError(
+                f"{filename}: the mode file holds {freq_vec.size} "
+                f"frequencies ({', '.join(f'{f:g}' for f in freq_vec)} Hz); "
+                f"say which one to read.",
+                remediation="Pass frequency= (the closest entry is taken).")
+        return 0
+    return int(np.argmin(np.abs(freq_vec - float(frequency))))
 
 
 def _fortran_div(numerator: int, denominator: int) -> int:
@@ -51,7 +66,7 @@ def _fortran_div(numerator: int, denominator: int) -> int:
 _ELASTIC_COMPONENTS = ('H', 'V', 'T', 'N')
 
 
-def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
+def _get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
     """
     Extract one component of the stress-displacement vector from a Kraken
     mode set.
@@ -67,7 +82,7 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
     Parameters
     ----------
     modes_dict : dict
-        A mode set as :func:`read_modes_bin` returns it. Uses:
+        A mode set as :func:`_read_modes_payload` returns it. Uses:
 
         - ``'phi'`` : ndarray ``(nrows, nmodes)`` — the stacked rows.
         - ``'z'`` : ndarray — the depth axis.
@@ -115,7 +130,7 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
     >>> import numpy as np
     >>> modes = {'phi': np.arange(12.0).reshape(6, 2), 'z': np.zeros(6),
     ...          'Nmedia': 1, 'Mater': ['ACOUSTIC']}
-    >>> get_component(modes, 'N').shape
+    >>> _get_component(modes, 'N').shape
     (6, 2)
 
     An elastic medium stacks four rows per depth; ``'V'`` takes the second
@@ -123,12 +138,12 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
 
     >>> modes = {'phi': np.arange(8.0).reshape(8, 1), 'z': np.zeros(2),
     ...          'Nmedia': 1, 'Mater': ['ELASTIC']}
-    >>> get_component(modes, 'V').ravel()
+    >>> _get_component(modes, 'V').ravel()
     array([1., 5.])
     """
     if comp not in _ELASTIC_COMPONENTS:
         raise ConfigurationError(
-            f"get_component(comp={comp!r}) is not a component of the "
+            f"read_modes(component={comp!r}) is not a component of the "
             f"stress-displacement vector.",
             remediation="Use 'H' (horizontal displacement), 'V' (vertical "
                         "displacement), 'T' (tangential stress) or 'N' "
@@ -168,19 +183,19 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
                 k += 4
             else:
                 raise ConfigurationError(
-                    f"get_component: medium {medium + 1} has material "
+                    f"read_modes: medium {medium + 1} has material "
                     f"{material!r}; a Kraken mode file describes each medium "
                     f"as 'ACOUSTIC' or 'ELASTIC' "
                     f"(Kraken/kraken.f90 writes the 8-character name).",
                     remediation="Check the mode file was read by "
-                                "read_modes_bin; a hand-built dict must use "
+                                "_read_modes_payload; a hand-built dict must use "
                                 "one of those two names.",
                 )
             jj += 1
 
     if not rows:
         raise FileFormatError(
-            "get_component: the modes set contains no readable modes (M=0) — "
+            "_get_component: the modes set contains no readable modes (M=0) — "
             "nothing to extract. The waveguide is likely below modal cutoff "
             "at this frequency; check the .mod record before requesting a "
             "component."
@@ -189,13 +204,13 @@ def get_component(modes_dict: Dict[str, Any], comp: str) -> np.ndarray:
 
 
 @typed_format_error
-def read_modes_asc(
+def _read_modes_asc_payload(
     filename: Union[str, Path],
     modes: Optional[Union[int, list, np.ndarray]] = None,
 ) -> Dict[str, Any]:
     """
     Read a KRAKEN ASCII mode file (``.moa``) — the text sibling of the
-    binary ``.mod`` :func:`read_modes_bin` parses.
+    binary ``.mod`` :func:`_read_modes_payload` parses.
 
     Parameters
     ----------
@@ -205,7 +220,7 @@ def read_modes_asc(
         Mode indices to keep, **1-indexed** (the Fortran/MATLAB
         convention). An int selects that one mode; ``None`` (default) keeps
         all of them. Indices outside ``1..M`` are dropped rather than
-        raising, matching ``read_modes_asc.m:41-43``.
+        raising, matching ``read_modes_asc.m:44-46``.
 
     Returns
     -------
@@ -217,7 +232,7 @@ def read_modes_asc(
         - ``'Nmedia'``, ``'ntot'``, ``'nmat'`` : int — medium count, total
           depth points, total matrix rows.
         - ``'M'`` : int — the number of modes **returned**, i.e.
-          ``len(k)``, the same meaning ``read_modes_bin`` gives it.
+          ``len(k)``, the same meaning ``_read_modes_payload`` gives it.
         - ``'z'`` : ndarray ``(ntot,)`` — depths in metres.
         - ``'k'`` : complex ndarray ``(M,)`` — horizontal wavenumbers in
           rad/m; the imaginary part is the attenuation.
@@ -261,13 +276,13 @@ def read_modes_asc(
 
     See Also
     --------
-    read_modes_bin : The binary ``.mod`` reader.
-    get_component : Pull one component out of an elastic mode set.
+    _read_modes_payload : The binary ``.mod`` reader.
+    _get_component : Pull one component out of an elastic mode set.
     """
     filename = Path(filename)
     if not filename.exists():
         raise FileFormatError(
-            f"read_modes_asc: mode file not found: {filename}.",
+            f"read_modes: mode file not found: {filename}.",
             remediation="Check the path; the ASCII .moa is written by the "
                         "AT Matlab tools, not by the shipped solvers.",
         )
@@ -276,22 +291,13 @@ def read_modes_asc(
         # Each numeric record below is a token stream that may span lines,
         # mirroring the reference reader's ``fscanf( fid, '%f', N )``: a
         # Fortran runtime may wrap a long record and this must not care.
+        # The shared list-directed reader: repeat counts (``2*0.0``),
+        # E-less three-digit exponents and ``D`` exponents all parse, and
+        # the surplus tokens of the final line are the record's padding.
         def _read_floats(n: int, what: str) -> np.ndarray:
-            values: list = []
-            while len(values) < n:
-                line = fid.readline()
-                if line == '':
-                    raise FileFormatError(
-                        f"read_modes_asc: {filename} ended while reading "
-                        f"{what} — expected {n} values, found {len(values)}.",
-                        remediation="The file is truncated; verify it was "
-                                    "written completely.",
-                    )
-                values.extend(float(tok) for tok in line.split())
-            # A list-directed WRITE ends each record with a newline, so the
-            # surplus tokens of the final line belong to this record's
-            # padding, not to the next one.
-            return np.array(values[:n], dtype=float)
+            return np.asarray(
+                read_list_directed_values(fid, n, what, filename),
+                dtype=float)
 
         def _read_complex(n: int, what: str) -> np.ndarray:
             """``fscanf( fid, '%f', [ 2, n ] )``: interleaved (Re, Im)."""
@@ -309,7 +315,7 @@ def read_modes_asc(
 
         if ntot <= 0 or n_media <= 0:
             raise FileFormatError(
-                f"read_modes_asc: {filename} declares Nmedia={n_media}, "
+                f"read_modes: {filename} declares Nmedia={n_media}, "
                 f"ntot={ntot}; both must be positive.",
                 remediation="Check the 'freq Nmedia ntot nmat M' record — a "
                             "misaligned file reads the wrong line as it.",
@@ -352,7 +358,7 @@ def read_modes_asc(
         "Nmedia": n_media,
         "ntot": ntot,
         "nmat": nmat,
-        # len(k), the same meaning read_modes_bin gives M.
+        # len(k), the same meaning _read_modes_payload gives M.
         "M": len(k_selected),
         "z": z,
         "k": k_selected,
@@ -360,10 +366,163 @@ def read_modes_asc(
     }
 
 
+class _ModFile(DirectAccessFile):
+    """A KRAKEN ``.mod`` file open for reading.
+
+    Per profile (``KrakenField/ReadModes.f90:19-25``): five header records,
+    then one block per frequency — a mode-count record, a halfspace record,
+    ``M`` eigenfunction records and the eigenvalues folded across
+    ``1 + (2M-1)/LRecordLength`` records (``Kraken/kraken.f90:106-117``).
+    ``LRecordLength`` is :attr:`record_words`, a count of 4-byte words.
+    """
+
+    def __init__(self, fid, filename: str):
+        head = fid.read(4)
+        fid.seek(0)
+        if len(head) < 4:
+            raise FileFormatError(
+                f"Invalid mode file (truncated header): {filename}.")
+        super().__init__(
+            fid, source=f'_read_modes_payload:{os.path.basename(filename)}')
+        self.filename = filename
+        # LRecordLength is a count of 4-byte `longwords' and each eigenvalue
+        # record holds LRecordLength/2 complex values (kraken.f90:587,110), so
+        # anything below 2 cannot carry a single eigenvalue.
+        if self.record_words < 2:
+            raise FileFormatError(
+                f"Invalid mode file: record length LRecordLength="
+                f"{self.record_words} words (must be a positive word-count "
+                f"of at least 2): {filename}."
+            )
+
+    def n_wavenumber_records(self, M: int) -> int:
+        """Eigenvalue records for ``M`` modes (kraken.f90:109)."""
+        return 1 + _fortran_div(2 * M - 1, self.record_words)
+
+    def next_block(self, rec: int, M: int) -> int:
+        """The mode-count record of the frequency block after the one at
+        ``rec`` holding ``M`` modes (kraken.f90:117)."""
+        return rec + 3 + M + _fortran_div(2 * M - 1, self.record_words)
+
+    def block_end(self, rec: int, M: int) -> int:
+        """One past the last record this reader touches for the frequency
+        block whose mode-count record is ``rec``.
+
+        ``kraken.f90:106-113`` writes the count, the halfspace record,
+        ``M`` eigenfunction records and the folded eigenvalue records.
+        A zero-mode run never reaches that writer: ``kraken.f90:958-961``
+        writes the profile header, puts ``M`` at ``iRecProfile + 6`` and
+        calls ERROUT, which STOPs (``misc/FatalError.f90:30``). This
+        reader reads the halfspace slot before it tests ``M``, so
+        ``rec + 2`` still bounds what it touches.
+        """
+        if M == 0:
+            return rec + 2
+        return rec + 2 + M + self.n_wavenumber_records(M)
+
+    def profile_header(self, hdr: int) -> Dict[str, Any]:
+        """The five descriptive records of the profile at record ``hdr``
+        (kraken.f90:593-599, ReadModes.f90:20)."""
+        lrecl, file_size = self.record_bytes, self.file_size
+        if (hdr + 5) * lrecl > file_size:
+            raise FileFormatError(
+                f"Invalid mode file {self.filename}: profile header at record "
+                f"{hdr} needs {(hdr + 5) * lrecl} bytes but the file is "
+                f"{file_size} bytes."
+            )
+        self.seek(hdr, offset=4)       # past this profile's LRecordLength
+        title = self.text(80).strip()
+        Nfreq, Nmedia, Ntot, NMat = (
+            int(v) for v in self.values(self.i4, 4)
+        )
+
+        # File-size-aware sanity bound on the header counts before any
+        # array is sized off them. A corrupt/hostile header (e.g.
+        # NMat=0x7fffffff) would otherwise drive a multi-GB np.zeros below.
+        # The smallest a single sample can occupy on disk is 4 bytes
+        # (float32 / int32), so no count of 4-byte items can exceed the
+        # remaining file size; use that as a generous upper bound.
+        max_items = file_size // 4
+        for _name, _val in (("Nfreq", Nfreq), ("Nmedia", Nmedia),
+                            ("Ntot", Ntot), ("NMat", NMat)):
+            if _val < 0 or _val > max_items:
+                raise FileFormatError(
+                    f"Invalid mode file: header count {_name}={_val} is "
+                    f"implausible for a {file_size}-byte file "
+                    f"(max {max_items} 4-byte items)."
+                )
+        if Nfreq < 1:
+            raise FileFormatError(
+                f"Invalid mode file: Nfreq={Nfreq} (need at least one "
+                f"frequency block): {self.filename}."
+            )
+
+        # Records hdr+1..hdr+4 (kraken.f90:594-598, read back at
+        # ReadModes.f90:185-188). The first two are implied-DO pair lists
+        # over the media, so the two quantities interleave: int32 N with
+        # CHARACTER*8 Material, then REAL*4 depth with REAL*4 rho — hence
+        # the (2, Nmedia) Fortran-order reshape. freqVec is REAL(KIND=8)
+        # (SourceReceiverPositions.f90:14) while zTab is a default REAL
+        # and depth/rho are written through REAL(), so those are f4.
+        self.seek(hdr + 1)
+        N = []
+        Mater = []
+        for _ in range(Nmedia):
+            N.append(self.integer())
+            Mater.append(self.text(8).strip())
+        bulk = self.vector(hdr + 2, self.f4, 2 * Nmedia).reshape(
+            (2, Nmedia), order="F"
+        )
+        freqVec = self.vector(hdr + 3, self.f8, Nfreq)
+        z = self.vector(hdr + 4, self.f4, Ntot)
+        return {
+            "title": title, "Nfreq": Nfreq, "Nmedia": Nmedia,
+            "Ntot": Ntot, "NMat": NMat, "N": N, "Mater": Mater,
+            "depth": bulk[0, :], "rho": bulk[1, :],
+            "freqVec": freqVec, "z": z,
+        }
+
+    def mode_count(self, rec: int) -> int:
+        """Read ``M`` from record ``rec`` and bound it against the file.
+
+        ``M`` is a plain header word (kraken.f90:106) that sizes every
+        allocation below, so it gets the same file-size bound as the
+        record-0 counts.
+        """
+        lrecl, file_size = self.record_bytes, self.file_size
+        if (rec + 1) * lrecl > file_size:
+            raise FileFormatError(
+                f"Invalid mode file {self.filename}: mode-count record {rec} "
+                f"starts past the end of a {file_size}-byte file."
+            )
+        self.seek(rec)
+        M = self.integer()
+        if M < 0 or self.block_end(rec, M) * lrecl > file_size:
+            raise FileFormatError(
+                f"Invalid mode file {self.filename}: mode count M={M} at "
+                f"record {rec} needs {self.block_end(rec, M) * lrecl} bytes "
+                f"but the file is {file_size} bytes."
+            )
+        return M
+
+    def halfspace(self) -> Dict[str, Any]:
+        """One halfspace description from the current position: the
+        boundary-condition letter, ``cp``, ``cs``, ``rho`` and ``depth``
+        (kraken.f90:603, read_modes_bin.m:132-141)."""
+        side = {"BC": chr(self.values(np.uint8, 1)[0])}
+        cp_data = self.values(self.f4, 2)
+        side["cp"] = complex(cp_data[0], cp_data[1])
+        cs_data = self.values(self.f4, 2)
+        side["cs"] = complex(cs_data[0], cs_data[1])
+        side["rho"] = self.values(self.f4, 1)[0]
+        side["depth"] = self.values(self.f4, 1)[0]
+        return side
+
+
 @typed_format_error
-def read_modes_bin(
-    filename: str,
-    frequency: float = 0.0,
+def _read_modes_payload(
+    filename: Union[str, Path],
+    frequency: Optional[float] = None,
     modes: Optional[Union[int, list, np.ndarray]] = None,
     profile: int = 1,
 ) -> Dict[str, Any]:
@@ -381,9 +540,11 @@ def read_modes_bin(
         (this is the extension that Kraken actually emit per
         ``Kraken/kraken.f90`` — ``OPEN(FILE=TRIM(FileRoot)//'.mod', ...)``).
     frequency : float, optional
-        Frequency in Hz for which to read modes. For broadband runs,
-        selects the closest frequency. Use frequency=0 if only one frequency.
-        Default is 0.0.
+        Frequency in Hz for which to read modes; the closest entry of the
+        file's ``freqVec`` is selected. ``None`` (default) reads the only
+        frequency of a single-frequency file and raises
+        :class:`~uacpy.core.exceptions.ConfigurationError` naming the
+        frequencies of a multi-frequency one, rather than pick one.
     modes : int, list, or ndarray, optional
         Mode indices to read (1-indexed). If None, reads all modes.
         Can be:
@@ -408,6 +569,7 @@ def read_modes_bin(
         - 'depth' : ndarray - Depths of interfaces
         - 'rho' : ndarray - Densities in each medium
         - 'freqVec' : ndarray - Frequencies for which modes were calculated
+        - 'freq' : float - The ``freqVec`` entry these modes belong to
         - 'z' : ndarray - Sample depths for modes
         - 'M' : int - Number of modes returned — always ``len(k)`` and
           ``phi.shape[1]``. Equals the number the solver found unless
@@ -454,163 +616,37 @@ def read_modes_bin(
     Examples
     --------
     >>> # Read all modes at 100 Hz
-    >>> modes = read_modes_bin('pekeris', frequency=100.0)
+    >>> modes = _read_modes_payload('pekeris', frequency=100.0)
     >>> print(f"Number of modes: {modes['M']}")
     >>> print(f"Wavenumber of mode 1: {modes['k'][0]}")
 
     >>> # Read specific modes
-    >>> modes = read_modes_bin('pekeris', frequency=100.0, modes=[1, 2, 3])
+    >>> modes = _read_modes_payload('pekeris', frequency=100.0, modes=[1, 2, 3])
     >>> print(f"Mode shapes: {modes['phi'].shape}")
     """
     if profile < 1:
         raise ConfigurationError(
-            f"read_modes_bin: profile must be >= 1 (got {profile}); mode-file "
+            f"read_modes: profile must be >= 1 (got {profile}); mode-file "
             "profiles are numbered from 1 (Kraken/kraken.f90:42)."
         )
+    filename = os.fspath(filename)
     if not os.path.splitext(filename)[1]:
         filename = filename + ".mod"
-    require_model_output(filename, 'read_modes_bin')
+    require_model_output(filename, 'read_modes')
 
     with open(filename, "rb") as fid:
-        head = fid.read(4)
-        if len(head) < 4:
-            raise FileFormatError(f"Invalid mode file (truncated header): {filename}")
-        endian = detect_endian(
-            head, source=f'read_modes_bin:{os.path.basename(filename)}')
-        i4 = np.dtype(endian + 'i4')
-        f4 = np.dtype(endian + 'f4')
-        f8 = np.dtype(endian + 'f8')
-        fid.seek(0, 2)
-        file_size = fid.tell()
-        max_items = file_size // 4
-        fid.seek(0, 0)
-        lrecl_words = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        # LRecordLength is a count of 4-byte `longwords' and each eigenvalue
-        # record holds LRecordLength/2 complex values (kraken.f90:587,110), so
-        # anything below 2 cannot carry a single eigenvalue.
-        if lrecl_words < 2:
-            raise FileFormatError(
-                f"Invalid mode file: record length LRecordLength={lrecl_words} "
-                f"words (must be a positive word-count of at least 2): {filename}"
-            )
-        lrecl = 4 * lrecl_words
-
-        def _n_wavenumber_records(M: int) -> int:
-            """Eigenvalue records for ``M`` modes (kraken.f90:109)."""
-            return 1 + _fortran_div(2 * M - 1, lrecl_words)
-
-        def _block_end_record(rec: int, M: int) -> int:
-            """One past the last record this reader touches for the frequency
-            block whose mode-count record is ``rec``.
-
-            ``kraken.f90:106-113`` writes the count, the halfspace record,
-            ``M`` eigenfunction records and the folded eigenvalue records.
-            A zero-mode run never reaches that writer: ``kraken.f90:958-961``
-            writes the profile header, puts ``M`` at ``iRecProfile + 6`` and
-            calls ERROUT, which STOPs (``misc/FatalError.f90:30``). This
-            reader reads the halfspace slot before it tests ``M``, so
-            ``rec + 2`` still bounds what it touches.
-            """
-            if M == 0:
-                return rec + 2
-            return rec + 2 + M + _n_wavenumber_records(M)
-
-        def _read_header(hdr: int) -> Dict[str, Any]:
-            """Read the five descriptive records of the profile at record
-            ``hdr`` (kraken.f90:593-599, ReadModes.f90:20)."""
-            if (hdr + 5) * lrecl > file_size:
-                raise FileFormatError(
-                    f"Invalid mode file {filename}: profile header at record "
-                    f"{hdr} needs {(hdr + 5) * lrecl} bytes but the file is "
-                    f"{file_size} bytes."
-                )
-            fid.seek(hdr * lrecl + 4, 0)   # past this profile's LRecordLength
-            title = fid.read(80).decode("ascii", errors="ignore").strip()
-            Nfreq, Nmedia, Ntot, NMat = (
-                int(v) for v in np.fromfile(fid, dtype=i4, count=4)
-            )
-
-            # File-size-aware sanity bound on the header counts before any
-            # array is sized off them. A corrupt/hostile header (e.g.
-            # NMat=0x7fffffff) would otherwise drive a multi-GB np.zeros below.
-            # The smallest a single sample can occupy on disk is 4 bytes
-            # (float32 / int32), so no count of 4-byte items can exceed the
-            # remaining file size; use that as a generous upper bound.
-            for _name, _val in (("Nfreq", Nfreq), ("Nmedia", Nmedia),
-                                ("Ntot", Ntot), ("NMat", NMat)):
-                if _val < 0 or _val > max_items:
-                    raise FileFormatError(
-                        f"Invalid mode file: header count {_name}={_val} is "
-                        f"implausible for a {file_size}-byte file "
-                        f"(max {max_items} 4-byte items)."
-                    )
-            if Nfreq < 1:
-                raise FileFormatError(
-                    f"Invalid mode file: Nfreq={Nfreq} (need at least one "
-                    f"frequency block): {filename}"
-                )
-
-            # Records hdr+1..hdr+4 (kraken.f90:594-598, read back at
-            # ReadModes.f90:185-188). The first two are implied-DO pair lists
-            # over the media, so the two quantities interleave: int32 N with
-            # CHARACTER*8 Material, then REAL*4 depth with REAL*4 rho — hence
-            # the (2, Nmedia) Fortran-order reshape. freqVec is REAL(KIND=8)
-            # (SourceReceiverPositions.f90:14) while zTab is a default REAL
-            # and depth/rho are written through REAL(), so those are f4.
-            fid.seek((hdr + 1) * lrecl, 0)
-            N = []
-            Mater = []
-            for _ in range(Nmedia):
-                N.append(int(np.fromfile(fid, dtype=i4, count=1)[0]))
-                Mater.append(fid.read(8).decode("ascii", errors="ignore").strip())
-            fid.seek((hdr + 2) * lrecl, 0)
-            bulk = np.fromfile(fid, dtype=f4, count=2 * Nmedia).reshape(
-                (2, Nmedia), order="F"
-            )
-            fid.seek((hdr + 3) * lrecl, 0)
-            freqVec = np.fromfile(fid, dtype=f8, count=Nfreq)
-            fid.seek((hdr + 4) * lrecl, 0)
-            z = np.fromfile(fid, dtype=f4, count=Ntot)
-            return {
-                "title": title, "Nfreq": Nfreq, "Nmedia": Nmedia,
-                "Ntot": Ntot, "NMat": NMat, "N": N, "Mater": Mater,
-                "depth": bulk[0, :], "rho": bulk[1, :],
-                "freqVec": freqVec, "z": z,
-            }
-
-        def _read_mode_count(rec: int) -> int:
-            """Read ``M`` from record ``rec`` and bound it against the file.
-
-            ``M`` is a plain header word (kraken.f90:106) that sizes every
-            allocation below, so it gets the same file-size bound as the
-            record-0 counts.
-            """
-            if (rec + 1) * lrecl > file_size:
-                raise FileFormatError(
-                    f"Invalid mode file {filename}: mode-count record {rec} "
-                    f"starts past the end of a {file_size}-byte file."
-                )
-            fid.seek(rec * lrecl, 0)
-            M = int(np.fromfile(fid, dtype=i4, count=1)[0])
-            if M < 0 or _block_end_record(rec, M) * lrecl > file_size:
-                raise FileFormatError(
-                    f"Invalid mode file {filename}: mode count M={M} at record "
-                    f"{rec} needs {_block_end_record(rec, M) * lrecl} bytes "
-                    f"but the file is {file_size} bytes."
-                )
-            return M
+        mod = _ModFile(fid, filename)
 
         # Walk the preceding profiles: each is a five-record header followed
         # by one block per frequency (ReadModes.f90:19-25,125).
         hdr = 0
         for _ in range(profile - 1):
             rec = hdr + 5
-            for _ in range(_read_header(hdr)["Nfreq"]):
-                M_prev = _read_mode_count(rec)
-                rec += 3 + M_prev + _fortran_div(2 * M_prev - 1, lrecl_words)
+            for _ in range(mod.profile_header(hdr)["Nfreq"]):
+                rec = mod.next_block(rec, mod.mode_count(rec))
             hdr = rec
 
-        header = _read_header(hdr)
+        header = mod.profile_header(hdr)
         title = header["title"]
         Nfreq = header["Nfreq"]
         Nmedia = header["Nmedia"]
@@ -622,17 +658,15 @@ def read_modes_bin(
         freqVec = header["freqVec"]
         z = header["z"]
 
-        freq_diff = np.abs(freqVec - frequency)
-        freq_index = int(np.argmin(freq_diff))
+        freq_index = _frequency_index(freqVec, frequency, filename)
         # Records hdr+0..hdr+3: header, N/Mater, depth/rho, freqVec
         # Record hdr+4: z vector
         # Record hdr+5: M (mode count) — where the first frequency block starts
         iRecProfile = hdr + 5
         for ifreq in range(freq_index + 1):
-            M = _read_mode_count(iRecProfile)
+            M = mod.mode_count(iRecProfile)
             if ifreq < freq_index:
-                # Advance to the next frequency block (kraken.f90:117).
-                iRecProfile += 3 + M + _fortran_div(2 * M - 1, lrecl_words)
+                iRecProfile = mod.next_block(iRecProfile, M)
         if modes is None:
             modes = np.arange(1, M + 1)
         elif isinstance(modes, (int, np.integer)):
@@ -646,23 +680,9 @@ def read_modes_bin(
         modes = modes[(modes >= 1) & (modes <= M)]
         # Top/Bot halfspace block sits at REC iRecProfile+1 per
         # kraken.f90:603 and read_modes_bin.m:129-131.
-        fid.seek((iRecProfile + 1) * lrecl, 0)
-        Top = {}
-        Top["BC"] = chr(np.fromfile(fid, dtype=np.uint8, count=1)[0])
-        cp_data = np.fromfile(fid, dtype=f4, count=2)
-        Top["cp"] = complex(cp_data[0], cp_data[1])
-        cs_data = np.fromfile(fid, dtype=f4, count=2)
-        Top["cs"] = complex(cs_data[0], cs_data[1])
-        Top["rho"] = np.fromfile(fid, dtype=f4, count=1)[0]
-        Top["depth"] = np.fromfile(fid, dtype=f4, count=1)[0]
-        Bot = {}
-        Bot["BC"] = chr(np.fromfile(fid, dtype=np.uint8, count=1)[0])
-        cp_data = np.fromfile(fid, dtype=f4, count=2)
-        Bot["cp"] = complex(cp_data[0], cp_data[1])
-        cs_data = np.fromfile(fid, dtype=f4, count=2)
-        Bot["cs"] = complex(cs_data[0], cs_data[1])
-        Bot["rho"] = np.fromfile(fid, dtype=f4, count=1)[0]
-        Bot["depth"] = np.fromfile(fid, dtype=f4, count=1)[0]
+        mod.seek(iRecProfile + 1)
+        Top = mod.halfspace()
+        Bot = mod.halfspace()
         if M == 0:
             # Same shapes the M > 0 path yields for an empty selection, so a
             # zero-mode file stays consumable as (ntot, 0) / (0,).
@@ -675,11 +695,9 @@ def read_modes_bin(
             # ReadModes.f90:243 reads REC = IRecProfile + 1 + Mode as NMat
             # COMPLEX*8 values, i.e. 2*NMat interleaved re/im float32.
             for ii, mode_idx in enumerate(modes):
-                rec = iRecProfile + 1 + int(mode_idx)
-                fid.seek(rec * lrecl, 0)
-                phi_data = np.fromfile(fid, dtype=f4, count=2 * NMat).reshape(
-                    (2, NMat), order="F"
-                )
+                phi_data = mod.vector(
+                    iRecProfile + 1 + int(mode_idx), mod.f4, 2 * NMat
+                ).reshape((2, NMat), order="F")
                 phi[:, ii] = phi_data[0, :] + 1j * phi_data[1, :]
             # The eigenvalues are folded across records: kraken.f90:108-113
             # writes LRecordLength/2 complex values per record, each starting
@@ -689,13 +707,14 @@ def read_modes_bin(
             # single contiguous read would absorb as data. ``irec`` counts
             # from 0 where the Fortran IREC counts from 1, hence ``+ 2`` here
             # against kraken.f90:111's ``+ 1``.
+            lrecl_words = mod.record_words
             k_all = np.zeros(M, dtype=np.complex64)
             per_record = lrecl_words // 2
             ifirst = 0
-            for irec in range(_n_wavenumber_records(M)):
+            for irec in range(mod.n_wavenumber_records(M)):
                 ilast = min(M, ifirst + per_record)
-                fid.seek((iRecProfile + 2 + M + irec) * lrecl, 0)
-                vals = np.fromfile(fid, dtype=f4, count=2 * (ilast - ifirst))
+                vals = mod.vector(iRecProfile + 2 + M + irec, mod.f4,
+                                  2 * (ilast - ifirst))
                 k_all[ifirst:ilast] = vals[0::2] + 1j * vals[1::2]
                 ifirst = ilast
             if ifirst < M:
@@ -727,6 +746,7 @@ def read_modes_bin(
         "depth": depth,
         "rho": rho,
         "freqVec": freqVec,
+        "freq": float(freqVec[freq_index]),   # the frequency read
         "z": z,
         "M": int(len(k)),   # modes returned, not the file's total
         "phi": phi,
@@ -736,9 +756,9 @@ def read_modes_bin(
     }
 
 
-def read_modes(
-    filename: str,
-    frequency: float = 0.0,
+def _read_modes_with_halfspace(
+    filename: Union[str, Path],
+    frequency: Optional[float] = None,
     modes: Optional[Union[int, list, np.ndarray]] = None,
     profile: int = 1,
 ) -> Dict[str, Any]:
@@ -754,7 +774,10 @@ def read_modes(
         direct-access ``.mod`` is the only mode format any
         Acoustics-Toolbox program writes.
     frequency : float, optional
-        Frequency in Hz to select from multi-frequency files (default: 0)
+        Frequency in Hz to select from a multi-frequency file (the closest
+        ``freqVec`` entry). ``None`` (default) reads a single-frequency file
+        and raises :class:`~uacpy.core.exceptions.ConfigurationError`
+        naming the frequencies of a multi-frequency one.
     modes : int, list, or ndarray, optional
         Mode indices to extract (1-indexed). If None, all modes are returned.
     profile : int, optional
@@ -763,7 +786,7 @@ def read_modes(
     Returns
     -------
     modes_data : dict
-        Mode data dictionary with fields from :func:`read_modes_bin`,
+        Mode data dictionary with fields from :func:`_read_modes_payload`,
         plus computed halfspace parameters:
         - 'Top': dict with top halfspace properties (k2, gamma, phi)
         - 'Bot': dict with bottom halfspace properties (k2, gamma, phi)
@@ -808,13 +831,8 @@ def read_modes(
 
     Examples
     --------
-    >>> # Read binary mode file
-    >>> modes = read_modes('test.mod', frequency=100.0)
-    >>> print(f"Number of modes: {modes['M']}")
-    >>> print(f"Wavenumbers shape: {modes['k'].shape}")
-
-    >>> # Read specific modes
-    >>> modes = read_modes('test.mod', frequency=100.0, modes=[1, 2, 3])
+    >>> payload = _read_modes_with_halfspace('test.mod', frequency=100.0)
+    >>> print(payload['Bot']['gamma'])
     """
     fileroot, ext = os.path.splitext(filename)
 
@@ -831,12 +849,11 @@ def read_modes(
             remediation="Read the solver's .mod output, or pass the root "
                         "name and let '.mod' be appended. An ASCII '.moa' "
                         "written by the AT Matlab tools is read by "
-                        "read_modes_asc directly (it carries no halfspace "
-                        "record this function could use).",
+                        "read_modes through its own parser (it carries no "
+                        "halfspace record).",
         )
-    Modes = read_modes_bin(filename, frequency, modes, profile=profile)
-    freq_diff = np.abs(Modes["freqVec"] - frequency)
-    freq_index = int(np.argmin(freq_diff))
+    Modes = _read_modes_payload(filename, frequency, modes, profile=profile)
+    freq_index = _frequency_index(Modes["freqVec"], frequency, filename)
     f_selected = float(Modes["freqVec"][freq_index])
     # KRAKENC keeps the full complex eigenvalue in the half-space vertical
     # wavenumber; KRAKEN discards the imaginary part, which is a first-order
@@ -872,3 +889,134 @@ def read_modes(
             Modes["Bot"]["phi"] = np.zeros_like(Modes["phi"][-1, :])
 
     return Modes
+
+
+
+def _modes_from_payload(
+    payload: Dict[str, Any],
+    *,
+    phi: Optional[np.ndarray] = None,
+    **result_kwargs,
+) -> Modes:
+    """The :class:`~uacpy.core.results.Modes` carrier of a mode-file payload.
+
+    ``k``, ``phi`` (KRAKEN's normalisation kept) and the depth axis ``z``
+    are taken as they are; ``phi`` overrides the payload's rows (a component
+    pulled out of an elastic block). ``backend`` defaults to the solver the
+    title names, ``frequencies`` to the payload's ``'freq'``.
+    """
+    title = str(payload.get('title', ''))
+    result_kwargs.setdefault(
+        'backend', 'krakenc' if title[:7].upper() == 'KRAKENC' else 'kraken')
+    if 'freq' in payload:
+        result_kwargs.setdefault('frequencies', float(payload['freq']))
+    return Modes(
+        k=payload.get('k', np.array([])),
+        phi=payload.get('phi', np.array([])) if phi is None else phi,
+        depths=payload.get('z', np.array([])),
+        **result_kwargs,
+    )
+
+
+def read_modes(
+    filepath: Union[str, Path],
+    frequency: Optional[float] = None,
+    modes: Optional[Union[int, list, np.ndarray]] = None,
+    profile: int = 1,
+    *,
+    component: Optional[str] = None,
+    water_density: Optional[float] = None,
+) -> Modes:
+    """Read a KRAKEN mode file as a :class:`~uacpy.core.results.Modes` result.
+
+    The carrier ``Kraken`` returns — plotting,
+    :meth:`~uacpy.core.results.Modes.first_n`, the modal sums — from a
+    ``.mod`` of any run, or an ASCII ``.moa``. ``model`` is empty (the file,
+    not a model run, is the source) and ``backend`` names the solver the
+    file's title records.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        A binary ``.mod`` (the extension is appended to a bare root) or an
+        ASCII ``.moa``. Any other extension raises
+        :class:`~uacpy.core.exceptions.FileFormatError`.
+    frequency : float, optional
+        Hz; the closest entry of a multi-frequency ``.mod`` is read. ``None``
+        (default) reads a single-frequency file and raises
+        :class:`~uacpy.core.exceptions.ConfigurationError` naming the
+        frequencies of a multi-frequency one.
+    modes : int, list or ndarray, optional
+        Mode numbers to keep, **1-based** as in the file and in
+        ``read_modes_bin.m``; out-of-range numbers are dropped. ``None``
+        keeps all.
+    profile : int, optional
+        Profile of a multi-profile ``.mod``, 1-based (``Kraken/kraken.f90:42``).
+    component : {'H', 'V', 'T', 'N'}, optional
+        The stress-displacement component to keep inside an **elastic**
+        medium (horizontal / vertical displacement, tangential / normal
+        stress, ``Matlab/ReadWrite/get_component.m``); acoustic rows pass
+        through as pressure. Needed for a file with elastic media, whose
+        rows otherwise stack four components per depth.
+    water_density : float, optional
+        g/cm³ the modes were normalised in, stored as
+        ``media.water_density`` for
+        :meth:`~uacpy.core.results.Modes.modal_pressure_field`. ``None``
+        stores the density a ``.mod`` records for its first medium, the
+        water column (``kraken.f90:595-596``); a ``.moa`` records none.
+
+    Returns
+    -------
+    Modes
+        ``k`` (rad/m, complex), ``phi`` ``(n_depths, n_modes)``, ``depths``
+        (m), ``frequencies`` = the entry read. ``media`` is the
+        :class:`~uacpy.core.results.MediaTable` of a ``.mod``: the top
+        depth (m) and density (g/cm³) of every medium, the base of the last
+        medium, the density below it and the water density (``None`` for a
+        ``.moa`` read with no ``water_density``). ``metadata`` carries the
+        file's ``title``, the ``.mod``'s ``top_halfspace`` /
+        ``bottom_halfspace`` records (boundary code, ``cp``/``cs``/``rho``,
+        and the ``k2``, ``gamma``, ``phi`` interface terms) and
+        ``media_types``.
+    """
+    root, ext = os.path.splitext(os.fspath(filepath))
+    metadata: Dict[str, Any] = {}
+    media = None
+    if ext == '.moa':
+        payload = _read_modes_asc_payload(filepath, modes=modes)
+    else:
+        payload = _read_modes_with_halfspace(filepath, frequency, modes,
+                                             profile=profile)
+        metadata['top_halfspace'] = payload['Top']
+        metadata['bottom_halfspace'] = payload['Bot']
+        metadata['media_types'] = list(payload.get('Mater', []))
+        # The medium table the modes were normalised in (kraken.f90:595-596:
+        # the density at the top of every medium the file tabulates, the
+        # water column first), from which Modes.modal_pressure_field takes
+        # rho(z_s). The .mod carries the water density its modes were
+        # normalised against; a .moa carries none, and keeps the package
+        # default unless one is given.
+        media = MediaTable(
+            water_density=(float(payload['rho'][0]) if water_density is None
+                           else float(water_density)),
+            tops=[float(d) for d in payload['depth']],
+            densities=[float(r) for r in payload['rho']],
+            bottom_depth=float(payload['Bot']['depth']),
+            halfspace_density=float(payload['Bot']['rho']))
+    metadata['title'] = str(payload.get('title', payload.get('pltitl', '')))
+    if media is None and water_density is not None:
+        media = MediaTable(water_density=float(water_density))
+    elastic = any(str(m).strip().upper() == 'ELASTIC'
+                  for m in payload.get('Mater', []))
+    if component is not None:
+        phi = _get_component(payload, component)
+    elif elastic:
+        raise ConfigurationError(
+            f"read_modes: {filepath} has elastic media, whose mode rows "
+            f"stack four stress-displacement components per depth; say "
+            f"which one to keep.",
+            remediation="Pass component='H', 'V', 'T' or 'N'.")
+    else:
+        phi = None
+    return _modes_from_payload(payload, phi=phi, metadata=metadata,
+                               media=media)

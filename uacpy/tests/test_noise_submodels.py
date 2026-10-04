@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 from uacpy.noise import ambient as N
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.tests.conftest import recorded_warnings
 
 F = np.array([10.0, 100.0, 1000.0, 10000.0])
 
@@ -65,9 +66,11 @@ def test_resolve_submodel():
         return np.zeros_like(f)
     fn, name = N._resolve_submodel(custom, N.WIND_MODELS, 'merklinger', 'wind_model')
     assert name == 'custom' and fn is custom
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError,
+                       match="wind_model='nope' is not a known model"):
         N._resolve_submodel('nope', N.WIND_MODELS, 'merklinger', 'wind_model')
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError,
+                       match='wind_model must be None, a name'):
         N._resolve_submodel(123, N.WIND_MODELS, 'merklinger', 'wind_model')
 
 
@@ -102,7 +105,8 @@ def test_string_selector_equals_default():
 
 
 def test_bad_selector_raises():
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError,
+                       match="wind_model='nope' is not a known model"):
         N.WenzNoise(F, wind_speed_kn=15.0, wind_model='nope')
 
 
@@ -126,13 +130,65 @@ def test_components_namedtuple():
 
 def test_registry_extensible_and_exported():
     import uacpy.noise as pkg
-    pkg.WIND_MODELS['flat50'] = lambda f, **k: np.full_like(f, 50.0)
+    pkg.register_noise_model('wind', 'flat50',
+                             lambda f, **k: np.full_like(f, 50.0))
     try:
         w = N.WenzNoise(F, wind_speed_kn=15.0, wind_model='flat50')
         assert np.allclose(w.wind, 50.0) and w.models['wind'] == 'flat50'
+        assert 'flat50' in pkg.WIND_MODELS
     finally:
-        del pkg.WIND_MODELS['flat50']
+        N._SUBMODELS['wind'].pop('flat50')
     assert hasattr(pkg, 'NoiseComponents')
+
+
+class TestTheRegistriesHaveOneDoor:
+    """The submodel registries are read-only views; register_noise_model is
+    the one way to add a submodel, and it cannot replace a shipped one."""
+
+    @pytest.mark.parametrize('registry', ['WIND_MODELS', 'SHIPPING_MODELS',
+                                          'RAIN_MODELS', 'THERMAL_MODELS',
+                                          'TURBULENCE_MODELS'])
+    def test_assignment_and_deletion_name_the_door(self, registry):
+        view = getattr(N, registry)
+        name = next(iter(view))
+        with pytest.raises(ConfigurationError,
+                           match=f'{registry} is read-only'):
+            view['mine'] = lambda f, **k: f
+        with pytest.raises(ConfigurationError, match='register_noise_model'):
+            del view[name]
+        assert name in view and len(view) == len(N._SUBMODELS[
+            registry.split('_')[0].lower()])
+
+    def test_a_callers_name_is_replaced_and_a_shipped_one_refused(self):
+        first = lambda f, **k: np.full_like(f, 40.0)  # noqa: E731
+        second = lambda f, **k: np.full_like(f, 41.0)  # noqa: E731
+        N.register_noise_model('shipping', 'mine', first)
+        try:
+            N.register_noise_model('shipping', 'mine', second)
+            assert N.SHIPPING_MODELS['mine'] is second
+        finally:
+            N._SUBMODELS['shipping'].pop('mine')
+        with pytest.raises(ConfigurationError,
+                           match="'wenz' is the shipped shipping submodel"):
+            N.register_noise_model('shipping', 'wenz', second)
+        assert N.SHIPPING_MODELS['wenz'] is N._shipping_wenz
+
+    @pytest.mark.parametrize('kind, name, fn, match', [
+        ('ice', 'x', lambda f, **k: f, "kind='ice' is not a WenzNoise"),
+        ('wind', '', lambda f, **k: f, 'name must be a non-empty str'),
+        ('wind', 3, lambda f, **k: f, 'name must be a non-empty str'),
+        ('wind', 'x', 60.0, 'fn must be callable'),
+    ])
+    def test_a_bad_registration_is_refused(self, kind, name, fn, match):
+        with pytest.raises(ConfigurationError, match=match):
+            N.register_noise_model(kind, name, fn)
+        assert 'x' not in N.WIND_MODELS
+
+    def test_the_view_reads_like_a_dict(self):
+        assert sorted(N.WIND_MODELS) == ['coates', 'knudsen', 'merklinger']
+        assert repr(N.WIND_MODELS) == (
+            "WIND_MODELS(['coates', 'knudsen', 'merklinger'])")
+        assert N.WIND_MODELS.get('nope') is None
 
 
 def test_coates_alternatives_registered():
@@ -162,16 +218,18 @@ def test_total_finite_when_wind_zero_midband():
 
 def test_negative_wind_speed_rejected():
     # N8: uniform guard so the Coates √(wind) model can't silently produce NaN.
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError,
+                       match='wind_speed_kn must be non-negative'):
         N.WenzNoise(F, wind_speed_kn=-1.0)
 
 
 def test_custom_submodel_errors_are_typed():
     # N9: a custom callable that raises, or returns a wrong-shaped array, is
     # surfaced as a typed ConfigurationError, not a raw TypeError/broadcast error.
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError,
+                       match='wind model failed: ZeroDivisionError'):
         N.WenzNoise(F, wind_speed_kn=15.0, wind_model=lambda f, **k: 1 / 0)
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match='wind model returned shape'):
         N.WenzNoise(F, wind_speed_kn=15.0, wind_model=lambda f, **k: np.zeros(f.size + 1))
 
 
@@ -236,7 +294,7 @@ def test_wind_follows_drdc_annex_a_below_the_cutoff():
             l1w = l0w + (s1w / np.log10(2)) * np.log10(f / f0w)
             l2w = l0w + (s2w / np.log10(2)) * np.log10(f / f0w)
             lw = l1w * (1 + (l1w / l2w) ** (-a)) ** (1 / a)
-            assert np.allclose(N.compute_windnoise(f, u, depth),
+            assert np.allclose(N.wind_noise_level(f, wind_speed_kn=u, water_depth=depth),
                                10 * np.log10(10 ** (lw / 10)))
     assert f_wind == 2000.0
 
@@ -247,8 +305,8 @@ def test_wind_above_the_cutoff_does_not_depend_on_the_frequency_grid():
     uacpy implements that, so the result cannot depend on the caller's grid;
     the Annex A.2 listing instead anchors on the last in-grid sample below the
     cutoff, which makes it grid-dependent."""
-    coarse = N.compute_windnoise(np.array([100., 1000., 4000.]), 15.0, 'deep')
-    fine = N.compute_windnoise(np.array([100., 1999., 4000.]), 15.0, 'deep')
+    coarse = N.wind_noise_level(np.array([100., 1000., 4000.]), wind_speed_kn=15.0, water_depth='deep')
+    fine = N.wind_noise_level(np.array([100., 1999., 4000.]), wind_speed_kn=15.0, water_depth='deep')
     assert coarse[-1] == pytest.approx(fine[-1])
 
 
@@ -310,9 +368,9 @@ def test_wind_above_the_cutoff_matches_drdc_equations_18_19():
     f = np.array([2500.0, 4000.0, 8000.0, 20000.0])
     for u in (5.0, 15.0, 30.0):
         for depth in ('deep', 'shallow'):
-            lw2000 = N.compute_windnoise(np.array([2000.0]), u, depth)[0]
+            lw2000 = N.wind_noise_level(np.array([2000.0]), wind_speed_kn=u, water_depth=depth)[0]
             spec = (lw2000 - m0 * 10 * np.log10(2000.0)) + m0 * 10 * np.log10(f)
-            got = N.compute_windnoise(np.concatenate(([2000.0], f)), u, depth)[1:]
+            got = N.wind_noise_level(np.concatenate(([2000.0], f)), wind_speed_kn=u, water_depth=depth)[1:]
             assert np.allclose(got, spec)
 
 
@@ -559,17 +617,13 @@ class TestAnEnvironmentKnobNoSubmodelReadsIsReported:
         assert np.array_equal(shallow, deep)
 
     def test_it_stays_silent_when_a_submodel_does_carry_the_term(self):
-        import warnings as _w
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter('always')
+        with recorded_warnings() as caught:
             self._build(water_depth='shallow', wind_model='merklinger')
         assert not [c for c in caught if 'was not used' in str(c.message)]
 
     def test_it_stays_silent_when_the_knob_is_left_at_its_default(self):
         """Only a value the caller chose can be reported as ignored."""
-        import warnings as _w
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter('always')
+        with recorded_warnings() as caught:
             self._build(water_depth='deep', wind_model='coates',
                         shipping_model='coates')
         assert not [c for c in caught if 'was not used' in str(c.message)]
@@ -578,15 +632,13 @@ class TestAnEnvironmentKnobNoSubmodelReadsIsReported:
 class TestTheWindScaleConversions:
     """m/s to knots, and the Beaufort/sea-state scales, as callables.
 
-    The factor and the Beaufort table both existed only as prose — the
-    factor in two docstrings ("multiply the m/s returned here by 1.9438")
-    and the table inside ``WenzNoise``'s docstring — while every fetcher
-    returns m/s and every noise and scattering entry point takes knots.
+    The factor and the Beaufort table are callables, not prose in a
+    docstring, so a reading in either unit converts in one call.
     """
 
     def test_the_seam_these_close_costs_a_measured_5_7_db(self):
-        """Why the conversion is a function: reading a m/s value as knots
-        understates the total by this much, and nothing used to stop it."""
+        """Why the conversion is a function: passing a 10 m/s value as
+        knots understates the total by this much."""
         from uacpy.core.units import ms_to_knots
         f = np.array([1000.0])
         kw = dict(water_depth='deep', shipping_level='medium')
@@ -688,30 +740,29 @@ class TestEverySubmodelUacpyShipsIsRecognisedAsItsOwn:
     def test_a_callers_own_function_is_not_recognised(self):
         """The other direction: whatever the caller passes stays theirs,
         including one they registered by name, which is a documented route
-        (``WIND_MODELS['mine'] = fn``) and used to fail this."""
+        (``register_noise_model('wind', 'mine', fn)``) and used to fail
+        this."""
         def mine(f, **k):
             return np.zeros_like(f)
         assert not N._is_builtin_submodel(mine)
-        N.WIND_MODELS['mine'] = mine
+        N.register_noise_model('wind', 'mine', mine)
         try:
             assert not N._is_builtin_submodel(N.WIND_MODELS['mine'])
         finally:
-            del N.WIND_MODELS['mine']
+            N._SUBMODELS['wind'].pop('mine')
 
     def test_a_registered_custom_model_draws_no_false_warning(self):
         """End to end, on the shape that produced the false claim: a
         ``(f, **k)`` submodel that reads the knob through its kwargs."""
-        import warnings as _w
 
         def depth_aware(f, **k):
             return np.full_like(
                 f, 60.0 if k['water_depth'] == 'shallow' else 55.0)
 
-        N.WIND_MODELS['depth_aware'] = depth_aware
+        N.register_noise_model('wind', 'depth_aware', depth_aware)
         try:
             grid = np.array([1000.0])
-            with _w.catch_warnings(record=True) as caught:
-                _w.simplefilter('always')
+            with recorded_warnings() as caught:
                 shallow = N.WenzNoise(grid, wind_speed_kn=15.0,
                                       water_depth='shallow',
                                       wind_model='depth_aware',
@@ -720,7 +771,7 @@ class TestEverySubmodelUacpyShipsIsRecognisedAsItsOwn:
                                wind_model='depth_aware',
                                shipping_model='coates').total[0]
         finally:
-            del N.WIND_MODELS['depth_aware']
+            N._SUBMODELS['wind'].pop('depth_aware')
         # The model demonstrably reads the knob...
         assert abs(shallow - deep) > 1.0, (shallow, deep)
         # ...so claiming it did not would be false.
@@ -743,14 +794,13 @@ class TestTheKnotHasOneValueAndOneHome:
         assert KNOTS_PER_M_PER_S == 3600.0 / 1852.0
         assert float(knots_to_ms(1.0)) == pytest.approx(0.5144444444, abs=1e-10)
 
-    def test_the_sonar_copy_derives_from_it_bit_for_bit(self):
-        """`sonar.scattering` held its own `1852.0/3600.0`. It now reads the
-        one home, and the reciprocal is bit-identical to what it replaced —
-        which is not automatic, since 1/(a/b) need not equal b/a."""
-        from uacpy.core.units import KNOTS_PER_M_PER_S
-        from uacpy.sonar.scattering import _KNOT_TO_MS
-        assert _KNOT_TO_MS == 1.0 / KNOTS_PER_M_PER_S
-        assert _KNOT_TO_MS == 1852.0 / 3600.0
+    def test_the_sonar_module_converts_with_it(self):
+        """`sonar.scattering` holds no copy of the factor: Chapman-Harris's
+        knots come from the one home's own function."""
+        from uacpy.core import units
+        from uacpy.sonar import scattering
+        assert scattering.ms_to_knots is units.ms_to_knots
+        assert not hasattr(scattering, '_KNOT_TO_MS')
 
     def test_no_module_computes_with_a_copy_of_the_factor(self):
         """The shape the duplicate took: a hand-rounded copy of the factor.
@@ -799,12 +849,13 @@ class TestTheForeignCarrierRefusalSaysWhatToDoInstead:
         import matplotlib.pyplot as plt
         from uacpy.acoustic_signal import snapshots
         from uacpy.core.exceptions import ConfigurationError
-        from uacpy.visualization import plot_spectrogram
+        from uacpy.plot import plot_spectrogram
         record = np.random.default_rng(0).standard_normal((512, 4))
         carrier = snapshots(record, 2000.0, 200.0, nperseg=256)
         assert not hasattr(carrier, 'plot')
         try:
-            with pytest.raises(ConfigurationError) as caught:
+            with pytest.raises(ConfigurationError,
+                               match='plot_spectrogram needs 3') as caught:
                 plot_spectrogram(carrier)
         finally:
             plt.close('all')
@@ -813,3 +864,21 @@ class TestTheForeignCarrierRefusalSaysWhatToDoInstead:
         assert 'Snapshots' in message and 'plot_spectrogram' in message
         # ...and offers a remedy that exists for a carrier without .plot().
         assert 'arrays' in message
+
+
+class TestKnudsenSaysWhereItHasNoData:
+    """EXPERT-4: the straight Knudsen line was applied at every frequency,
+    rising 17 dB/decade below the curves' 0.1-10 kc band with no warning."""
+
+    def test_frequencies_outside_the_band_warn(self):
+        from uacpy.noise.ambient import _wind_knudsen
+        with pytest.warns(UserWarning, match="outside 100-25000 Hz"):
+            _wind_knudsen(np.array([10.0, 1000.0]), wind_speed_kn=10.0)
+
+    def test_the_band_itself_is_silent(self):
+        import warnings
+        from uacpy.noise.ambient import _wind_knudsen
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            _wind_knudsen(np.array([100.0, 1000.0, 25000.0]),
+                          wind_speed_kn=10.0)

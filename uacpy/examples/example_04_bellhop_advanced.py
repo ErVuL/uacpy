@@ -17,7 +17,7 @@ beam_width_type=, beam_curvature=, eps_multiplier=, r_loop=, n_image=, ib_win=)
 Source.plot_beam_pattern · multi-depth Source → ResultStack ·
 ResultStack.superpose(weights=) ·
 RunMode.RAYS · Rays.plot(color_by=) · uacpy.Thorp · Bottom.from_halfspaces ·
-plot.shared_colorbar
+plot_field(source=) · plot.shared_colorbar
 """
 
 import os
@@ -49,15 +49,17 @@ env = uacpy.Environment(
     absorption=uacpy.Thorp(),
 )
 source = uacpy.Source(depths=75.0, frequencies=100.0)
+# Ranges start past one range step (~200 m), the first column a Cerveny run
+# can fill (InfluenceCervenyCart never writes the first column).
 receiver = uacpy.Receiver(depths=np.linspace(10, 450, 50),
-                          ranges=np.linspace(100, 30000, 150))
+                          ranges=np.linspace(300, 30000, 150))
 
-gaussian = uacpy.Bellhop(beam_type='B', grid_type='R', n_beams=500,
-                         alpha=(-85, 85)).run(
+gaussian = uacpy.Bellhop(backend='fortran', beam_type='B', grid_type='R', n_beams=500,
+                         launch_angles=(-85, 85)).run(
     env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
 
-cerveny = uacpy.Bellhop(
-    beam_type='C', grid_type='R', n_beams=500, alpha=(-85, 85),
+cerveny = uacpy.Bellhop(backend='fortran', 
+    beam_type='C', grid_type='R', n_beams=500, launch_angles=(-85, 85),
     beam_width_type='M', beam_curvature='Z', eps_multiplier=0.7,
     r_loop=10000.0, n_image=2, ib_win=4, beam_shift=True).run(
     env, source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
@@ -65,17 +67,18 @@ cerveny = uacpy.Bellhop(
 # Geometry lives on the Source, not the model: same Bellhop, different source.
 # 'line' is an infinite coherent line source (Cartesian spreading) rather than
 # a point source (cylindrical).
-line = uacpy.Bellhop(beam_type='B', grid_type='R', n_beams=500).run(
+line = uacpy.Bellhop(backend='fortran', beam_type='B', grid_type='R', n_beams=500).run(
     env, uacpy.Source(depths=source.depths, frequencies=source.frequencies,
                       source_type='line'),
     receiver, run_mode=uacpy.RunMode.COHERENT_TL)
 
 # Three source depths in ONE binary call — the Bellhop binary loops the source
 # axis natively. The shelf is 100 m deep at r=0, so every source must sit in
-# the water column there.
-stack = uacpy.Bellhop(n_beams=500, alpha=(-85, 85)).run(
-    env, uacpy.Source(depths=[20.0, 50.0, 80.0], frequencies=300.0),
-    receiver, run_mode=uacpy.RunMode.COHERENT_TL)
+# the water column there. At 300 Hz to 30 km Bellhop's own fan criterion,
+# sqrt(c / (6 f r)) between beams, asks for 565 beams over ±85°.
+array_source = uacpy.Source(depths=[20.0, 50.0, 80.0], frequencies=300.0)
+stack = uacpy.Bellhop(backend='fortran', n_beams=600, launch_angles=(-85, 85)).run(
+    env, array_source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
 # A ResultStack of Field slabs: iterate for (source_depth, slab) pairs, or
 # stack.at(source_depth=z) for one 2-D Field. The slab accessors (.dB, .p,
 # .at(depth=, range=)) live on the Field, not on the stack.
@@ -106,8 +109,8 @@ print(f"  phased array: {stack.n_slabs} elements {spacing_m:.0f} m apart "
       f"({spacing_wavelengths:.1f} λ), steered {STEER_DEG:.0f}° down → "
       f"median TL {np.nanmedian(steered.dB):.1f} dB")
 
-rays = uacpy.Bellhop(beam_type='g', grid_type='R', n_beams=50,
-                     alpha=(-80, 80), beam_shift=True).run(
+rays = uacpy.Bellhop(backend='fortran', beam_type='g', grid_type='R', n_beams=50,
+                     launch_angles=(-80, 80), beam_shift=True).run(
     env, source, receiver, run_mode=uacpy.RunMode.RAYS)
 
 # A beam pattern is an (angle_deg, level_dB re peak) table. The angle axis is
@@ -133,8 +136,8 @@ pattern_levels = 20.0 * np.log10(
 directional_source = uacpy.Source(
     depths=source.depths, frequencies=source.frequencies,
     beam_pattern=np.column_stack([pattern_angles, pattern_levels]))
-directional = uacpy.Bellhop(beam_type='B', grid_type='R', n_beams=500,
-                            alpha=(-85, 85)).run(
+directional = uacpy.Bellhop(backend='fortran', beam_type='B', grid_type='R', n_beams=500,
+                            launch_angles=(-85, 85)).run(
     env, directional_source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
 
 fig, _ = env.plot()
@@ -142,10 +145,10 @@ fig.savefig(OUT / 'example_04_environment.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 fig, (left, right) = plt.subplots(1, 2, figsize=(16, 6))
-uacpy.plot_field(gaussian, left, env=env, show_colorbar=False,
+uacpy.plot.plot_field(gaussian, left, env=env, show_colorbar=False,
                  contours=[70, 85, 100],
                  title='Standard Gaussian beams\n(with Thorp attenuation)')
-uacpy.plot_field(cerveny, right, env=env, show_colorbar=False,
+uacpy.plot.plot_field(cerveny, right, env=env, show_colorbar=False,
                  contours=[70, 85, 100],
                  title='Cerveny beams, minimum width\n(with beam shift)')
 uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
@@ -155,9 +158,9 @@ fig.savefig(OUT / 'example_04_beam_comparison.png', dpi=150,
 plt.close(fig)
 
 fig, (left, right) = plt.subplots(1, 2, figsize=(16, 6))
-uacpy.plot_field(gaussian, left, env=env, show_colorbar=False,
+uacpy.plot.plot_field(gaussian, left, env=env, show_colorbar=False,
                  title="Point source (cylindrical)\nRunType: 'CB RR  '")
-uacpy.plot_field(line, right, env=env, show_colorbar=False,
+uacpy.plot.plot_field(line, right, env=env, show_colorbar=False,
                  title="Line source (Cartesian)\nRunType: 'CB XR  '")
 uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
 fig.suptitle('Point vs line source', fontsize='xx-large', fontweight='bold')
@@ -173,12 +176,10 @@ plt.close(fig)
 
 fig, axes = plt.subplots(1, stack.n_slabs, figsize=(6 * stack.n_slabs, 5))
 for ax, (depth, slab) in zip(np.atleast_1d(axes), stack):
-    uacpy.plot_field(slab.to_dB(), ax, env=env, show_colorbar=False,
+    # source= marks the slab's own source at r = 0 and its depth.
+    uacpy.plot.plot_field(slab.to_dB(), ax, env=env, show_colorbar=False,
+                     source=uacpy.Source(depths=depth, frequencies=300.0),
                      title=f'Source depth = {depth:.0f} m')
-    # The source, at r = 0 km and its own depth; TL panels use km on x, m on y.
-    ax.plot(0.0, depth, marker='*', markersize=18, color='white',
-            markeredgecolor='black', markeredgewidth=1.2, zorder=10,
-            clip_on=False)
 uacpy.plot.shared_colorbar(fig, axes, label='TL (dB)')
 fig.suptitle('Multi-source-depth: one binary call, one ResultStack',
              fontsize='x-large', fontweight='bold')
@@ -188,18 +189,16 @@ plt.close(fig)
 # One slab beside the phased sum of all three. The superposed Field has the
 # slabs' grid and phase reference, so it plots like any single-source field.
 fig, (left, right) = plt.subplots(1, 2, figsize=(16, 6))
-uacpy.plot_field(stack.at(source_depth=50.0).to_dB(), left, env=env,
+# Each panel marks the sources it holds, at r = 0 km.
+uacpy.plot.plot_field(stack.at(source_depth=50.0).to_dB(), left, env=env,
                  show_colorbar=False,
+                 source=uacpy.Source(depths=50.0, frequencies=300.0),
                  title='One element\n(source depth 50 m, unit weight)')
-uacpy.plot_field(steered.to_dB(), right, env=env, show_colorbar=False,
+uacpy.plot.plot_field(steered.to_dB(), right, env=env, show_colorbar=False,
+                 source=array_source,
                  title=f'Three-element array, weights exp(-i·k·n·d·sinθ)\n'
                        f'(θ = {STEER_DEG:.0f}° down, d = {spacing_m:.0f} m = '
                        f'{spacing_wavelengths:.1f} λ)')
-# Each panel marks the sources it holds, at r = 0 km.
-for ax, depths in ((left, [50.0]), (right, array_depths)):
-    ax.plot(np.zeros(len(depths)), depths, marker='*', markersize=14,
-            linestyle='none', color='white', markeredgecolor='black',
-            markeredgewidth=1.2, zorder=10, clip_on=False)
 uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
 fig.suptitle('ResultStack.superpose: the stack as a phased vertical array',
              fontsize='x-large', fontweight='bold')
@@ -216,10 +215,10 @@ directional_source.plot_beam_pattern(
     title=f'Source directivity\n{BEAMWIDTH_DEG:.0f}° beam aimed at '
           f'{TILT_DEG:.0f}°')
 omni_ax = fig.add_subplot(1, 3, 2)
-uacpy.plot_field(gaussian, omni_ax, env=env, show_colorbar=False,
+uacpy.plot.plot_field(gaussian, omni_ax, env=env, show_colorbar=False,
                  title='Omnidirectional source\n(beam_pattern=None)')
 dir_ax = fig.add_subplot(1, 3, 3)
-uacpy.plot_field(directional, dir_ax, env=env, show_colorbar=False,
+uacpy.plot.plot_field(directional, dir_ax, env=env, show_colorbar=False,
                  title="Directional source\n(.sbp, RunType(3:3) = '*')")
 # Room for the two-line panel titles: add_subplot fills more of the figure than
 # plt.subplots leaves, so the default top margin puts the suptitle through them.

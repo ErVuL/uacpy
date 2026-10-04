@@ -6,23 +6,27 @@ scale at in-situ temperature and pressure (Lauvset et al. 2016) — into the
 cache. This module samples it locally.
 
 pH is the one Francois-Garrison absorption input WOA23 does not carry, so
-without it :func:`uacpy.data.build_francois_garrison` falls back to a constant
-(8.1). A cached GLODAP grid replaces that constant with the real in-situ column,
-letting :func:`uacpy.data.fetch_environment` build absorption from measured pH.
+without it :func:`uacpy.data.fetch_environment` falls back to a constant
+(8.0, ``core.constants.REFERENCE_PH``, on the NBS scale). A cached GLODAP
+grid replaces that constant with the real in-situ column, which the
+absorption takes as ``(depth, pH)`` pairs on GLODAP's own levels.
 """
 
-import tarfile
-import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from uacpy._log import log_message
+from uacpy.core._export import ExportRecord
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
-from uacpy.data._geo import as_coordinate
+from uacpy.core.geo import as_coordinate
+from uacpy.data._geo import checked_max_distance
 from uacpy.data._netcdf import NetcdfGrid, netcdf_lock
+from uacpy.data.sources import DataProvenance
+from uacpy.core.constants import PH_MAX, PH_MIN
 
 __all__ = ['download_glodap_db', 'fetch_ph_profile', 'fetch_ph']
 
@@ -43,59 +47,37 @@ def download_glodap_db(cache_dir=None, *, url: Optional[str] = None,
 
     Fetches the mapped-product tarball (~211 MB), extracts only the in-situ pH
     grid to ``<cache>/glodap/GLODAPv2.2016b.pHtsinsitutp.nc`` and discards the
-    rest, then returns the path. Uses curl when available, falling back to the
-    urllib fetcher.
+    rest, then returns the path (:func:`uacpy.data._http.download_member`:
+    curl first, then urllib).
 
     ``url`` fetches that address instead of :data:`GLODAP_URL` — a mirror,
     or a copy staged on an http server of your own. What is written and
     how it is read are the same whatever address served it.
+
+    Parameters
+    ----------
+    cache_dir : str or Path, optional
+        Directory to write into; ``None`` is the dataset's own directory under
+        the cache root (:func:`dataset_root`).
+    url : str, optional
+        The one address to fetch; ``None`` is :data:`GLODAP_URL`.
+    timeout : float, optional
+        Network timeout in seconds. Default 600.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
     """
-    from uacpy.data._http import curl_download, http_get
-    url = url or GLODAP_URL
+    from uacpy.data._http import download_member
     dest = _cache.prepare_download(
         'glodap', "downloading GLODAPv2.2016b mapped product (~211 MB)",
         cache_dir=cache_dir, verbose=verbose)
-    out = dest / GLODAP_FILE
-    # Staged beside its destination: the 211 MB tarball must not land in a
-    # tmpfs /tmp (RAM) the way the system temp dir can.
-    with tempfile.TemporaryDirectory(dir=dest) as tmp:
-        tar_path = Path(tmp) / GLODAP_TARBALL
-        if not curl_download(url, tar_path, timeout=timeout,
-                             verbose=verbose):
-            with _cache.atomic_write(tar_path) as part:
-                part.write_bytes(http_get(url, timeout=timeout,
-                                          verbose=verbose, source='glodap'))
-        _extract_ph(tar_path, out)
+    # Only the pH member is kept; the 211 MB tarball is staged beside the
+    # cache and discarded (download_member).
+    out = download_member('glodap', url or GLODAP_URL, GLODAP_FILE,
+                          dest / GLODAP_FILE, timeout=timeout,
+                          verbose=verbose)
     _cache.invalidate_grids()
     log_message('glodap', f"GLODAP pH grid cached → {out}", verbose=verbose)
     return out
-
-
-def _extract_ph(tar_path, out):
-    """Extract the pH member from the mapped-product tarball to ``out``.
-
-    Iterates lazily (member data is never read before its declared size passes
-    the decompression-bomb cap) and writes through
-    :func:`uacpy.data._cache.atomic_write`."""
-    from uacpy.data._http import checked_member_size
-    with tarfile.open(tar_path, 'r:gz') as tar:
-        member = next((m for m in tar
-                       if Path(m.name).name == GLODAP_FILE), None)
-        if member is None:
-            raise DataFetchError(
-                f"GLODAP tarball has no {GLODAP_FILE} member; its layout may "
-                "have changed.",
-                remediation="Check the GLODAP mapped-product download.",
-            )
-        checked_member_size(member.size, member.name)
-        src = tar.extractfile(member)
-        if src is None:
-            raise DataFetchError(
-                f"GLODAP tarball member {member.name!r} is not a regular file.",
-                remediation="Check the GLODAP mapped-product download.",
-            )
-        with _cache.atomic_write(out) as part:
-            part.write_bytes(src.read())
 
 
 class _GlodapGrid(NetcdfGrid):
@@ -145,7 +127,7 @@ class _GlodapGrid(NetcdfGrid):
                 np.nan)
         # Backstop for a file whose fill is a bare sentinel with no mask:
         # seawater pH cannot leave the 0-14 scale.
-        col[(col < 0.0) | (col > 14.0)] = np.nan
+        col[(col < PH_MIN) | (col > PH_MAX)] = np.nan
         valid = np.isfinite(col)
         return self._depth[valid], col[valid]
 
@@ -154,14 +136,53 @@ def _grid():
     return _cache.cached_grid('glodap', GLODAP_FILE, _GlodapGrid)
 
 
-def fetch_ph_profile(point):
+@dataclass(frozen=True, eq=False)
+class PHProfile(ExportRecord):
+    """A seawater pH column, as :func:`fetch_ph_profile` returns it.
+
+    Attributes
+    ----------
+    depths : ndarray
+        The GLODAP standard levels (m), trimmed at the seafloor.
+    ph : ndarray
+        In-situ pH at each level, on the scale ``ph_scale`` names.
+    ph_scale : {'total'}
+        GLODAP's ``pHtsinsitutp`` is on the total scale;
+        :class:`~uacpy.core.absorption.FrancoisGarrison` takes
+        ``ph_scale='total'`` and converts it to the NBS scale it was fitted
+        on.
+    provenance : DataProvenance
+        The ``'glodap'`` record with the requested point.
+    """
+
+    depths: np.ndarray
+    ph: np.ndarray
+    ph_scale: str
+    provenance: DataProvenance
+
+    _ARRAY_FIELDS = ('depths', 'ph')
+    _TABLE_FIELDS = ('depths', 'ph')
+
+
+def fetch_ph_profile(point, *, max_distance_km=None) -> PHProfile:
     """Seawater pH column (total scale, in-situ) at a ``(lat, lon)`` point.
 
-    Returns ``(depths_m, pH)`` on the GLODAP standard levels, trimmed at the
-    seafloor. Raises ``DataFetchError`` where GLODAP has no column (land or
-    unmapped).
+    Returns a :class:`PHProfile` on the GLODAP standard levels, trimmed at
+    the seafloor. Raises ``DataFetchError`` where GLODAP has no column (land
+    or unmapped).
+
+    Parameters
+    ----------
+    point : (lat, lon)
+        Site coordinates in decimal degrees.
+    max_distance_km : float, optional
+        Refuse a node farther than this (km) from ``point`` (the offset rule);
+        ``None`` (default) sets no limit beyond its ``ProvenanceWarning``.
     """
     lat, lon = as_coordinate(point)
+    prov = _grid().node_provenance(
+        'glodap', lat, lon, who='fetch_ph_profile',
+        max_distance_km=checked_max_distance(max_distance_km, 'fetch_ph_profile'))
     depths, ph = _grid().profile(lat, lon)
     if depths.size == 0:
         raise DataFetchError(
@@ -169,20 +190,41 @@ def fetch_ph_profile(point):
             "(land or unmapped).",
             remediation="Pick an ocean location, or supply pH directly.",
         )
-    return depths, ph
+    return PHProfile(depths=depths, ph=ph, ph_scale='total',
+                     provenance=prov)
 
 
-def fetch_ph(point, *, reference_depth=None):
+def fetch_ph(point, *, reference_depth=None, max_distance_km=None):
     """Representative seawater pH at a ``(lat, lon)`` point.
 
     Samples the GLODAP column and returns the value at ``reference_depth`` (m,
-    nearest level), or at the column's **mid-depth** when ``None`` — the row
-    :func:`uacpy.data.build_francois_garrison` takes by default, so the two
-    defaults pair a pH with the temperature of the same depth. The pH column
+    nearest level), or at the column's **mid-depth** when ``None`` — the
+    depth :func:`uacpy.data.fetch_environment` reads its one pH at beside a
+    fetched T/S profile. The pH column
     ends at the GLODAP seafloor level, which need not be the T/S column's;
     pass ``reference_depth`` to pin the row (``fetch_environment`` does).
+
+    The value is raw and carries no provenance;
+    :func:`uacpy.data.fetch_environment` with ``with_absorption=True``
+    returns the carrier that records it in ``.data_sources``.
+
+    Parameters
+    ----------
+    point : (lat, lon)
+        Site coordinates in decimal degrees.
+    reference_depth : float, optional
+        Depth (m) of the row returned; ``None`` is the column's mid-depth.
+    max_distance_km : float, optional
+        As in :func:`fetch_ph_profile`.
     """
-    depths, ph = fetch_ph_profile(point)
+    return _ph_at_depth(fetch_ph_profile(point, max_distance_km=max_distance_km),
+                       reference_depth)
+
+
+def _ph_at_depth(profile: PHProfile, reference_depth=None) -> float:
+    """The pH of ``profile`` at ``reference_depth`` (m, nearest level), or at
+    the column's mid-depth when ``None`` — the row :func:`fetch_ph` returns."""
+    depths, ph = profile.depths, profile.ph
     ref = (0.5 * (float(depths.min()) + float(depths.max()))
            if reference_depth is None else float(reference_depth))
     return float(ph[int(np.argmin(np.abs(depths - ref)))])

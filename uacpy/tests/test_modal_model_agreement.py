@@ -17,6 +17,7 @@ import numpy as np
 
 import uacpy
 from uacpy.models import Kraken, Scooter, OAST
+from uacpy.tests.conftest import make_pekeris
 
 # All tests in this module spawn model binaries (Kraken, Scooter, OAST)
 pytestmark = pytest.mark.requires_binary
@@ -162,7 +163,7 @@ class TestModalModelAgreement:
 
     @pytest.mark.requires_oases
     @pytest.mark.filterwarnings(
-        "ignore:OAST. receiver.ranges do not match:UserWarning")
+        "ignore:OAST. receiver.ranges are off:UserWarning")
     def test_all_modal_models_agreement(
         self, simple_environment, simple_source, single_receiver
     ):
@@ -201,7 +202,7 @@ class TestModalModelAgreement:
     def test_mode_count_consistency(self, simple_environment, simple_source):
         """Test that mode count is consistent for the environment.
 
-        ``mode_depth_grid`` is only where the eigenfunctions get tabulated —
+        ``mode_depths`` is only where the eigenfunctions get tabulated —
         the eigenvalue search runs on Kraken's own internal mesh — so the count
         it returns must not move with the output resolution.
         """
@@ -213,7 +214,7 @@ class TestModalModelAgreement:
             # column; landing exactly on the seafloor puts it on the interface,
             # where the mode shape is continuous but the medium is not.
             mode_depths = np.linspace(0, simple_environment.depth * 0.999, n_points)
-            kraken = Kraken(mode_depth_grid=mode_depths, verbose=False)
+            kraken = Kraken(mode_depths=mode_depths, verbose=False)
             result = kraken.compute_modes(simple_environment, simple_source)
 
             k = result.k
@@ -241,15 +242,9 @@ class TestDocumentedModeCounts:
     @staticmethod
     def _shallow_channel():
         # docs/figure_scripts/_common.py shallow_water(), verbatim.
-        return uacpy.Environment(
-            name='Shallow-water channel',
-            bathymetry=100.0,
-            ssp=[(0.0, 1500.0), (30.0, 1495.0), (100.0, 1490.0)],
-            bottom=uacpy.BoundaryProperties(
-                acoustic_type='half-space',
-                sound_speed=1650.0, density=1.8, attenuation=0.6,
-            ),
-        )
+        return make_pekeris(name='Shallow-water channel',
+                            ssp=[(0.0, 1500.0), (30.0, 1495.0), (100.0, 1490.0)],
+                            sound_speed=1650.0, attenuation=0.6)
 
     _SRC = staticmethod(lambda: uacpy.Source(depths=25.0, frequencies=200.0))
 

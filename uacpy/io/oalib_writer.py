@@ -25,7 +25,8 @@ to the wrong ``READ``:
 1. the TopOpt line (``ReadEnvironment:68`` → ``ReadTopOpt``);
 2. the volume-attenuation rows *inside* ``ReadTopOpt`` — the
    Francois-Garrison ``T S pH z_bar`` row for ``TopOpt(4)='F'``
-   (``:215``) or the bio-layer count + rows for ``'B'`` (``:220-235``);
+   (``:215``; written only for a deck covering several frequencies) or the
+   bio-layer count + rows for ``'B'`` (``:220-235``);
 3. only then the top half-space row ``z cP cS rho alphaI betaI`` for
    ``TopOpt(2)='A'`` (``:75`` → ``TopBot`` ``:285``).
 
@@ -59,29 +60,42 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO, Tuple, Union
 
 from uacpy.core.absorption import (
-    Biological, ConstantAbsorption, FrancoisGarrison,
+    BAND_ABSORPTION_CHECK_DEPTHS, BAND_ABSORPTION_WARN_DB_PER_KM,
+    Biological, ConstantAbsorption, warn_if_band_absorption_frozen,
 )
 from uacpy.core.environment import Environment
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.bottom import BoundaryProperties, _NON_GEOACOUSTIC_TYPES
+from uacpy.core.boundary import BoundaryProperties, BoundaryType
 from uacpy.core.surface import Surface
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.core.constants import (
-    BoundaryType, AttenuationUnits,
-    parse_boundary_type,
-    C_LOW_FACTOR, C_HIGH_FACTOR, DEFAULT_C_MAX_UNBOUNDED,
-    DECK_AXIS_DECIMALS, DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
+from uacpy.core.deck_limits import (
+    DECK_DEPTH_FMT, DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
 )
+from uacpy.io.at_codes import (
+    BOUNDARY_CODES, SSP_INTERP_CODES, AttenuationUnits,
+    biological_records, boundary_code, francois_garrison_record,
+    parse_boundary_type, volume_attenuation_code, writes_alpha_per_ssp_row,
+    writes_francois_garrison_letter,
+)
+from uacpy.core._validate import equally_spaced
 from uacpy.io.input_checks import (
     _collapsed_pair_index,
-    equally_spaced,
     reject_unknown_kwargs,
 )
 from uacpy.core.units import m_to_km
 from uacpy.io.refl_io import stage_reflection_file
-from uacpy.core._carrier_validate import _sanitize_title
-from uacpy.core.exceptions import ConfigurationError, UnsupportedFeatureError
+from uacpy.core._validate import sanitize_title
+from uacpy.io._fortran_helpers import deck_title
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
+)
+from uacpy.core.engine_defaults import (
+    KRAKEN_N_MESH,
+    SCOOTER_N_MESH,
+    SPARC_N_MESH,
+    SPARC_OUTPUT_MODE,
+)
 
 
 #: AT source-geometry letters keyed by uacpy ``source.source_type``, written
@@ -103,13 +117,10 @@ SOURCE_TYPE_CODE = {'point': 'R', 'line': 'X', 'scaled': 'S'}
 #: parses, which means one format for every depth written. Six decimals sits two
 #: orders below the tightest tolerance any reader applies
 #: (``sspMod.f90:353``'s ``100 * EPSILON( 1.0e0 )`` = 1.19e-05 m).
-#: Taken from ``core.constants`` rather than restated: the carriers admit a
-#: step down to ``DECK_DEPTH_RESOLUTION_M`` on the strength of this column
-#: format, so a deck printed coarser than the carriers admit would collapse
-#: two admitted samples onto one token.
-_DECK_DEPTH_DECIMALS = DECK_AXIS_DECIMALS
-_DECK_DEPTH_FMT = f'.{_DECK_DEPTH_DECIMALS}f'
-_DECK_DEPTH_RESOLUTION_M = DECK_DEPTH_RESOLUTION_M
+#: The format is ``core.deck_limits.DECK_DEPTH_FMT``, not restated: the
+#: carriers admit a step down to ``DECK_DEPTH_RESOLUTION_M`` on the strength of
+#: this column format, so a deck printed coarser than the carriers admit would
+#: collapse two admitted samples onto one token.
 
 #: Thickness of the transparent pad media that equalise ``NMedia`` across the
 #: profiles of a range-dependent deck. This is uacpy's own construct, not
@@ -117,14 +128,6 @@ _DECK_DEPTH_RESOLUTION_M = DECK_DEPTH_RESOLUTION_M
 #: acoustically inert, and it only has to be thick enough to mesh
 #: (``misc/sspMod.f90:356-358`` rejects a medium with fewer than 2 SSP points).
 _PAD_MEDIUM_THICKNESS_M = 0.1
-
-#: Resolution in metres of every range axis these decks write, which print km
-#: at :data:`~uacpy.core.constants.DECK_AXIS_DECIMALS` decimals — so two ranges
-#: closer than this collapse to one token. Callers that build a range axis for
-#: a deck must separate their samples by more than this, and
-#: ``models/_segmentation.py`` uses it when it builds one itself. The same
-#: number the carriers validate against, taken from ``core.constants``.
-DECK_RANGE_QUANTUM_M = DECK_RANGE_RESOLUTION_M
 
 
 # misc/AttenMod.f90:10,18 — ``MaxBioLayers = 200`` sizes the static
@@ -175,8 +178,10 @@ def quote_fortran_title(name) -> str:
     not doubled). Re-running the same sanitizer here closes the
     post-construction ``env.name = ...`` mutation path, which otherwise
     writes a quote that silently truncates the Fortran list-directed READ.
+    The result is ASCII (:func:`~uacpy.io._fortran_helpers.deck_title`),
+    because the engines cut titles in bytes.
     """
-    return "'" + _sanitize_title(name) + "'"
+    return "'" + deck_title(sanitize_title(name)) + "'"
 
 
 
@@ -189,7 +194,7 @@ def deck_depth(depth_m: float) -> float:
     one function is what keeps a fractional ``env.depth`` from putting two models
     on different water columns.
 
-    It round-trips through :data:`_DECK_DEPTH_FMT` rather than snapping to a grid.
+    It round-trips through :data:`DECK_DEPTH_FMT` rather than snapping to a grid.
     The three invariants the decks actually impose are all satisfied by writing
     the *same* number everywhere, not by coarsening it:
 
@@ -209,7 +214,7 @@ def deck_depth(depth_m: float) -> float:
     an 11 dB water-depth error for any bathymetry not already on a decimetre —
     is not needed to satisfy any of them.
     """
-    return float(f"{float(depth_m):{_DECK_DEPTH_FMT}}")
+    return float(f"{float(depth_m):{DECK_DEPTH_FMT}}")
 
 
 def writable_layers(bottom):
@@ -259,7 +264,7 @@ def at_env_media(env):
     # ``c`` is its last sample, the one ``alphaR`` holds after EvaluateSSP.
     water = env.ssp.extend_to(seafloor).to_pairs()
     media = [(seafloor, float(water[-1, 1]))]
-    if env.has_layered_bottom:
+    if env.bottom.is_layered and not env.bottom.is_range_dependent:
         top = seafloor
         for layer in writable_layers(env.bottom):
             bot = deck_depth(top + layer.thickness)
@@ -292,9 +297,135 @@ def reject_unsupported_ssp_interp(model: str, interp_ssp) -> None:
             "the 'quad' SSP interpolation — it is Bellhop-only, the "
             "external 2-D .ssp scheme the shared EvaluateSSP has no case for",
             alternatives=["'linear' (C-linear)", "'n2linear'", "'pchip'",
-                          "'cubic' / 'spline'"],
+                          "'spline'"],
             alternatives_label='SSP interpolations',
         )
+
+
+#: Spacing (m) of the SSP node pair written across each edge of a
+#: :class:`~uacpy.core.absorption.Biological` layer. AT evaluates the ``'B'``
+#: law only at SSP nodes — ``CRCI`` tests the node depth against the layer
+#: (``misc/AttenMod.f90:103-104``), called per node at
+#: ``misc/sspMod.f90:388-393`` and ``Bellhop/sspMod.f90:906`` — and
+#: interpolates ``Im c`` between them, so a layer holding no node is lossless
+#: and a layer with one node per edge bleeds into the neighbouring intervals.
+#: A node on the edge and one ``_BIOLOGICAL_EDGE_PAIR_M`` outside it confine
+#: the ramp to that spacing. Measured on a 30-70 m layer (2 dB/km peak at
+#: 300 Hz) over 10 km, Kraken BROADBAND: 0.01 m and 0.1 m give identical
+#: absorption losses, which fall short of RAM's (RAM samples the edges
+#: itself) by at most 0.22 dB, at the 300 Hz peak (8.777 against 8.999 dB);
+#: 1 m adds 1-2 % to the loss.
+_BIOLOGICAL_EDGE_PAIR_M = 0.01
+
+#: SSP interpolations that build their curve from neighbouring nodes. Both
+#: interpolate the complex ``c`` (``misc/sspMod.f90:397-415``,
+#: ``Bellhop/sspMod.f90:281``, ``:339-344``), so an ``Im c`` step across a
+#: layer edge rings under the spline (measured: NaN, or tens to hundreds of dB
+#: of gain), and an inserted node reshapes the real PCHIP curve (measured: up
+#: to 0.5 dB of range-averaged level on a curved profile).
+_NEIGHBOUR_INTERP_CODES = frozenset({'P', 'S'})
+
+
+def biological_interior_edges(absorption, z_min: float,
+                              z_max: float) -> List[float]:
+    """Depths of every :class:`~uacpy.core.absorption.Biological` layer edge
+    strictly inside ``(z_min, z_max)``, sorted; empty for any other law."""
+    if not isinstance(absorption, Biological):
+        return []
+    edges = {float(z) for layer in biological_records(absorption)
+             for z in layer[:2]}
+    return sorted(z for z in edges if z_min < z < z_max)
+
+
+def reject_biological_edges_under_neighbour_interp(
+        model: str, env: Environment, interp_ssp) -> None:
+    """Refuse a Biological layer edge inside the water column when the
+    model's ``interp_ssp`` resolves to a PCHIP or spline profile.
+
+    The edge needs its own node pair (:func:`biological_edge_nodes`), which
+    only a piecewise-linear interpolation takes without changing the profile
+    or ringing on the ``Im c`` step (see :data:`_NEIGHBOUR_INTERP_CODES`).
+    ``interp_ssp`` is resolved (:func:`resolve_ssp_topopt`) only when there
+    is an interior edge, so every other environment is untouched here.
+    """
+    edges = biological_interior_edges(env.absorption, 0.0, float(env.depth))
+    if not edges:
+        return
+    ssp_code = resolve_ssp_topopt(env, interp_ssp)
+    if ssp_code not in _NEIGHBOUR_INTERP_CODES:
+        return
+    name = 'pchip' if ssp_code == 'P' else 'spline'
+    raise ConfigurationError(
+        f"{model}: env.absorption is Biological with layer edges at "
+        f"{', '.join(f'{z:g}' for z in edges)} m inside the water column, "
+        f"and interp_ssp resolves to {name!r}. The Acoustics Toolbox "
+        f"evaluates the biological law only at SSP nodes "
+        f"(misc/AttenMod.f90:103-104), so each edge needs a node pair; a "
+        f"{name} interpolation of the complex sound speed "
+        f"{'rings on that step into unphysical gain' if ssp_code == 'S' else 'is reshaped by the inserted nodes'}.",
+        remediation="Pass interp_ssp='linear' (or 'n2linear'), which takes "
+                    "the node pairs exactly.")
+
+
+def biological_edge_nodes(depths, sound_speed, absorption,
+                          ssp_code: str, *, who: str):
+    """``depths`` and ``sound_speed`` with a node pair across every
+    Biological layer edge strictly inside the profile.
+
+    For a layer top ``z1`` the pair is ``(z1 - ε, z1)``; for a layer bottom
+    ``z2`` it is ``(z2, z2 + ε)``, with ε = :data:`_BIOLOGICAL_EDGE_PAIR_M`:
+    ``'B'`` counts both edges as inside (``misc/AttenMod.f90:104``), so the
+    node on the edge carries the layer and the other one the water beside it.
+    Nodes already present are kept as they are. ``sound_speed`` is 1-D, or
+    ``(n_depths, n_ranges)`` for Bellhop's quad profile; each added row is
+    interpolated the way the deck interpolates — linear in ``c`` for ``'C'``
+    and ``'Q'`` (``Bellhop/sspMod.f90`` ``Quad``: linear in depth), linear
+    in ``1/c²`` for ``'N'``. A PCHIP or spline deck with an interior edge is
+    refused (:func:`reject_biological_edges_under_neighbour_interp`).
+    Returns the arrays unchanged when there is no interior edge.
+    """
+    z = np.asarray(depths, dtype=float)
+    c = np.asarray(sound_speed, dtype=float)
+    edges = biological_interior_edges(absorption, float(z[0]), float(z[-1]))
+    if not edges:
+        return z, c
+    if ssp_code in _NEIGHBOUR_INTERP_CODES:
+        raise ConfigurationError(
+            f"{who}: a Biological layer edge at "
+            f"{', '.join(f'{e:g}' for e in edges)} m lies inside the profile "
+            f"and the SSP interpolation is {ssp_code!r}; only a "
+            f"piecewise-linear profile takes the node pairs the biological "
+            f"law needs (see reject_biological_edges_under_neighbour_interp).",
+            remediation="Pass interp_ssp='linear' (or 'n2linear').")
+    tops = {float(layer[0]) for layer in biological_records(absorption)}
+    added = []
+    for e in edges:
+        # An edge can be the top of one layer and the bottom of another:
+        # then both sides are inside, and the node on the edge suffices.
+        is_top = e in tops
+        is_bottom = any(float(layer[1]) == e
+                        for layer in biological_records(absorption))
+        added.append(e)
+        if is_top and not is_bottom:
+            added.append(e - _BIOLOGICAL_EDGE_PAIR_M)
+        elif is_bottom and not is_top:
+            added.append(e + _BIOLOGICAL_EDGE_PAIR_M)
+    new = np.array([a for a in added
+                    if z[0] < a < z[-1]
+                    and np.min(np.abs(z - a)) > DECK_DEPTH_RESOLUTION_M])
+    if new.size == 0:
+        return z, c
+    columns = c.reshape(z.size, -1)
+    if ssp_code == 'N':
+        rows = np.column_stack([
+            1.0 / np.sqrt(np.interp(new, z, 1.0 / col ** 2))
+            for col in columns.T])
+    else:
+        rows = np.column_stack([np.interp(new, z, col) for col in columns.T])
+    order = np.argsort(np.concatenate([z, new]), kind='stable')
+    z_out = np.concatenate([z, new])[order]
+    c_out = np.vstack([columns, rows])[order]
+    return z_out, (c_out if c.ndim == 2 else c_out[:, 0])
 
 
 #: ``misc/sspMod.f90:11`` declares ``MaxSSP = 20001`` and dimensions every
@@ -350,7 +481,7 @@ def _profile_n_media(env_seg) -> int:
     """AT media a single profile carries naturally: water plus its sediment
     layers."""
     n = 1
-    if env_seg.has_layered_bottom:
+    if env_seg.bottom.is_layered and not env_seg.bottom.is_range_dependent:
         n += len(writable_layers(env_seg.bottom))
     return n
 
@@ -365,7 +496,7 @@ def _profile_media(env_seg) -> List[Tuple]:
     """
     current = deck_depth(env_seg.depth)
     media: List[Tuple] = []
-    if env_seg.has_layered_bottom:
+    if env_seg.bottom.is_layered and not env_seg.bottom.is_range_dependent:
         for layer in writable_layers(env_seg.bottom):
             top = current
             current = deck_depth(current + layer.thickness)
@@ -382,11 +513,12 @@ def _plan_unpadded_media(segments, acoustic_types
     """Media plan for profiles whose half-space carries no material.
 
     ``vacuum``, ``rigid`` and the two reflection-table types
-    (:data:`~uacpy.core.bottom._NON_GEOACOUSTIC_TYPES`) are boundary
+    (:attr:`~uacpy.core.boundary.BoundaryType.is_geoacoustic` false) are boundary
     conditions, not media: the ``sound_speed`` / ``density`` /
     ``attenuation`` a parameter-free ``BoundaryProperties`` carries are the
-    constructor's placeholders, which is why
-    :func:`resolve_phase_speed_bounds` refuses to cap cHigh on them either.
+    constructor's placeholders, which is why the engines' default
+    phase-speed window (``uacpy.models._window``) does not cap cHigh on them
+    either.
     A pad medium built from those placeholders would put metres of invented
     sediment between the water and a boundary the user asked to be
     pressure-release, so no pad is emitted here.
@@ -455,8 +587,9 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     properties to repeat, so :func:`_plan_unpadded_media` takes over.
     """
     non_geoacoustic = sorted(
-        {env_seg.bottom.halfspace_at(range=0.0).acoustic_type
-         for _range_m, env_seg in segments} & _NON_GEOACOUSTIC_TYPES
+        {kind for kind in {env_seg.bottom.halfspace_at(range=0.0).acoustic_type
+                           for _range_m, env_seg in segments}
+         if not BoundaryType.from_string(kind).is_geoacoustic}
     )
     if non_geoacoustic:
         return _plan_unpadded_media(segments, non_geoacoustic)
@@ -489,31 +622,9 @@ def plan_multi_profile_media(segments) -> Tuple[int, float, List[List[Tuple]]]:
     return n_media, bottom_depth, plans
 
 
-#: User-facing ``interp_ssp`` name -> ``TopOpt(1:1)`` letter. The letters are
-#: AT's (``doc/EnvironmentalFile.htm``): 'C' C-linear, 'N' N2-linear (n the
-#: index of refraction), 'P' PCHIP, 'S' cubic Spline, 'Q' Quadrilateral 2D SSP
-#: read from a file (BELLHOP only). 'H' (Hexahedral 3D, BELLHOP3D) and 'A'
-#: (Analytic, needs ANALYT.FOR recompiled) are deliberately absent — this
-#: writer emits neither.
-#:
-#: ``'bilinear'`` names the PROFILE SHAPE, not a 2-D interpolation rule: an
-#: oceanographic bilinear SSP is two linear segments (a zero-gradient mixed
-#: layer over a thermocline gradient, as in
-#: ``examples/example_02_sound_speed_profiles.py``), and two linear segments
-#: are interpolated C-linearly. The 2-D range-depth option is 'Q', which this
-#: table reaches as ``'quad'`` — do not read ``'bilinear'`` as bilinear
-#: interpolation and route it there.
-_AT_INTERP_TO_CODE = {
-    'linear': 'C',
-    'c-linear': 'C',
-    'clin': 'C',
-    'bilinear': 'C',      # profile shape (two linear segments), see above
-    'n2linear': 'N',
-    'pchip': 'P',
-    'cubic': 'S',
-    'spline': 'S',
-    'quad': 'Q',          # AT 'Q' = Quadrilateral 2-D SSP from a file
-}
+#: Every ``interp_ssp`` name the writers accept -> ``TopOpt(1:1)`` letter:
+#: :data:`~uacpy.io.at_codes.SSP_INTERP_CODES`.
+_AT_INTERP_TO_CODE = dict(SSP_INTERP_CODES)
 
 
 def resolve_ssp_interp(env: Environment, model_interp) -> str:
@@ -524,7 +635,7 @@ def resolve_ssp_interp(env: Environment, model_interp) -> str:
     otherwise ``'linear'``. Explicit values pass through unchanged.
     """
     if model_interp is None:
-        return 'quad' if env.has_range_dependent_ssp else 'linear'
+        return 'quad' if env.ssp.is_range_dependent else 'linear'
     return str(model_interp).lower()
 
 
@@ -532,11 +643,11 @@ def resolve_ssp_topopt(env: Environment, model_interp) -> str:
     """Pick the AT ``TopOpt(1)`` character for an env / model pair.
 
     The model's ``interp_ssp`` (``None`` → auto / ``'linear'`` /
-    ``'pchip'`` / ``'cubic'`` / ``'quad'`` / ``'n2linear'`` /
+    ``'pchip'`` / ``'spline'`` / ``'quad'`` / ``'n2linear'`` /
     ``'analytic'`` / …) drives the character via :data:`_AT_INTERP_TO_CODE`.
-    The only env-side override is ``shape='isovelocity'`` which forces
+    The only env-side override is ``kind='isovelocity'`` which forces
     ``'C'`` (any connection scheme over constant data is constant). All
-    other shape values (``'munk'``, ``'analytic'``, ``'n2linear'``,
+    other kind values (``'munk'``, ``'analytic'``, ``'n2linear'``,
     ``'measured'``) are informational — the model decides how to connect
     the samples.
     """
@@ -548,7 +659,7 @@ def resolve_ssp_topopt(env: Environment, model_interp) -> str:
             "(misc/munk.f90) — it ignores env.ssp entirely, so the run would "
             "not model the environment you supplied. Pass the Munk profile as "
             "data via SoundSpeedProfile if you want it, and pick an "
-            "interpolation of 'linear', 'n2linear', 'pchip' or 'cubic'."
+            "interpolation of 'linear', 'n2linear', 'pchip' or 'spline'."
         )
     if key not in _AT_INTERP_TO_CODE:
         raise ConfigurationError(
@@ -557,7 +668,7 @@ def resolve_ssp_topopt(env: Environment, model_interp) -> str:
         )
     # Checked after the model's knob so an isovelocity env cannot swallow an
     # invalid ``interp_ssp``.
-    if getattr(env.ssp, 'shape', 'measured') == 'isovelocity':
+    if env.ssp.kind == 'isovelocity':
         return 'C'
     return _AT_INTERP_TO_CODE[key]
 
@@ -565,11 +676,76 @@ def resolve_ssp_topopt(env: Environment, model_interp) -> str:
 def get_top_bc_code(env: Environment) -> str:
     """Return the single-character AT top boundary condition code.
 
-    An ``acoustic_type`` no :class:`~uacpy.core.constants.BoundaryType`
+    An ``acoustic_type`` no :class:`~uacpy.core.boundary.BoundaryType`
     covers raises :class:`ConfigurationError` — silently falling back to a
     vacuum would model a different surface than the one asked for.
     """
-    return parse_boundary_type(env.surface.acoustic_type).to_acoustics_toolbox_code()
+    return boundary_code(env.surface.acoustic_type)
+
+
+def compose_topopt(ssp_code: str, surface_code: str, env: Environment, *,
+                   pos5: str = ' ', pos6: str = ' ', extra: str = '',
+                   multi_frequency: bool = False) -> str:
+    """The Acoustics-Toolbox ``TopOpt`` string of a deck.
+
+    Position 1 is the SSP interpolation letter and 2 the top boundary
+    letter; 3:4 are the attenuation pair ``TopOpt(3:4)``
+    (``misc/ReadEnvironmentMod.f90:167``): ``'W'`` (dB/wavelength, uacpy's
+    unit for every attenuation field) and the volume-attenuation letter of
+    ``env.absorption`` (blank for none). Positions 5 and 6 differ by program
+    and are the caller's (``pos5``, ``pos6``); ``extra`` follows them.
+    ``multi_frequency`` says the deck covers several frequencies, where one
+    Francois-Garrison row takes ``'F'``
+    (:func:`~uacpy.io.at_codes.writes_francois_garrison_letter`).
+    """
+    vol_atten_code = volume_attenuation_code(env.absorption,
+                                             multi_frequency=multi_frequency)
+    return (f"{ssp_code}{surface_code}"
+            f"{AttenuationUnits.DB_PER_WAVELENGTH.to_char()}{vol_atten_code}"
+            f"{pos5}{pos6}{extra}")
+
+
+def format_halfspace_row(depth: str, hs) -> str:
+    """The half-space row ``depth cp cs rho alpha_p alpha_s /`` the top
+    (``TopBot``, ``misc/ReadEnvironmentMod.f90:285``) and the Bellhop bottom
+    (``Bellhop/ReadEnvironmentBell.f90:474``) read, from the boundary ``hs``;
+    ``depth`` is the depth column as the deck spells it."""
+    return (f" {depth}  {hs.sound_speed:.6f} {hs.shear_speed:.6f}"
+            f" {hs.density:.6f}"
+            f" {hs.attenuation:.6f} {hs.shear_attenuation:.6f} /\n")
+
+
+def ssp_row_attenuations(env: Environment, frequency: Optional[float],
+                         depths, sound_speeds, *,
+                         multi_frequency: bool = False) -> np.ndarray:
+    """The compressional attenuation (dB/wavelength) of each water SSP row at
+    ``depths`` / ``sound_speeds``: ``env.absorption`` at the deck
+    ``frequency`` in dB per local wavelength when the rows carry the law
+    (:func:`~uacpy.io.at_codes.writes_alpha_per_ssp_row` — a
+    :class:`ConstantAbsorption`, :class:`FrancoisGarrison`, a tabulated
+    α(f, z)), else 0 (a law with a ``TopOpt(4)`` letter is applied by the
+    solver itself).
+
+    The solver turns ``alphaI`` back into a loss at the row's own sound speed
+    (``misc/AttenMod.f90:73``, ``alphaT = alpha*freq/(8.6858896*c)``), so
+    the row reproduces ``α(f, z)`` exactly at each node and interpolates
+    between nodes. ``frequency`` may be ``None`` only when no row law
+    depends on it (none, or a constant). ``multi_frequency`` as in
+    :func:`compose_topopt`."""
+    z = np.atleast_1d(np.asarray(depths, dtype=float))
+    absorption = env.absorption
+    if not writes_alpha_per_ssp_row(absorption,
+                                    multi_frequency=multi_frequency):
+        return np.zeros(z.shape)
+    if frequency is None and not isinstance(absorption, ConstantAbsorption):
+        raise ConfigurationError(
+            f"ssp_row_attenuations: env.absorption ({absorption._short()}) is "
+            f"written into the SSP rows at the deck frequency, and none was "
+            f"given.",
+            remediation="Pass frequency= (Hz), the frequency the deck "
+                        "header carries.")
+    return np.asarray(absorption.alpha_dB_per_wavelength(
+        frequency, z, sound_speeds), dtype=float)
 
 
 def write_surface_halfspace(f, env: Environment, code: Optional[str] = None) -> None:
@@ -589,15 +765,10 @@ def write_surface_halfspace(f, env: Environment, code: Optional[str] = None) -> 
     """
     if (code if code is not None else get_top_bc_code(env)) != 'A':
         return
-    s = env.surface
-    f.write(
-        f" 0.00  {s.sound_speed:.6f} {s.shear_speed:.6f}"
-        f" {s.density:.6f}"
-        f" {s.attenuation:.6f} {s.shear_attenuation:.6f} /\n"
-    )
+    f.write(format_halfspace_row('0.00', env.surface))
 
 
-def write_ssp(filepath: Union[str, Path], ranges_m: np.ndarray, c: np.ndarray) -> None:
+def write_ssp(filepath: Union[str, Path], ranges: np.ndarray, sound_speed: np.ndarray) -> None:
     """
     Write sound speed profile matrix to file.
 
@@ -605,10 +776,10 @@ def write_ssp(filepath: Union[str, Path], ranges_m: np.ndarray, c: np.ndarray) -
     ----------
     filepath : str or Path
         SSP file path
-    ranges_m : ndarray
+    ranges : ndarray
         Range vector in metres, shape (N,), converted to the km the
         ``.ssp`` format expects at this boundary (``Bellhop/sspMod.f90:422``).
-    c : ndarray
+    sound_speed : ndarray
         Sound speed profiles in m/s, shape (n_depth, N)
         Each column is the SSP at the corresponding range
 
@@ -626,36 +797,38 @@ def write_ssp(filepath: Union[str, Path], ranges_m: np.ndarray, c: np.ndarray) -
 
     Examples
     --------
-    A range-dependent SSP: one column per range, so ``c`` is
-    ``(n_depth, len(ranges_m))``. Written to a temporary directory so running
+    A range-dependent SSP: one column per range, so ``sound_speed`` is
+    ``(n_depth, len(ranges))``. Written to a temporary directory so running
     the example leaves nothing behind:
 
     >>> import os, tempfile
-    >>> ranges_m = np.array([0.0, 10000.0, 20000.0, 30000.0])
+    >>> ranges = np.array([0.0, 10000.0, 20000.0, 30000.0])
     >>> z = np.linspace(0, 100, 11)
     >>> gradient = 1500 - 0.1 * z[:, np.newaxis]      # (11, 1)
-    >>> c = np.tile(gradient, (1, len(ranges_m)))     # (11, 4)
+    >>> sound_speed = np.tile(gradient, (1, len(ranges)))     # (11, 4)
     >>> with tempfile.TemporaryDirectory() as d:
-    ...     write_ssp(os.path.join(d, 'test.ssp'), ranges_m, c)
+    ...     write_ssp(os.path.join(d, 'test.ssp'), ranges, sound_speed)
     ...     print(open(os.path.join(d, 'test.ssp')).readline().strip())
     4
     """
     filepath = Path(filepath)
-    r_km = m_to_km(ranges_m)
+    sound_speed = np.asarray(sound_speed, dtype=float)
+    ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
+    r_km = m_to_km(ranges)
     Npts = len(r_km)
 
-    # Validate range vector vs SSP matrix shape — each column of ``c``
+    # Validate range vector vs SSP matrix shape — each column of ``sound_speed``
     # is the profile at the corresponding range. Mismatched shapes will
     # otherwise produce a silently-malformed .ssp file that Bellhop
     # rejects deep in its run.
-    if c.ndim != 2:
+    if sound_speed.ndim != 2:
         raise ConfigurationError(
-            f"write_ssp: c must be 2-D (n_depth, n_ranges); got shape {c.shape}"
+            f"write_ssp: sound_speed must be 2-D (n_depth, n_ranges); got shape {sound_speed.shape}."
         )
-    if c.shape[1] != Npts:
+    if sound_speed.shape[1] != Npts:
         raise ConfigurationError(
-            f"write_ssp: len(ranges_m) = {Npts} does not match c.shape[1] = "
-            f"{c.shape[1]} (each column of c must be one profile)"
+            f"write_ssp: len(ranges) = {Npts} does not match sound_speed.shape[1] = "
+            f"{sound_speed.shape[1]} (each column of sound_speed must be one profile)"
         )
     if Npts < 2:
         # Bellhop/sspMod.f90:410-412 — "You must have a least two profiles in
@@ -666,6 +839,21 @@ def write_ssp(filepath: Union[str, Path], ranges_m: np.ndarray, c: np.ndarray) -
             remediation="Give the range-dependent SSP two or more range "
                         "nodes, or use a range-independent interp_ssp.",
         )
+    # Bellhop's Quad segment search needs SSP%Seg%r strictly increasing
+    # (Bellhop/sspMod.f90), and it reads the km tokens, not this array: the
+    # check runs on the tokens the file will hold, so a decreasing, NaN or
+    # sub-millimetre pair is caught here.
+    tokens = [f"{r:.6f}" for r in r_km]
+    bad = _collapsed_pair_index(tokens)
+    if bad is not None:
+        raise ConfigurationError(
+            f"write_ssp: profile ranges {ranges[bad]:g} m and "
+            f"{ranges[bad + 1]:g} m write as {tokens[bad]} and "
+            f"{tokens[bad + 1]} km; the range axis must increase strictly at "
+            f"the deck's 1 mm resolution.",
+            remediation="Give strictly increasing, finite profile ranges "
+                        "more than 1 mm apart.",
+        )
 
     # AT/bellhopcuda's LDIFile reader treats each line as a separate
     # list-directed record (`LIST(SSPFile)` resets to the next line before
@@ -675,15 +863,16 @@ def write_ssp(filepath: Union[str, Path], ranges_m: np.ndarray, c: np.ndarray) -
         # 6 decimals of km = mm on the range axis. Bellhop's Quad segment
         # search needs SSP%Seg%r strictly increasing (Bellhop/sspMod.f90), so a
         # coarser format would collapse neighbouring profiles into duplicates.
-        for r in r_km:
-            fid.write(f"{r:.6f}  ")
+        for token in tokens:
+            fid.write(f"{token}  ")
         fid.write("\n")
-        # Sub-decimetre precision so Munk-style SSPs (e.g. 1502.345 m/s)
-        # are not silently rounded; Acoustics-Toolbox parses free-format
-        # so the extra digits are tolerated.
-        for i in range(c.shape[0]):
-            for j in range(c.shape[1]):
-                fid.write(f"{c[i, j]:8.4f} ")
+        # Four decimals (0.1 mm/s), so a Munk-style speed such as
+        # 1502.345 m/s is written unrounded; Bellhop reads the .ssp
+        # list-directed (Bellhop/sspMod.f90:428), so no width applies. The
+        # .env SSP rows carry the first profile at six decimals.
+        for i in range(sound_speed.shape[0]):
+            for j in range(sound_speed.shape[1]):
+                fid.write(f"{sound_speed[i, j]:8.4f} ")
             fid.write("\n")
 
 
@@ -697,7 +886,8 @@ def write_header(
     n_media_override: Optional[int] = None,
     topopt_extra: str = '',
     filepath: Optional[Union[str, Path]] = None,
-    verbose: bool = False,
+    verbose: Union[bool, str] = False,
+    pos5: str = ' ',
 ) -> None:
     """
     Write the whole top block: title, frequency, NMedia, TopOpt, the
@@ -705,10 +895,15 @@ def write_header(
 
     TopOpt position 3 is hardwired to ``'W'`` (dB/wavelength) — uacpy's
     documented unit convention for every attenuation field. Position 4 is
-    taken from ``env.absorption``: ``Thorp`` → ``'T'``,
-    ``FrancoisGarrison`` → ``'F'``, ``Biological`` → ``'B'``,
-    ``ConstantAbsorption`` or ``None`` → ``' '``; the per-formula follow-up
-    rows are emitted here, before the half-space row, in the order
+    taken from ``env.absorption``: ``Thorp`` → ``'T'``, ``Biological`` →
+    ``'B'``, one ``FrancoisGarrison`` row on a broadband deck → ``'F'``
+    (:func:`warn_if_francois_garrison_depth_frozen`), ``None`` and the laws
+    the SSP rows carry in ``alphaI`` (``ConstantAbsorption``,
+    ``FrancoisGarrison`` on a one-frequency deck or as a profile, a table;
+    :func:`ssp_row_attenuations`) →
+    ``' '``, and a broadband deck says what freezing a row law at the deck
+    frequency costs (:func:`warn_if_row_absorption_frozen`); the per-formula
+    follow-up rows are emitted here, before the half-space row, in the order
     ``ReadEnvironmentMod.f90`` reads them (module docstring). A
     ``TopOpt(2)='F'`` surface has its ``.trc`` table staged beside the
     ``.env``. Callers write the SSP mesh next and nothing in between.
@@ -728,7 +923,9 @@ def write_header(
         Surface boundary condition
     frequencies : ndarray, optional
         Frequency vector for broadband runs. If provided, TopOpt(6) is set
-        to ``'B'`` and the frequency vector is written after TopOpt.
+        to ``'B'``; this function writes no frequency vector itself — the
+        family writer emits it after the receiver depths, where
+        ``ReadfreqVec`` reads it.
     n_media_override : int, optional
         Override NMedia value. Used by multi-profile writer to ensure
         all profiles have the same NMedia.
@@ -739,8 +936,11 @@ def write_header(
     filepath : str or Path, optional
         Path of the ``.env`` being written; required for a ``'file'``
         surface so its ``.trc`` table can be staged beside it.
-    verbose : bool, optional
+    verbose : bool or str, optional
         Log the reflection-table staging step.
+    pos5 : str, optional
+        ``TopOpt(5:5)``: blank for KRAKEN, KRAKENC, SCOOTER and BOUNCE
+        (krakenc tests it for ``'.'``); SPARC's output mode.
     """
     f.write(f"{quote_fortran_title(env.name)}\n")
     f.write(f"{source.frequencies[0]:.6f}\n")
@@ -749,33 +949,37 @@ def write_header(
         n_media = n_media_override
     else:
         n_media = 1
-        if env.has_layered_bottom:
+        if env.bottom.is_layered and not env.bottom.is_range_dependent:
             n_media += len(writable_layers(env.bottom))
     _reject_media_overrun(n_media)
     f.write(f"{int(n_media)}\n")
 
-    ssp_code = ssp_topopt
-    surface_code = surface_type.to_acoustics_toolbox_code()
-    atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
-    vol_atten_code = (
-        env.absorption.topopt_code() if env.absorption is not None else ' '
-    )
-
+    surface_code = BOUNDARY_CODES[surface_type]
     broadband_code = (
         'B' if frequencies is not None and len(np.atleast_1d(frequencies)) > 1
         else ' '
     )
 
-    # ``atten_code`` fills TopOpt(3:3) and ``vol_atten_code`` TopOpt(4:4) — the
-    # two halves of the AttenUnit pair ``TopOpt( 3 : 4 )``
-    # (misc/ReadEnvironmentMod.f90:167). The literal blank holds TopOpt(5:5),
-    # which none of these models reads, so that ``broadband_code`` lands on
-    # TopOpt(6:6) where kraken/krakenc/scooter pick up the broadband flag
+    # The literal blank default of ``pos5`` holds TopOpt(5:5) — krakenc tests
+    # it for '.' (more root-finder restarts, Kraken/krakenc.f90:323), which a
+    # blank leaves off; the restarts draw from an unseeded RANDOM_NUMBER, so a
+    # deck carrying '.' does not give the same answer twice — so that
+    # ``broadband_code`` lands on TopOpt(6:6) where kraken/krakenc/scooter
+    # pick up the broadband flag
     # (Kraken/kraken.f90:52, Kraken/krakenc.f90:52, Scooter/scooter.f90:172).
-    topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code} {broadband_code}{topopt_extra}"
+    multi = broadband_code == 'B'
+    topopt = compose_topopt(ssp_topopt, surface_code, env, pos5=pos5,
+                            pos6=broadband_code, extra=topopt_extra,
+                            multi_frequency=multi)
     f.write(f"'{topopt}'\n")
 
-    write_absorption_block(f, env)
+    write_absorption_block(f, env, multi_frequency=multi)
+    if multi and writes_francois_garrison_letter(env.absorption,
+                                                 multi_frequency=True):
+        warn_if_francois_garrison_depth_frozen(env, frequencies)
+    elif multi:
+        warn_if_row_absorption_frozen(env, frequencies,
+                                      float(source.frequencies[0]))
 
     if surface_code == 'F':
         if filepath is None:
@@ -793,13 +997,109 @@ def write_header(
         write_surface_halfspace(f, env, code=surface_code)
 
 
-def write_absorption_block(f: TextIO, env: Environment) -> None:
+#: How a law the SSP rows carry is written into ``alphaI``: a Thorp-sized
+#: loss at 1 kHz is 9e-5 dB/wavelength, which six decimals would keep to two
+#: digits. A :class:`ConstantAbsorption` and a zero column keep the six
+#: decimals every other attenuation field of the deck is written with.
+_ROW_LAW_ALPHA_FORMAT = '.9e'
+
+
+def ssp_row_attenuation_texts(env: Environment, frequency: Optional[float],
+                              depths, sound_speeds, *,
+                              multi_frequency: bool = False) -> List[str]:
+    """:func:`ssp_row_attenuations` as the deck spells each row's
+    ``alphaI``: nine significant digits for a law that varies with depth or
+    frequency, six decimals for a constant or no law."""
+    alpha = ssp_row_attenuations(env, frequency, depths, sound_speeds,
+                                 multi_frequency=multi_frequency)
+    fmt = ('.6f' if (not writes_alpha_per_ssp_row(
+                         env.absorption, multi_frequency=multi_frequency)
+                     or isinstance(env.absorption, ConstantAbsorption))
+           else _ROW_LAW_ALPHA_FORMAT)
+    return [format(float(a), fmt) for a in alpha]
+
+
+def warn_if_row_absorption_frozen(env: Environment, frequencies,
+                                  deck_frequency: float) -> None:
+    """Say what a multi-frequency deck costs a law the SSP rows carry
+    (:func:`ssp_row_attenuations`): the rows hold dB/wavelength at the deck
+    frequency, and the solver re-applies that at every frequency of the
+    vector, so the water absorption is linear in frequency
+    (:func:`~uacpy.core.absorption.warn_if_band_absorption_frozen`). A
+    :class:`ConstantAbsorption` is exactly that line and is not checked."""
+    absorption = env.absorption
+    if (not writes_alpha_per_ssp_row(absorption, multi_frequency=True)
+            or isinstance(absorption, ConstantAbsorption)):
+        return
+    warn_if_band_absorption_frozen(
+        'AT env writer', absorption, frequencies, float(deck_frequency),
+        water_depth=float(env.depth),
+        mechanism=(
+            f"the SSP rows carry the absorption as dB/wavelength at the "
+            f"deck frequency {float(deck_frequency):.4g} Hz, and the solver "
+            f"re-applies it at every frequency of the broadband vector "
+            f"(misc/AttenMod.f90:73, alphaT = alpha*freq/(8.6858896*c)), so "
+            f"the water absorption is linear in frequency."),
+        remediation=("Run one deck per frequency, narrow the band, or use "
+                     "RAM, which evaluates the law at every frequency."))
+
+
+def francois_garrison_deck_depth(env: Environment) -> float:
+    """The ``z_bar`` (m) of a ``'F'`` deck: mid-water column, half the
+    deck's water depth, where the one depth the solver evaluates the formula
+    at departs least, at its worst, from the depths it is applied at."""
+    return 0.5 * deck_depth(env.depth)
+
+
+def warn_if_francois_garrison_depth_frozen(env: Environment,
+                                           frequencies) -> Optional[float]:
+    """Say what a broadband ``'F'`` deck costs one Francois-Garrison row:
+    AT evaluates the formula at one ``z_bar``
+    (:func:`francois_garrison_deck_depth`) and applies it at every depth
+    (``misc/AttenMod.f90:148-160``), exact in frequency. A
+    ``FallbackWarning`` when, somewhere in the band and the water column,
+    that departs from the formula at the depth itself by
+    :data:`~uacpy.core.absorption.BAND_ABSORPTION_WARN_DB_PER_KM` or more;
+    the message also says that ``'F'`` adds the formula to the sediment
+    layers and half-spaces too (``CRCI``, ``misc/AttenMod.f90:84-110``),
+    where the water rows of a one-frequency deck carry it in the water
+    only. Returns the error in dB/km."""
+    freqs = np.atleast_1d(np.asarray(frequencies, dtype=float)).ravel()
+    z_bar = francois_garrison_deck_depth(env)
+    z = np.linspace(0.0, float(env.depth), BAND_ABSORPTION_CHECK_DEPTHS)
+    grid = np.asarray(env.absorption.table(
+        freqs, depths=np.concatenate([[z_bar], z]), units='dB/km').data,
+        dtype=float).reshape(z.size + 1, freqs.size)
+    err = float(np.max(np.abs(grid[1:] - grid[:1])))
+    if err >= BAND_ABSORPTION_WARN_DB_PER_KM:
+        warnings.warn(
+            f"AT env writer: a deck covering {freqs.size} frequencies "
+            f"carries the {env.absorption._short()} absorption as AT's 'F' "
+            f"row, exact in frequency, which evaluates the formula at "
+            f"z_bar = {z_bar:g} m (mid-water column) and applies it at every "
+            f"depth (misc/AttenMod.f90:148-160). Across "
+            f"{freqs.min():.4g}-{freqs.max():.4g} Hz and the water column "
+            f"that departs from the formula at each depth by up to "
+            f"{err:.3g} dB/km of path — about {err * 10.0:.3g} dB over "
+            f"10 km. 'F' also adds the formula to the sediment layers and "
+            f"half-spaces (misc/AttenMod.f90:84-110), where a one-frequency "
+            f"deck carries it in the water rows only. Run one deck per "
+            f"frequency, or RAM, for the formula at every depth.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return err
+
+
+def write_absorption_block(f: TextIO, env: Environment, *,
+                           multi_frequency: bool = False) -> None:
     """Emit the post-TopOpt absorption block (FG params or bio layers).
 
-    For ``env.absorption`` of type :class:`FrancoisGarrison` writes one
-    record ``T S pH z_bar``; for :class:`Biological` writes the layer
-    count followed by one ``Z1 Z2 f0 Q a0`` record per layer. Other
-    absorption types (Thorp, ConstantAbsorption, None) emit nothing.
+    For one :class:`FrancoisGarrison` row on a deck covering several
+    frequencies (``multi_frequency``, letter ``'F'``) writes one record ``T
+    S pH z_bar`` at :func:`francois_garrison_deck_depth`; for
+    :class:`Biological` writes the layer count followed by one ``Z1 Z2 f0 Q
+    a0`` record per layer. Every other law (Thorp, None, and the laws the
+    SSP rows carry: a constant, Francois-Garrison on a one-frequency deck
+    or as a profile, a table) emits nothing.
 
     ``ReadTopOpt`` consumes these rows before the top half-space row, so
     they belong immediately after the TopOpt line. :func:`write_header`
@@ -807,10 +1107,13 @@ def write_absorption_block(f: TextIO, env: Environment) -> None:
     (SPARC, Bellhop) calls this directly.
     """
     absorption = env.absorption
-    if isinstance(absorption, FrancoisGarrison):
-        write_fg_params(f, absorption.as_at_tuple())
-    elif isinstance(absorption, Biological):
-        write_bio_layers(f, absorption.as_at_tuples())
+    code = volume_attenuation_code(absorption,
+                                   multi_frequency=multi_frequency)
+    if code == 'F':
+        write_fg_params(f, francois_garrison_record(
+            absorption, francois_garrison_deck_depth(env)))
+    elif code == 'B':
+        write_bio_layers(f, biological_records(absorption))
 
 
 def write_fg_params(f: TextIO, params: Tuple[float, float, float, float]) -> None:
@@ -827,7 +1130,7 @@ def write_fg_params(f: TextIO, params: Tuple[float, float, float, float]) -> Non
         Open file handle
     params : tuple of 4 floats
         (T, S, pH, z_bar): temperature (degC), salinity (psu), pH,
-        mean depth (m).
+        the depth (m) the formula is evaluated at.
     """
     if params is None or len(params) != 4:
         raise ConfigurationError(
@@ -853,7 +1156,7 @@ def write_bio_layers(f: TextIO, bio_layers) -> None:
         [(Z1, Z2, f0, Q, a0), ...] per layer.
     """
     if not bio_layers:
-        raise ConfigurationError("bio_layers must be a non-empty list of 5-tuples")
+        raise ConfigurationError("bio_layers must be a non-empty list of 5-tuples.")
     if len(bio_layers) > _MAX_BIO_LAYERS:
         raise ConfigurationError(
             f"{len(bio_layers)} biological attenuation layers exceed the "
@@ -901,64 +1204,17 @@ def write_broadband_freqs(f: TextIO, frequencies: np.ndarray) -> None:
     f.write(f"{freq_str} /\n")
 
 
-def resolve_phase_speed_bounds(
-    env: Environment,
-    c_low: Optional[float] = None,
-    c_high: Optional[float] = None,
-) -> Tuple[float, float]:
-    """Resolve effective ``(c_low, c_high)`` for an AT-family run.
-
-    Precedence (same logic used by :func:`write_phase_speed_and_rmax`):
-      1. Explicit caller values win.
-      2. Otherwise: ``c_low = c_min · C_LOW_FACTOR`` and
-         ``c_high = max(c_max, env.bottom.halfspace_at(range=0).sound_speed) · C_HIGH_FACTOR``.
-
-    A **non-geoacoustic** bottom (vacuum, rigid, or a reflection table —
-    'file'/'precalc') carries no physical sound speed — modes above the
-    half-space speed are leaky only when there *is* a half-space to leak into,
-    and a parameter-free ``BoundaryProperties`` still carries the placeholder
-    ``sound_speed`` its constructor defaults to. Capping on that placeholder
-    silently truncates the mode spectrum (a 100 m rigid-bottom guide at 50 Hz
-    keeps 3 of its 7 modes, a 10.6 dB error; a 'file' bottom's 1600 m/s
-    placeholder capped cHigh at 1680 m/s), so those boundaries resolve to
-    :data:`DEFAULT_C_MAX_UNBOUNDED` instead — the AT idiom for "no upper
-    limit", the same value ``leaky_modes`` uses.
-
-    Useful for model wrappers that want to log the resolved values
-    before handing them to the writer.
-    """
-    if c_low is not None and c_high is not None:
-        return float(c_low), float(c_high)
-    ssp_pairs = env.ssp.to_pairs()
-    c_min = float(ssp_pairs[:, 1].min())
-    halfspace = env.bottom.halfspace_at(range=0.0)
-    if halfspace.acoustic_type in _NON_GEOACOUSTIC_TYPES:
-        c_high_auto = DEFAULT_C_MAX_UNBOUNDED
-    else:
-        c_max = max(float(ssp_pairs[:, 1].max()),
-                    float(halfspace.sound_speed))
-        c_high_auto = c_max * C_HIGH_FACTOR
-    return (
-        float(c_low) if c_low is not None else c_min * C_LOW_FACTOR,
-        float(c_high) if c_high is not None else c_high_auto,
-    )
-
-
 def write_phase_speed_and_rmax(
     f: TextIO,
-    env: Environment,
     *,
     rmax_m: float,
-    c_low: Optional[float] = None,
-    c_high: Optional[float] = None,
+    c_low: float,
+    c_high: float,
 ) -> None:
     """Write the cLow/cHigh phase-speed line and the RMax (km) line.
 
-    cLow/cHigh resolve in this order:
-      1. Explicit ``c_low`` / ``c_high`` (caller-supplied user override).
-      2. SSP-derived: ``c_min·C_LOW_FACTOR`` and
-         ``max(c_max, env.bottom.halfspace_at(range=0).sound_speed)``
-         ``·C_HIGH_FACTOR``.
+    ``c_low`` / ``c_high`` are the resolved window (m/s): the engines
+    derive it (``uacpy.models._window``) and the deck states it.
 
     ``rmax_m`` is converted to the km the deck expects and written at
     millimetre resolution. RMax is the range at which KRAKEN enforces
@@ -969,8 +1225,7 @@ def write_phase_speed_and_rmax(
     ``ReadEnvironmentMod.f90:138`` reads the field list-directed into a
     REAL(KIND=8), so there is no width constraint to respect.
     """
-    _c_low, _c_high = resolve_phase_speed_bounds(env, c_low, c_high)
-    f.write(f"{_c_low:.1f} {_c_high:.1f}\n")
+    f.write(f"{float(c_low):.1f} {float(c_high):.1f}\n")
     f.write(f"{float(m_to_km(rmax_m)):.6f}\n")
 
 
@@ -979,9 +1234,22 @@ def write_ssp_section(
     env: Environment,
     bottom_depth: float,
     n_mesh: int = 0,
+    *,
+    ssp_topopt: str,
+    frequency: Optional[float] = None,
+    multi_frequency: bool = False,
 ) -> None:
     """Write the SSP section spanning ``z = 0`` to ``bottom_depth``
     (quantised by :func:`deck_depth`).
+
+    ``frequency`` is the deck frequency, at which a law the rows carry is
+    written into each row's ``alphaI`` (:func:`ssp_row_attenuations`);
+    ``multi_frequency`` as in :func:`compose_topopt`.
+
+    ``ssp_topopt`` is the deck's ``TopOpt(1)`` letter
+    (:func:`resolve_ssp_topopt`): a Biological ``env.absorption`` gets a
+    node pair across every layer edge inside the column, interpolated the
+    way that letter interpolates (:func:`biological_edge_nodes`).
 
     Both the header line and the SSP samples go through the same quantised
     depth so the AT parser sees ``ssp[-1].z == header.z_max`` exactly.
@@ -1012,9 +1280,17 @@ def write_ssp_section(
     # The count is what the deck carries: the extended profile, the z = 0
     # guard row prepended below when the profile starts under the surface,
     # and two rows per sediment layer.
+    # The profile the deck carries, surface guard row included, with the
+    # Biological edge nodes added (the same arrays when there are none).
+    guarded = (np.vstack([[0.0, pairs[0, 1]], pairs]) if pairs[0, 0] > 0.0
+               else pairs)
+    edge_z, edge_c = biological_edge_nodes(
+        guarded[:, 0], guarded[:, 1], env.absorption, ssp_topopt,
+        who='AT env writer')
     reject_oversized_at_ssp(
         'AT env writer',
-        len(pairs) + int(pairs[0, 0] > 0.0) + 2 * n_layers)
+        len(pairs) + int(pairs[0, 0] > 0.0)
+        + (edge_z.size - guarded.shape[0]) + 2 * n_layers)
     # AT reads this mesh line as NG, SSP%sigma(Medium), Depth(Medium+1)
     # (misc/ReadEnvironmentMod.f90:81-88). For the water column that is sigma(1) —
     # the *sea surface* interface. Each sigma belongs to the interface at the top
@@ -1022,25 +1298,18 @@ def write_ssp_section(
     # follows (write_layer_sections) and sigma(NMedia+1) on the bottom half-space
     # line when none does. Take each from its own carrier so none is mislabelled.
     surface_roughness = float(env.surface.roughness)
-    f.write(f"{int(n_mesh)}  {surface_roughness:.6f}  {bottom_depth_rounded:{_DECK_DEPTH_FMT}}\n")
+    f.write(f"{int(n_mesh)}  {surface_roughness:.6f}  {bottom_depth_rounded:{DECK_DEPTH_FMT}}\n")
 
-    baseline = (
-        env.absorption.value_dB_per_wavelength
-        if isinstance(env.absorption, ConstantAbsorption)
-        else 0.0
-    )
-    if pairs[0, 0] > 0.0:
-        warnings.warn(
-            f"The sound-speed profile starts at {pairs[0, 0]:g} m, not at the "
-            f"sea surface. AT places the pressure-release surface on the first "
-            f"SSP sample, so the deck carries the shallowest sound speed "
-            f"({pairs[0, 1]:g} m/s) extrapolated up to z = 0; without it the "
-            f"waveguide would be {pairs[0, 0]:g} m thinner than env.depth and "
-            f"every source/receiver above that depth would be moved down onto "
-            f"it. Supply a sample at 0 m to control the near-surface water.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        pairs = np.vstack([[0.0, pairs[0, 1]], pairs])
+    # A profile that starts under the surface carries its shallowest sound
+    # speed up to z = 0 (the guard row above): AT places the pressure-release
+    # surface on the first SSP sample, so without it the waveguide would be
+    # that much thinner than env.depth and every source/receiver above it
+    # would be moved down onto it. The run states it
+    # (``models._checks.warn_on_ssp_start``).
+    pairs = np.column_stack([edge_z, edge_c])
+    alpha_i = ssp_row_attenuation_texts(env, frequency, pairs[:, 0],
+                                        pairs[:, 1],
+                                        multi_frequency=multi_frequency)
 
     # AT reads each SSP line as z, alphaR (cp), betaR (cs), rhoR, alphaI
     # (compressional attenuation), betaI (misc/sspMod.f90:334). All six are
@@ -1049,9 +1318,9 @@ def write_ssp_section(
     # (misc/ReadEnvironmentMod.f90:285) reads the top half-space into those
     # very module variables first, so a short form donates the surface's
     # cs/rho/alphaI/betaI to the water.
-    for depth, c in pairs:
+    for (depth, c), alpha in zip(pairs, alpha_i):
         f.write(f"  {depth:.6f} {c:.6f} 0.000000 {env.water_density:.6f} "
-                f"{baseline:.6f} 0.000000 /\n")
+                f"{alpha} 0.000000 /\n")
 
 
 def write_layer_sections(
@@ -1069,10 +1338,6 @@ def write_layer_sections(
 
     Parameters
     ----------
-    density_reference : float, optional
-        Every density is written divided by this (default 1, i.e. as
-        carried). BOUNCE references its reflection coefficient to a unit
-        water density, so its writer passes ``env.water_density`` here.
     f : TextIO
         Open file handle
     env : Environment
@@ -1088,6 +1353,10 @@ def write_layer_sections(
         each medium from its own thickness and its own shear speed. For
         multi-profile runs, use a fixed scalar to keep NTotal consistent
         across profiles.
+    density_reference : float, optional
+        Every density is written divided by this (default 1, i.e. as
+        carried). BOUNCE references its reflection coefficient to a unit
+        water density, so its writer passes ``env.water_density`` here.
 
     Notes
     -----
@@ -1105,13 +1374,13 @@ def write_layer_sections(
         Depth of the bottom of the last sediment layer
         (i.e., top of the half-space)
     """
-    if not env.has_layered_bottom:
+    if not (env.bottom.is_layered and not env.bottom.is_range_dependent):
         return seafloor_depth
 
     # ``deck_depth`` round-trips through the deck-wide depth format, so the
     # quantised value reprints exactly.
     interface = deck_depth
-    zfmt = _DECK_DEPTH_FMT
+    zfmt = DECK_DEPTH_FMT
 
     layered = env.bottom
     current_depth = interface(seafloor_depth)
@@ -1159,7 +1428,7 @@ def write_bottom_section(
     env: Environment,
     bottom_type: Optional[BoundaryType] = None,
     filepath: Optional[Path] = None,
-    verbose: bool = False,
+    verbose: Union[bool, str] = False,
     halfspace_depth: Optional[float] = None,
     density_reference: float = 1.0,
 ) -> None:
@@ -1168,10 +1437,6 @@ def write_bottom_section(
 
     Parameters
     ----------
-    density_reference : float, optional
-        Every density is written divided by this (default 1, i.e. as
-        carried). BOUNCE references its reflection coefficient to a unit
-        water density, so its writer passes ``env.water_density`` here.
     f : TextIO
         Open file handle
     env : Environment
@@ -1182,11 +1447,15 @@ def write_bottom_section(
         Path to the ENV file being written; required for a ``'file'``
         (``.brc``) or ``'precalc'`` (``.irc``) seabed so the table can be
         staged beside it.
-    verbose : bool, optional
+    verbose : bool or str, optional
         Print verbose output
     halfspace_depth : float, optional
         Depth used for the 'A' halfspace line. Defaults to ``env.depth``
         plus stacked layered-bottom thicknesses.
+    density_reference : float, optional
+        Every density is written divided by this (default 1, i.e. as
+        carried). BOUNCE references its reflection coefficient to a unit
+        water density, so its writer passes ``env.water_density`` here.
     """
     hs = env.bottom.halfspace_at(range=0.0)
     if bottom_type is None:
@@ -1197,7 +1466,7 @@ def write_bottom_section(
     rho = hs.density / density_reference
     alpha = hs.attenuation
 
-    bottom_code = bottom_type.to_acoustics_toolbox_code()
+    bottom_code = BOUNDARY_CODES[bottom_type]
     sigma = hs.roughness
 
     # misc/ReadEnvironmentMod.f90:121-129 reads only BotOpt(1:1); a bathymetry
@@ -1245,10 +1514,10 @@ def write_bottom_section(
             # it — but BELLHOP does not, and a deck that names one interface
             # three ways cannot be diffed against a reference.)
             z_bottom = deck_depth(env.depth)
-            if env.has_layered_bottom:
+            if env.bottom.is_layered and not env.bottom.is_range_dependent:
                 for layer in writable_layers(env.bottom):
                     z_bottom = deck_depth(z_bottom + layer.thickness)
-        # betaI on the 'A' line (misc/sspMod.f90:334). Every AT program that
+        # betaI on the 'A' line (misc/ReadEnvironmentMod.f90:285). Every AT program that
         # reads an elastic half-space uses it: krakenc and bounce apply it, and
         # real kraken.exe accepts the column and ignores it, so the
         # environment's value is written unconditionally.
@@ -1266,9 +1535,14 @@ def write_vector_record(f: TextIO, values) -> None:
     f.write(" ".join(f"{v:.6f}" for v in values) + " /\n")
 
 
-def write_source_depths(f: TextIO, source: Source) -> None:
-    """Write the source-depth section of an Acoustics Toolbox ``.env`` file."""
-    write_vector_record(f, source.depths)
+def write_source_depths(f: TextIO, source) -> None:
+    """Write the source-depth section of an Acoustics Toolbox ``.env`` file.
+
+    Accepts either a ``Source`` instance or a 1-D depths array, like
+    :func:`write_receiver_depths`.
+    """
+    depths = source.depths if isinstance(source, Source) else source
+    write_vector_record(f, depths)
 
 
 def write_receiver_depths(f: TextIO, receiver_or_depths) -> None:
@@ -1283,21 +1557,27 @@ def write_receiver_depths(f: TextIO, receiver_or_depths) -> None:
     write_vector_record(f, depths)
 
 
-def write_receiver_ranges(f: TextIO, receiver: Receiver) -> None:
+def write_receiver_ranges(f: TextIO, receiver_or_ranges) -> None:
     """Write the receiver-range section (ranges converted from m to km).
 
-    The check is on the **written** values, not on ``receiver.ranges``: at
+    Accepts either a ``Receiver`` instance or a 1-D ranges array (metres),
+    like :func:`write_receiver_depths`.
+
+    The check is on the **written** values, not on the ranges given: at
     ``.6f`` km the deck resolves 1 mm, so two ranges closer than that collapse
     to one token even though the carrier's own strictly-increasing guard
     passed. Bellhop reads the file, not the array.
     """
-    n_rr = len(receiver.ranges)
-    tokens = [f"{float(m_to_km(r)):.6f}" for r in receiver.ranges]
+    ranges = np.atleast_1d(np.asarray(
+        getattr(receiver_or_ranges, 'ranges', receiver_or_ranges),
+        dtype=float))
+    n_rr = len(ranges)
+    tokens = [f"{float(m_to_km(r)):.6f}" for r in ranges]
     bad = _collapsed_pair_index(tokens)
     if bad is not None:
         raise ConfigurationError(
-            f"receiver ranges {receiver.ranges[bad]:g} m and "
-            f"{receiver.ranges[bad + 1]:g} m both write as "
+            f"receiver ranges {ranges[bad]:g} m and "
+            f"{ranges[bad + 1]:g} m both write as "
             f"{tokens[bad]} km at the deck's 1 mm resolution, leaving the "
             f"range axis non-increasing.",
             remediation="Separate the receiver ranges by more than 1 mm.",
@@ -1331,7 +1611,7 @@ def write_multi_profile_env(
     (``misc/ReadEnvironmentMod.f90:99-110``). Per-profile meshes are
     legal: the ``.mod`` record length is set once from the first profile
     as ``MAX(2*Nfreq, 2*NzTab, 32, 3*NMedia_acoustic)``
-    (``Kraken/kraken.f90:587``, ``krakenc.f90:629``) and carries no mesh
+    (``Kraken/kraken.f90:587``, ``krakenc.f90:630``) and carries no mesh
     term. What the record length does depend on is held constant another
     way — every profile is padded to the same NMedia
     (:func:`plan_multi_profile_media`) and the source/receiver depth
@@ -1349,7 +1629,15 @@ def write_multi_profile_env(
     receiver : Receiver
         Receiver configuration (depths for mode computation)
     **kwargs
-        n_mesh, c_low, c_high, rmax_m passed through.
+        n_mesh, c_low, c_high, rmax_m passed through. ``c_low`` and
+        ``c_high`` are required: ``c_high`` is one value for every profile,
+        or a sequence of one per profile (each profile's own window).
+        ``n_mesh`` must be
+        >= 0; ``rmax_m`` (metres) defaults to the farthest receiver range,
+        as in :func:`write_kraken_env_file`. ``interp_ssp``
+        (``'linear'`` when omitted) selects each block's SSP interpolation via
+        :func:`resolve_ssp_topopt`, and ``verbose`` logs the bottom
+        sections.
         TopOpt position 4 is taken from each segment env's ``absorption``
         field via :func:`write_header`.
     """
@@ -1359,21 +1647,37 @@ def write_multi_profile_env(
         'write_multi_profile_env', kwargs,
         {'n_mesh', 'c_low', 'c_high', 'rmax_m', 'interp_ssp', 'verbose'},
     )
-    c_low = kwargs.get('c_low', None)
-    c_high = kwargs.get('c_high', None)
-    rmax_m = kwargs.get('rmax_m', 100000.0)
+    missing = [k for k in ('c_low', 'c_high') if k not in kwargs]
+    if missing:
+        raise TypeError(
+            f"write_multi_profile_env: missing required keyword(s) "
+            f"{', '.join(missing)} (the resolved phase-speed window, m/s).")
+    c_low = kwargs['c_low']
+    c_high = kwargs['c_high']
+    c_highs = (list(c_high) if isinstance(c_high, (list, tuple, np.ndarray))
+               else [c_high] * len(segments))
+    if len(c_highs) != len(segments):
+        raise ConfigurationError(
+            f"write_multi_profile_env: c_high holds {len(c_highs)} values "
+            f"for {len(segments)} profiles; pass one value, or one per "
+            f"profile.")
+    rmax_m = _rmax_or_farthest_receiver(kwargs.get('rmax_m'), receiver,
+                                        'write_multi_profile_env')
     # NG = 0 on a mesh line asks the reader to size that medium of that
-    # profile itself (misc/ReadEnvironmentMod.f90:105-110); a negative
-    # request is normalised to the same automatic form.
-    n_mesh = max(int(kwargs.get('n_mesh', 0)), 0)
+    # profile itself (misc/ReadEnvironmentMod.f90:105-110).
+    n_mesh = int(kwargs.get('n_mesh', 0))
+    if n_mesh < 0:
+        raise ConfigurationError(
+            f"write_multi_profile_env: n_mesh must be >= 0 (0 lets KRAKEN "
+            f"size each medium); got {n_mesh}.")
 
     max_n_media, _bottom_depth, media_plans = plan_multi_profile_media(segments)
 
     interp_ssp = kwargs.get('interp_ssp', 'linear')
 
     with open(filepath, 'w') as f:
-        for (_range_m, env_seg), all_extra_media in zip(segments,
-                                                         media_plans):
+        for (_range_m, env_seg), all_extra_media, c_high_seg in zip(
+                segments, media_plans, c_highs):
             ssp_topopt = resolve_ssp_topopt(env_seg, interp_ssp)
             surface_obj = getattr(env_seg, 'surface', None)
             if surface_obj is not None:
@@ -1396,16 +1700,17 @@ def write_multi_profile_env(
             # --- Water column (medium 1) ---
             write_ssp_section(
                 f, env_seg, env_seg.depth,
-                n_mesh=n_mesh,
+                n_mesh=n_mesh, ssp_topopt=ssp_topopt,
+                frequency=float(source.frequencies[0]),
             )
 
             # --- Sub-bottom media (2..max_n_media), from the shared plan ---
             for top, bot, cp, cs, rho_v, ap, as_, sigma in all_extra_media:
-                f.write(f"{int(n_mesh)}  {sigma:.6f}  {bot:{_DECK_DEPTH_FMT}}\n")
-                f.write(f"  {top:{_DECK_DEPTH_FMT}} {cp:.6f} "
+                f.write(f"{int(n_mesh)}  {sigma:.6f}  {bot:{DECK_DEPTH_FMT}}\n")
+                f.write(f"  {top:{DECK_DEPTH_FMT}} {cp:.6f} "
                         f"{cs:.6f} {rho_v:.6f} "
                         f"{ap:.6f} {as_:.6f} /\n")
-                f.write(f"  {bot:{_DECK_DEPTH_FMT}} {cp:.6f} "
+                f.write(f"  {bot:{DECK_DEPTH_FMT}} {cp:.6f} "
                         f"{cs:.6f} {rho_v:.6f} "
                         f"{ap:.6f} {as_:.6f} /\n")
 
@@ -1422,9 +1727,7 @@ def write_multi_profile_env(
             )
 
             write_phase_speed_and_rmax(
-                f, env_seg,
-                rmax_m=rmax_m,
-                c_low=c_low, c_high=c_high,
+                f, rmax_m=rmax_m, c_low=c_low, c_high=c_high_seg,
             )
 
             write_source_depths(f, source)
@@ -1494,7 +1797,7 @@ def _write_flp_axis(f: TextIO, values, count_label: str, label: str,
     *recompute* the intermediate values in single precision, so they land a
     few ULPs from the ``%.6f`` the same numbers are written as elsewhere —
     harmless for an axis FIELD only evaluates on, and not for the receiver
-    depths, which ``Kraken._write_field_env`` now places on the mode
+    depths, which ``Kraken._write_field_env`` places on the mode
     tabulation grid so they are read off a tabulated point instead of
     interpolated between two. A few ULPs is enough to put the interpolation
     weight at ~1e-7 instead of 0, which let a source depth elsewhere in the
@@ -1514,9 +1817,9 @@ def write_fieldflp(
     option: str,
     pos: Dict[str, Any],
     title: str = "",
-    M_limit: int = 999999,
+    n_modes: int = 999999,
     n_profiles: int = 1,
-    profile_ranges_m: Any = None,
+    profile_ranges: Any = None,
 ) -> None:
     """
     Write field parameters file (.flp) for FIELD/FIELDS programs.
@@ -1553,12 +1856,12 @@ def write_fieldflp(
         Title for the file. Default ``''``, which ``quote_fortran_title``
         writes as ``'unnamed'`` (an empty quoted title is legal to field.f90
         but useless as a label).
-    M_limit : int, optional
+    n_modes : int, optional
         Maximum number of modes to include (default: 999999 = all)
     n_profiles : int, optional
         Number of range profiles (default: 1 for range-independent).
         For range-dependent, set > 1 and provide profile_ranges_m.
-    profile_ranges_m : array-like, optional
+    profile_ranges : array-like, optional
         Profile boundary ranges in metres, converted to the km the
         ``.flp`` format expects at this boundary. Required when
         n_profiles > 1. First value must be 0.0. Length must equal
@@ -1593,16 +1896,16 @@ def write_fieldflp(
 
     # Validate profile parameters
     if n_profiles > 1:
-        if profile_ranges_m is None:
-            raise ConfigurationError("profile_ranges_m required when n_profiles > 1")
-        profile_ranges_km = m_to_km(profile_ranges_m)
+        if profile_ranges is None:
+            raise ConfigurationError("profile_ranges_m required when n_profiles > 1.")
+        profile_ranges_km = m_to_km(profile_ranges)
         if len(profile_ranges_km) != n_profiles:
             raise ConfigurationError(
                 f"profile_ranges_m length ({len(profile_ranges_km)}) "
                 f"must equal n_profiles ({n_profiles})"
             )
         if abs(profile_ranges_km[0]) > 1e-9:
-            raise ConfigurationError("First profile range must be 0.0 km")
+            raise ConfigurationError("First profile range must be 0.0 km.")
         # Check the values as WRITTEN. field.exe never tests rProf for
         # monotonicity — `grep monotonic KrakenField/field.f90` is empty, unlike
         # ReadRcvrRanges (misc/SourceReceiverPositions.f90:163-165) — so a
@@ -1615,13 +1918,13 @@ def write_fieldflp(
         bad = _collapsed_pair_index(tokens)
         if bad is not None:
             raise ConfigurationError(
-                f"profile ranges {profile_ranges_m[bad]:g} m and "
-                f"{profile_ranges_m[bad + 1]:g} m both write as "
+                f"profile ranges {profile_ranges[bad]:g} m and "
+                f"{profile_ranges[bad + 1]:g} m both write as "
                 f"{tokens[bad]} km at the deck's 1 mm resolution, leaving the "
                 f"profile axis non-increasing.",
                 remediation=(
                     f"Separate the profile ranges by more than "
-                    f"{DECK_RANGE_QUANTUM_M * 1e3:g} mm."
+                    f"{DECK_RANGE_RESOLUTION_M * 1e3:g} mm."
                 ),
             )
 
@@ -1632,7 +1935,7 @@ def write_fieldflp(
         f.write(f"'{option:4s}'  ! Option \n")
 
         # Mode limit
-        f.write(f"{int(M_limit)}   ! Mlimit (number of modes to include) \n")
+        f.write(f"{int(n_modes)}   ! Mlimit (number of modes to include) \n")
 
         # Profile info
         f.write(f"{int(n_profiles)}        ! NProf  \n")
@@ -1656,7 +1959,7 @@ def write_fieldflp(
 
         # Receiver range offsets (array tilt) - default to zeros for every
         # receiver. field.exe ERROUTs unless ``NRro == NRz``
-        # (KrakenField/field.f90:149-152), so we keep the count = NRz. The
+        # (KrakenField/field.f90:149-152), so the count stays NRz. The
         # sentinel ``/`` terminator paired with a single explicit value
         # lets AT's SubTab routine replicate it across the full vector
         # (see misc/subtabulate.f90 — when x(3) is left at its -999.9
@@ -1682,7 +1985,7 @@ def write_field3dflp(
     bathy: Dict[str, Any],
     mod_file_pattern: str = "'{}'",
     title: str = "",
-    M_limit: int = 999999,
+    n_modes: int = 999999,
 ) -> None:
     """
     Write the FIELD3D field-parameter deck (``.flp``).
@@ -1726,7 +2029,7 @@ def write_field3dflp(
     title : str, optional
         Deck title. Default ``''``, written as ``'unnamed'`` by
         ``quote_fortran_title``.
-    M_limit : int, optional
+    n_modes : int, optional
         Mode-count cap. Default 999999.
 
     Raises
@@ -1777,11 +2080,11 @@ def write_field3dflp(
     ...                      mod_file_pattern="'mode_{:07.1f}_{:07.1f}'",
     ...                      title='3D Test')
     ...     deck = read_flp3d(path)
-    >>> deck['title'], deck['method']
+    >>> deck.title, deck.method
     ('3D Test', 'STD')
-    >>> len(deck['nodes']['mode_file']), deck['elements'].shape
+    >>> len(deck.node_mode_files), deck.elements.shape
     (121, (200, 3))
-    >>> int(deck['elements'].min()), int(deck['elements'].max())
+    >>> int(deck.elements.min()), int(deck.elements.max())
     (1, 121)
     """
     filepath = Path(filepath)
@@ -1858,7 +2161,7 @@ def write_field3dflp(
         opt_literal = str(option).replace("'", "")
         f.write(f"{quote_fortran_title(title)} ! TITLE\n")
         f.write(f"'{opt_literal}' ! OPT\n")
-        f.write(f"{M_limit} ! MLIMIT\n")
+        f.write(f"{n_modes} ! MLIMIT\n")
 
         _write_axis(f, s_x, Nsx, " ! Sx (km)")
         _write_axis(f, s_y, Nsy, " ! Sy (km)")
@@ -1899,18 +2202,39 @@ def write_field3dflp(
                 f.write(f"{n0 + 1:5d} {n0 + nx:5d} {n0 + nx + 1:5d}\n")
 
 
+def _env_boundary_types(env: Environment) -> Tuple[BoundaryType, BoundaryType]:
+    """The surface and bottom boundary types a deck writes for ``env``:
+    its surface's, and its seabed half-space's at range 0."""
+    return (parse_boundary_type(env.surface.acoustic_type),
+            parse_boundary_type(
+                env.bottom.halfspace_at(range=0.0).acoustic_type))
+
+
+def _rmax_or_farthest_receiver(rmax_m: Optional[float], receiver,
+                               who: str) -> float:
+    """``rmax_m``, or the farthest receiver range when it is None."""
+    if rmax_m is not None:
+        return float(rmax_m)
+    ranges = getattr(receiver, 'ranges', None)
+    if ranges is None or np.size(ranges) == 0:
+        raise ConfigurationError(
+            f"{who}: rmax_m is None and the receiver carries no ranges to "
+            f"take RMax from.",
+            remediation="Pass rmax_m= (metres), or a Receiver with ranges.")
+    return float(np.max(np.asarray(ranges, dtype=float)))
+
+
 def _write_kraken_family_env_file(
     filepath: Union[str, Path],
     env: Environment,
     source: Source,
     receiver,
     *,
-    ssp_topopt: str,
-    surface_type: BoundaryType,
-    bottom_type: BoundaryType,
+    who: str,
+    interp_ssp: Optional[str],
     frequencies: Optional[np.ndarray],
     n_mesh: int,
-    rmax_m: float,
+    rmax_m: Optional[float],
     c_low: float,
     c_high: float,
     topopt_extra: str = '',
@@ -1920,6 +2244,10 @@ def _write_kraken_family_env_file(
     broadband frequency vector when there is more than one frequency.
     ``topopt_extra`` is the extra TopOpt character only Scooter reads.
     """
+    reject_unsupported_ssp_interp(who, interp_ssp)
+    ssp_topopt = resolve_ssp_topopt(env, interp_ssp)
+    surface_type, bottom_type = _env_boundary_types(env)
+    rmax_m = _rmax_or_farthest_receiver(rmax_m, receiver, who)
     with open(filepath, 'w') as f:
         write_header(
             f, env, source,
@@ -1929,7 +2257,12 @@ def _write_kraken_family_env_file(
             topopt_extra=topopt_extra,
             filepath=Path(filepath),
         )
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
+        write_ssp_section(f, env, env.depth, n_mesh=n_mesh,
+                          ssp_topopt=ssp_topopt,
+                          frequency=float(source.frequencies[0]),
+                          multi_frequency=(
+                              frequencies is not None
+                              and len(np.atleast_1d(frequencies)) > 1))
         write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
         # Both engines read the 'A' halfspace line as ``zTemp, alphaR, betaR,
         # rhoR, alphaI, betaI`` (misc/ReadEnvironmentMod.f90:285), shear
@@ -1941,7 +2274,7 @@ def _write_kraken_family_env_file(
             filepath=Path(filepath),
         )
         write_phase_speed_and_rmax(
-            f, env, rmax_m=rmax_m, c_low=c_low, c_high=c_high,
+            f, rmax_m=rmax_m, c_low=c_low, c_high=c_high,
         )
         write_source_depths(f, source)
         write_receiver_depths(f, receiver)
@@ -1951,8 +2284,9 @@ def _write_kraken_family_env_file(
 
 def write_kraken_env_file(
     filepath: Union[str, Path], env: Environment, source: Source, receiver, *,
-    ssp_topopt: str, surface_type: BoundaryType, bottom_type: BoundaryType,
-    frequencies: Optional[np.ndarray], n_mesh: int, rmax_m: float,
+    interp_ssp: Optional[str] = None,
+    frequencies: Optional[np.ndarray] = None, n_mesh: Optional[int] = None,
+    rmax_m: Optional[float] = None,
     c_low: float, c_high: float,
 ) -> None:
     """Write a Kraken environment file (.env).
@@ -1960,37 +2294,98 @@ def write_kraken_env_file(
     Kraken extends the KRAKEN ENV format with phase-speed limits (cLow,
     cHigh), a maximum range (RMax), and an optional broadband frequency
     vector (``TopOpt(6)='B'``, read after the source/receiver depth blocks).
-    All policy (rmax, cLow/cHigh, broadband detection) is resolved by the
-    caller; this function only formats. ``receiver`` is whatever carries the
-    receiver depths (a ``Receiver`` or a depth array).
+    ``receiver`` is whatever carries the receiver depths (a ``Receiver`` or
+    a depth array).
+
+    The deck states ``env``: the SSP letter comes from ``interp_ssp``
+    (:func:`resolve_ssp_topopt`, the name :class:`~uacpy.models.Kraken`
+    takes) and the boundary letters from ``env.surface`` and the seabed
+    half-space at range 0. ``n_mesh=0`` lets KRAKEN size each medium;
+    ``c_low``/``c_high`` are the phase-speed window the deck states (m/s,
+    required); ``rmax_m`` of None is the farthest receiver range. :class:`~uacpy.models.Kraken` passes its own
+    ``rmax_m`` (5 % past the farthest receiver, ×3 for a band) and phase
+    speeds.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Output deck path.
+    env : Environment
+        The environment the deck states.
+    source : Source
+        Source depths and frequency.
+    receiver : Receiver or array_like
+        The receiver, or its depths.
+    interp_ssp : str, optional
+        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is the
+        engine's own choice.
+    frequencies : array_like, optional
+        A broadband frequency vector (Hz), written after the depth blocks.
+    n_mesh : int, optional
+        Mesh points per medium; ``0`` lets the engine size each one.
+    rmax_m : float, optional
+        The deck's RMax (m); ``None`` is the farthest receiver range.
+    c_low, c_high : float
+        The phase-speed window the deck states (m/s).
     """
+    n_mesh = KRAKEN_N_MESH if n_mesh is None else n_mesh
     _write_kraken_family_env_file(
-        filepath, env, source, receiver, ssp_topopt=ssp_topopt,
-        surface_type=surface_type, bottom_type=bottom_type,
-        frequencies=frequencies, n_mesh=n_mesh, rmax_m=rmax_m,
-        c_low=c_low, c_high=c_high)
+        filepath, env, source, receiver, who='write_kraken_env_file',
+        interp_ssp=interp_ssp, frequencies=frequencies, n_mesh=n_mesh,
+        rmax_m=rmax_m, c_low=c_low, c_high=c_high)
 
 
 def write_scooter_env_file(
     filepath: Union[str, Path], env: Environment, source: Source,
     receiver: Receiver, *,
-    ssp_topopt: str, surface_type: BoundaryType, bottom_type: BoundaryType,
-    frequencies: Optional[np.ndarray], topopt_extra: str, n_mesh: int,
-    rmax_m: float, c_low: float, c_high: float,
+    interp_ssp: Optional[str] = None,
+    frequencies: Optional[np.ndarray] = None, topopt_extra: str = '',
+    n_mesh: Optional[int] = None, rmax_m: Optional[float] = None,
+    c_low: float, c_high: float,
 ) -> None:
     """Write a Scooter environment file (.env).
 
     Scooter uses the KRAKEN ENV format plus cLow/cHigh, RMax, and shear
     support on the bottom halfspace 'A' line. It reads no receiver ranges —
     ``scooter.f90:158-176`` (``GetPar``) stops at ``ReadfreqVec`` and the
-    ranges come from the ``.grn`` post-processing instead. Policy (rmax,
-    cLow/cHigh) is resolved by the caller; this only formats.
+    ranges come from the ``.grn`` post-processing instead.
+
+    The SSP and boundary letters, ``n_mesh``, ``c_low``/``c_high`` and
+    ``rmax_m`` default as in :func:`write_kraken_env_file`. RMax sets
+    Scooter's wavenumber sampling; :class:`~uacpy.models.Scooter` passes
+    the farthest receiver times its ``rmax_factor``. ``topopt_extra``
+    ``'0'`` turns off the stabilising attenuation (TopOpt(7)).
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Output deck path.
+    env : Environment
+        The environment the deck states.
+    source : Source
+        Source depths and frequency.
+    receiver : Receiver
+        The receiver depths.
+    interp_ssp : str, optional
+        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is the
+        engine's own choice.
+    frequencies : array_like, optional
+        A broadband frequency vector (Hz), written after the depth blocks.
+    topopt_extra : str, optional
+        ``'0'`` turns off the stabilising attenuation (TopOpt(7)).
+    n_mesh : int, optional
+        Mesh points per medium; ``0`` lets the engine size each one.
+    rmax_m : float, optional
+        The deck's RMax (m); ``None`` is the farthest receiver range.
+    c_low, c_high : float
+        The phase-speed window the deck states (m/s).
     """
+    n_mesh = SCOOTER_N_MESH if n_mesh is None else n_mesh
     _write_kraken_family_env_file(
-        filepath, env, source, receiver, ssp_topopt=ssp_topopt,
-        surface_type=surface_type, bottom_type=bottom_type,
-        frequencies=frequencies, topopt_extra=topopt_extra, n_mesh=n_mesh,
-        rmax_m=rmax_m, c_low=c_low, c_high=c_high)
+        filepath, env, source, receiver, who='write_scooter_env_file',
+        interp_ssp=interp_ssp, frequencies=frequencies,
+        topopt_extra=topopt_extra, n_mesh=n_mesh, rmax_m=rmax_m,
+        c_low=c_low, c_high=c_high)
 
 
 def write_sparc_env_file(
@@ -1999,21 +2394,19 @@ def write_sparc_env_file(
     source: Source,
     receiver: Receiver,
     *,
-    ssp_code: str,
-    surface_type: BoundaryType,
-    bottom_type: BoundaryType,
-    output_mode: str,
-    n_mesh: int,
-    rmax_m: float,
+    interp_ssp: Optional[str] = None,
+    output_mode: Optional[str] = None,
+    n_mesh: Optional[int] = None,
+    rmax_m: Optional[float] = None,
     c_low: float,
     c_high: float,
     pulse_type: str,
-    f_min: float,
-    f_max: float,
-    n_t_out: int,
-    t_max: float,
-    t_start: float,
-    t_mult: float,
+    freq_min: float,
+    freq_max: float,
+    n_time_samples: int,
+    time_max: float,
+    march_start: float,
+    courant_factor: float,
 ) -> None:
     """Write a SPARC environment file (.env).
 
@@ -2022,9 +2415,56 @@ def write_sparc_env_file(
     blocks. Both boundaries are restricted to vacuum or rigid
     (``sparc.f90:101-104``), so no half-space row is ever written — and a
     deck that declared one without writing the row would hand the SSP mesh
-    line to ``TopBot``. Pulse band, RMax and the time window are resolved by
-    the caller; this only formats.
+    line to ``TopBot``.
+
+    The SSP and boundary letters, ``n_mesh``, ``c_low``/``c_high`` and
+    ``rmax_m`` default as in :func:`write_kraken_env_file`; ``output_mode``
+    defaults to ``'R'`` as :class:`~uacpy.models.SPARC` does. The pulse
+    band and the time window have no answer in ``env`` and are required;
+    :class:`~uacpy.models.SPARC` sizes them from the source frequency and
+    the receiver ranges.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Output deck path.
+    env : Environment
+        The environment the deck states.
+    source : Source
+        Source depths and frequency.
+    receiver : Receiver
+        The receiver.
+    interp_ssp : str, optional
+        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is the
+        engine's own choice.
+    output_mode : {'R', 'D', 'S'}, optional
+        Horizontal array, vertical array or snapshot.
+    n_mesh : int, optional
+        Mesh points per medium; ``0`` lets the engine size each one.
+    rmax_m : float, optional
+        The deck's RMax (m); ``None`` is the farthest receiver range.
+    c_low, c_high : float
+        The phase-speed window the deck states (m/s).
+    pulse_type : str
+        The 4-character pulse code (see :class:`~uacpy.models.SPARC`).
+    freq_min, freq_max : float
+        The pulse band (Hz).
+    n_time_samples : int
+        Output time samples.
+    time_max : float
+        End of the output window (s).
+    march_start : float
+        Time (s) the march begins.
+    courant_factor : float
+        Safety factor on the marching time step.
     """
+    n_mesh = SPARC_N_MESH if n_mesh is None else n_mesh
+    output_mode = SPARC_OUTPUT_MODE if output_mode is None else output_mode
+    reject_unsupported_ssp_interp('write_sparc_env_file', interp_ssp)
+    ssp_code = resolve_ssp_topopt(env, interp_ssp)
+    surface_type, bottom_type = _env_boundary_types(env)
+    rmax_m = _rmax_or_farthest_receiver(rmax_m, receiver,
+                                        'write_sparc_env_file')
     # sparc.f90:177 stops on a non-zero roughness in the SSP block —
     # "Rough interfaces not allowed" — for the surface and every sediment
     # layer; the half-space's, on the BotOpt line, it reads and ignores.
@@ -2046,15 +2486,14 @@ def write_sparc_env_file(
             f"write_sparc_env_file: the half-space roughness ({hs_sigma:g} m) "
             f"goes on the BotOpt line, which SPARC reads and ignores — the "
             f"deck is valid but the seabed is smooth to SPARC.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    surface_code = surface_type.to_acoustics_toolbox_code()
-    bottom_code = bottom_type.to_acoustics_toolbox_code()
-    for code, boundary, carrier in ((surface_code, 'surface', env.surface),
-                                    (bottom_code, 'bottom', env.bottom)):
-        if code not in ('V', 'R'):
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    bottom_code = BOUNDARY_CODES[bottom_type]
+    for btype, boundary, carrier in ((surface_type, 'surface', env.surface),
+                                     (bottom_type, 'bottom', env.bottom)):
+        if BOUNDARY_CODES[btype] not in ('V', 'R'):
             raise UnsupportedFeatureError(
                 'SPARC',
-                f"a {parse_boundary_type(code).value} {boundary} — "
+                f"a {btype.value} {boundary} — "
                 f"GETPAR stops with 'SPARC only allows Vacuum or Rigid "
                 f"boundary conditions' (sparc.f90:101-104). Got "
                 f"{carrier!r}",
@@ -2068,27 +2507,10 @@ def write_sparc_env_file(
             )
 
     with open(filepath, 'w') as f:
-        # SPARC TopOpt: [SSP][BC][AttenUnit(2 chars)][OutputMode]
-        f.write(f"{quote_fortran_title(env.name)}\n")
-        f.write(f"{source.frequencies[0]:.6f}\n")
-        # NMedia = water column + one medium per sediment layer actually
-        # emitted by write_layer_sections below.
-        n_media = 1
-        if env.has_layered_bottom:
-            n_media += len(writable_layers(env.bottom))
-        _reject_media_overrun(n_media)
-        f.write(f"{int(n_media)}\n")
-
-        atten_code = AttenuationUnits.DB_PER_WAVELENGTH.to_char()
-        vol_atten_code = (
-            env.absorption.topopt_code() if env.absorption is not None else ' '
-        )
-        topopt = f"{ssp_code}{surface_code}{atten_code}{vol_atten_code}{output_mode}".ljust(6)
-        f.write(f"'{topopt}'\n")
-
-        # ReadTopOpt consumes these rows before any top half-space row; the
-        # V/R guard above means there is never one to follow them.
-        write_absorption_block(f, env)
+        # SPARC's TopOpt(5:5) is its output mode. The V/R guard above means
+        # there is no top half-space row and no .trc to stage.
+        write_header(f, env, source, ssp_code, surface_type,
+                     pos5=output_mode, filepath=filepath)
         # One count per MEDIUM when a sequence is given: AT sizes each medium
         # separately (ReadEnvironmentMod.f90:101-112 takes each one's own
         # thickness and speed), so a single scalar broadcast to a thin sediment
@@ -2097,10 +2519,14 @@ def write_sparc_env_file(
         # sediment layers.
         if isinstance(n_mesh, (list, tuple, np.ndarray)):
             counts = [int(n) for n in n_mesh]
-            write_ssp_section(f, env, env.depth, n_mesh=counts[0])
+            write_ssp_section(f, env, env.depth, n_mesh=counts[0],
+                              ssp_topopt=ssp_code,
+                              frequency=float(source.frequencies[0]))
             write_layer_sections(f, env, env.depth, n_mesh=counts[1:])
         else:
-            write_ssp_section(f, env, env.depth, n_mesh=n_mesh)
+            write_ssp_section(f, env, env.depth, n_mesh=n_mesh,
+                              ssp_topopt=ssp_code,
+                              frequency=float(source.frequencies[0]))
             write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
 
         # Bottom section (V or R only, so no halfspace params follow).
@@ -2108,7 +2534,7 @@ def write_sparc_env_file(
         f.write(f"'{bottom_code}' {sigma:.6f}\n")
 
         write_phase_speed_and_rmax(
-            f, env, rmax_m=rmax_m, c_low=c_low, c_high=c_high,
+            f, rmax_m=rmax_m, c_low=c_low, c_high=c_high,
         )
 
         write_source_depths(f, source)
@@ -2119,23 +2545,21 @@ def write_sparc_env_file(
 
         # Time-domain pulse parameters (SPARC-specific, come BEFORE ranges).
         f.write(f"'{pulse_type}'\n")
-        f.write(f"{f_min:.6f} {f_max:.6f}\n")
+        f.write(f"{freq_min:.6f} {freq_max:.6f}\n")
 
         # Receiver ranges (come AFTER pulse info in SPARC). SubTab expands
         # "rmin rmax /" into a uniform vector, silently discarding non-uniform
-        # ranges — emit the full list so an N-entry list is read verbatim.
-        ranges_km = m_to_km(receiver.ranges)
-        f.write(f"{len(ranges_km)}\n")
-        ranges_str = ' '.join([f"{r:.6f}" for r in ranges_km])
-        f.write(f"{ranges_str} /\n")
+        # ranges — write_receiver_ranges emits the full list so an N-entry
+        # list is read verbatim, and refuses two ranges sharing a km token.
+        write_receiver_ranges(f, receiver)
 
         # Output times. Read through ReadVector (Scooter/sparc.f90:159), so the
-        # "first last /" pair is expanded by SubTab into n_t_out uniformly
-        # spaced times — which needs n_t_out >= 3
+        # "first last /" pair is expanded by SubTab into n_time_samples uniformly
+        # spaced times — which needs n_time_samples >= 3
         # (misc/subtabulate.f90:24,40); below that the two values are taken
         # verbatim.
-        f.write(f"{n_t_out}\n")
-        f.write(f"0.0 {t_max:.6f} /\n")
+        f.write(f"{n_time_samples}\n")
+        f.write(f"0.0 {time_max:.6f} /\n")
         # Integration parameters: TSTART, TMULT, ALPHA, BETA, V
         # (Scooter/sparc.f90:168). The trailing three pin the finite-element
         # time march to its standard scheme: ALPHA = 0 is a lumped mass matrix,
@@ -2143,7 +2567,64 @@ def write_sparc_env_file(
         # V = 0 the convection velocity — a moving medium is not part of
         # uacpy's Environment. ``doc/sparc.htm`` names all three and its own
         # sample deck ends in the same three zeros.
-        f.write(f"{t_start:.6f} {t_mult:.6f} 0.0 0.0 0.0\n")
+        f.write(f"{march_start:.6f} {courant_factor:.6f} 0.0 0.0 0.0\n")
+
+
+def write_sparc_source_time_series(filepath, source, waveform, sample_rate,
+                                   rows: int) -> None:
+    """Write SPARC's ``STSFIL`` in the layout
+    ``tslib/sourceMod.f90:97-117`` reads: ``waveform`` zero-padded to
+    ``rows`` rows (a power of two when the binary band-passes the pulse,
+    ``tslib/bandpassc.f90:24-25``).
+
+    Record layout (list-directed reads, so the title is quoted)::
+
+        'uacpy source time series'          ! :99  PulseTitle
+        Nsd  SD(1) ... SD(Nsd)              ! :100 count, source depths
+        t    s(1) ... s(Nsd)                ! :107 one row per sample
+        ...                                 !      until end of file
+
+    ``t`` is in seconds from 0 at ``1/sample_rate`` steps; the binary
+    interpolates linearly between rows (``:144-183``) and drives a zero
+    source outside ``[t_first, t_last]`` (``:172-174``), so the march,
+    which starts at ``march_start`` (default -0.1 s) from a field at rest,
+    meets the waveform from t = 0. The same series is written under
+    every source depth of the deck, whose count must match the row
+    width (``:100`` reads ``SD`` with the deck's ``NSz``). A leading
+    ``'B'`` makes the binary play the file backwards (``:125-136``);
+    the file is the same.
+
+    The band-pass is circular (an FFT over the whole record), so a
+    series should lead with zeros rather than start on its pulse: a
+    pulse placed at row 0 loses about a fifth of its peak level to the
+    filter's wrap at the window edge (measured 19 %).
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Output path.
+    source : Source
+        Source whose depths the file lists.
+    waveform : array_like
+        The source series.
+    sample_rate : float
+        Sample rate (Hz) of ``waveform``.
+    rows : int
+        Rows written; ``waveform`` is zero-padded to it.
+    """
+    waveform = np.asarray(waveform, dtype=float)
+    n_depths = int(np.atleast_1d(np.asarray(source.depths)).size)
+    depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+    series = np.zeros(int(rows))
+    series[:waveform.size] = waveform
+    times = np.arange(int(rows)) / sample_rate
+    with open(filepath, 'w') as f:
+        f.write("'uacpy source time series'\n")
+        f.write(f"{n_depths} " + " ".join(f"{d:.6f}" for d in depths)
+                + "\n")
+        for t, v in zip(times, series):
+            f.write(f"{t:.9e} " + " ".join([f"{v:.9e}"] * n_depths)
+                    + "\n")
 
 
 def write_bounce_input_file(
@@ -2151,19 +2632,22 @@ def write_bounce_input_file(
     env: Environment,
     source: Source,
     *,
-    ssp_topopt: str,
-    bottom_type: BoundaryType,
+    interp_ssp: Optional[str] = None,
     n_mesh,
     c_low: float,
     c_high: float,
-    rmax: float,
-    verbose: bool = False,
+    rmax_m: float,
+    verbose: Union[bool, str] = False,
 ) -> None:
     """Write a BOUNCE input file (.env).
 
-    BOUNCE uses the KRAKEN ENV format plus cLow/cHigh and RMax (km), and does
+    The SSP letter comes from ``interp_ssp`` (:func:`resolve_ssp_topopt`)
+    and the bottom letter from the seabed half-space at range 0.
+
+    BOUNCE uses the KRAKEN ENV format plus cLow/cHigh and RMax, and does
     NOT read source/receiver depth blocks — its Fortran driver stops after
-    RMax (bounce.f90).
+    RMax (bounce.f90). ``rmax_m`` is in metres, written as the km the deck
+    holds, like the ``rmax_m`` of the Kraken/Scooter/SPARC writers.
 
     **The water column is deliberately omitted.** ``bounce.f90:178-179`` shoots
     the impedance up from the bottom half-space through *every* acoustic medium
@@ -2190,7 +2674,7 @@ def write_bounce_input_file(
     ``n_mesh`` is passed through to :func:`write_layer_sections` (a scalar for
     every medium, or one count per writable layer).
 
-    **Densities reach BOUNCE as ratios to the water's.** ``bounce.f90:200``
+    **Densities reach BOUNCE as ratios to the water's.** ``bounce.f90:201``
     forms ``R = -(f - i kz g)/(f + i kz g)`` with ``g = P'/rho`` referenced
     to a unit density — no ``HSTop`` density appears anywhere in the
     program — so the reference row's density is written as ``1`` (the
@@ -2198,20 +2682,43 @@ def write_bounce_input_file(
     ``env.water_density`` (``density_reference``), the same treatment the
     RAM codes get. Measured: the water row alone moved ``R`` by 0.0, the
     direct Scooter run of the same seabed by 2 dB.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Output deck path.
+    env : Environment
+        The environment the deck states.
+    source : Source
+        Source depths and frequency.
+    interp_ssp : str, optional
+        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is the
+        engine's own choice.
+    n_mesh : int
+        Mesh points per medium; ``0`` lets BOUNCE size each one.
+    c_low, c_high : float
+        The phase-speed window the deck states (m/s).
+    rmax_m : float
+        The deck's RMax (m).
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
     """
     filepath = Path(filepath)
+    ssp_topopt = resolve_ssp_topopt(env, interp_ssp)
+    _surface_type, bottom_type = _env_boundary_types(env)
     seafloor = float(env.depth)
-    layers = writable_layers(env.bottom) if env.has_layered_bottom else []
+    layered = env.bottom.is_layered and not env.bottom.is_range_dependent
+    layers = writable_layers(env.bottom) if layered else []
 
     # Reference medium for the incident wave: the water at the seafloor.
     water_top = BoundaryProperties(
         acoustic_type='half-space',
-        sound_speed=float(np.atleast_1d(env.get_sound_speed(seafloor))[0]),
+        sound_speed=float(np.atleast_1d(env.ssp.sound_speed_at(seafloor))[0]),
         density=1.0,
         attenuation=0.0,
     )
     bounce_env = env.copy()
-    bounce_env.surface = Surface(properties=[water_top])
+    bounce_env.surface = Surface(nodes=[water_top])
 
     with open(filepath, 'w') as f:
         write_header(
@@ -2237,12 +2744,11 @@ def write_bounce_input_file(
             density_reference=env.water_density,
         )
         # Phase velocity bounds (define angular coverage) and RMax (km),
-        # through the same writer the sibling decks use. Both bounds arrive
-        # explicit from the caller, so no env-derived resolution applies.
+        # through the same writer the sibling decks use.
         # bounce.f90:49 makes the tabulated-angle count
         # NkTab = INT( 1000 * RMax * ( kMax - kMin ) / 2 pi ) directly
         # proportional to RMax, which the writer emits at the same millimetre
         # resolution as the rest of the deck's ranges.
         write_phase_speed_and_rmax(
-            f, bounce_env, rmax_m=rmax, c_low=c_low, c_high=c_high,
+            f, rmax_m=rmax_m, c_low=c_low, c_high=c_high,
         )

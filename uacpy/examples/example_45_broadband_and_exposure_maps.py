@@ -29,9 +29,9 @@ wavelengths or less at the center frequency, in which case use of Equation
 (11.46) is required." This panel is that case, and the numbers say where.
 
 Uses: RunMode.BROADBAND / COHERENT_TL / INCOHERENT_TL · Field.at ·
-Field.window · Field.broadband_loss(waveform=) · Field.sound_exposure_level ·
+Field.window · Field.broadband_loss(source_waveform=) · Field.sound_exposure_level ·
 Field.peak_sound_pressure_level ·
-Field.to_time_trace(waveform=) · Field.synthesize_time_series ·
+Field.to_time_trace(source_waveform=) · Field.synthesize_time_series ·
 Arrivals.synthesis_band / energy_support ·
 acoustic_signal.tone_burst / lfm_chirp · plot_field · plot_field_difference ·
 plot_waveform
@@ -47,7 +47,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy.acoustic_signal import lfm_chirp, tone_burst
-from uacpy.visualization import (plot_field_difference,
+from uacpy.plot import (plot_field_difference,
                                  plot_waveform)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
@@ -58,7 +58,7 @@ env = uacpy.Environment(name='Deep water', bathymetry=5000.0, ssp=1500.0)
 # +-60 deg covers the steepest direct path (300 m down at 300 m of range is
 # 43 deg); the 5000 m bottom returns at 2*5000/tan(60) = 5.8 km, well outside
 # the panel, so what is drawn is the direct path and its surface image alone.
-model = uacpy.Bellhop(verbose=False, n_beams=12001, alpha=(-60.0, 60.0))
+model = uacpy.Bellhop(backend='fortran', verbose=False, n_beams=12001, launch_angles=(-60.0, 60.0))
 source_depth, tone = 20.0, 1000.0
 depths = np.linspace(2.0, 300.0, 150)
 ranges = np.linspace(300.0, 2500.0, 350)
@@ -113,7 +113,7 @@ for ax, (title, field) in zip(axes, (
         (f'Continuous wave, {tone:.0f} Hz — every path interfering', cw),
         ('B = 50 Hz — Ainslie Eq. 11.46 over a 20 ms burst', narrow),
         ('B = 400 Hz — the same, over a wideband chirp', wide))):
-    uacpy.plot_field(field, ax, env=env, vmin=45, vmax=100, title=title)
+    uacpy.plot.plot_field(field, ax, env=env, vmin=45, vmax=100, title=title)
     ax.set_ylim(300.0, 0.0)
 fig.tight_layout()
 fig.savefig(OUT / 'example_45a_bandwidth_washes_interference.png', dpi=200,
@@ -138,7 +138,7 @@ for lo, hi in ((2.0, 25.0), (25.0, 100.0), (100.0, 300.0)):
           f"dB, largest {slab[ok].max():5.1f} dB")
 
 fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True, sharey=True)
-uacpy.plot_field(incoherent, axes[0], env=env, vmin=45, vmax=100,
+uacpy.plot.plot_field(incoherent, axes[0], env=env, vmin=45, vmax=100,
                  title='RunMode.INCOHERENT_TL — Ainslie Eq. 11.47')
 plot_field_difference(wide, incoherent, axes[1], env=env,
                       title='Eq. 11.46 minus Eq. 11.47 — the coherent '
@@ -155,7 +155,7 @@ plt.close(fig)
 # amplitude, because a source level of SL dB re 1 µPa at 1 m IS an rms
 # pressure of 1e-6 * 10**(SL/20) Pa there.
 rate, source_level = 8000.0, 190.0
-_, pulse = tone_burst(tone, 20, rate)                # 20 cycles = 20 ms
+_, pulse = tone_burst(tone, 20, sample_rate=rate)                # 20 cycles = 20 ms
 duration = pulse.size / rate
 unit = pulse / np.sqrt(np.mean(pulse ** 2))
 with warnings.catch_warnings():        # the 1/df record holds the pulse
@@ -168,7 +168,7 @@ with warnings.catch_warnings():        # the 1/df record holds the pulse
 # DTFT the synthesis uses. This is the transient's TL in the ordinary sense:
 # received level is SL - TPL, and the energy form below is SEL = ESL - TPL,
 # with ESL = SL + 10log10(T) for constant power (Ainslie Eq. 3.155).
-burst_loss = H.broadband_loss(waveform=unit, sample_rate=rate)
+burst_loss = H.broadband_loss(source_waveform=unit, sample_rate=rate)
 energy_source_level = source_level + 10.0 * np.log10(duration)
 by_equation = energy_source_level - burst_loss.tl
 residual = np.abs(exposure.dB - by_equation)
@@ -242,13 +242,14 @@ print(f"    the two rank cells almost alike here (Spearman {rho:.2f}) — what "
 # (Example 19 does this across eight solvers; this is the one-receiver form
 # on an H already in hand, with no second model run.)
 sweep = 200.0
-_, chirp = lfm_chirp(tone - sweep / 2.0, tone + sweep / 2.0, 0.020, rate)
+_, chirp = lfm_chirp(tone - sweep / 2.0, tone + sweep / 2.0, 0.020, sample_rate=rate)
 look_depth, look_range = 150.0, 1500.0
-# The map's frequency grid will NOT do for a waveform. Its record is 1/df
-# long and circular, and the maps only need it to hold the 20 ms burst; this
-# chirp plus its image tail overruns it, and the overrun does not vanish —
-# it folds onto the record's start, where it reads as energy arriving before
-# any path could. At the map's 20 Hz that is 1.8 % of the trace's energy.
+# The map's frequency grid is not sized for a waveform. Its record is 1/df
+# long and circular, and the maps only need it to hold the 20 ms burst; a
+# pulse plus multipath that overruns it does not vanish — it folds onto the
+# record's start, where it reads as energy arriving before any path could.
+# This chirp happens to fit the map's 50 ms record; a longer pulse or a
+# longer channel would not, and nothing on the map's grid says which.
 # A fold is NOT harmless to the level maps either — sampling H every df
 # periodises the response, so a late arrival adds COHERENTLY to the early
 # part and the maps inherit the error (measured: -9.27 to +2.75 dB over 400
@@ -271,9 +272,9 @@ span = spread + chirp.size / rate
 # so the headroom is supplied here. It is not a token factor: the pulse has
 # to fit AND the rectangular band's precursor has to have somewhere to sit.
 # Measured on this geometry, energy landing before the direct path could
-# arrive ran 21.2 % at 1.5x the span, 0.185 % at 4x, and 0.189 % at 60x —
-# so it converges at about 4x, and the 0.19 % floor is the band edge's own
-# precursor rather than anything folded.
+# arrive ran about ten times its floor at 1.5x the span and had converged by
+# 4x; that floor (the "energy before the direct path" line printed below) is
+# the band edge's own precursor rather than anything folded.
 trace_band = paths.synthesis_band(bandwidth=2.0 * sweep, centre=tone,
                                   record=6.0 * span)
 trace_df = float(np.diff(trace_band)[0])
@@ -289,30 +290,29 @@ with warnings.catch_warnings():
     # stays 1/df. The automatic size only guarantees Nyquist; a display of
     # the waveform wants several samples per cycle, not two.
     sent = trace_field.to_time_trace(
-        depth=look_depth, range=look_range, waveform=chirp,
-        sample_rate=rate, window='none', nfft=8192)
+        depth=look_depth, range=look_range, source_waveform=chirp,
+        sample_rate=rate, window=None, nfft=8192)
 received = np.asarray(sent.data).real
 clock = np.asarray(sent.coords['time'])
 # The record's own audit. Nothing can arrive before the direct path, so
 # energy sitting there came from somewhere it should not. HOW MUCH is not
 # enough to say what it is — a band edge's precursor and a folded tail both
 # show up as a percentage — so WHERE it sits decides: a precursor hugs the
-# arrival, a fold is parked back at the record's start. Measured on this
-# geometry, a 35 ms record put 21.2 % of the energy there with its median
-# 18.7 ms before the arrival and only 0.9 % of it within 5 ms; a 137 ms one
-# puts 0.18 % there with the median 0.3 ms out and 94.8 % within 5 ms.
+# arrival, a fold is parked back at the record's start. On this geometry a
+# 1.5x record parks most of its early energy at the record's start, over
+# 10 ms out with little of it within 5 ms; the record below prints where
+# its own early energy sits.
 onset = direct / 1500.0
 early = clock < onset
 power = received ** 2
 leak = power[early].sum() / power.sum()
 ahead = onset - clock[early]
 # The energy-weighted MEDIAN, not the mean: the mean is pulled toward the
-# record's far end by the little energy out there and separates the two
-# cases by about 10x, where the median separates them by 64x (18.67 ms
-# folded against 0.29 ms for a precursor). The 5 ms mark is 1/B, the width
-# a precursor has; it discriminates over any threshold from 1 to 10 ms, but
-# it must stay small against the RECORD — at 20 ms against a 34 ms record
-# the folded case reads 73 % and the verdict flips.
+# record's far end by the little energy out there, so it separates a fold
+# from a precursor less sharply than the median does. The 5 ms mark is 1/B,
+# the width a precursor has; it must stay small against the stretch of
+# record ahead of the arrival — a mark past the record's start counts a
+# fold as hugging the arrival and the verdict flips.
 order = np.argsort(ahead)
 share = np.cumsum(power[early][order]) / power[early].sum()
 middle = float(ahead[order][int(np.searchsorted(share, 0.5))])
@@ -323,7 +323,7 @@ print(f"    transmitted {chirp.size / rate * 1e3:5.1f} ms, "
       f"received span {(clock[-1] - clock[0]) * 1e3:5.1f} ms at "
       f"{1e-3 / float(np.diff(clock)[0]):.1f} kHz")
 print(f"    the low ripple before the arrival is the rectangular band edge "
-      f"at\n    {band[0]:.0f}/{band[-1]:.0f} Hz — window='none' keeps the "
+      f"at\n    {band[0]:.0f}/{band[-1]:.0f} Hz — window=None keeps the "
       f"energy exact and pays a sinc skirt")
 # The image path is the one reflected off the surface: it leaves the source
 # as if from source_depth ABOVE it, so its extra length is the difference of
@@ -366,14 +366,14 @@ fig.savefig(OUT / 'example_45d_received_chirp.png', dpi=200,
 plt.close(fig)
 
 fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True, sharey=True)
-uacpy.plot_field(exposure, axes[0], env=env,
+uacpy.plot.plot_field(exposure, axes[0], env=env,
                  title=f'Sound exposure level of one '
                        f'{duration * 1e3:.0f} ms burst at '
                        f'SL = {source_level:.0f} dB re 1 µPa @ 1 m')
-uacpy.plot_field(
+uacpy.plot.plot_field(
     uacpy.core.results.Field(
         data=peak, coords={'depth': depths, 'range': ranges},
-        metadata={'kind': 'level', 'unit': 'dB'}),
+        kind='level', unit='dB'),
     axes[1], env=env,
     title='Peak sound pressure level of the same burst — the other half of '
           'the dual metric, and not a band average')

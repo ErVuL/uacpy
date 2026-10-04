@@ -22,7 +22,7 @@ from figure_scripts._common import (deep_water, shallow_water,
 
 import uacpy
 from uacpy.models import Bellhop, Kraken, RAM, RunMode
-from uacpy.visualization.plots import shared_colorbar
+from uacpy.plot import shared_colorbar
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
 GUIDE = True

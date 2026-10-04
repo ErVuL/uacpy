@@ -36,12 +36,14 @@ env = uacpy.Environment(
 )
 source = uacpy.Source(depths=1000.0,      # in the channel, 300 m above its axis
                       frequencies=20.0)   # low frequency buys the range
+# Ranges start at 4 km: closer in, the deepest receivers see direct and
+# surface-reflected paths steeper than the 60° the spectral window keeps.
 receiver = uacpy.Receiver(depths=np.linspace(100, 5400, 30),
-                          ranges=np.linspace(1000, 150000, 150))
+                          ranges=np.linspace(4000, 150000, 147))
 
 # OAST is the optional fourth: it needs the OASES binaries, and without them
 # the comparison runs on the other three.
-models = {'Bellhop': uacpy.Bellhop(), 'Kraken': uacpy.Kraken(),
+models = {'Bellhop': uacpy.Bellhop(backend='fortran'), 'Kraken': uacpy.Kraken(),
           'Scooter': uacpy.Scooter()}
 fields = {name: model.run(env, source, receiver)
           for name, model in models.items()}
@@ -60,7 +62,7 @@ fig, _ = env.plot(source=source, receiver=receiver)
 fig.savefig(OUT / 'example_08_environment.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, _ = uacpy.compare_models(fields, env=env)
+fig, _ = uacpy.plot.compare_models(fields, env=env)
 fig.savefig(OUT / 'example_08_fields.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 

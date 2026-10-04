@@ -23,7 +23,7 @@ from figure_scripts._common import WIDE, deep_water, shallow_water
 import uacpy
 from uacpy import sonar
 from uacpy.models import Bellhop, Kraken, RunMode
-from uacpy.visualization.plots import (
+from uacpy.plot import (
     plot_detection_probability,
     plot_matched_field,
     plot_roc,
@@ -41,10 +41,12 @@ DT_ACTIVE = sonar.detection_threshold_energy(
 
 # ── Two passive budgets. Every level shares one band reference (dB re 1 µPa²
 # per Hz here), which is what makes the differences meaningful.
-PASSIVE_DEEP = dict(source_level=125.0, noise_level=65.0,
-                    directivity_index=15.0, detection_threshold=DT_PASSIVE)
-PASSIVE_SHELF = dict(source_level=110.0, noise_level=75.0,
-                     directivity_index=15.0, detection_threshold=DT_PASSIVE)
+PASSIVE_DEEP = dict(source_level_dB=125.0, noise_level_dB=65.0,
+                    directivity_index_dB=15.0,
+                    detection_threshold_dB=DT_PASSIVE)
+PASSIVE_SHELF = dict(source_level_dB=110.0, noise_level_dB=75.0,
+                     directivity_index_dB=15.0,
+                     detection_threshold_dB=DT_PASSIVE)
 
 SIGMA_DB = 5.6          # Dyer's saturated-multipath signal-excess fluctuation
 CUT_DEPTH = 60.0        # m — the depth the shelf range cut is taken at
@@ -97,7 +99,10 @@ def _csdm(modes, seed=0, snr_dB=10.0, n_snapshots=50):
     ``modes`` describes the ocean the *data* came from — pass a perturbed
     environment's modes to simulate environmental mismatch.
     """
-    e = sonar.synthesize_replica(modes, TRUE_DEPTH, TRUE_RANGE, ARRAY_DEPTHS)
+    e = sonar.synthesize_replica(modes,
+                                 source_depth=TRUE_DEPTH,
+                                 ranges=TRUE_RANGE,
+                                 array_depths=ARRAY_DEPTHS)
     rng = np.random.default_rng(seed)
     phases = np.exp(1j * rng.uniform(0.0, 2.0 * np.pi, n_snapshots))
     n_power = np.mean(np.abs(e) ** 2) / 10.0 ** (snr_dB / 10.0)
@@ -116,13 +121,13 @@ def _draw_surface(ax, surface, title, *, extra='', show_legend=False):
     the call a reader would make, and the markers read as they do everywhere
     else in uacpy -- the red source star, and a black cross for the estimate.
     """
-    iz, ir = np.unravel_index(np.nanargmax(surface), surface.shape)
+    estimate = surface.max().pinned
     plot_matched_field(
-        CAND_RANGES, CAND_DEPTHS, surface, ax=ax, cmap='turbo',
-        dynamic_range=20.0, true_position=(TRUE_RANGE, TRUE_DEPTH),
+        surface, ax=ax, cmap='turbo',
+        dynamic_range_dB=20.0, true_position=(TRUE_RANGE, TRUE_DEPTH),
         show_colorbar=False, show_legend=show_legend,
-        title=f'{title}\nestimate ({CAND_DEPTHS[iz]:.0f} m, '
-              f'{CAND_RANGES[ir] / 1e3:.2f} km){extra}')
+        title=f'{title}\nestimate ({estimate["depth"]:.0f} m, '
+              f'{estimate["range"] / 1e3:.2f} km){extra}')
 
 
 def _outer_labels_only(axes):
@@ -161,8 +166,8 @@ def detection_range():
     _, tl, se = _passive_shelf()
     fom = sonar.figure_of_merit(**PASSIVE_SHELF)
     cut = se.at(depth=CUT_DEPTH)
-    r_det = sonar.detection_range(cut.coords['range'], cut.data)
-    depths, ranges = sonar.detection_range_by_depth(se)
+    r_det = sonar.detection_range_from_field(cut)
+    depths, ranges = sonar.detection_ranges_by_depth(se)
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.2))
 
@@ -201,7 +206,7 @@ def detection_probability_field():
     env, se = _passive_deep()
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 7.2), sharex=True)
     for ax, sigma in zip(axes, (SIGMA_DB, 9.0)):
-        pd = sonar.probability_of_detection_field(se, sigma_dB=sigma)
+        pd = sonar.transition_probability_field(se, sigma_dB=sigma)
         plot_detection_probability(
             pd, ax=ax, env=env,
             title=f'Detection probability, σ = {sigma:g} dB')
@@ -229,7 +234,7 @@ def detection_theory():
                 label=f'$P_F = 10^{{{int(np.log10(pf))}}}$')
     ax.set_xlabel('Required $P_D$')
     ax.set_ylabel('$10\\log_{10} d$  (dB)')
-    ax.set_title('Detection index the detector must reach', loc='left',
+    ax.set_title('Detection index the detector must reach',
                  fontsize=10)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc='upper left')
@@ -237,13 +242,22 @@ def detection_theory():
     ax = axes[2]
     wt = np.logspace(0.0, 5.0, 200)
     for pd_target, colour in ((0.5, 'C0'), (0.9, 'C3')):
-        dt = [sonar.detection_threshold_energy(
-                  pd_target, 1e-4, bandwidth_hz=m, integration_time_s=1.0)
-              for m in wt]
-        ax.semilogx(wt, dt, color=colour, label=f'$P_D$ = {pd_target}')
+        # Eq. (2.77) evaluated directly: detection_threshold_energy would
+        # warn at every wt below its 1 dB envelope, which is this panel's
+        # left half by design.
+        d = sonar.detection_index(pd_target, 1e-4)
+        dt_large_m = 5.0 * np.log10(d / wt)
+        dt_exact = [sonar.detection_threshold_energy(
+                        pd_target, 1e-4, bandwidth_hz=m,
+                        integration_time_s=1.0, exact=True)
+                    for m in wt]
+        ax.semilogx(wt, dt_exact, color=colour,
+                    label=f'$P_D$ = {pd_target}, exact')
+        ax.semilogx(wt, dt_large_m, color=colour, ls='--', lw=1.0,
+                    label=f'$P_D$ = {pd_target}, $5\\log_{{10}}(d/wt)$')
     ax.set_xlabel('Time-bandwidth product  $wt$')
     ax.set_ylabel('Detection threshold  DT (dB)')
-    ax.set_title('DT falls 5 dB per decade of integration', loc='left',
+    ax.set_title('DT falls 5 dB per decade of integration',
                  fontsize=10)
     ax.grid(True, which='both', alpha=0.3)
     ax.legend(fontsize=8)
@@ -259,10 +273,10 @@ def target_strength():
     freq = 5000.0
     angles = np.linspace(-30.0, 30.0, 2401)
 
-    plate = sonar.ts_plate(4.0, 2.0, freq, angle_deg=angles)
-    cylinder = sonar.ts_cylinder(1.0, 8.0, freq, angle_deg=angles)
-    sphere = sonar.ts_sphere(2.0, frequency_hz=freq)
-    ellipsoid = sonar.ts_ellipsoid(20.0, 4.0, 4.0, frequency_hz=freq)
+    plate = sonar.ts_plate(4.0, 2.0, frequency=freq, angle_deg=angles)
+    cylinder = sonar.ts_cylinder(1.0, 8.0, frequency=freq, angle_deg=angles)
+    sphere = sonar.ts_sphere(2.0, frequency=freq)
+    ellipsoid = sonar.ts_ellipsoid(20.0, 4.0, 4.0, frequency=freq)
 
     fig, ax = plt.subplots(figsize=WIDE)
     ax.plot(angles, plate, color='C0', lw=0.9,
@@ -292,23 +306,24 @@ def reverberation():
     grow differently — the boundary cell as ``r``, the volume cell as ``r²`` —
     and because the scattering strength itself follows the grazing angle down.
     """
-    ranges = np.linspace(50.0, 8000.0, 700)
+    ranges = np.linspace(50.0, 8000.0, 700)          # horizontal
+    slant = np.hypot(ranges, 50.0)   # sonar 50 m off each boundary
     sound_speed = 1500.0
-    two_way_time = 2.0 * ranges / sound_speed
-    grazing = np.rad2deg(np.arctan2(50.0, ranges))   # sonar 50 m off each boundary
+    two_way_time = 2.0 * slant / sound_speed
+    grazing = np.rad2deg(np.arctan2(50.0, ranges))
 
     bottom = sonar.boundary_reverberation(
-        ranges, 210.0, sonar.lambert_bottom(grazing),
+        slant, 210.0, sonar.lambert_bottom(grazing),
         pulse_length_s=0.02, horizontal_beamwidth_rad=0.15,
         sound_speed=sound_speed)
     surface = sonar.boundary_reverberation(
-        ranges, 210.0,
-        sonar.chapman_harris_surface(grazing, wind_speed_kn=25.0,
-                                     frequency=5000.0),
+        slant, 210.0,
+        sonar.chapman_harris_surface(frequency=5000.0,
+                                     grazing_deg=grazing, wind_speed_kn=25.0),
         pulse_length_s=0.02, horizontal_beamwidth_rad=0.15,
         sound_speed=sound_speed)
     volume = sonar.volume_reverberation(
-        ranges, 210.0, -70.0,
+        slant, 210.0, -70.0,
         pulse_length_s=0.02, solid_angle_beamwidth_sr=0.01,
         sound_speed=sound_speed)
     total = sonar.total_reverberation(bottom, surface, volume)
@@ -336,7 +351,7 @@ def reverberation():
     secondary = ax.secondary_xaxis(
         'top', functions=(lambda t: t * sound_speed / 2e3,
                           lambda r: 2e3 * r / sound_speed))
-    secondary.set_xlabel('Range (km)')
+    secondary.set_xlabel('Slant range (km)')
     fig.tight_layout()
     return fig
 
@@ -358,7 +373,7 @@ def active_budget():
     tl = tl_field.at(depth=CUT_DEPTH).data
     tl_bottom = tl_field.at(depth=99.0).data
 
-    ts = sonar.ts_cylinder(2.0, 8.0, 200.0)
+    ts = sonar.ts_cylinder(2.0, 8.0, frequency=200.0)
     el = sonar.echo_level(ACTIVE_SL, tl, ts)
     nl_di = sonar.noise_background(ACTIVE_NL, DIRECTIVITY)
 
@@ -366,17 +381,17 @@ def active_budget():
     # range grows — that is what makes reverberation a near-field problem.
     grazing = np.rad2deg(np.arctan2(SONAR_HEIGHT, ranges))
     rl = sonar.boundary_reverberation(
-        ranges, ACTIVE_SL, sonar.lambert_bottom(grazing),
+        np.hypot(ranges, SONAR_HEIGHT), ACTIVE_SL, sonar.lambert_bottom(grazing),
         pulse_length_s=PULSE_S, horizontal_beamwidth_rad=BEAMWIDTH_RAD,
         tl_dB=tl_bottom)
 
     se_noise = sonar.active_signal_excess(
-        ACTIVE_SL, tl, ts, noise_level=ACTIVE_NL,
-        directivity_index=DIRECTIVITY, detection_threshold=DT_ACTIVE)
+        ACTIVE_SL, tl, ts, noise_level_dB=ACTIVE_NL,
+        directivity_index_dB=DIRECTIVITY, detection_threshold_dB=DT_ACTIVE)
     se_both = sonar.active_signal_excess(
-        ACTIVE_SL, tl, ts, noise_level=ACTIVE_NL,
-        directivity_index=DIRECTIVITY, reverberation_level=rl,
-        detection_threshold=DT_ACTIVE)
+        ACTIVE_SL, tl, ts, noise_level_dB=ACTIVE_NL,
+        directivity_index_dB=DIRECTIVITY, reverberation_level_dB=rl,
+        detection_threshold_dB=DT_ACTIVE)
     crossover = float(ranges[np.argmax(rl < nl_di)])
 
     fig, axes = plt.subplots(2, 1, figsize=(9.0, 7.0), sharex=True)
@@ -400,7 +415,7 @@ def active_budget():
     ax = axes[1]
     for se, colour, label in ((se_noise, 'C2', 'noise only'),
                               (se_both, 'C3', 'noise + reverberation')):
-        r_det = sonar.detection_range(ranges, se)
+        r_det = sonar.detection_range(ranges, signal_excess_dB=se)
         ax.plot(ranges / 1e3, se, color=colour, lw=1.4,
                 label=f'{label} — detection range {r_det / 1e3:.1f} km')
         if np.isfinite(r_det):
@@ -429,7 +444,10 @@ def matched_field():
     """
     env, source, _ = shallow_water()
     modes = Kraken().compute_modes(env, source)
-    bank = sonar.replica_bank(modes, ARRAY_DEPTHS, CAND_DEPTHS, CAND_RANGES)
+    bank = sonar.replica_bank(modes,
+                              array_depths=ARRAY_DEPTHS,
+                              candidate_depths=CAND_DEPTHS,
+                              candidate_ranges=CAND_RANGES)
 
     true_env = uacpy.Environment(
         name='The ocean, 2 m deeper than charted',
@@ -473,8 +491,8 @@ def replica_banks():
     """
     env, source, _ = shallow_water()
     modes = Kraken().compute_modes(env, source)
-    modal_bank = sonar.replica_bank(modes, ARRAY_DEPTHS, CAND_DEPTHS,
-                                    CAND_RANGES)
+    modal_bank = sonar.replica_bank(modes, array_depths=ARRAY_DEPTHS, candidate_depths=CAND_DEPTHS,
+                                    candidate_ranges=CAND_RANGES)
 
     # One Bellhop run fills the whole bank: the candidate depths are the source
     # depths, the array elements are the receivers, and the candidate ranges
@@ -491,8 +509,10 @@ def replica_banks():
             (axes[0], 'replica_bank — Kraken modes', modal_bank),
             (axes[1], 'replica_bank_from_field — Bellhop', ray_bank))):
         surface = sonar.bartlett(K, bank)
+        # The surface is dB re its peak; the peak Bartlett power itself
+        # (1 is a perfect match) is the Field's reference.
         _draw_surface(ax, surface, title, show_legend=(i == 0),
-                      extra=f' · peak {surface.max():.2f}')
+                      extra=f' · peak {surface.reference:.2f}')
     _outer_labels_only(axes[None, :])
     fig.suptitle('Bartlett on the same data, from two replica engines',
                  fontweight='bold', fontsize='large')
@@ -522,15 +542,19 @@ def boundary_scattering():
               color='k', lw=1.2, label='Lambert, µ = −27 dB (any f)')
     ax_b.set_title('Bottom backscatter, 30 kHz', fontweight='bold', fontsize=12)
 
-    for wind_mps, style in ((3.0, ':'), (8.0, '-'), (15.0, '--')):
-        ax_s.plot(grazing, sonar.apl_uw_surface_backscatter(grazing, 25e3, wind_mps),
-                  ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_mps:g} m/s')
+    for wind_kn, style in ((6.0, ':'), (16.0, '-'), (30.0, '--')):
+        ax_s.plot(grazing,
+                  sonar.apl_uw_surface_backscatter(
+                      frequency=25e3, grazing_deg=grazing,
+                      wind_speed_kn=wind_kn),
+                  ls=style, color='C0', lw=1.4, label=f'APL-UW {wind_kn:g} kn')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')      # 25 kHz is 20 kHz above the fit
         ax_s.plot(grazing[grazing <= 50.0],
-                  sonar.chapman_harris_surface(grazing[grazing <= 50.0],
-                                               wind_speed_kn=15.6, frequency=25e3),
-                  color='k', lw=1.2, label='Chapman–Harris 8 m/s, extrapolated')
+                  sonar.chapman_harris_surface(
+                      frequency=25e3, grazing_deg=grazing[grazing <= 50.0],
+                      wind_speed_kn=16.0),
+                  color='k', lw=1.2, label='Chapman–Harris 16 kn, extrapolated')
     ax_s.set_title('Surface backscatter, 25 kHz', fontweight='bold', fontsize=12)
     for ax in (ax_b, ax_s):
         ax.set_xlabel('Grazing angle (deg)')

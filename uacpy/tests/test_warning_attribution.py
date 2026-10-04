@@ -37,11 +37,12 @@ from uacpy.tests._doc_gate import package_python_files
 
 import uacpy
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.acoustic_signal.estimate import constant_q_transform
+from uacpy.acoustic_signal.cqt import constant_q_transform
 from uacpy.core.absorption import Biological, BiologicalLayer
 from uacpy.core.acoustics import sound_speed_delgrosso
 from uacpy.core.receiver import Receiver
 from uacpy.io import grn_reader
+from uacpy.tests.conftest import recorded_warnings
 
 _THIS_FILE = Path(__file__).resolve()
 _PACKAGE_DIR = Path(uacpy.__file__).resolve().parent
@@ -83,22 +84,52 @@ def _write_two_frame_module():
     return module
 
 
+def test_an_assignment_warns_on_the_assigning_line():
+    """An assignment rebuilds the carrier through its constructor, from
+    ``RevalidateOnAssignMixin.__setattr__`` in ``_carrier.py`` — a package
+    frame the walk steps over — so a warning the rebuild raises names the
+    line that assigned, as the constructor's names the line that built."""
+    layer = uacpy.SedimentLayer(thickness=5.0, sound_speed=1600.0, density=1.8)
+    receiver = Receiver(depths=[10.0], ranges=[100.0])
+    with recorded_warnings() as record:
+        layer.density = 1800.0
+    warning = _only_warning(record)
+    assert 'kg/m³' in str(warning.message)
+    assert Path(warning.filename).resolve() == _THIS_FILE
+    with recorded_warnings() as record:
+        receiver.ranges = None
+    warning = _only_warning(record)
+    assert 'ranges not given' in str(warning.message)
+    assert Path(warning.filename).resolve() == _THIS_FILE
+
+
 def test_receiver_default_ranges_warning_names_the_callers_file():
     """``Receiver(depths=…)`` with no ``ranges`` is a documented, supported
     path (docs/guide/source-receiver.md §"``Receiver`` without ``ranges``
     warns"), so its warning is raised on every such call and must land on the
     caller, not on the ``<string>`` frame of the generated ``__init__``."""
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
+    with recorded_warnings() as record:
         Receiver(depths=[10.0])
     warning = _only_warning(record)
     assert warning.filename != '<string>'
     assert Path(warning.filename).resolve() == _THIS_FILE
 
 
+def test_histogram_door_warnings_name_the_callers_file():
+    """The histogram estimators warn from their shared core, one frame
+    below whichever door was called; the warning lands on the caller."""
+    import numpy as np
+    from uacpy.acoustic_signal import probabilistic_welch
+    x = np.random.default_rng(0).standard_normal(4000)
+    with recorded_warnings() as record:
+        probabilistic_welch(x, 1000.0, segment_duration=0.5, nperseg=8192,
+                            noverlap=8000, level_min_dB=-200, level_max_dB=200)
+    warning = _only_warning(record)
+    assert Path(warning.filename).resolve() == _THIS_FILE
+
+
 def test_biological_layer_ceiling_warning_names_the_callers_file():
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
+    with recorded_warnings() as record:
         BiologicalLayer(10.0, 20.0, 100.0, 100.0, 100.0)
     warning = _only_warning(record)
     assert warning.filename != '<string>'
@@ -114,10 +145,9 @@ def test_a_layer_built_from_a_tuple_also_names_the_callers_file():
     frames respectively: ``stacklevel=3`` was right for the direct call and
     measured wrong here (it needed 5), and ``skip_file_prefixes`` could not
     stand in for either, because the walk stops on ``<string>`` — it matches no
-    package prefix. Writing both ``__init__``s out removed the generated frames
-    and let one mechanism serve both depths."""
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
+    package prefix. ``@carrier``'s ``__init__`` is an ordinary package frame,
+    so one mechanism serves both depths."""
+    with recorded_warnings() as record:
         Biological(layers=[(10.0, 20.0, 100.0, 100.0, 100.0)])
     warning = _only_warning(record)
     assert warning.filename != '<string>'
@@ -177,9 +207,9 @@ def _in_package_dispatcher():
 
 
 @pytest.mark.parametrize('kwargs', [
-    {'temperature': 99.0, 'salinity': 35.0, 'pressure': 0.0},
-    {'temperature': 10.0, 'salinity': 20.0, 'pressure': 0.0},
-    {'temperature': 10.0, 'salinity': 35.0, 'pressure': 1.0e5},
+    {'temperature': 99.0, 'salinity': 35.0, 'pressure_dbar': 0.0},
+    {'temperature': 10.0, 'salinity': 20.0, 'pressure_dbar': 0.0},
+    {'temperature': 10.0, 'salinity': 35.0, 'pressure_dbar': 1.0e5},
 ], ids=['temperature', 'salinity', 'pressure'])
 def test_delgrosso_extrapolation_warnings_name_the_callers_file(kwargs):
     """Each of the three Del Grosso domain warnings, driven through the
@@ -190,8 +220,7 @@ def test_delgrosso_extrapolation_warnings_name_the_callers_file(kwargs):
     the user cannot act on and — worse — one dedup key for every call site in
     their program."""
     dispatch = _in_package_dispatcher()
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
+    with recorded_warnings() as record:
         dispatch(sound_speed_delgrosso, **kwargs)
     warning = _only_warning(record)
     assert 'Del Grosso' in str(warning.message)
@@ -207,9 +236,9 @@ def test_each_delgrosso_call_site_warns_under_the_once_per_location_filter():
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter('default')
         dispatch(sound_speed_delgrosso, temperature=10.0, salinity=20.0,
-                 pressure=0.0)                                  # call site A
+                 pressure_dbar=0.0)                             # call site A
         dispatch(sound_speed_delgrosso, temperature=10.0, salinity=21.0,
-                 pressure=0.0)                                  # call site B
+                 pressure_dbar=0.0)                             # call site B
     assert len(record) == 2, [(w.filename, w.lineno) for w in record]
     assert {Path(w.filename).resolve() for w in record} == {_THIS_FILE}
 
@@ -239,14 +268,12 @@ def test_a_prefix_equal_to_a_whole_filename_does_not_skip_that_frame():
     ``USER_FRAME_SKIP``'s module entries follows from which one holds."""
     module = _write_two_frame_module()
 
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
+    with recorded_warnings() as record:
         module.SKIP = (module.__file__,)
         module.outer()                                  # whole-path entry
     assert Path(_only_warning(record).filename) == Path(module.__file__)
 
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
+    with recorded_warnings() as record:
         module.SKIP = (module.__file__[:-len('.py')],)
         module.outer()                                  # module-stem entry
     assert Path(_only_warning(record).filename).resolve() == _THIS_FILE
@@ -284,8 +311,8 @@ def test_two_call_sites_of_one_converted_site_keep_separate_dedup_keys():
     signal = np.zeros(64)
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter('default')
-        constant_q_transform(signal, 1000.0, fmin=1.0)   # call site A
-        constant_q_transform(signal, 1000.0, fmin=1.0)   # call site B
+        constant_q_transform(signal, 1000.0, freq_min=1.0)   # call site A
+        constant_q_transform(signal, 1000.0, freq_min=1.0)   # call site B
     lines = {w.lineno for w in record}
     files = {Path(w.filename).resolve() for w in record}
     assert files == {_THIS_FILE}, files
@@ -297,10 +324,10 @@ def test_every_module_that_skips_frames_shares_one_prefix_set():
     produced the bug this pins — ``grn_reader``'s copy had lost the trailing
     separator and swallowed every sibling path. One object cannot diverge.
 
-    The wavenumber warnings moved out of ``grn_reader`` into
-    ``core.acoustics.wavenumber`` so a user could reach the transform they
-    guard; the module holding them is what has to carry the set."""
-    from uacpy.models.base import USER_FRAME_SKIP as base_skip
+    The wavenumber warnings live in ``core.acoustics.wavenumber``, beside
+    the transform they guard; the module holding them is what has to carry
+    the set."""
+    from uacpy.core._warn_frames import USER_FRAME_SKIP as base_skip
     from uacpy.core.acoustics import wavenumber
 
     assert wavenumber.USER_FRAME_SKIP is USER_FRAME_SKIP
@@ -310,9 +337,9 @@ def test_every_module_that_skips_frames_shares_one_prefix_set():
 
 
 def test_grn_zero_range_warning_names_the_callers_file():
-    with warnings.catch_warnings(record=True) as record:
-        warnings.simplefilter('always')
-        grn_reader._warn_zero_ranges(np.array([0.0, 100.0]), 'R')
+    from uacpy.core.acoustics import wavenumber
+    with recorded_warnings() as record:
+        wavenumber._warn_zero_ranges(np.array([0.0, 100.0]), 'point')
     warning = _only_warning(record)
     assert Path(warning.filename).resolve() == _THIS_FILE
 
@@ -334,97 +361,103 @@ def test_grn_zero_range_warning_names_the_callers_file():
 # The count is part of the entry: a file may hold several converted sites in
 # one function, and a revert that leaves one behind still has to fail.
 CONVERTED_SITES = [
-    ('acoustic_signal/estimate.py', '_warn_two_sided', 1),
-    ('acoustic_signal/arrays.py', '_powerless_covariance', 1),
-    ('acoustic_signal/system.py', 'impulse_response', 2),
-    ('acoustic_signal/estimate.py', '_cq_setup', 2),
-    ('acoustic_signal/system.py', '_etfe_divide', 1),
-    ('comms/link.py', 'awgn', 1),
+    ('acoustic_signal/spectral.py', '_warn_two_sided', 1),
+    ('acoustic_signal/beamforming.py', '_powerless_covariance', 1),
+    ('acoustic_signal/channel.py', 'impulse_response', 2),
+    ('acoustic_signal/cqt.py', '_cq_setup', 2),
+    # Reached one frame below each of the three histogram doors.
+    ('acoustic_signal/spectral.py', '_probabilistic_estimate', 2),
+    ('acoustic_signal/frf.py', '_etfe_divide', 1),
+    ('comms/channel.py', 'awgn', 1),
     ('comms/janus.py', 'JanusPacket.from_bits', 1),
-    ('comms/modulate.py', 'ofdm_demodulate', 1),
-    ('comms/link.py', 'CommsReceiver.receive', 1),
-    ('comms/link.py', 'OFDMReceiver.receive', 1),
+    ('comms/ofdm.py', 'ofdm_demodulate', 1),
+    ('comms/transceiver.py', 'CommsReceiver.receive', 1),
+    ('comms/transceiver.py', 'OFDMReceiver.receive', 1),
     # Not a converted hand count but the same rule, and it belongs under the
     # same guard: two construction depths (a direct ``BiologicalLayer(...)``
-    # and the tuple normalisation inside ``Biological.__init__``) that no
-    # single count covers. Both classes write their ``__init__`` out so no
-    # ``<string>`` frame stops the walk; a ``stacklevel`` reappearing here
-    # would mean one of those was regenerated.
-    ('core/absorption.py', 'BiologicalLayer.__init__', 1),
-    # Same shape again: ``FrancoisGarrison`` writes its ``__init__`` out so the
+    # and the tuple normalisation inside ``Biological.__post_init__``) that
+    # no single count covers. Both are built by ``@carrier``'s ``__init__``,
+    # so no ``<string>`` frame stops the walk.
+    ('core/absorption.py', 'BiologicalLayer.__post_init__', 1),
+    # Same shape again: ``FrancoisGarrison`` is built by ``@carrier`` so the
     # fitted-envelope notice lands on the user's line from a hand-built model
-    # and from ``data.build_francois_garrison`` alike; the frequency notice
-    # sits under ``Absorption.alpha_dB_per_m``, one package frame up.
+    # and from ``FrancoisGarrison.from_temperature_salinity`` alike; the frequency notice is
+    # the base class's, raised once per ``alpha`` / ``alpha_dB_per_m`` call.
     ('core/absorption.py', 'FrancoisGarrison.__post_init__', 1),
-    ('core/absorption.py', 'FrancoisGarrison._alpha_dB_per_m', 1),
+    ('core/absorption.py', 'Absorption._warn_outside_frequency_range', 1),
     # One helper for both seabed carriers (``SedimentLayer`` and
-    # ``BoundaryProperties``, whose ``__init__``s are written out for the same
-    # reason), reached from the user's constructor and from the in-package
-    # factories (``SeabedColumn.collapse``, the CRUST1/GRAW readers) alike.
-    ('core/bottom.py', '_warn_implausible_geoacoustics', 2),
+    # ``BoundaryProperties``, both built by ``@carrier``), reached from the
+    # user's constructor, from an assignment's rebuild and from the
+    # in-package factories (``SeabedColumn.collapse_layers``, the CRUST1/GRAW
+    # readers) alike.
+    ('core/boundary.py', '_warn_implausible_geoacoustics', 2),
+    # Reached from a ``Receiver(depths=…)`` and from ``receiver.ranges =
+    # None``: the walk serves both, where the ``stacklevel=3`` it replaced
+    # named ``_carrier.py`` on the second.
+    ('core/receiver.py', 'Receiver.__post_init__', 1),
     ('core/acoustics/seawater.py', 'sound_speed_mackenzie', 3),
     ('core/acoustics/seawater.py', 'sound_speed_delgrosso', 3),
     ('core/acoustics/seawater.py', 'sound_speed_teos10', 4),
     ('core/acoustics/seawater.py', 'sound_speed_unesco', 4),
-    ('core/bottom.py', 'SeabedColumn.collapse', 1),
-    ('core/environment.py', 'Environment.get_sound_speed', 1),
+    ('core/bottom.py', 'SeabedColumn.collapse_layers', 1),
+    ('core/ssp.py', 'SoundSpeedProfile.sound_speed_at', 1),
     ('core/results/field.py', 'Field._warn_if_frequency_axis_undersamples', 1),
     ('core/results/field.py', 'Field._warn_if_phase_view_aliases', 2),
     ('core/results/field.py', 'Field._warn_if_undersampled', 2),
-    ('core/results/field.py', '_estimate_t_start', 2),
-    ('core/results/field.py', '_warn_unsolved_bins', 1),
-    ('core/results/field.py', '_synthesize_time_series', 2),
-    # _taper travelled with tone_phasor: first out of core/results/field.py
-    # so a user could call the estimator, then on to estimate.py, whose
-    # question ("measure this signal") is the one those two answer.
-    ('acoustic_signal/estimate.py', '_taper', 1),
-    # The perturbation and its depth-resolution notice moved out of
-    # Modes into acoustics/modal.py so a user can run them on plain
-    # k/psi arrays. The move added a call frame under
-    # Modes.with_attenuation, which is exactly what a hand-counted
-    # stacklevel cannot survive: all six notices in the body were
-    # converted with it.
-    ('core/acoustics/modal.py', 'modal_attenuation', 6),
+    # The array half of the synthesis, reached from the Field methods, from
+    # BeamformedField.to_time_trace and from
+    # acoustic_signal.synthesize_time_series at different depths.
+    ('acoustic_signal/_synthesis.py', 'record_start', 3),
+    ('acoustic_signal/_synthesis.py', 'warn_unsolved_bins', 2),
+    ('core/results/_field_synthesis.py', '_synthesize_time_series', 1),
+    ('acoustic_signal/_synthesis.py', 'waveform_synthesis_setup', 1),
+    # One window builder for the tone extractor and the Fourier synthesis,
+    # reached from both at different depths.
+    ('acoustic_signal/windows.py', '_taper', 1),
+    # The perturbation and its notices sit in acoustics/modal.py, one or
+    # two frames under Modes.with_attenuation and under a direct call, and
+    # in helpers of modal_attenuation — depths no hand-counted stacklevel
+    # covers.
+    ('core/acoustics/modal.py', '_modal_attenuation', 1),
+    ('core/acoustics/modal.py', '_water_column_term', 1),
+    ('core/acoustics/modal.py', '_check_water_only_tabulation', 1),
+    ('core/acoustics/modal.py', '_halfspace_tail_term', 3),
     ('core/acoustics/modal.py', '_warn_if_depth_axis_underresolves', 1),
     ('core/results/reflection.py', 'ReflectionCoefficient._resolve_axes', 1),
     ('core/sediment.py', 'grain_size_to_geoacoustics', 1),
-    ('core/ssp.py', 'generate_sea_surface', 1),
+    ('core/altimetry.py', 'generate_sea_surface', 1),
     ('data/_geo.py', 'capped_n_points', 1),
     ('data/_netcdf.py', 'NetcdfGrid._bounded', 1),
-    ('data/bathymetry.py', 'fetch_bathy_grid', 1),
-    ('data/bathymetry.py', 'fetch_bathy_transect', 1),
+    ('data/bathymetry.py', '_fetch_bathy_grid_backend', 1),
+    ('data/bathymetry.py', '_fetch_bathy_transect_backend', 2),
     ('data/crust1_local.py', '_warn_non_commercial', 1),
     ('data/environment.py', '_record_provenance', 1),
-    ('data/gebco_local.py', '_grid_path', 1),
+    ('data/gebco_local.py', '_grid_path', 2),
     ('data/mars.py', '_query_bbox', 1),
     ('data/pelagic.py', 'pelagic_lithology', 1),
-    ('data/sea_surface.py', '_surface', 1),
-    ('data/seaice_local.py', '_concentration', 1),
     ('data/seaice_local.py', 'sea_ice_surface_transect', 1),
-    ('data/sediment.py', 'range_dependent_bottom_along', 1),
-    ('data/sound_speed.py', '_ts_profile_with_cell', 1),
+    ('data/sediment.py', '_warn_filled_gaps', 1),
     ('data/sound_speed.py', 'extend_ssp_below_data', 1),
     ('io/_fortran_helpers.py', '_warn_non_little_endian', 1),
     ('io/bathy_io.py', 'write_bty_long_format', 1),
-    ('io/bellhop_writer.py', 'write_bellhop_env_file', 1),
+    ('io/bellhop_writer.py', '_write_quad_ssp_beside', 1),
     # The wavenumber transform and its two range guards moved to
     # core/acoustics/wavenumber.py, out of the .grn reader.
     ('core/acoustics/wavenumber.py', '_warn_zero_ranges', 1),
-    ('io/oalib_reader.py', 'read_flp', 1),
+    ('io/oalib_reader.py', '_parse_flp', 1),
     ('io/oalib_reader.py', 'read_shd_bin', 2),
-    ('io/oalib_writer.py', 'write_ssp_section', 1),
     ('io/oases_reader.py', '_oast_curve_slots', 1),
     ('io/oases_reader.py', '_read_oasp_trf_binary', 1),
     ('io/oases_writer.py', '_check_n_time_samples', 1),
-    ('io/oases_writer.py', '_check_nw_samples', 1),
+    ('io/oases_writer.py', '_check_n_wavenumbers', 1),
     ('io/oases_writer.py', '_check_ssp_layer_count', 1),
     ('io/oases_writer.py', '_emit_bottom_layers', 1),
     ('io/oases_writer.py', '_format_upper_halfspace', 1),
     ('io/oases_writer.py', '_noise_nw', 1),
+    ('io/oases_writer.py', '_warn_oasr_ignores_volume_attenuation', 1),
     ('io/oases_writer.py', '_warn_rough_gradient_surface', 1),
-    ('io/oases_writer.py', '_warn_volume_attenuation_ignored', 2),
     ('io/oases_writer.py', '_write_oases_header', 1),
-    ('io/oases_writer.py', 'write_oasn_input', 1),
+    ('io/oases_writer.py', '_write_oasn_replica_block', 1),
     ('io/oases_writer.py', 'write_oassp_input', 1),
     ('io/refl_io.py', 'stage_reflection_file', 2),
     ('parallel.py', '_reap_scratch_root', 2),
@@ -433,8 +466,85 @@ CONVERTED_SITES = [
     ('sonar/sonar_equation.py', 'detection_range', 1),
     ('sonar/target_strength.py', '_warn_below_geometric', 1),
     ('visualization/plots/_common.py', '_plot_warn', 1),
-    ('models/bellhop.py', 'Bellhop._warn_on_engine_stdout_warnings', 1),
+    ('models/bellhop/_backend.py', 'warn_on_engine_stdout_warnings', 1),
+    # Public functions reached only by a direct call today, where a count of
+    # 2 and the walk name the same frame. They take the walk so that one rule
+    # holds for every warning, and a second in-package door added later
+    # (see test_a_warning_reached_through_a_package_frame_names_the_caller)
+    # cannot move the attribution.
+    ('acoustic_signal/generate.py', 'synthesize_noise_from_psd', 4),
+    ('acoustic_signal/channel.py', 'impulse_response_from_transfer_function',
+     2),
+    ('acoustic_signal/bands.py', '_band_levels', 1),
+    ('acoustic_signal/timefreq.py', 'inverse_cwt', 2),
+    ('parallel.py', 'ParallelResult.stack', 1),
+    # fetch_environment's four notices, in the axis helpers it calls.
+    ('data/environment.py', '_fetch_chain_axis', 1),
+    ('data/environment.py', '_fetch_bottom_axis', 2),
+    ('core/results/greens_function.py', 'GreensFunction.snapshot_to_field', 1),
+    ('data/seaice_local.py', 'download_seaice_db', 1),
 ]
+
+
+def _through_a_package_frame(function, *args, **kwargs):
+    """Call ``function`` from a frame whose file lies inside the package, as
+    a second in-package door to it would. A count of 2 names that frame; the
+    walk skips it and names this file."""
+    door = str(_PACKAGE_DIR / 'acoustic_signal' / '_attribution_door.py')
+    namespace = {}
+    exec(compile('def door(f, a, k):\n    return f(*a, **k)\n', door, 'exec'),
+         namespace)
+    return namespace['door'](function, args, kwargs)
+
+
+def _signal_warning_cases():
+    from uacpy.acoustic_signal import (
+        decidecade_band_levels, impulse_response_from_transfer_function,
+        inverse_cwt, synthesize_noise_from_psd)
+    ones = np.ones(10)
+    band = np.linspace(10.0, 500.0, 10)
+    return [
+        ('psd above Nyquist', synthesize_noise_from_psd,
+         (ones, np.linspace(10.0, 1000.0, 10)),
+         dict(sample_rate=1000.0, nfft=1024), 'above the Nyquist'),
+        ('nfft below 16', synthesize_noise_from_psd, (ones, band),
+         dict(nfft=8), 'below the minimum 16'),
+        ('nfft above the maximum', synthesize_noise_from_psd, (ones, band),
+         dict(nfft=2 * 262144), 'clamping'),
+        ('nfft not a power of two', synthesize_noise_from_psd, (ones, band),
+         dict(nfft=1000), 'not a power of two'),
+        ('H above Nyquist', impulse_response_from_transfer_function,
+         (np.ones(5),),
+         dict(frequencies=np.array([0.0, 100.0, 200.0, 300.0, 400.0]),
+              sample_rate=600.0), 'above the Nyquist'),
+        ('H off the DFT grid', impulse_response_from_transfer_function,
+         (np.ones(4),),
+         dict(frequencies=np.array([0.0, 100.0, 300.0, 400.0]),
+              sample_rate=1000.0), 'not uniformly spaced'),
+        ('coarse PSD grid', decidecade_band_levels,
+         (np.ones(5),), dict(frequencies=np.linspace(0.0, 1000.0, 5)),
+         'too coarse'),
+        ('non-uniform CWT scales', inverse_cwt,
+         (np.ones((3, 8), complex), np.array([100.0, 200.0, 250.0]),
+          1000.0), {}, 'not uniform in log2'),
+        ('single CWT scale', inverse_cwt,
+         (np.ones((1, 8), complex), np.array([100.0]), 1000.0), {},
+         'a single scale'),
+    ]
+
+
+@pytest.mark.parametrize('label', [
+    'psd above Nyquist', 'nfft below 16', 'nfft above the maximum',
+    'nfft not a power of two', 'H above Nyquist', 'H off the DFT grid',
+    'coarse PSD grid', 'non-uniform CWT scales', 'single CWT scale'])
+def test_a_warning_reached_through_a_package_frame_names_the_caller(label):
+    cases = {c[0]: c[1:] for c in _signal_warning_cases()}
+    function, args, kwargs, fragment = cases[label]
+    with recorded_warnings() as record:
+        _through_a_package_frame(function, *args, **kwargs)
+    hits = [w for w in record if fragment in str(w.message)]
+    assert len(hits) == 1, [str(w.message) for w in record]
+    assert Path(hits[0].filename).resolve() == _THIS_FILE
 
 
 def _warn_call_kinds(path):
@@ -559,24 +669,7 @@ def test_no_site_combines_the_skip_walk_with_a_raised_stacklevel():
 # entry here is a site where that has already happened and the count still
 # stands, with the reason it stands. Anything else showing up is a site that
 # has silently grown a second door.
-HAND_COUNTS_WITH_AN_IN_PACKAGE_CALLER = {
-    # Reachable only from a user's constructor call: every in-package
-    # ``Receiver(...)`` passes an explicit ``ranges=``.
-    ('core/receiver.py', 'Receiver.__post_init__'),
-    # ``bottom_loss_curve`` always passes an explicit ``c=``, so the fallback
-    # this warns about cannot be reached from inside the package.
-    ('core/acoustics/boundaries.py', 'reflection_coeff'),
-    # ``_wind_merklinger`` passes three positional arguments, so
-    # ``band_integrate`` is always False on that path and the branch is dead.
-    ('noise/ambient.py', 'compute_windnoise'),
-    # Its in-package callers are the five histogram doors
-    # (``probabilistic_welch`` and the rest), which exist to
-    # name one statistic each and forward the arguments that statistic takes.
-    # A warning raised here is therefore still the user's own call one frame
-    # further out, which ``USER_FRAME_SKIP`` already walks past — the door
-    # adds a frame, not a caller.
-    ('acoustic_signal/estimate.py', '_probabilistic_estimate'),
-}
+HAND_COUNTS_WITH_AN_IN_PACKAGE_CALLER = set()
 
 
 def _resolved_in_package_callers(target, defining_file, call_index, import_index):
@@ -735,7 +828,7 @@ def test_dev_md_states_the_convention_every_warn_site_follows():
     the mechanism sentence there has no way to know a warn call takes a
     keyword at all, and a bare call is what the gate above then catches."""
     section = _dev_md_section('### 6.2 Logging',
-                              '### 6.3 Stack-size bootstrapping')
+                              '### 6.3 Stack limit for the binaries')
     for phrase in ('skip_file_prefixes', 'USER_FRAME_SKIP', 'stacklevel'):
         assert phrase in section, phrase
 
@@ -748,13 +841,12 @@ def test_beam_pattern_plot_warnings_name_the_callers_file():
     like every other plotter's warning does."""
     import numpy as np
     import uacpy
-    from uacpy.visualization import plot_beam_pattern
+    from uacpy.plot import plot_beam_pattern
     half = np.column_stack([np.linspace(0.0, 90.0, 91), np.zeros(91)])
     for call in (lambda: plot_beam_pattern(half),
                  lambda: uacpy.Source(depths=25.0, frequencies=200.0,
                                       beam_pattern=half).plot_beam_pattern()):
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             call()
         warning = _only_warning(record)
         assert Path(warning.filename).resolve() == _THIS_FILE, warning.filename

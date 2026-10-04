@@ -10,7 +10,7 @@ caught here.
 
 References
 ----------
-* Porter, *The KRAKEN Normal Mode Program* (SACLANTCEN SM-245, 2001): Pekeris
+* Porter, *The KRAKEN Normal Mode Program* (SACLANTCEN SM-245, 1991): Pekeris
   normal-mode theory, the characteristic equation, and the modal-sum
   transmission loss (eq. 2.19). (Freely distributed with the Acoustics
   Toolbox; ``docs/KrakenNormalModeProgram_2001.pdf``.)
@@ -21,10 +21,12 @@ References
 
 Convention
 ----------
-The AT ``.env`` writer emits no explicit water-column density, so the AT
-binaries (Kraken, Bounce, OASES) use their default ``rho_water = 1.0 g/cm^3``.
-The analytic references below use the same value so the comparison is
-apples-to-apples; the bottom density/speed are taken from the env exactly.
+Every deck writer emits ``env.water_density`` on each water-column row
+(``io/oalib_writer.py``, ``io/bellhop_writer.py``, ``io/oases_writer.py``),
+whose default is 1.027 g/cm^3. These tests pin ``water_density=RHO_WATER``
+(1.0 g/cm^3) on the Environment, and the analytic references below use the
+same value, so the comparison is apples-to-apples; the bottom density/speed
+are taken from the env exactly.
 """
 import numpy as np
 import pytest
@@ -246,17 +248,17 @@ def _modal_abs_dtl(tl):
 
 # ── benchmarks ──────────────────────────────────────────────────────────────
 
-def test_modal_propagation_loss_matches_pekeris_modal_sum():
-    """``Modes.modal_propagation_loss`` reproduces the analytic Pekeris
+def test_modal_pressure_field_matches_pekeris_modal_sum():
+    """``Modes.modal_pressure_field`` reproduces the analytic Pekeris
     normal-mode sum in *absolute* dB — the prefactor, the 4*pi TL reference and
     the g/cm^3 density convention, none of which a relative test can see. A
     missing 4*pi/1000 in the prefactor is a flat +81.98 dB offset."""
     src, _ = _modal_src_rcv()
     modes = Kraken(timeout=120).compute_modes(_pekeris_env(), src)
-    f = modes.modal_propagation_loss(
+    f = modes.modal_pressure_field(
         source_depth=_MODAL_ZS,
         receiver_depths=np.array(_MODAL_DEPTHS),
-        ranges_m=_MODAL_RANGES,
+        ranges=_MODAL_RANGES,
     )
     d, _ = _modal_abs_dtl(-20.0 * np.log10(np.abs(np.asarray(f.data))))
     assert np.median(d) < 0.1, f"median |dTL|={np.median(d):.3f} dB"
@@ -430,7 +432,7 @@ def test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum():
 
     The discretisation is pinned rather than left to the Lytaev optimizer: the
     default grid gives 3.55 dB median on this problem, and ``dr=5, dz=0.25,
-    np_pade=6`` gives 0.012 dB median / 0.043 dB p90 / 0.185 dB max. The bounds
+    n_pade=6`` gives 0.012 dB median / 0.043 dB p90 / 0.185 dB max. The bounds
     below are 12x and 11x that measurement. ``max`` is deliberately not bounded
     — the field runs 40.7 to 74.4 dB and the deepest cells are hypersensitive
     to a sub-metre shift of a null (a nearby grid, dr=2.5, moves one cell to
@@ -442,7 +444,7 @@ def test_ram_pressure_release_waveguide_matches_dirichlet_modal_sum():
     substitution.
     """
     src, rcv = _pr_src_rcv()
-    d = _pr_abs_dtl(RAM(dr=5.0, dz=0.25, np_pade=6, timeout=300).compute_tl(
+    d = _pr_abs_dtl(RAM(dr=5.0, dz=0.25, n_pade=6, timeout=300).compute_tl(
         _pressure_release_env(BoundaryProperties(
             acoustic_type='half-space', sound_speed=C_W,
             density=RHO_SOFT, attenuation=0.0)),
@@ -505,8 +507,8 @@ def test_bounce_reflection_matches_rayleigh():
     rc = Bounce(c_low=1400.0, c_high=20000.0, timeout=120).compute_reflection(
         _pekeris_env(), Source(depths=20.0, frequencies=FREQ),
         Receiver(depths=[50.0], ranges=[1000.0]))
-    theta = np.asarray(rc.theta, dtype=float)
-    R_num = np.abs(np.asarray(rc.R, dtype=float))
+    theta = np.asarray(rc.angles, dtype=float)
+    R_num = np.abs(np.asarray(rc.magnitude, dtype=float))
     R_ana = np.abs(rayleigh_reflection(theta, C_W, C_B, RHO_WATER, RHO_B))
     theta_c = critical_grazing_deg(C_W, C_B)                      # ≈ 33.56°
 
@@ -537,8 +539,8 @@ def test_oasr_reflection_matches_rayleigh():
                                Source(depths=20.0, frequencies=FREQ),
                                Receiver(depths=[50.0], ranges=[1000.0]),
                                run_mode=RunMode.REFLECTION)
-    theta = np.asarray(rc.theta, dtype=float)
-    R_num = np.abs(np.asarray(rc.R, dtype=float))
+    theta = np.asarray(rc.angles, dtype=float)
+    R_num = np.abs(np.asarray(rc.magnitude, dtype=float))
     R_ana = np.abs(rayleigh_reflection(theta, C_W, C_B, RHO_WATER, RHO_B))
     theta_c = critical_grazing_deg(C_W, C_B)
 
@@ -575,7 +577,7 @@ def test_bellhop_lloyd_mirror():
     # narrowed to ±20°, which still spans the 10.2° steepest path (200 m receiver),
     # so 5001 rays resolve the near-grazing surface image at the far end.
     tl_hat = np.asarray(Bellhop(timeout=120, beam_type='G', n_beams=5001,
-                                alpha=(-20.0, 20.0)).compute_tl(env, src, rcv).dB).ravel()
+                                launch_angles=(-20.0, 20.0)).compute_tl(env, src, rcv).dB).ravel()
     d_hat = np.abs(tl_hat - tl_ana)
     assert np.max(d_hat) < 0.05, f"max |dTL|={np.max(d_hat):.4f} dB"
 
@@ -620,7 +622,7 @@ def test_semicoherent_is_the_lloyd_shaded_incoherent_sum():
     src = Source(depths=z_s, frequencies=f)
     rcv = Receiver(depths=[z_r], ranges=ranges)
     model = Bellhop(timeout=120, beam_type='G', n_beams=5001,
-                    alpha=(-20.0, 20.0))
+                    launch_angles=(-20.0, 20.0))
     tl_inc = np.asarray(model.run(env, src, rcv,
                                   run_mode=RunMode.INCOHERENT_TL).dB).ravel()
     tl_semi = np.asarray(model.run(env, src, rcv,
@@ -816,10 +818,9 @@ class TestBounceReflectsTheSeabedNotTheOcean:
         r = Bounce(timeout=300).run(
             env, Source(depths=1.0, frequencies=200.0),
             Receiver(depths=[1.0], ranges=[1000.0]))
-        full = r.metadata['full_result']
-        return (np.asarray(full['theta'], dtype=float),
-                np.asarray(full['R'], dtype=float),
-                np.asarray(full['phi'], dtype=float))
+        return (np.asarray(r.angles, dtype=float),
+                np.asarray(r.magnitude, dtype=float),
+                np.asarray(r.phase, dtype=float))
 
     @staticmethod
     def _wrap(deg):
@@ -879,4 +880,35 @@ def test_bellhop_line_source_level_is_unit_amplitude_at_one_metre():
     exact = np.sqrt(8 * np.pi * k) * lloyd_mirror_pressure_2d(ranges, z_s, z_r, f, c)
     level_dB = 20 * np.log10(np.abs(p_ln) / np.abs(exact))
     assert abs(float(np.mean(level_dB))) < 1.0, level_dB
+
+
+class TestTheExactModalSumIsTheAsymptoticOnesLimit:
+    """``modal_field(form='hankel')`` sums ``H0^(1)(k r)`` exactly, in the
+    same sign convention as the asymptotic form, so the two meet where
+    ``k r`` is large and part near the source; any other form is refused."""
+
+    K = np.array([0.40 + 1e-5j, 0.35 + 2e-5j, 0.20 + 4e-5j])
+    PHI_S = np.array([0.8, -0.5, 0.3])
+    PHI_R = np.array([[0.2, 0.6, -0.4], [0.7, -0.1, 0.5]])
+
+    def test_the_forms_meet_far_from_the_source(self):
+        from uacpy.core.acoustics import modal_field
+        r = np.array([5000.0, 20000.0])
+        exact = modal_field(self.K, self.PHI_S, self.PHI_R, r, form='hankel')
+        far = modal_field(self.K, self.PHI_S, self.PHI_R, r)
+        assert np.max(np.abs(exact - far) / np.abs(far)) < 1e-3
+
+    def test_the_forms_part_near_the_source(self):
+        from uacpy.core.acoustics import modal_field
+        r = np.array([1.0])
+        exact = modal_field(self.K, self.PHI_S, self.PHI_R, r, form='hankel')
+        far = modal_field(self.K, self.PHI_S, self.PHI_R, r)
+        assert np.max(np.abs(exact - far) / np.abs(far)) > 1e-2
+
+    def test_an_unknown_form_is_refused(self):
+        from uacpy.core.acoustics import modal_field
+        from uacpy.core.exceptions import ConfigurationError
+        with pytest.raises(ConfigurationError,
+                           match="form must be 'asymptotic' or 'hankel'"):
+            modal_field(self.K, self.PHI_S, self.PHI_R, [100.0], form='exact')
 

@@ -19,8 +19,9 @@ Format:
 
 ``[YYYY/MM/DD HH:MM:SS UTC] [LEVEL] [source] message``
 
-Genuine user-facing problems still go through :mod:`warnings` (typed
-``UserWarning``) or a typed exception in :mod:`uacpy.core.exceptions`.
+Genuine user-facing problems still go through :mod:`warnings` (a
+:class:`~uacpy.core.exceptions.UACPYWarning` subclass named for its cause)
+or a typed exception in :mod:`uacpy.core.exceptions`.
 ``WARN`` / ``ERROR`` here are for status banners that don't fit
 either of those (e.g. "field.exe exited non-zero but the .shd is
 readable — continuing").
@@ -35,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Union
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, UACPYWarning
 
 
 _LEVEL_VALUE = {
@@ -73,6 +74,13 @@ def _resolve_threshold(verbose: Union[bool, str, None]) -> int:
             remediation="Use False/True/'off'/'silent'/'info'/'debug'.",
         )
     return _VERBOSE_THRESHOLD[key]
+
+
+def _log_enabled(verbose: Union[bool, str, None], level: str) -> bool:
+    """Whether :func:`log_message` would print a ``level`` line under
+    ``verbose`` — so a caller can skip building a costly message that
+    would be dropped."""
+    return _LEVEL_VALUE[level.lower()] >= _resolve_threshold(verbose)
 
 
 def log_message(
@@ -155,9 +163,12 @@ def _uacpy_format_warning(
     try:
         ts = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC")
         cat_name = getattr(category, '__name__', str(category))
-        label = 'WARN' if cat_name == 'UserWarning' else cat_name.replace(
-            'Warning', '',
-        ).upper() or 'WARN'
+        # A uacpy warning names its cause by its class; the label stays the
+        # level, in the log's own vocabulary (DEBUG/INFO/WARN/ERROR).
+        if cat_name == 'UserWarning' or issubclass(category, UACPYWarning):
+            label = 'WARN'
+        else:
+            label = cat_name.replace('Warning', '').upper() or 'WARN'
         source = f"{_source_from_filename(filename)}:{lineno}"
         return f"[{ts}] [{label}] [{source}] {message}\n"
     except Exception:
@@ -178,8 +189,9 @@ def install_warning_formatter() -> None:
     warnings of every library in the process, not just uacpy's — the price of
     one consistent rendering for a package used as an application. Two escapes,
     in the order they are checked: ``UACPY_NO_WARNING_FORMAT=1`` keeps Python's
-    own rendering (the same truthy opt-out spelling :mod:`uacpy._stack` uses
-    for its process-global RLIMIT change), and a host application that
+    own rendering (the same truthy opt-out spelling ``UACPY_NO_STACK_RAISE``
+    uses in :mod:`uacpy._stack`, which raises the stack limit of each spawned
+    binary only), and a host application that
     installed its own formatter first keeps it — only the stdlib default (or a
     previous install of this one) is replaced.
     """

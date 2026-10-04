@@ -11,6 +11,7 @@ catch a deck OASES accepts and answers wrongly.
 """
 
 import inspect
+import pathlib
 import warnings
 
 import numpy as np
@@ -21,12 +22,13 @@ from uacpy.core import BoundaryProperties, Environment, Receiver, Source
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.oases_writer import write_oass_input
 from uacpy.tests.conftest import make_pekeris
+from uacpy.tests.conftest import recorded_warnings
 
 
 def _env(c_water=1500.0, roughness=0.5):
     return make_pekeris(
         ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0],
-                                    data=[c_water, c_water]),
+                                    sound_speed=[c_water, c_water]),
         roughness=roughness)
 
 
@@ -167,7 +169,7 @@ class TestBlockIXIsWrittenOnlyUnderC:
 
 class TestGuards:
     def test_two_products_refused(self, tmp_path):
-        # oassun26.f:683-688 vs :897-902 — 'a' with 'r' returns a silently
+        # oassun26.f:683-688 vs :899-904 — 'a' with 'r' returns a silently
         # ZERO covariance, which no downstream check would catch.
         with pytest.raises(ConfigurationError, match='more than one'):
             _write(tmp_path, options='r a')
@@ -178,7 +180,8 @@ class TestGuards:
         # IOUT(1)=1 / NOUT=1 (:694-696) and the parameter comes from the
         # receiver ITYP column. The manual's own example (oass.tex:305) is
         # wrong about this.
-        with pytest.raises(ConfigurationError, match='not OASS option'):
+        with pytest.raises(ConfigurationError,
+                           match='are not option letters this binary tests'):
             _write(tmp_path, options=f'r {letter}')
 
     def test_option_k_refused_with_its_own_reason(self, tmp_path):
@@ -217,7 +220,7 @@ class TestGuards:
 class TestWavenumberRecordIsExplicit:
     """Under REVERB the binary recomputes ``NWVNO`` from the ``.rhs`` file's
     own ``DLWVNO`` and forces ``ICUT1=1, ICUT2=NWVNO``
-    (``unoass21.f:211-215``), so this record is inert *there*. It is written
+    (``unoass21.f:209-215``), so this record is inert *there*. It is written
     explicitly anyway: on a plots-only deck the branch is skipped and the
     siblings' ``-1`` auto sentinel would survive as a negative count."""
 
@@ -249,7 +252,7 @@ class TestWavenumberRecordIsExplicit:
 from uacpy.core.exceptions import UnsupportedFeatureError    # noqa: E402
 from uacpy.io.oases_reader import read_oases_rhs_header      # noqa: E402
 from uacpy.models import OASS, OAST, OASN, OASP, OASES       # noqa: E402
-from uacpy.models.base import RunMode                        # noqa: E402
+from uacpy.core.run_settings import RunMode                        # noqa: E402
 from uacpy.core.results import (                             # noqa: E402
     Covariance, Field, _DOCUMENTED_METADATA, _UNIVERSAL_METADATA,
 )
@@ -261,10 +264,32 @@ _CLASS_RCV = uacpy.Receiver(depths=[30.0, 70.0],
                             ranges=np.linspace(200.0, 2000.0, 8))
 
 
+def _rhs_header(n_time_samples, freq_min):
+    """A mean-field header with the two fields the OASS guard reads."""
+    from uacpy.io import OasesRhsHeader
+    return OasesRhsHeader(
+        n_time_samples=n_time_samples, freq_min=freq_min, freq_max=freq_min,
+        time_step=1.0, frequency=freq_min, source_layer=1, n_wavenumbers=1,
+        interface=1)
+
+
 def _oass(**kw):
     kw.setdefault('correlation_length', 10.0)
     kw.setdefault('rms_roughness', 0.5)
     return OASS(**kw)
+
+
+def _options(model, run_mode):
+    """The option line ``model``'s knobs give for ``run_mode``."""
+    from uacpy.models.oases.oass import _oass_options
+    return _oass_options(model.options, run_mode, model.roughness_spectrum,
+                         model.multiple_scattering)
+
+
+def _interface(model, env):
+    """The scattering interface ``model`` resolves on ``env``."""
+    from uacpy.models.oases.oass import _oass_interface
+    return _oass_interface(env, model.interface)
 
 
 def _layered_env(halfspace_roughness=0.3):
@@ -273,7 +298,7 @@ def _layered_env(halfspace_roughness=0.3):
     return uacpy.Environment(
         bathymetry=100.0,
         ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0],
-                                    data=[1500.0, 1500.0]),
+                                    sound_speed=[1500.0, 1500.0]),
         bottom=uacpy.Bottom(columns=[uacpy.SeabedColumn(
             layers=[uacpy.SedimentLayer(
                 thickness=10.0, sound_speed=1600.0, density=1.6,
@@ -310,21 +335,15 @@ class TestSingleConfigRule:
     no ``**kwargs``. A ``run(**kwargs)`` is what lets a misspelled knob be
     silently dropped instead of rejected."""
 
-    # ``run`` is the base class's template method, one object shared by
-    # every model; the body each wrapper actually declares — and the one
-    # ``__init_subclass__`` checks — is ``_run_single``. Reading ``.run``
-    # here would assert a property of ``PropagationModel`` twice.
     @pytest.mark.parametrize('cls_name', ['OASS', 'OASSP'])
-    def test_run_single_takes_no_var_keywords(self, cls_name):
-        params = inspect.signature(
-            getattr(uacpy, cls_name)._run_single).parameters
+    def test_run_takes_no_var_keywords(self, cls_name):
+        params = inspect.signature(getattr(uacpy, cls_name).run).parameters
         assert not any(p.kind is inspect.Parameter.VAR_KEYWORD
                        for p in params.values())
 
     @pytest.mark.parametrize('cls_name', ['OASS', 'OASSP'])
-    def test_run_single_takes_no_var_positionals(self, cls_name):
-        params = inspect.signature(
-            getattr(uacpy, cls_name)._run_single).parameters
+    def test_run_takes_no_var_positionals(self, cls_name):
+        params = inspect.signature(getattr(uacpy, cls_name).run).parameters
         assert not any(p.kind is inspect.Parameter.VAR_POSITIONAL
                        for p in params.values())
 
@@ -338,25 +357,26 @@ class TestConstructor:
         with pytest.raises(ConfigurationError, match='correlation_length'):
             OASS()
 
-    def test_integration_offset_is_refused_not_ignored(self):
+    @pytest.mark.parametrize('name', ['integration_offset', 'n_wavenumbers'])
+    def test_the_mean_fields_integration_knobs_are_not_oass_knobs(self, name):
         # ICNTIN is initialised to 0 (unoass21.f:596) and GETOPT never sets
-        # it, so Block III's COFF is unreachable.
-        with pytest.raises(ConfigurationError, match=r'unoass21\.f:596'):
-            _oass(integration_offset=0.5)
-
-    def test_nw_samples_is_refused_not_ignored(self):
-        # Under every option OASS supports, NWVNO comes from the .rhs
-        # (unoass21.f:209-215) — measured: a deck asking 2048 ran 2778.
-        with pytest.raises(ConfigurationError, match=r'209-215'):
-            _oass(nw_samples=2048)
+        # it, so Block III's COFF is unreachable; under every option OASS
+        # supports, NWVNO comes from the .rhs (unoass21.f:209-215). Both are
+        # the mean-field model's knobs.
+        with pytest.raises(TypeError, match=name):
+            _oass(**{name: 1})
 
     def test_raw_options_and_typed_flags_are_exclusive(self):
         with pytest.raises(ConfigurationError, match='replaces the whole'):
-            _oass(options='r', plane_geometry=True)
+            _oass(options='r', multiple_scattering=True)
+
+    def test_the_bare_spectrum_keyword_is_not_accepted(self):
+        with pytest.raises(TypeError, match='spectrum'):
+            _oass(spectrum='gaussian')
 
     def test_unknown_spectrum_is_refused(self):
         with pytest.raises(ConfigurationError, match='spectrum'):
-            _oass(spectrum='von-karman')
+            _oass(roughness_spectrum='von-karman')
 
     def test_mean_field_must_be_a_producer(self):
         # oass.tex:18-23 names OAST and OASR; an OASP .rhs is broadband and
@@ -367,12 +387,11 @@ class TestConstructor:
             _oass(mean_field=OASN())
 
     def test_copy_round_trips_every_argument(self):
-        model = _oass(spectral_exponent=2.5, plane_geometry=True,
+        model = _oass(spectral_exponent=2.5, multiple_scattering=True,
                       interface=3, c_low=1300.0)
         clone = model.copy(rms_roughness=0.9)
-        for name in ('correlation_length', 'spectral_exponent', 'spectrum',
-                     'interface', 'multiple_scattering', 'plane_geometry',
-                     'c_low', 'c_high'):
+        for name in ('correlation_length', 'spectral_exponent', 'roughness_spectrum',
+                     'interface', 'multiple_scattering', 'c_low', 'c_high'):
             assert getattr(clone, name) == getattr(model, name), name
         assert clone.rms_roughness == 0.9
         # ``executable`` is kept as passed (None) so copy() re-resolves.
@@ -383,22 +402,91 @@ class TestConstructor:
 class TestOptionLine:
     def test_product_letter_follows_the_run_mode(self):
         model = _oass()
-        assert model._resolve_options(RunMode.REVERBERATION) == 'r'
-        assert model._resolve_options(RunMode.COVARIANCE) == 'a'
+        assert _options(model, RunMode.REVERBERATION) == 'r'
+        assert _options(model, RunMode.COVARIANCE) == 'a'
 
     def test_typed_flags_map_to_their_letters(self):
-        model = _oass(spectrum='goff-jordan', multiple_scattering=True,
-                      plane_geometry=True)
-        assert model._resolve_options(RunMode.REVERBERATION).split() == \
-            ['r', 'g', 'p', 'P']
+        model = _oass(roughness_spectrum='goff-jordan', multiple_scattering=True)
+        assert _options(model, RunMode.REVERBERATION).split() == \
+            ['r', 'g', 'p']
+
+    def test_a_line_source_runs_both_decks_in_plane_geometry(self):
+        # The Source decides the geometry of the chain: 'P' (ICDR=1,
+        # unoass21.f:654-656) on the OASS deck and on the mean-field OAST.
+        line = uacpy.Source(depths=50.0, frequencies=100.0,
+                            source_type='line')
+        assert set(OASS.spec.source_types) == {'point', 'line'}
+        engine = _oass().run_settings(_env(), line, _CLASS_RCV).engine
+        assert engine.options.split() == ['r', 'P']
+        assert engine.mean_field.source_type == 'line'
+        assert 'P' in engine.mean_field.engine.options.split()
+        point = _oass().run_settings(_env(), _CLASS_SRC, _CLASS_RCV).engine
+        assert 'P' not in point.options.split()
+        assert 'P' not in point.mean_field.engine.options.split()
+
+    def test_the_mean_field_deck_the_binary_reads_carries_the_geometry(
+            self, tmp_path):
+        # Measured on a 100 m guide over a rough 1700 m/s seabed at 100 Hz:
+        # OASS in plane geometry over a cylindrical OAST mean field read
+        # 11.76 dB less reverberation loss than the chain with 'P' on both
+        # decks, which this run reproduces bit for bit.
+        line = uacpy.Source(depths=50.0, frequencies=100.0,
+                            source_type='line')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            _oass(work_dir=tmp_path / 'wd', cleanup=False).run(
+                _env(), line, _CLASS_RCV)
+        for deck in ('oast_run.dat', 'oass_run.dat'):
+            option_line = (tmp_path / 'wd' / deck).read_text().splitlines()[1]
+            assert 'P' in option_line.split(), (deck, option_line)
+
+    def test_the_roughness_notice_is_a_setting_the_preview_shows(self):
+        """The small-roughness bound at the run's frequency is decided in
+        stage 3: recorded in ``run_settings().engine.notices``, announced by
+        ``run_settings``, not by ``validate_inputs``."""
+        model = _oass(rms_roughness=3.0)
+        with recorded_warnings() as caught:
+            model.validate_inputs(_env(), _CLASS_SRC, _CLASS_RCV)
+        assert not [w for w in caught if 'Rayleigh' in str(w.message)]
+        with recorded_warnings() as caught:
+            settings = model.run_settings(_env(), _CLASS_SRC, _CLASS_RCV)
+        said = [str(w.message) for w in caught
+                if 'Rayleigh' in str(w.message)]
+        assert len(said) == 1 and said[0] in [n.message for n in settings.engine.notices]
+
+    @pytest.mark.parametrize('run_mode',
+                             [RunMode.REVERBERATION, RunMode.COVARIANCE])
+    def test_one_receiver_range_is_refused_before_the_mean_field_runs(
+            self, run_mode, monkeypatch):
+        """Block VIII's RSTEP divides by NR - 1 (unoass21.f:269); the deck
+        writer refused NR = 1 only after the OAST mean field had run. It is
+        decided from the Receiver, so every entry point refuses it and no
+        binary is launched."""
+        model = _oass()
+        launched = []
+        monkeypatch.setattr(model, '_run_subprocess',
+                            lambda *a, **k: launched.append(a))
+        rcv = uacpy.Receiver(depths=[30.0, 70.0], ranges=[1000.0])
+        for call in ('validate_inputs', 'run_settings', 'run'):
+            with pytest.raises(ConfigurationError, match='n_ranges must be'):
+                getattr(model, call)(_env(), _CLASS_SRC, rcv,
+                                     run_mode=run_mode)
+        assert launched == []
+
+    def test_a_raw_P_on_a_point_source_is_refused(self):
+        model = _oass(options='r P')
+        for call in ('validate_inputs', 'run_settings', 'run'):
+            with pytest.raises(ConfigurationError,
+                               match=r"OASS\(options='r P'\) carries 'P'"):
+                getattr(model, call)(_env(), _CLASS_SRC, _CLASS_RCV)
 
     @pytest.mark.parametrize('run_mode',
                              [RunMode.REVERBERATION, RunMode.COVARIANCE])
     def test_derived_line_asks_for_exactly_one_product(self, run_mode):
         # G7, at the source: 'a' sharing a deck with 'r'/'C'/'D' returns a
         # SILENTLY zero covariance (oassun26.f:683-688 zeroes ROUGH2 before
-        # :897-902 reads it). One product per run, chosen by run_mode.
-        chars = set(_oass()._resolve_options(run_mode))
+        # :899-904 reads it). One product per run, chosen by run_mode.
+        chars = set(_options(_oass(), run_mode))
         assert len(chars & set('arCD')) == 1
 
     @pytest.mark.parametrize('letters', ['r C', 'r D'])
@@ -448,8 +536,10 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
         # G3 — SCTRHS skips any interface with ROUGH2 < 1e-10
         # (oaseun31.f:2310, :379), so the mean field writes an empty .rhs and
         # OASS has no wavenumber step at all.
-        with pytest.raises(ConfigurationError, match=r'oaseun31\.f:2310'):
+        with pytest.raises(ConfigurationError, match=r'oaseun31\.f:2310') as err:
             _oass().run(_env(roughness=0.0), _CLASS_SRC, _CLASS_RCV)
+        # Named in words, with the deck index the user never chose second.
+        assert 'the seafloor (deck layer 3)' in str(err.value)
 
     def test_smooth_interface_is_judged_on_the_environment_not_the_override(self):
         # rms_roughness overrides the OASS deck only; the mean-field deck
@@ -460,7 +550,7 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
 
     def test_interface_defaults_to_the_seafloor(self):
         # Deck layers: 1 upper halfspace, 2 water, 3 bottom halfspace.
-        assert _oass()._resolve_interface(_env()) == 3
+        assert _interface(_oass(), _env()) == 3
 
     def test_interface_default_tracks_the_water_layer_count(self):
         # A gradient profile emits one record per SSP row, so the seafloor
@@ -468,12 +558,12 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
         env = uacpy.Environment(
             bathymetry=100.0,
             ssp=uacpy.SoundSpeedProfile(depths=[0.0, 50.0, 100.0],
-                                        data=[1500.0, 1490.0, 1495.0]),
+                                        sound_speed=[1500.0, 1490.0, 1495.0]),
             bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
                 sound_speed=1700.0, density=1.8, attenuation=0.5,
                 roughness=0.5)),
         )
-        assert _oass()._resolve_interface(env) == 5
+        assert _interface(_oass(), env) == 5
 
     @pytest.mark.parametrize('env_factory,expected', [
         (lambda: _env(), 3),
@@ -489,7 +579,7 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
             env = uacpy.Environment(
                 bathymetry=100.0,
                 ssp=uacpy.SoundSpeedProfile(depths=[0.0, 50.0, 100.0],
-                                            data=[1500.0, 1490.0, 1495.0]),
+                                            sound_speed=[1500.0, 1490.0, 1495.0]),
                 bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
                     sound_speed=1700.0, density=1.8, attenuation=0.5,
                     roughness=0.5)),
@@ -497,7 +587,7 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
         else:
             env = env_factory()
         model = _oass()
-        interface = model._resolve_interface(env)
+        interface = _interface(model, env)
         assert interface == expected
         path = tmp_path / 'oass_run.dat'
         write_oass_input(path, env, _CLASS_SRC, _CLASS_RCV, 'r',
@@ -520,7 +610,7 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
         # INTFC has a real choice: 3 is the seafloor, 4 the base of the
         # sediment. Only the named one may carry the spectrum.
         env = _layered_env()
-        assert _oass()._resolve_interface(env) == 3      # default: seafloor
+        assert _interface(_oass(), env) == 3      # default: seafloor
         path = tmp_path / 'oass_run.dat'
         write_oass_input(path, env, _CLASS_SRC, _CLASS_RCV, 'r',
                          interface=interface, correlation_length=10.0,
@@ -536,9 +626,10 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
         # A rough seafloor over a smooth sediment base: interface 4 has no
         # boundary operators in the .rhs even though interface 3 does.
         env = _layered_env(halfspace_roughness=0.0)
-        assert _oass()._resolve_interface(env) == 3
-        with pytest.raises(ConfigurationError, match='is smooth'):
+        assert _interface(_oass(), env) == 3
+        with pytest.raises(ConfigurationError, match='is smooth') as err:
             _oass(interface=4).run(env, _CLASS_SRC, _CLASS_RCV)
+        assert 'the top of seabed layer 2 (deck layer 4)' in str(err.value)
 
     def test_mean_field_without_option_s_is_refused(self, tmp_path):
         # SCTOUT gates the whole boundary-operator dump (oaseun31.f:1899-1900).
@@ -548,7 +639,7 @@ class TestGuardsThatFireBeforeAnyBinaryRuns:
 
 
 class TestTheReverberationCitationNamesTheRoutineOnOptionRsPath:
-    """``_read_reverberation`` explains the reverberation quantity by citing
+    """``_reverberation_field`` explains the reverberation quantity by citing
     the OASES lines that convert it to dB. Two routines in ``oassun26.f``
     carry a byte-identical "CONVERT TO dB" block — ``REVRAN`` at :633-638 and
     ``REVINT`` at :853-858 — so a content check alone cannot tell them apart,
@@ -571,8 +662,9 @@ class TestTheReverberationCitationNamesTheRoutineOnOptionRsPath:
     @staticmethod
     def _docstring():
         from uacpy.models.oases import OASS
-        return inspect.getdoc(OASS._read_reverberation)
+        return inspect.getdoc(OASS._reverberation_field)
 
+    @pytest.mark.requires_oases
     def test_the_cited_block_converts_to_dB(self):
         cited = '\n'.join(self._src('oassun26.f')[853 - 1:858])
         assert 'CONVERT TO dB' in cited
@@ -581,6 +673,7 @@ class TestTheReverberationCitationNamesTheRoutineOnOptionRsPath:
         assert 'VALG10' in cited          # log10
         assert '-5E0' in cited            # times -5 on an already-squared term
 
+    @pytest.mark.requires_oases
     def test_the_cited_block_writes_the_array_pltlos_plots(self):
         # The discriminating half. REVRAN's block passes every assertion
         # above and still cannot be the source of these curves, because it
@@ -593,6 +686,7 @@ class TestTheReverberationCitationNamesTheRoutineOnOptionRsPath:
         assert '(XS(1),CFFS(1))' in driver      # so CFFs IS the plotted XS
         assert '(X(1,1),CFF(1,1))' in driver    # while CFF(1,1) is X
 
+    @pytest.mark.requires_oases
     def test_the_cited_lines_sit_inside_revint_not_revran(self):
         lines = self._src('oassun26.f')
         starts = {}
@@ -605,6 +699,7 @@ class TestTheReverberationCitationNamesTheRoutineOnOptionRsPath:
         assert starts['REVRAN'] < 638 < starts['REVINT']
         assert starts['REVINT'] < 853 and 858 < starts['REVCOV']
 
+    @pytest.mark.requires_oases
     def test_option_r_reaches_revint_and_not_the_contour_branch(self):
         driver = self._src('unoass21.f')
         # option 'r' sets PLTL (and REVERB); it never sets CCONTU.
@@ -672,7 +767,7 @@ class TestTwoBinaryRoundTrip:
           every value would flip both runs together and keep the inequality.
         * ``test_reverberation_field`` above checks the near/far endpoints of
           one real run, but nothing downstream of the Field.
-        * ``test_core_carriers_and_results.py`` pins ``Field.max()``, ``.dB`` and the axis
+        * ``test_field.py`` pins ``Field.max()``, ``.dB`` and the axis
           label on Fields built from hand-written arrays, so it pins the
           CONSUMERS against a direction the test itself supplies.
 
@@ -726,7 +821,7 @@ class TestTwoBinaryRoundTrip:
                        if len(ln.split()) == 3 and ln.split()[1] == '1'][0]
                       .split()[0])
         assert deck_nw == 2048
-        assert result.metadata['n_wavenumbers'] != deck_nw
+        assert result.metadata['n_integrated_wavenumbers'] != deck_nw
 
     def test_both_decks_integrate_from_the_same_c_low(self, tmp_path):
         # G4's contract, read off the two decks. CMIN truncates the OASS
@@ -753,11 +848,13 @@ class TestTwoBinaryRoundTrip:
         assert deck_c_low('oass_run.dat') == pytest.approx(
             deck_c_low('oast_run.dat'))
 
-    def test_mean_field_result_is_kept_and_is_not_a_carrier(self, tmp_path):
+    def test_the_mean_field_is_kept_as_a_component_and_is_not_a_carrier(
+            self, tmp_path):
         result = _oass(work_dir=tmp_path, cleanup=False).run(
             _env(), _CLASS_SRC, _CLASS_RCV)
-        mean = result.metadata['mean_field_result']
+        mean = result.components['mean_field']
         assert isinstance(mean, Field) and mean.model == 'OAST'
+        assert 'mean_field_result' not in result.metadata
         for forbidden in ('env', 'environment', 'source', 'receiver'):
             assert not hasattr(result, forbidden)
             assert forbidden not in result.metadata
@@ -816,6 +913,25 @@ class TestTwoBinaryRoundTrip:
         documented |= set(_UNIVERSAL_METADATA)
         assert not set(result.metadata) - documented
 
+    @pytest.mark.parametrize('run_mode', [RunMode.REVERBERATION,
+                                          RunMode.COVARIANCE])
+    def test_every_product_keeps_the_mean_field_as_a_component(
+            self, tmp_path, run_mode):
+        """The reverberation Field and the Covariance both carry the mean
+        field they were scattered from as ``components['mean_field']``, not
+        in ``metadata``."""
+        result = _oass(work_dir=tmp_path, cleanup=False).run(
+            _env(), _CLASS_SRC, _CLASS_RCV, run_mode=run_mode)
+        assert isinstance(result.components['mean_field'], Field)
+        assert 'mean_field_result' not in result.metadata
+
+    def test_the_covariance_states_its_unit(self, tmp_path):
+        """OASS's covariance is the variance of the field a source of
+        level 1 Pa scatters (oass.tex:216-218): Pa², not OASN's Pa²/Hz."""
+        result = _oass(work_dir=tmp_path, cleanup=False).run(
+            _env(), _CLASS_SRC, _CLASS_RCV, run_mode=RunMode.COVARIANCE)
+        assert result.unit == 'Pa²'
+
     def test_a_cleaned_work_dir_keeps_nothing_from_either_binary(self,
                                                                  tmp_path):
         # Both runs' scratch goes: the OASS deck and outputs, the producer's
@@ -845,14 +961,14 @@ class TestRhsContract:
     def test_header_record_is_nfreq_and_the_frequency(self, tmp_path):
         # A single-frequency OAST writes nfreq into the NX slot and its own
         # frequency into FR1 (unoast31.f:164-165), which is what OASS reads
-        # back as nx_in_file / fr1_in_file (unoass21.f:127).
+        # back as nx_in_file / fr1_in_file (unoass21.f:126).
         _oass(work_dir=tmp_path, cleanup=False).run(
             _env(), _CLASS_SRC, _CLASS_RCV)
         header = read_oases_rhs_header(tmp_path / 'oast_run.045')
-        assert header['n_time_samples'] == 1
-        assert header['freq_min'] == pytest.approx(
+        assert header.n_time_samples == 1
+        assert header.freq_min == pytest.approx(
             float(_CLASS_SRC.frequencies[0]))
-        assert header['frequency'] == pytest.approx(header['freq_min'])
+        assert header.frequency == pytest.approx(header.freq_min)
 
     def test_a_frequency_mismatch_is_refused_rather_than_substituted(
             self, tmp_path, monkeypatch):
@@ -860,18 +976,16 @@ class TestRhsContract:
         # ``freq=fr1_in_file``, so a mismatch silently moves the run to the
         # .rhs's frequency while the Field would still be labelled with the
         # deck's.
-        import uacpy.models.oases as oases_module
+        import uacpy.models.oases.oass as oases_module
         monkeypatch.setattr(oases_module, 'read_oases_rhs_header',
-                            lambda path: {'n_time_samples': 1,
-                                          'freq_min': 137.0})
+                            lambda path: _rhs_header(1, 137.0))
         with pytest.raises(ConfigurationError, match='137'):
             _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, _CLASS_RCV)
 
     def test_a_multi_frequency_rhs_is_refused(self, tmp_path, monkeypatch):
-        import uacpy.models.oases as oases_module
+        import uacpy.models.oases.oass as oases_module
         monkeypatch.setattr(oases_module, 'read_oases_rhs_header',
-                            lambda path: {'n_time_samples': 4,
-                                          'freq_min': 100.0})
+                            lambda path: _rhs_header(4, 100.0))
         with pytest.raises(ConfigurationError, match='frequency block'):
             _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, _CLASS_RCV)
 
@@ -880,16 +994,14 @@ class TestRhsContract:
         """G2's boundary at 100 Hz: |Δf| > 0.1 Hz refuses, |Δf| ≤ 0.1 Hz
         passes the guard (the producer's real .rhs carries the exact
         frequency, so the passing chain then completes normally)."""
-        import uacpy.models.oases as oases_module
+        import uacpy.models.oases.oass as oases_module
         monkeypatch.setattr(oases_module, 'read_oases_rhs_header',
-                            lambda path: {'n_time_samples': 1,
-                                          'freq_min': 100.11})
+                            lambda path: _rhs_header(1, 100.11))
         with pytest.raises(ConfigurationError, match='100.11'):
             _oass(work_dir=tmp_path / 'outside').run(
                 _env(), _CLASS_SRC, _CLASS_RCV)
         monkeypatch.setattr(oases_module, 'read_oases_rhs_header',
-                            lambda path: {'n_time_samples': 1,
-                                          'freq_min': 100.09})
+                            lambda path: _rhs_header(1, 100.09))
         result = _oass(work_dir=tmp_path / 'inside').run(
             _env(), _CLASS_SRC, _CLASS_RCV)
         assert np.isfinite(np.asarray(result.data)).any()
@@ -903,29 +1015,32 @@ class TestCLowDirectionOfHarm:
     the direction of harm — raising truncates the scattering integral
     (measured 30.15 dB), lowering is inert (measured 1e-4 dB: REVINT bounds
     its own buffer reads, so wavenumbers past the mean field's grid
-    contribute nothing). No binary runs — the warning fires pre-launch."""
+    contribute nothing). No binary runs — ``run_settings`` says it before
+    any launch."""
+
+    @staticmethod
+    def _settings(model):
+        return model.run_settings(_env(), _CLASS_SRC, _CLASS_RCV)
 
     def test_lower_c_low_warns_it_does_not_extend(self):
         with pytest.warns(UserWarning, match='does not extend'):
-            _oass(c_low=900.0)._warn_on_c_low_mismatch(_env())
+            self._settings(_oass(c_low=900.0))
 
     def test_higher_c_low_warns_it_truncates(self):
         with pytest.warns(UserWarning, match='truncates'):
-            _oass(c_low=2000.0)._warn_on_c_low_mismatch(_env())
+            self._settings(_oass(c_low=2000.0))
 
     def test_unset_c_low_inherits_the_mean_fields_bound_silently(self):
-        import warnings as _w
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter('always')
-            _oass()._warn_on_c_low_mismatch(_env())
+        with recorded_warnings() as caught:
+            engine = self._settings(_oass()).engine
         assert not [w for w in caught if 'c_low' in str(w.message)]
+        assert engine.c_low == engine.mean_field.engine.c_low
+        assert engine.c_low == pytest.approx(1350.0)
 
     def test_matching_c_low_is_silent(self):
-        import warnings as _w
-        mean = _oass()._mean_field_c_low(_env())
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter('always')
-            _oass(c_low=mean)._warn_on_c_low_mismatch(_env())
+        mean = self._settings(_oass()).engine.mean_field.engine.c_low
+        with recorded_warnings() as caught:
+            self._settings(_oass(c_low=mean))
         assert not [w for w in caught if 'differs' in str(w.message)]
 
 
@@ -935,7 +1050,7 @@ class TestPhysics:
 
     def test_doubling_rms_roughness_costs_exactly_10log10_4(self, tmp_path):
         # REVINT's integration constant is FF = RG2*DLWVNO*FNI5^2/(2 pi)^3
-        # (oassun26.f:698), linear in RG^2, and the mean field is unchanged —
+        # (oassun26.f:697), linear in RG^2, and the mean field is unchanged —
         # the OASS deck's roughness is independent of the producer's
         # (oass.tex:182-186). So the whole chain must move by 10*log10(4) and
         # by nothing else, at every depth and range.
@@ -977,7 +1092,7 @@ class TestPhysics:
     def test_goff_jordan_backscatters_more_than_gaussian(self, tmp_path):
         gaussian = _oass(work_dir=tmp_path / 'a').run(
             _env(), _CLASS_SRC, _CLASS_RCV)
-        goff = _oass(spectrum='goff-jordan', work_dir=tmp_path / 'b').run(
+        goff = _oass(roughness_spectrum='goff-jordan', work_dir=tmp_path / 'b').run(
             _env(), _CLASS_SRC, _CLASS_RCV)
         assert (goff.data < gaussian.data).all()
 
@@ -994,14 +1109,14 @@ class TestReceiverRangeAxis:
             result = _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, rcv)
         assert np.allclose(result.coords['range'], rcv.ranges)
         assert result.metadata['interpolated'] is True
-        assert np.allclose(result.metadata['oass_native_ranges'],
+        assert np.allclose(result.metadata['native_ranges'],
                            np.linspace(200.0, 2000.0, 4))
 
     def test_equispaced_ranges_are_kept_verbatim(self, tmp_path, recwarn):
         result = _oass(work_dir=tmp_path).run(_env(), _CLASS_SRC, _CLASS_RCV)
         assert not [w for w in recwarn
                     if 'not the equispaced axis' in str(w.message)]
-        assert 'oass_native_ranges' not in result.metadata
+        assert 'native_ranges' not in result.metadata
 
 
 class TestRoughnessMustSurviveTheRecordFormat:
@@ -1029,11 +1144,13 @@ class TestRoughnessMustSurviveTheRecordFormat:
             roughness = 0.5
 
         class _B:
+            is_layered = False
+            is_range_dependent = False
+
             def halfspace_at(self, range=0.0):
                 return _HS()
 
         class _E:
-            has_layered_bottom = False
             bottom = _B()
 
         return _make_roughness_tail(_E(), {1: (rg, 10.0, 2.0)})(1)
@@ -1075,7 +1192,7 @@ class TestTheSeaSurfaceIsAScatteringInterface:
         data = [1500.0, 1500.0] if isovelocity else [1500.0, 1490.0]
         return uacpy.Environment(
             bathymetry=100.0,
-            ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0], data=data),
+            ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=data),
             bottom=uacpy.Bottom.from_halfspace(uacpy.BoundaryProperties(
                 sound_speed=1700.0, density=1.8, attenuation=0.5,
                 roughness=0.5)),
@@ -1160,11 +1277,13 @@ class TestCorrelationLengthMustSurviveTheRecordFormat:
             roughness = 0.5
 
         class _B:
+            is_layered = False
+            is_range_dependent = False
+
             def halfspace_at(self, range=0.0):
                 return _HS()
 
         class _E:
-            has_layered_bottom = False
             bottom = _B()
 
         return _make_roughness_tail(_E(), {1: (0.5, cl, 3.0)})(1)
@@ -1188,7 +1307,8 @@ class TestCorrelationLengthMustSurviveTheRecordFormat:
     def test_oasr_inherits_the_guard_through_its_public_knob(self):
         # OASR exposes interface_roughness=[(RG, CL, M)] and had no CL check
         # of its own; the funnel is what gives it one.
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='correlation_length = .* is below'):
             self._tail(1e-5)
 
 
@@ -1252,7 +1372,7 @@ class TestSubMillimetreLayersDoNotVanishSilently:
         env = uacpy.Environment(
             bathymetry=100.0,
             ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0],
-                                        data=[1500.0, 1500.0]),
+                                        sound_speed=[1500.0, 1500.0]),
             bottom=uacpy.Bottom(columns=[col]))
         write_oast_input(tmp_path / 'x.dat', env, _SRC,
                          uacpy.Receiver(depths=[50.0],
@@ -1312,7 +1432,8 @@ class TestOasrIsNotAUsableMeanField:
 
     def test_an_oasr_mean_field_is_refused(self):
         from uacpy.models import OASR
-        with pytest.raises(ConfigurationError) as ei:
+        with pytest.raises(ConfigurationError,
+                           match='divides by zero inside oass2') as ei:
             OASS(correlation_length=10.0, mean_field=OASR())
         message = str(ei.value)
         assert 'IN1=2' in message, message
@@ -1342,7 +1463,7 @@ class TestSeaSurfaceIsALegalScatteringInterface:
         return uacpy.Environment(
             bathymetry=100.0,
             ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0],
-                                        data=[1500.0, 1500.0]),
+                                        sound_speed=[1500.0, 1500.0]),
             surface=uacpy.BoundaryProperties(acoustic_type='vacuum',
                                              roughness=surface_roughness),
             bottom=uacpy.BoundaryProperties(
@@ -1351,21 +1472,21 @@ class TestSeaSurfaceIsALegalScatteringInterface:
 
     def test_interface_2_resolves_against_the_surface_roughness(self):
         model = OASS(correlation_length=10.0, interface=2)
-        assert model._resolve_interface(self._env(0.5, 0.0)) == 2
+        assert _interface(model, self._env(0.5, 0.0)) == 2
 
     def test_a_smooth_surface_is_named_as_the_reason(self):
         model = OASS(correlation_length=10.0, interface=2)
         with pytest.raises(ConfigurationError, match='sea surface'):
-            model._resolve_interface(self._env(0.0, 0.5))
+            _interface(model, self._env(0.0, 0.5))
 
     def test_the_default_interface_resolves_to_the_seabed(self):
         model = OASS(correlation_length=10.0)
-        assert model._resolve_interface(self._env(0.0, 0.5)) == 3
+        assert _interface(model, self._env(0.0, 0.5)) == 3
 
     def test_an_interface_below_the_stack_is_refused(self):
         model = OASS(correlation_length=10.0, interface=9)
         with pytest.raises(ConfigurationError, match='not a scattering'):
-            model._resolve_interface(self._env(0.5, 0.5))
+            _interface(model, self._env(0.5, 0.5))
 
     @pytest.mark.slow
     def test_the_chain_runs_and_answers(self, tmp_path):
@@ -1384,22 +1505,23 @@ class TestSeaSurfaceIsALegalScatteringInterface:
 
 @pytest.mark.requires_oases
 def test_oass_accepts_the_same_spectrum_spellings_as_oassp():
-    """OASS compared ``spectrum`` exactly while OASSP lower-cased it, so
+    """OASS compared ``roughness_spectrum`` exactly while OASSP lower-cased it, so
     ``'Gaussian'`` raised on one and ran on the other. Both normalise now, so
     the stored value — which the option letter and the options-exclusivity
     check both read — is the canonical spelling."""
     assert OASS(correlation_length=10.0,
-                spectrum='Gaussian').spectrum == 'gaussian'
+                roughness_spectrum='Gaussian').roughness_spectrum == 'gaussian'
     assert OASS(correlation_length=10.0,
-                spectrum='Goff-Jordan').spectrum == 'goff-jordan'
+                roughness_spectrum='Goff-Jordan').roughness_spectrum == 'goff-jordan'
     # The canonical value is what reaches the option line.
-    assert 'g' in OASS(correlation_length=10.0, spectrum='Goff-Jordan'
-                       )._resolve_options(RunMode.REVERBERATION).split()
+    assert 'g' in _options(OASS(correlation_length=10.0,
+                                roughness_spectrum='Goff-Jordan'),
+                           RunMode.REVERBERATION).split()
     # A default spelled with a capital must not read as a pinned non-default.
-    assert OASS(correlation_length=10.0, spectrum='Gaussian',
-                options='r').spectrum == 'gaussian'
+    assert OASS(correlation_length=10.0, roughness_spectrum='Gaussian',
+                options='r').roughness_spectrum == 'gaussian'
     with pytest.raises(ConfigurationError, match='von-karman'):
-        OASS(correlation_length=10.0, spectrum='von-karman')
+        OASS(correlation_length=10.0, roughness_spectrum='von-karman')
 
 
 @pytest.mark.requires_oases  # constructs OASS / OAST (resolves their binaries)
@@ -1409,8 +1531,8 @@ class TestOassMeanFieldOptionLine:
     requires the table ``'T'`` writes (OAST's FOR020 ``.plt``, OASR's
     ``.rco``/``.trc``). ``options='N J s'`` is documented as legal and does
     write the ``.rhs``, so the run died on a missing table nothing here reads,
-    after the binary had already been spent. Both letters are now stated up
-    front, before any deck is written."""
+    after the binary had already been spent. Both letters are refused by the
+    checking stage, before any deck is written."""
 
     @staticmethod
     def _rig(tmp_path, options):
@@ -1426,26 +1548,56 @@ class TestOassMeanFieldOptionLine:
                 Receiver(depths=np.array([50.0]),
                          ranges=np.linspace(500.0, 2500.0, 5)))
 
-    def _run_mean_field(self, tmp_path, options):
+    def _validate(self, tmp_path, options):
         model, env, source, receiver = self._rig(tmp_path, options)
-        return model._run_mean_field(env, source, receiver,
-                                     model._setup_file_manager(), 100.0)
+        model.validate_inputs(env, source, receiver)
 
     def test_a_producer_without_s_is_refused(self, tmp_path):
         with pytest.raises(ConfigurationError, match="must contain 's'"):
-            self._run_mean_field(tmp_path, 'N J T')
+            self._validate(tmp_path, 'N J T')
 
     def test_a_producer_without_T_is_refused(self, tmp_path):
         with pytest.raises(ConfigurationError, match="must also"):
-            self._run_mean_field(tmp_path, 'N J s')
+            self._validate(tmp_path, 'N J s')
 
     def test_the_refusal_names_a_line_that_works(self, tmp_path):
-        with pytest.raises(ConfigurationError) as excinfo:
-            self._run_mean_field(tmp_path, 'N J s')
+        with pytest.raises(ConfigurationError,
+                           match="option line must also contain 'T'") as excinfo:
+            self._validate(tmp_path, 'N J s')
         assert "'N J T s'" in str(excinfo.value)
 
     def test_the_default_producer_carries_both_letters(self):
-        # The default mean field is built inside _run_mean_field, so a
+        # The default mean field is built by _build_mean_field, so a
         # missing letter there would refuse every default OASS run.
-        chars = set(OAST(options='N J T s', verbose=False)._resolve_options())
+        from uacpy.models.oases.oast import _oast_options
+        producer = _oass()._build_mean_field()
+        chars = set(_oast_options(producer.options, producer.complex_contour,
+                                  producer.compute_contour,
+                                  producer.compute_depth_average))
         assert {'s', 'T'} <= chars
+
+
+@pytest.mark.requires_oases
+class TestTheMeanFieldsFilesFollowTheScatterersCleanup:
+    """The mean field's files share the scatterer's work directory, which
+    the scatterer's ``cleanup`` keeps or wipes, so the mean field's result
+    records their paths exactly when they survive (DOCUMENTATION.md §8):
+    never a path to a file the cleanup has deleted."""
+
+    @staticmethod
+    def _mean(**kw):
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter('ignore')
+            result = _oass(**kw).run(_env(), _CLASS_SRC, _CLASS_RCV)
+        return result, result.components['mean_field']
+
+    def test_a_cleaned_run_records_no_mean_field_path(self):
+        result, mean = self._mean()
+        assert not [k for k in mean.metadata if k.endswith('_file')]
+        assert not [k for k in result.metadata if k.endswith('_file')]
+
+    def test_a_kept_run_records_mean_field_paths_that_exist(self, tmp_path):
+        result, mean = self._mean(work_dir=tmp_path / 'wd', cleanup=False)
+        paths = [v for k, v in mean.metadata.items() if k.endswith('_file')]
+        assert paths and all(pathlib.Path(p).exists() for p in paths)

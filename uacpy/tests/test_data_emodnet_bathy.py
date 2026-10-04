@@ -66,7 +66,7 @@ def test_depths_along(monkeypatch):
 
 def test_fetch_bathy_dispatches_emodnet(monkeypatch):
     monkeypatch.setattr(emo, 'http_get', _stub_point(-88.0))
-    assert bathymetry.fetch_bathy((50.0, 0.0), source='emodnet') == pytest.approx(88.0)
+    assert bathymetry.fetch_bathy((50.0, 0.0), source='emodnet_dtm') == pytest.approx(88.0)
 
 
 def test_region_grid(monkeypatch):
@@ -82,6 +82,15 @@ def test_region_grid(monkeypatch):
     assert depth.shape == (4, 4)
     assert np.nanmin(depth) == 2000.0
     assert np.isnan(depth).sum() >= 1                  # the land node
+
+
+def test_a_region_failure_names_what_each_tile_answered(monkeypatch):
+    def fake(url, *, timeout, verbose, source='data', user_agent='uacpy'):
+        raise DataFetchError("Could not reach the host: timed out")
+    monkeypatch.setattr(emo, 'http_get', fake)
+    with pytest.raises(DataFetchError, match='timed out') as info:
+        emo.region_grid((43.0, 43.5), (7.0, 7.5), 4, 4)
+    assert all(d in info.value.message for d in emo.DATASETS)
 
 
 def test_fetch_environment_records_emodnet_provenance(monkeypatch):

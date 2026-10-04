@@ -15,13 +15,14 @@ while dropping the fine multipath fringes a coherent field would imprint.
 
 Uses: sonar.detection_threshold_energy · passive/active_signal_excess ·
 lambert_bottom · boundary_reverberation · detection_range · ts_cylinder ·
-passive/active_signal_excess_field · probability_of_detection_field ·
-detection_range_by_depth · plot_signal_excess · plot_detection_probability ·
-plot_roc · absorption_thorp
+passive/active_signal_excess_field · transition_probability_field ·
+detection_ranges_by_depth · plot_signal_excess · plot_detection_probability ·
+plot_roc · Thorp.table
 """
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
@@ -36,14 +37,14 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 frequency = 2000.0
 # The range vector has to extend past the SE = 0 crossing or detection_range
-# has nothing to bracket and returns inf. With SL=140, NL-DI=45 and DT=-4.3 the
-# passive curve crosses near 45 km, so 30 km would stop short of the very
+# has nothing to bracket and returns inf. With SL=140, NL-DI=45 and DT=-3.8 the
+# passive curve crosses near 44 km, so 30 km would stop short of the very
 # quantity this example is about.
 ranges = np.linspace(100.0, 60000.0, 600)
 # units='dB/m' rather than dB/km divided by 1000: the conversion is a value
 # the library applies, not arithmetic to get right here.
 alpha_dB_per_m = float(np.ravel(
-    uacpy.absorption_thorp(frequency, units='dB/m').values)[0])
+    uacpy.Thorp().table(frequency, units='dB/m').data)[0])
 tl = (20.0 * np.log10(ranges)
       + alpha_dB_per_m * ranges)
 
@@ -52,9 +53,9 @@ threshold = sonar.detection_threshold_energy(0.5, 1e-4, bandwidth_hz=100.0,
                                              integration_time_s=1.0)
 
 passive_se = sonar.passive_signal_excess(
-    source_level=140.0, tl=tl, noise_level=60.0, directivity_index=15.0,
-    detection_threshold=threshold)
-passive_range = sonar.detection_range(ranges, passive_se)
+    source_level_dB=140.0, tl_dB=tl, noise_level_dB=60.0, directivity_index_dB=15.0,
+    detection_threshold_dB=threshold)
+passive_range = sonar.detection_range(ranges, signal_excess_dB=passive_se)
 
 # Active: the echo competes with bottom reverberation as well as noise. The
 # grazing angle is set by a sonar 100 m above the seafloor.
@@ -63,10 +64,10 @@ reverberation = sonar.boundary_reverberation(
     ranges, 220.0, sonar.lambert_bottom(grazing), pulse_length_s=0.05,
     horizontal_beamwidth_rad=0.1, tl_dB=tl)
 active_se = sonar.active_signal_excess(
-    220.0, tl, target_strength=10.0, noise_level=60.0,
-    directivity_index=15.0, reverberation_level=reverberation,
-    detection_threshold=threshold)
-active_range = sonar.detection_range(ranges, active_se)
+    220.0, tl, target_strength_dB=10.0, noise_level_dB=60.0,
+    directivity_index_dB=15.0, reverberation_level_dB=reverberation,
+    detection_threshold_dB=threshold)
+active_range = sonar.detection_range(ranges, signal_excess_dB=active_se)
 print(f"  DT = {threshold:.1f} dB → passive detection range "
       f"{passive_range / 1000:.2f} km, active "
       f"{active_range / 1000:.2f} km")
@@ -117,42 +118,53 @@ env = uacpy.Environment(
     ssp=[(0.0, 1500.0), (30.0, 1512.0), (120.0, 1496.0), (200.0, 1500.0)],
     bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
                                     sound_speed=1600.0, density=1.5,
-                                    attenuation=0.5))
+                                    attenuation=0.5),
+    absorption=uacpy.Thorp())       # the volume loss Part 1's curve carries
 source = uacpy.Source(depths=18.0, frequencies=frequency)   # inside the duct
+# Ranges start at 200 m, where the seafloor patch is seen at 42° grazing,
+# inside the 45° Lambert's law holds to.
 receiver = uacpy.Receiver(depths=np.linspace(0.0, 200.0, 201),
-                          ranges=np.linspace(100.0, 20000.0, 350))
+                          ranges=np.linspace(200.0, 20000.0, 350))
 # Geometric-hat beams with automatic beam count and step (n_beams=0), the
 # BELLHOP User Guide's recommendation for TL runs.
-tl_field = uacpy.Bellhop(beam_type='G', n_beams=0, alpha=(-80, 80)).run(
+tl_field = uacpy.Bellhop(backend='fortran', beam_type='G', n_beams=0, launch_angles=(-80, 80)).run(
     env, source, receiver, run_mode=uacpy.RunMode.INCOHERENT_TL)
 
 se_passive = sonar.passive_signal_excess_field(
-    tl_field, source_level=125.0, noise_level=75.0, directivity_index=15.0,
-    detection_threshold=threshold)
+    tl_field, source_level_dB=125.0, noise_level_dB=75.0, directivity_index_dB=15.0,
+    detection_threshold_dB=threshold)
 # A geometric-regime target strength (Urick Table 9.1) instead of an assumed
 # number: a 1.5 m × 5 m rigid cylinder at broadside.
-target_strength = sonar.ts_cylinder(1.5, 5.0, frequency)
+target_strength = sonar.ts_cylinder(1.5, 5.0, frequency=frequency)
 # Reverberation uses the same modelled TL as the echo, evaluated at the
 # seafloor where the scattering patch sits. The 18 m source is 182 m above it.
 se_active = sonar.active_signal_excess_field(
-    tl_field, source_level=190.0, target_strength=target_strength,
-    noise_level=75.0, directivity_index=15.0,
-    reverberation_level=sonar.boundary_reverberation(
-        receiver.ranges, 190.0,
+    tl_field, source_level_dB=190.0, target_strength_dB=target_strength,
+    noise_level_dB=75.0, directivity_index_dB=15.0,
+    reverberation_level_dB=sonar.boundary_reverberation(
+        np.hypot(receiver.ranges, 182.0), 190.0,        # slant range to the seabed
         sonar.lambert_bottom(np.rad2deg(np.arctan2(182.0, receiver.ranges))),
         pulse_length_s=0.05, horizontal_beamwidth_rad=0.1,
         tl_dB=tl_field.at(depth=float(env.depth)).dB),
-    detection_threshold=threshold)
+    detection_threshold_dB=threshold)
 
 cut = se_passive.at(depth=100.0)
 print(f"  target strength {target_strength:.1f} dB; passive detection range "
       f"at 100 m over the Bellhop field = "
-      f"{sonar.detection_range(cut.coords['range'], cut.data) / 1000:.2f} km")
+      f"{sonar.detection_range_from_field(cut) / 1000:.2f} km")
 
 # Mean SE → detection probability through Urick's transition curve
 # (σ = 5.6 dB, Dyer's saturated-multipath fluctuation).
-probability = sonar.probability_of_detection_field(se_passive, sigma_dB=5.6)
-profile_depths, profile_ranges = sonar.detection_range_by_depth(se_passive)
+probability = sonar.transition_probability_field(se_passive, sigma_dB=5.6)
+# The surface duct carries the target past the 20 km grid on its top rows, so
+# the outermost crossing there lies beyond it and inf comes back; the notice
+# says so and is printed, and those rows are left off the profile below.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    profile_depths, profile_ranges = sonar.detection_ranges_by_depth(
+        se_passive)
+for warning in caught:
+    print(f"  noted: {str(warning.message).split(' — ')[0]}")
 
 fig, axes = plt.subplots(2, 2, figsize=(15, 9))
 uacpy.plot.plot_signal_excess(se_passive, ax=axes[0, 0], env=env,

@@ -89,6 +89,10 @@ def test_formatter_labels_by_category():
     # name minus the 'Warning' suffix; the bare Warning base class (empty
     # after the strip) falls back to WARN.
     assert label(UserWarning) == 'WARN'
+    # a uacpy warning keeps the level label; its class names the cause
+    for name in ('UACPYWarning', 'NumericsWarning', 'ValidityWarning',
+                 'FallbackWarning', 'ProvenanceWarning', 'IOWarning'):
+        assert label(getattr(uacpy, name)) == 'WARN', name
     assert label(DeprecationWarning) == 'DEPRECATION'
     assert label(RuntimeWarning) == 'RUNTIME'
     assert label(Warning) == 'WARN'
@@ -102,16 +106,16 @@ def test_torn_down_datetime_falls_back_to_the_plain_shape(monkeypatch):
     # sys.modules teardown has nulled this module's globals; the formatter
     # must still return a line rather than raise and lose the warning.
     monkeypatch.setattr(_log, 'datetime', None)
-    out = _uacpy_format_warning('late warning', UserWarning, 'plot.py', 7)
-    assert out == 'plot.py:7: UserWarning: late warning\n'
+    out = _uacpy_format_warning('late warning', UserWarning, 'user_script.py', 7)
+    assert out == 'user_script.py:7: UserWarning: late warning\n'
 
 
 def test_torn_down_path_falls_back_too(monkeypatch):
     # Same guard, torn one level deeper: _source_from_filename itself
     # raising (Path nulled) is caught by the formatter's fallback.
     monkeypatch.setattr(_log, 'Path', None)
-    out = _uacpy_format_warning('late warning', UserWarning, 'plot.py', 7)
-    assert out == 'plot.py:7: UserWarning: late warning\n'
+    out = _uacpy_format_warning('late warning', UserWarning, 'user_script.py', 7)
+    assert out == 'user_script.py:7: UserWarning: late warning\n'
 
 
 # ─── install_warning_formatter policy ──────────────────────────────────────
@@ -299,3 +303,18 @@ class TestWarningSourceTags:
 
     def test_path_outside_the_package_keeps_its_stem(self):
         assert _source_from_filename('/somewhere/else/script.py') == 'script'
+
+
+@pytest.mark.parametrize('verbose,level,prints', [
+    (False, 'debug', False), (True, 'debug', False), ('info', 'debug', False),
+    ('debug', 'debug', True), (True, 'info', True), (False, 'warn', True),
+])
+def test_log_enabled_answers_what_log_message_would_print(verbose, level,
+                                                          prints, capsys):
+    """RA-CONTRACT-8: callers build a whole binary stdout into a DEBUG line
+    only when it will print; the gate is the one ``log_message`` applies,
+    so ``verbose=True`` (INFO) skips it."""
+    assert _log._log_enabled(verbose, level) is prints
+    _log.log_message('src', 'text', verbose=verbose, level=level)
+    out = capsys.readouterr()
+    assert bool(out.out or out.err) is prints

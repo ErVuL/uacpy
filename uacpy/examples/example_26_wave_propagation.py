@@ -3,7 +3,10 @@
 A pulse crossing a Pekeris waveguide and bouncing off the seafloor, computed
 five ways on one grid, as a snapshot sheet and as one GIF per solver.
 
-* SPARC marches time natively. Its range domain has an implicit periodic
+* SPARC marches time natively, over the same water with a rigid floor: its
+  deck carries only vacuum and rigid boundaries and it refuses the
+  half-space, so its panel shows a different seabed, chosen explicitly
+  below. Its range domain has an implicit periodic
   boundary from the wavenumber-FFT method, so T_MAX must end BEFORE the wave
   reaches the far edge or the late frames show aliasing rather than
   propagation. TIME_SERIES auto-widens the solver domain to 3× the receiver
@@ -25,13 +28,14 @@ solvers) · plot_time_snapshots · save_animation
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustic_signal.generate import gaussian_pulse
+from uacpy.acoustic_signal import gaussian_pulse
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -44,7 +48,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 # count if you want those.
 T_MAX = 0.18            # s — front at 270 m: past the array, inside the wrap
 F_CENTER, F_MIN, F_MAX = 200.0, 50.0, 350.0
-FS = 8000.0             # ≥ 2× f_max
+FS = 8000.0             # ≥ 2× freq_max
 receiver = uacpy.Receiver(depths=np.linspace(1, 49, 32),
                           ranges=np.linspace(2, 200, 64))
 
@@ -54,6 +58,11 @@ env = uacpy.Environment(
                                     sound_speed=1700.0, density=1.5,
                                     attenuation=0.5))
 source = uacpy.Source(depths=25.0, frequencies=F_CENTER)   # mid-depth
+# SPARC refuses a half-space seabed; its run gets the same water over a rigid
+# floor, so its seafloor reflection is total where the others' is partial.
+rigid_floor_env = uacpy.Environment(
+    name='Pekeris water, rigid floor (SPARC)', bathymetry=50.0, ssp=1500.0,
+    bottom=uacpy.BoundaryProperties(acoustic_type='rigid'))
 
 # A Gaussian-windowed cosine whose peak sits at duration/2, so the early
 # samples are identically zero (causality) and the spectrum stays narrow around
@@ -66,7 +75,7 @@ waveform = (gaussian_pulse(t, peak_time, sigma_t * np.sqrt(2))
             * np.cos(2 * np.pi * F_CENTER * (t - peak_time)))
 
 
-def run(name, model, waveform=None):
+def run(name, model, waveform=None, run_env=env):
     """One call site for every solver: TIME_SERIES on the shared window.
 
     SPARC builds p(t) from its own pulse_type; the IFFT models derive their
@@ -76,15 +85,28 @@ def run(name, model, waveform=None):
     solver's wavefront then emerges from the source at t ≈ 0, matching SPARC's
     native convention.
     """
-    if waveform is None:
-        field = model.run(env, source, receiver,
-                          run_mode=uacpy.RunMode.TIME_SERIES)
-    else:
-        field = model.run(env, source, receiver,
-                          run_mode=uacpy.RunMode.TIME_SERIES,
-                          source_waveform=waveform, sample_rate=FS,
-                          output_duration=T_MAX + peak_time)
-        field = field.shift(time=-peak_time)
+    # Two notices belong to what this sheet shows and are printed: the
+    # receivers start 2 m from the source, so the spectral solvers drop the
+    # paths steeper than their windows keep, and Bellhop's delay-and-sum
+    # drops the echoes that land after the 0.2 s window. Any other warning is
+    # shown as usual.
+    with warnings.catch_warnings(record=True) as caught:
+        if waveform is None:
+            field = model.run(run_env, source, receiver,
+                              run_mode=uacpy.RunMode.TIME_SERIES)
+        else:
+            field = model.run(run_env, source, receiver,
+                              run_mode=uacpy.RunMode.TIME_SERIES,
+                              source_waveform=waveform, sample_rate=FS,
+                              output_duration=T_MAX + peak_time)
+            field = field.shift(time=-peak_time)
+    for warning in caught:
+        text = str(warning.message)
+        if 'closest receiver sees' in text or 'hold every echo' in text:
+            print(f"  noted: {text.split(';')[0]}")
+        else:
+            warnings.showwarning(warning.message, warning.category,
+                                 warning.filename, warning.lineno)
     # Clip to 0 ≤ t ≤ T_MAX. SPARC integrates from t = -0.1 s (pre-roll) while
     # the IFFT models start at 0, so the lower bound drops that pre-roll.
     field = field.window(time=(0.0, T_MAX))
@@ -94,18 +116,24 @@ def run(name, model, waveform=None):
 
 # What each constructor declares is the physics or numerics that has to stay
 # pinned per solver; the wrappers handle the TIME_SERIES aliases and band
-# derivation at run time. SPARC's pulse band and n_t_out are its own
+# derivation at run time. SPARC's pulse band and n_time_samples are its own
 # pulse-shaping knobs (not equivalent to source_waveform); RAM's dr/dz are
-# pinned for upper-band resolution and c0=1500 matches the physical sound speed
-# so its carrier wavelength lines up with the others.
+# pinned for upper-band resolution (dz puts the 50 m seafloor a quarter cell
+# below a node, where the fluid codes place the interface best) and c0=1500
+# matches the physical sound speed so its carrier wavelength lines up with the
+# others. Bellhop's fan reaches ±89.9° so the receivers 2 m from the source
+# keep their direct path.
 fields = {
-    'SPARC': run('SPARC', uacpy.SPARC(n_t_out=400, t_max=T_MAX, f_min=F_MIN,
-                                      f_max=F_MAX,
-                                      max_depths=receiver.depths.size)),
+    'SPARC': run('SPARC', uacpy.SPARC(n_time_samples=400, time_max=T_MAX, freq_min=F_MIN,
+                                      freq_max=F_MAX,
+                                      max_launches=receiver.depths.size),
+                   run_env=rigid_floor_env),
     'Scooter': run('Scooter', uacpy.Scooter(), waveform),
-    'RAM': run('RAM', uacpy.RAM(dr=1.0, dz=0.5, c0=1500.0), waveform),
+    'RAM': run('RAM', uacpy.RAM(dr=1.0, dz=0.498753, c0=1500.0), waveform),
     'Kraken': run('Kraken', uacpy.Kraken(), waveform),
-    'Bellhop': run('Bellhop', uacpy.Bellhop(), waveform),
+    'Bellhop': run('Bellhop', uacpy.Bellhop(backend='fortran',
+                                            launch_angles=(-89.9, 89.9)),
+                   waveform),
 }
 
 # Snapshots from t=0 (the emission) through the first seafloor reflection.

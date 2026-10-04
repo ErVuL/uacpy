@@ -16,7 +16,7 @@ array, a source hidden at (62 m, 3.2 km) seen through 50 snapshots at 10 dB
 SNR, localized by the Bartlett (linear) and MVDR (Capon) processors.
 
 Uses: Kraken.compute_modes · sonar.synthesize_replica / replica_bank · csdm ·
-bartlett · mvdr · a Field of kind 'ambiguity' through plot_field ·
+bartlett · mvdr · Field.max · plot.plot_matched_field ·
 plot.shared_colorbar
 """
 
@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.core.results import Field
 from uacpy.sonar import bartlett, csdm, mvdr, replica_bank, synthesize_replica
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
@@ -56,7 +55,10 @@ print(f"  {modes.n_modes} modes at {source.frequencies[0]:.0f} Hz, "
 
 # Array data for a hidden source: one replica, random phase per snapshot, noise.
 true_depth, true_range = 62.0, 3200.0
-truth = synthesize_replica(modes, true_depth, true_range, array_depths)
+truth = synthesize_replica(modes,
+                           source_depth=true_depth,
+                           ranges=true_range,
+                           array_depths=array_depths)
 rng = np.random.default_rng(1)
 n_snapshots, snr_dB = 50, 10.0
 signal = truth[:, None] * np.exp(1j * rng.uniform(0, 2 * np.pi, n_snapshots))
@@ -68,7 +70,10 @@ covariance = csdm(signal + noise)
 
 candidate_depths = np.linspace(5, 95, 91)
 candidate_ranges = np.linspace(500, 5000, 121)
-bank = replica_bank(modes, array_depths, candidate_depths, candidate_ranges)
+bank = replica_bank(modes,
+                    array_depths=array_depths,
+                    candidate_depths=candidate_depths,
+                    candidate_ranges=candidate_ranges)
 # Diagonal loading as a fraction of the average eigenvalue (the mvdr default,
 # named here because it sets the trade-off): smaller sharpens the Capon peak
 # but makes it brittle to environmental mismatch, larger relaxes the surface
@@ -78,36 +83,21 @@ surfaces = {'Bartlett': bartlett(covariance, bank),
 
 print(f"  hidden source at {true_depth:.0f} m, {true_range / 1e3:.1f} km")
 for name, surface in surfaces.items():
-    depth_index, range_index = np.unravel_index(np.argmax(surface),
-                                                surface.shape)
-    print(f"  {name:8s} estimate: {candidate_depths[depth_index]:5.1f} m, "
-          f"{candidate_ranges[range_index] / 1e3:.2f} km")
+    # Each surface is an ambiguity Field in dB re its peak: .max() is the
+    # estimate, with the candidate coordinates it sits at.
+    estimate = surface.max().pinned
+    print(f"  {name:8s} estimate: {estimate['depth']:5.1f} m, "
+          f"{estimate['range'] / 1e3:.2f} km")
 
-# Each surface becomes a Field of kind 'ambiguity' — normalised power in dB re
-# its own maximum — so the library owns the rendering: the turbo map, the
-# "Normalised power (dB re max)" label, depth downward, range in km, and cell
-# edges computed from the candidate positions rather than an extent built by
-# hand (which is how a surface ends up drawn half a cell off the grid it was
-# computed on).
-ambiguity = {
-    name: Field(data=10 * np.log10(np.clip(surface / surface.max(), 1e-3,
-                                           None)),
-                coords={'depth': candidate_depths, 'range': candidate_ranges},
-                model='MFP', frequencies=source.frequencies,
-                metadata={'kind': 'ambiguity'})
-    for name, surface in surfaces.items()}
-
+# plot_matched_field draws each (depth, range) surface in dB re its own peak,
+# with cell edges from the candidate positions, depth downward, range in km,
+# the true position as the package's source star and the peak as a cross.
 fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
-for ax, (name, field) in zip(axes, ambiguity.items()):
-    uacpy.plot_field(field, ax, vmin=-15, vmax=0, show_colorbar=False,
-                     title=f"{name} ambiguity surface")
-    ax.plot(true_range / 1e3, true_depth, 'w*', ms=16, mec='k', label='truth')
-    depth_index, range_index = np.unravel_index(
-        np.argmax(surfaces[name]), surfaces[name].shape)
-    ax.plot(candidate_ranges[range_index] / 1e3,
-            candidate_depths[depth_index], 'o', mfc='none', mec='w', ms=12,
-            mew=2, label='estimate')
-    ax.legend(loc='upper right', fontsize='small')
+for ax, (name, surface) in zip(axes, surfaces.items()):
+    uacpy.plot.plot_matched_field(
+        surface, ax, dynamic_range_dB=15.0,
+        true_position=(true_range, true_depth), show_colorbar=False,
+        show_legend=ax is axes[0], title=f"{name} ambiguity surface")
 # Both panels are on the same -15..0 dB window, so one bar describes both.
 uacpy.plot.shared_colorbar(fig, axes, label='Normalised power [dB re max]')
 fig.suptitle("Matched-field localization — KRAKEN replicas "

@@ -351,7 +351,7 @@ writes `u·f3 / sqrt(r)`, while `rams0.5.f` writes `u / sqrt(r)` (its
 carrier `exp(+i k0 r)` — baked into `u` in `rams0.5.f` (via the `g0`
 march step), factored out in `ramsurf1.5.f` — so the RAM Python wrapper
 applies a per-backend correction (conjugate ψ and the Hankel phase
-`exp(-iπ/4)` for both, `models/_pe_phase.py:135,156,175`; an extra
+`exp(-iπ/4)` for both, `models/ram/_pe_phase.py:135,156,175`; an extra
 `exp(-i k0 r)` for ramsurf only) before tagging the result
 `phase_reference='travelling_wave'`, so every broadband-capable model
 presents the same shape of H(f) to the IFFT pipeline. See the per-binary
@@ -409,12 +409,12 @@ the `g0` factor at the end of each `solve` step bakes
 `exp(-iπ/4)` only — where ramsurf's comment describes the
 factored-out-carrier convention that holds for the fluid codes.
 
-Both Collins drivers consume `pcomplex.bin` via `read_pcomplex_grid`:
-`uacpy.models.ram.RAM._run_collins` for narrowband `COHERENT_TL`, and
-`RAM._run_collins_broadband` for `BROADBAND` / `TIME_SERIES`, which loops
-the binary over the Q/T-derived frequency vector and assembles a
-broadband `Field` (complex `data` over `coords={depth, range,
-frequency}`). Every Collins-backend
+Every Collins launch reads `pcomplex.bin` via `read_pcomplex_grid`
+(`uacpy.models.ram.collins.read_collins_grid`): one launch for narrowband
+`COHERENT_TL` (`ram.collins.assemble_collins_tl_field`), and one per frequency
+of the Q/T-derived vector for `BROADBAND` / `TIME_SERIES`
+(`ram.collins.assemble_collins_band_field` stacks them into a broadband `Field`,
+complex `data` over `coords={depth, range, frequency}`). Every Collins-backend
 run returns complex pressure, so a binary built from unpatched sources
 does not degrade to real TL — it fails outright, with the wrapper
 naming `pcomplex.bin` and telling the user to rebuild. The complex
@@ -435,11 +435,11 @@ so its `u` carries no `exp(+i k₀ r)`. ramsurf1.5 stores
 envelope; matches what `tlg` is computed from). Since `f3 ∈ ℝ`, the
 wrapper's `conj(H) · exp(−i k₀ r)` post-multiply still recovers the
 engineering travelling-wave convention.
-`_run_collins_broadband` therefore branches on `kind`: rams gets
+The travelling-wave conversion therefore branches on `kind`: rams gets
 `np.conj(H) · exp(−iπ/4)`, ramsurf gets
 `np.conj(H) · exp(−i k₀(ω) r) · exp(−iπ/4)` — the `exp(−iπ/4)` is the
 Hankel-asymptotic cylindrical-spreading phase both Collins branches
-apply (`models/_pe_phase.py:135,156,175`; mpiramS bakes it into `psif`
+apply (`models/ram/_pe_phase.py:135,156,175`; mpiramS bakes it into `psif`
 itself). After this convention bookkeeping all
 three RAM backends land the IFFT peak at `r/c₀` (matching JKPS
 *Computational Ocean Acoustics* §8.2 eq. 8.1–8.4 within real
@@ -464,7 +464,7 @@ quiet-oceans, only `rams0.5.f` (below) carries a uacpy dimension patch.
 Upstream's own bounds checks (`Need to increase parameter …`,
 `ramsurf1.5.f:123-134`) are left as they are: their conditions are written
 against `nz+2` / `np` / `i`, so they keep working at the larger dimensions and
-still stop the run rather than overrun. `uacpy.models.ram._COLLINS_ARRAY_LIMITS`
+still stop the run rather than overrun. `uacpy.models.ram.collins._COLLINS_ARRAY_LIMITS`
 carries the matching per-backend limit and `tests/test_ram_backends.py` asserts
 the two agree by parsing these guard expressions out of the source.
 
@@ -508,7 +508,7 @@ footprint; single-precision accounting would halve both figures.
 
 The bounds-check condition is `2*nz+4`, not the `nz+2` its siblings use —
 copying theirs would have understated rams' capacity by 2×.
-`uacpy.models.ram._COLLINS_ARRAY_LIMITS` carries the same per-backend rate,
+`uacpy.models.ram.collins._COLLINS_ARRAY_LIMITS` carries the same per-backend rate,
 and `tests/test_ram_backends.py` asserts the two agree by parsing these
 guard expressions out of the sources.
 
@@ -1400,8 +1400,8 @@ multi-range output grid `rsc` becomes `rg(nr) - rs` where upstream it was
 branch fire slightly earlier. It fires within the first output segment
 either way — the branch compares the distance left to the *current* output
 range rather than the absolute range marched, which is what makes
-`rs_stability` largely inert on a multi-range grid (upstream behaviour;
-`RAM._warn_rs_stability_inert_on_a_multi_range_grid` warns about it).
+`stability_range_m` largely inert on a multi-range grid (upstream behaviour;
+`ram._stability.warn_stability_range_inert_on_a_multi_range_grid` warns about it).
 
 ```diff
 @@ -59,7 +59,6 @@
@@ -1699,7 +1699,7 @@ Measured (75 Hz, single frequency, iso 1500 m/s, `dz=1 dr=10 np=4`, seafloor
 100 → 200 m over 1.5 km, outputs at 1/2/3 km) against the same deck padded
 to 4 km: before, `psif` differed by 0 / 31 % / 31 % of its peak at the three
 ranges; after, by exactly 0. The padded deck itself is byte-identical before
-and after. uacpy never reached the defect — `RAM._prepare_bathymetry` pads
+and after. uacpy never reached the defect — `ram.mpirams.prepare_bathymetry` pads
 every table to the last receiver range, which is why that padding is
 load-bearing — and `tests/test_mpirams_bathymetry_extension.py` now drives
 the binary on the unpadded deck directly.
@@ -2173,7 +2173,7 @@ truncates toward zero, so a bandwidth narrower than one bin (`bw < df`, the
 `fc+df` — 2.4× the wall time of a single march (0.0658 s against 0.0275 s
 single-threaded on a 100 m Pekeris deck), of which uacpy kept the centre bin.
 Now `nf1=0` when `bw < df`: one marched frequency, `nf=1` in the `psif.dat`
-header. `ram.py`'s `_broadband_frequencies` applies the same rule so the
+header. `models/ram/_band.py`'s `broadband_frequencies` applies the same rule so the
 Collins loop marches the same vector. `peramx_mpi.f90` is unpatched (see
 below) and still marches three.
 
@@ -2230,7 +2230,7 @@ table of zeros lands within the same 1e-16. A 0.5 dB/wavelength table costs
 25.2 dB over the sample's first kilometre against 25.0 predicted.
 
 The bin frequencies the wrapper writes come from the same formula the driver
-uses (`peramx.f90:353-379`, reproduced by `RAM._broadband_frequencies`), so a
+uses (`peramx.f90:353-379`, reproduced by `ram._band.broadband_frequencies`), so a
 mismatch is a wrapper bug and the binary says so rather than picking a
 neighbour.
 

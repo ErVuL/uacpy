@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import uacpy
-from uacpy.core.absorption import FrancoisGarrison, absorption_thorp
+from uacpy.core.absorption import FrancoisGarrison, Thorp
 
 
 def _env():
@@ -52,7 +52,7 @@ def _profile(surface_c, seafloor_c, *, n_columns=1):
     column = np.linspace(surface_c, seafloor_c, depths.size)
     data = np.column_stack([column + j for j in range(n_columns)])
     ranges = None if n_columns == 1 else np.linspace(0.0, 1000.0, n_columns)
-    return uacpy.SoundSpeedProfile(depths=depths, data=data, ranges=ranges)
+    return uacpy.SoundSpeedProfile(depths=depths, sound_speed=data, ranges=ranges)
 
 
 def test_ssp_plot_overlays_labelled_profiles_on_one_axis():
@@ -92,7 +92,7 @@ def test_ssp_plot_draws_a_legend_only_when_something_is_labelled():
     assert _profile(1490.0, 1520.0).plot()[1].get_legend() is None
     assert _profile(1490.0, 1520.0).plot(label='named')[1].get_legend() is not None
     assert _profile(1490.0, 1520.0).plot(label='named',
-                                         legend=False)[1].get_legend() is None
+                                         show_legend=False)[1].get_legend() is None
 
 
 def test_ssp_plot_forwards_line_kwargs():
@@ -105,14 +105,14 @@ def test_ssp_plot_forwards_line_kwargs():
 # `Absorption.plot(frequencies)` used to compute a curve and draw it in one
 # call. It was the third spelling of one thing — beside
 # `plot_absorption(f, model=...)` and `plot_absorption(f, absorption=...)` —
-# so it went. Evaluation and drawing are now separate: `.alpha(...)` returns
+# so it went. Evaluation and drawing are now separate: `.table(...)` returns
 # the carrier, and the carrier draws itself.
 
 _FREQS = np.logspace(2, 4, 20)          # 100 Hz – 10 kHz
 
 
 def test_thorp_curve_is_drawn_from_the_carrier():
-    fig, ax = absorption_thorp(_FREQS).plot()
+    fig, ax = Thorp().table(_FREQS).plot()
     assert ax.get_xlabel() == 'Frequency (Hz)'
     assert ax.get_ylabel() == 'Absorption (dB/km)'
     line = ax.lines[0]
@@ -121,32 +121,34 @@ def test_thorp_curve_is_drawn_from_the_carrier():
 
 
 def test_evaluating_requires_frequencies():
-    with pytest.raises(TypeError):
-        absorption_thorp()
+    with pytest.raises(
+            TypeError,
+            match="missing 1 required positional argument: 'frequencies'"):
+        Thorp().table()
 
 
 def test_a_scalar_depth_gives_a_curve_not_a_one_row_grid():
     """The shape rule: a scalar depth is a place to evaluate, an array is an
     axis to span. Asking for one depth must not produce a heatmap."""
-    fg = FrancoisGarrison(temperature_c=10, salinity_psu=35, pH=8.0, z_bar_m=0)
-    curve = fg.alpha(_FREQS, depths=1000.0)
+    fg = FrancoisGarrison(temperature=10, salinity=35, pH=8.0)
+    curve = fg.table(_FREQS, depths=1000.0)
     assert not curve.is_depth_dependent
     fig, ax = curve.plot()
     assert ax.get_xlabel() == 'Frequency (Hz)'
     assert np.all(ax.lines[0].get_ydata() > 0)
-    assert fg.alpha(_FREQS, depths=[0.0, 1000.0]).is_depth_dependent
+    assert fg.table(_FREQS, depths=[0.0, 1000.0]).is_depth_dependent
 
 
 def test_plot_forwards_kwargs():
-    fig, ax = absorption_thorp(_FREQS).plot(title='α(f)')
-    assert ax.get_title(loc='left') == 'α(f)'   # plot_absorption titles left
+    fig, ax = Thorp().table(_FREQS).plot(title='α(f)')
+    assert ax.get_title() == 'α(f)'
 
 
 def test_a_curve_that_is_all_zero_warns_before_drawing_a_blank_log_axis():
     from uacpy.core.absorption import Biological
     bio = Biological(layers=[(40.0, 60.0, 1000.0, 5.0, 10.0)])
     # depth 0 m is outside the 40-60 m layer → α ≡ 0 → blank log-log axes.
-    curve = bio.alpha(_FREQS, depths=0.0)
+    curve = bio.table(_FREQS, depths=0.0)
     with pytest.warns(UserWarning, match='entirely non-positive'):
         curve.plot()
     # The warning belongs to the drawing, so the direct call gets it too —
@@ -162,7 +164,7 @@ def test_inside_the_layer_it_does_not_warn():
     bio = Biological(layers=[(40.0, 60.0, 1000.0, 5.0, 10.0)])
     with warnings.catch_warnings():
         warnings.simplefilter('error', UserWarning)
-        fig, ax = bio.alpha(_FREQS, depths=50.0).plot()
+        fig, ax = bio.table(_FREQS, depths=50.0).plot()
     assert np.all(ax.lines[0].get_ydata() > 0)
 
 
@@ -256,8 +258,7 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
         for draw in (lambda ax: env.plot(ax=ax),
                      lambda ax: env.ssp.plot(ax=ax),
                      lambda ax: env.bathymetry.plot(ax=ax),
-                     lambda ax: absorption_thorp(
-                         np.array([1e3, 1e4])).plot(ax=ax)):
+                     lambda ax: Thorp().table(np.array([1e3, 1e4])).plot(ax=ax)):
             fig, ax = plt.subplots()
             draw(ax)
             assert ax.lines or ax.collections or ax.patches, draw
@@ -277,13 +278,11 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
 
     @pytest.mark.parametrize('spelling', sorted(PAIR_SPELLINGS),
                              ids=sorted(PAIR_SPELLINGS))
-    @pytest.mark.parametrize('name', ['ax', 'axes'])
-    def test_the_two_panel_plot_takes_a_pair_under_either_name(self, name,
-                                                               spelling):
+    def test_the_two_panel_plot_takes_a_pair_as_ax(self, spelling):
         field = self._broadband()
         fig, pair = plt.subplots(2, 1, sharex=True)
         given = self.PAIR_SPELLINGS[spelling](pair)
-        _, drawn = field.plot_transfer_function(**{name: given})
+        _, drawn = field.plot_transfer_function(ax=given)
         assert drawn == (pair[0], pair[1])
         assert pair[0].lines and pair[1].lines, 'lent axes were not drawn into'
         plt.close(fig)
@@ -315,7 +314,8 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
         from uacpy.core.exceptions import ConfigurationError
         field = self._broadband()
         fig, ax = plt.subplots()
-        with pytest.raises(ConfigurationError) as excinfo:
+        with pytest.raises(ConfigurationError,
+                           match='needs a pair of Axes') as excinfo:
             field.plot_transfer_function(ax=ax)
         plt.close(fig)
         assert 'plt.subplots(2, 1, sharex=True)' in str(excinfo.value)
@@ -325,12 +325,14 @@ class TestEveryPlotMethodSpellsTheAxesArgumentAx:
         assert drawn == (pair[0], pair[1])
         plt.close(fig)
 
-    def test_both_spellings_at_once_is_a_typed_error(self):
-        from uacpy.core.exceptions import ConfigurationError
+    def test_the_pair_has_one_keyword(self):
+        """``ax`` is the one keyword for the pair (H10); ``axes=`` is not
+        another name for it, and falls through to matplotlib's own ``axes``
+        artist property, which refuses it."""
         field = self._broadband()
         fig, pair = plt.subplots(2, 1, sharex=True)
-        with pytest.raises(ConfigurationError, match='not both'):
-            field.plot_transfer_function(ax=tuple(pair), axes=tuple(pair))
+        with pytest.raises(TypeError, match="argument 'axes'"):
+            field.plot_transfer_function(axes=tuple(pair))
         plt.close(fig)
 
 
@@ -381,3 +383,56 @@ def test_source_method_accepts_an_existing_axis():
     out_fig, out_ax = _beamed_source(_beam_pattern()).plot_beam_pattern(ax=ax)
     assert out_ax is ax
     assert out_fig is fig
+
+
+# ── one dispatcher: each .plot() draws what its public plotter draws ─────────
+
+def _drawn(ax):
+    """What a panel holds, as data: every line's points and every
+    collection's offsets and arrays."""
+    lines = [line.get_xydata().tolist() for line in ax.lines]
+    collections = [(np.asarray(c.get_offsets()).tolist(),
+                    None if c.get_array() is None
+                    else np.asarray(c.get_array()).tolist())
+                   for c in ax.collections]
+    return lines, collections
+
+
+@pytest.mark.parametrize('carrier,plotter', [
+    ('environment', 'plot_environment'),
+    ('ssp', 'plot_ssp'),
+    ('bathymetry', 'plot_range_profile'),
+    ('altimetry', 'plot_range_profile'),
+    ('absorption', 'plot_absorption'),
+])
+def test_a_carrier_plot_draws_what_its_public_plotter_draws(carrier, plotter):
+    from uacpy import plot as visualization
+    env = uacpy.Environment(
+        bathymetry=[(0.0, 100.0), (2000.0, 150.0)],
+        ssp=[(0.0, 1500.0), (150.0, 1490.0)],
+        altimetry=uacpy.Altimetry(ranges=np.array([0.0, 2000.0]),
+                                  heights=np.array([0.0, 1.5])))
+    obj = {'environment': env, 'ssp': env.ssp,
+           'bathymetry': env.bathymetry, 'altimetry': env.altimetry,
+           'absorption': Thorp().table(np.logspace(2.0, 4.0, 20))}[carrier]
+    _, by_method = obj.plot()
+    _, by_plotter = getattr(visualization, plotter)(obj)
+    assert _drawn(by_method) == _drawn(by_plotter)
+    assert by_method.get_title() == by_plotter.get_title()
+    plt.close('all')
+
+
+def test_plot_carrier_refuses_a_result_and_plot_result_a_carrier():
+    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.core.results import Field
+    from uacpy.plot import plot_carrier, plot_result
+    field = Field(data=np.ones((2, 3)),
+                  coords={'depth': np.array([10.0, 20.0]),
+                          'range': np.array([100.0, 200.0, 300.0])},
+                  model='Synthetic', source_depths=np.array([5.0]),
+                  frequencies=np.array([100.0]))
+    with pytest.raises(ConfigurationError, match='plot_carrier: Field is a Result'):
+        plot_carrier(field)
+    with pytest.raises(ConfigurationError,
+                       match='plot_result: Environment is not a Result'):
+        plot_result(_env())

@@ -6,10 +6,9 @@ range, a shelf-break slope, and Thorp volume attenuation. Bellhop, RAM, Kraken,
 Scooter and OAST each take the same Environment and reduce whatever they cannot
 represent — warning about it — rather than refusing.
 
-Volume attenuation is honoured by Bellhop, Kraken, Scooter and RAM (every RAM
-backend takes it as a dB-per-wavelength profile on the water wavenumber). OASES
-substitutes its own internal Skretting-Leroy attenuation for AC=0 water layers
-and says so at runtime.
+Volume attenuation is honoured by all five (every RAM backend takes it as a
+dB-per-wavelength profile on the water wavenumber, OAST as each water layer's
+attenuation in dB per wavelength).
 OAST needs OASES (./install.sh --oases yes); without it the example runs
 the other models and says so.
 
@@ -20,6 +19,7 @@ contours=)
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
@@ -34,7 +34,8 @@ OUT.mkdir(parents=True, exist_ok=True)
 # A thermal front: warm shelf water inshore, cooler water offshore, stratified
 # exponentially with depth. c(T, z) is Medwin's equation kept to its linear
 # terms — a smooth stand-in for a frontal profile, not a calibrated seawater
-# equation.
+# equation (those are uacpy.acoustics.sound_speed_mackenzie / _unesco / _teos10, or
+# SoundSpeedProfile.from_temperature_salinity for one column).
 depths = np.linspace(0, 200, 21)
 ranges_m = np.array([0.0, 2000.0, 4000.0, 6000.0, 8000.0])
 t_surface = 18 - (ranges_m / 1000.0) * 0.3          # 18 °C → 15.6 °C at 8 km
@@ -59,27 +60,39 @@ env = uacpy.Environment(
     absorption=uacpy.Thorp(),
 )
 print(f"  SSP {ssp_matrix.min():.1f}-{ssp_matrix.max():.1f} m/s, "
-      f"range-dependent ssp={env.has_range_dependent_ssp} "
-      f"bottom={env.has_range_dependent_bottom}")
+      f"range-dependent ssp={env.ssp.is_range_dependent} "
+      f"bottom={env.bottom.is_range_dependent}")
 
 source = uacpy.Source(depths=50.0, frequencies=100.0)
+# Ranges start at 700 m: closer in, the deepest receivers see direct and
+# surface-reflected paths steeper than Kraken's mode window keeps (19.7°).
 receiver = uacpy.Receiver(depths=np.linspace(5, 165, 30),
-                          ranges=np.linspace(100, 8000, 40))
+                          ranges=np.linspace(700, 8000, 37))
 
 # Kraken runs adiabatic here: each mode propagates independently, so the
 # range-dependent guide costs one mode solve per segment and no more.
 # OAST is the optional fifth: it needs the OASES binaries, and without them
 # the comparison runs on the other four.
-models = {'Bellhop': uacpy.Bellhop(),
-          'RAM': uacpy.RAM(accuracy=1e-1),
+models = {'Bellhop': uacpy.Bellhop(backend='fortran'),
+          'RAM': uacpy.RAM(),
           'Kraken': uacpy.Kraken(mode_coupling='adiabatic', n_segments=4),
           'Scooter': uacpy.Scooter()}
-fields = {name: model.run(env, source, receiver)
-          for name, model in models.items()}
-try:
-    fields['OAST'] = uacpy.OAST().run(env, source, receiver)
-except uacpy.ExecutableNotFoundError:
-    print("  OAST skipped: OASES executable not found (./install.sh --oases yes)")
+# What each model reduces is the point of the comparison, so those notices
+# are printed as part of the output; any other warning is shown as usual.
+with warnings.catch_warnings(record=True) as caught:
+    fields = {name: model.run(env, source, receiver)
+              for name, model in models.items()}
+    try:
+        fields['OAST'] = uacpy.OAST().run(env, source, receiver)
+    except uacpy.ExecutableNotFoundError:
+        print("  OAST skipped: OASES executable not found "
+              "(./install.sh --oases yes)")
+for warning in caught:
+    if issubclass(warning.category, uacpy.FallbackWarning):
+        print(f"  reduced: {str(warning.message).splitlines()[0]}")
+    else:
+        warnings.showwarning(warning.message, warning.category,
+                             warning.filename, warning.lineno)
 for name, field in fields.items():
     # NaN-aware: RAM masks sub-seafloor cells, so a plain mean would be nan.
     print(f"  {name:8s} TL [{np.nanmin(field.dB):5.1f}, "
@@ -90,11 +103,11 @@ ax.set_title('Thermal front: 2-D range-dependent SSP + bottom')
 fig.savefig(OUT / 'example_07_environment.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, _ = uacpy.compare_models(fields, env=env)
+fig, _ = uacpy.plot.compare_models(fields, env=env)
 fig.savefig(OUT / 'example_07_comparison.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, _ = uacpy.compare_models(fields, env=env, ncols=3, vmin=50, vmax=110,
+fig, _ = uacpy.plot.compare_models(fields, env=env, ncols=3, vmin=50, vmax=110,
                               contours=[70, 90],
                               title='All models — TL with 70/90 dB contours')
 fig.savefig(OUT / 'example_07_models.png', dpi=150)

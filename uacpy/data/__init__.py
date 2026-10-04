@@ -1,7 +1,8 @@
 """On-demand external-data layer — GPS coordinates → ``Environment`` inputs.
 
-- **Bathymetry** (GEBCO, static): a single water depth or a range-dependent
-  transect for ``Environment(bathymetry=...)``.
+- **Bathymetry** (GEBCO, GMRT, EMODnet DTM): a single water depth, a
+  range-dependent transect for ``Environment(bathymetry=...)``, or a lat/lon
+  grid for a map.
 - **Sound speed** (WOA23 climatology, date/month-aware; Copernicus Marine
   operational; or the nearest Argo float profile): a depth-vs-c profile for
   ``Environment(ssp=...)``, plus the raw T/S column and a Francois-Garrison
@@ -15,6 +16,12 @@
 - **Surface**: NSIDC sea-ice concentration → an elastic ice-canopy
   ``BoundaryProperties`` (:func:`fetch_sea_ice_surface`), so an ice-covered
   point replaces the free surface with a pack-ice boundary.
+- **Sea state**: significant wave height (Copernicus WAVERYS, WaveWatch III)
+  or 10 m wind (NBS live, or its cached climatology) → a Pierson-Moskowitz
+  altimetry realization (:func:`fetch_sea_surface`).
+- **Absorption inputs**: pH (GLODAP, Copernicus BGC) for the
+  Francois-Garrison absorption
+  (:meth:`~uacpy.core.absorption.FrancoisGarrison.from_temperature_salinity`).
 - **Capstone**: :func:`fetch_environment` assembles them
   (``surface_sources='seaice'`` adds the ice surface). Each axis is a literal
   (``ssp=`` / ``bathymetry=`` / ``bottom=`` / ``surface=`` / ``altimetry=``)
@@ -34,67 +41,59 @@ Examples
 """
 
 from uacpy.data.bathymetry import (
-    fetch_bathy, fetch_bathy_transect, fetch_bathy_grid, transect_length,
+    BathyGrid, fetch_bathy, fetch_bathy_transect, fetch_bathy_grid,
+    transect_length,
+    transect_waypoints, bathy_transect_plan,
 )
 from uacpy.data.sound_speed import (
-    fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
+    TSProfile, fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
+    ssp_transect_plan,
     extend_ssp_below_data, extend_column_to_seafloor,
+    assemble_range_dependent,
 )
 from uacpy.data.copernicus import (
     fetch_ssp_operational, fetch_ssp_transect_operational,
     fetch_ts_profile_operational, fetch_waves_operational,
     fetch_ph_operational,
 )
+from uacpy.data._geo import AlongTrack
 from uacpy.data.wind_live import fetch_wind, fetch_wind_transect
 from uacpy.data.wind_local import download_wind_db
-from uacpy.data.waves import fetch_waves
+from uacpy.data.waves import SeaStateRecord, fetch_waves
 from uacpy.data.sea_surface import fetch_sea_surface, hs_to_pm_wind
-from uacpy.data.argo import fetch_argo_profile, fetch_ssp_argo
-from uacpy.data.absorption import build_francois_garrison
+from uacpy.data.argo import ArgoProfile, fetch_argo_profile, fetch_ssp_argo
 from uacpy.data.glodap_local import (
-    download_glodap_db, fetch_ph_profile, fetch_ph,
+    PHProfile, download_glodap_db, fetch_ph_profile, fetch_ph,
 )
-from uacpy.data.sediment import (
-    grain_size_to_geoacoustics, grain_size_from_density,
-    bottom_from_grain_size, bottom_from_class,
-)
-from uacpy.data.seabed import (
-    fetch_seabed_substrate, fetch_bottom, fetch_bottom_transect,
-)
-from uacpy.data.mars import (
-    fetch_mars_sediment, fetch_bottom_mars, fetch_bottom_mars_transect,
-)
-from uacpy.data.sediment_db import (
-    download_sediment_db, fetch_sediment_sample, fetch_bottom_local,
-    fetch_bottom_local_transect,
-)
-from uacpy.data.emodnet_local import download_emodnet_db, fetch_seabed_local
+from uacpy.data.sediment import (SeabedSample, bottom_from_class,
+                                 bottom_from_grain_size, samples_table)
+from uacpy.data.seabed import fetch_emodnet_substrate
+from uacpy.data.mars import fetch_mars_sediment
+from uacpy.data.sediment_db import download_sediment_db, fetch_sediment_sample
+from uacpy.data.emodnet_local import download_emodnet_db, fetch_emodnet_substrate_local
 from uacpy.data.globsed_local import (
     download_globsed_db, fetch_sediment_thickness, fetch_sediment_thickness_transect,
 )
-from uacpy.data.crust1_local import (
-    download_crust1_db, fetch_crust1_profile, fetch_bottom_crust1,
-    fetch_bottom_crust1_transect,
-)
-from uacpy.data.pelagic import (
-    pelagic_lithology, pelagic_grain_size, fetch_bottom_pelagic,
-    fetch_bottom_pelagic_transect,
-)
+from uacpy.data.crust1_local import (Crust1Profile, download_crust1_db,
+                                     fetch_crust1_profile)
+from uacpy.data.pelagic import pelagic_lithology, pelagic_grain_size
 from uacpy.data.diesing_local import (
-    download_diesing_db, fetch_seafloor_lithology, fetch_bottom_diesing,
-    fetch_bottom_diesing_transect,
+    download_diesing_db, fetch_seafloor_lithology,
 )
 from uacpy.data.graw_local import (
     download_graw_db, fetch_seabed_density, fetch_seabed_density_transect,
-    fetch_bottom_graw, fetch_bottom_graw_transect,
 )
 from uacpy.data.seaice_local import (
     download_seaice_db, fetch_sea_ice_concentration,
     fetch_sea_ice_concentration_transect, sea_ice_grid, sea_ice_pixel,
     sea_ice_surface, fetch_sea_ice_surface, sea_ice_surface_transect,
+    SEA_ICE_TYPICAL_ROUGHNESS_M,
 )
-from uacpy.data.environment import fetch_environment
-from uacpy.data.sources import DataSource, DataProvenance, SOURCES, citations
+from uacpy.data.environment import (
+    fetch_environment, fetch_bottom, fetch_bottom_transect,
+)
+from uacpy.data.sources import (DataSource, DataProvenance, SOURCES, citations,
+                                provenance_table)
 # The cache's own introspection: where it lives and what is in it. The rest of
 # `_cache` (staging writes, grid memos, the DATASETS registry) is machinery a
 # contributor uses, documented in DEV.md; these three answer questions a *user*
@@ -110,14 +109,18 @@ __all__ = [
     # bathymetry
     'fetch_bathy',
     'fetch_bathy_transect',
-    'fetch_bathy_grid',
+    'BathyGrid', 'fetch_bathy_grid',
     'transect_length',
+    'transect_waypoints', 'AlongTrack',
+    'bathy_transect_plan',
     # sound speed
     'fetch_ssp',
     'fetch_ssp_transect',
-    'fetch_ts_profile',
+    'ssp_transect_plan',
+    'TSProfile', 'fetch_ts_profile',
     'extend_ssp_below_data',
     'extend_column_to_seafloor',
+    'assemble_range_dependent',
     'fetch_ssp_operational',
     'fetch_ssp_transect_operational',
     'fetch_ts_profile_operational',
@@ -126,52 +129,37 @@ __all__ = [
     'fetch_wind',
     'fetch_wind_transect',
     'download_wind_db',
-    'fetch_waves',
+    'SeaStateRecord', 'fetch_waves',
     'fetch_sea_surface',
     'hs_to_pm_wind',
-    'fetch_argo_profile',
+    'ArgoProfile', 'fetch_argo_profile',
     'fetch_ssp_argo',
-    'build_francois_garrison',
     'download_glodap_db',
-    'fetch_ph_profile',
+    'PHProfile', 'fetch_ph_profile',
     'fetch_ph',
     # bottom
-    'grain_size_to_geoacoustics',
-    'grain_size_from_density',
     'bottom_from_grain_size',
-    'bottom_from_class',
-    'fetch_seabed_substrate',
+    'bottom_from_class', 'SeabedSample', 'samples_table',
+    'fetch_emodnet_substrate',
     'fetch_bottom',
     'fetch_bottom_transect',
     'fetch_mars_sediment',
-    'fetch_bottom_mars',
-    'fetch_bottom_mars_transect',
     'download_sediment_db',
     'download_emodnet_db',
-    'fetch_seabed_local',
+    'fetch_emodnet_substrate_local',
     'download_globsed_db',
     'download_crust1_db',
     'fetch_sediment_sample',
-    'fetch_bottom_local',
-    'fetch_bottom_local_transect',
     'fetch_sediment_thickness',
     'fetch_sediment_thickness_transect',
-    'fetch_crust1_profile',
-    'fetch_bottom_crust1',
-    'fetch_bottom_crust1_transect',
+    'Crust1Profile', 'fetch_crust1_profile',
     'pelagic_lithology',
     'pelagic_grain_size',
-    'fetch_bottom_pelagic',
-    'fetch_bottom_pelagic_transect',
     'download_diesing_db',
     'fetch_seafloor_lithology',
-    'fetch_bottom_diesing',
-    'fetch_bottom_diesing_transect',
     'download_graw_db',
     'fetch_seabed_density',
     'fetch_seabed_density_transect',
-    'fetch_bottom_graw',
-    'fetch_bottom_graw_transect',
     'download_seaice_db',
     'fetch_sea_ice_concentration',
     'fetch_sea_ice_concentration_transect',
@@ -179,37 +167,12 @@ __all__ = [
     'sea_ice_pixel',
     'sea_ice_surface',
     'fetch_sea_ice_surface', 'sea_ice_surface_transect',
+    'SEA_ICE_TYPICAL_ROUGHNESS_M',
     # capstone
     'fetch_environment',
     # provenance / licensing
     'SOURCES',
     'DataSource',
     'DataProvenance',
-    'citations',
-    # submodules (the eager public surface; the live/local grid loaders —
-    # emodnet_bathy_live, gebco_local, gmrt_live, woa23_local, ww3_live —
-    # are loaded on demand by their fetch wrappers and stay unlisted)
-    'absorption',
-    'argo',
-    'bathymetry',
-    'copernicus',
-    'crust1_local',
-    'diesing_local',
-    'emodnet_local',
-    'environment',
-    'globsed_local',
-    'glodap_local',
-    'graw_local',
-    'mars',
-    'pelagic',
-    'sea_surface',
-    'seabed',
-    'seaice_local',
-    'sediment',
-    'sediment_db',
-    'sound_speed',
-    'sources',
-    'waves',
-    'wind_live',
-    'wind_local',
+    'citations', 'provenance_table',
 ]

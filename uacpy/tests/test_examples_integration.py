@@ -26,23 +26,20 @@ import numpy as np
 import pytest
 
 import uacpy
+from uacpy.models._registry import ENGINES
 
 EXAMPLES_DIR = Path(uacpy.__file__).parent / "examples"
 
-# Model classes whose ``.run(...)`` spawns one of the OALIB / RAM
-# Fortran/C++ binaries shipped by ``install.sh``.
-_BINARY_MODEL_CLASSES = frozenset({
-    "Bellhop",
-    "Kraken",
-    "Scooter", "SPARC", "Bounce",
-    "RAM",
-})
-
-# Sub-classes of OASES — academic-licensed, downloaded by
-# ``install.sh --oases yes``. ``OASES`` is the factory.
-_OASES_MODEL_CLASSES = frozenset({
-    "OAST", "OASN", "OASR", "OASP", "OASS", "OASSP", "OASES",
-})
+# The engines whose ``.run(...)`` spawns a binary shipped by ``install.sh``,
+# and the OASES ones among them (academic-licensed, downloaded by
+# ``install.sh --oases yes``), read from the engine registry. ``OASES`` is
+# their common base, which an example can name too.
+_BINARY_MODEL_CLASSES = frozenset(
+    entry.class_name for entry in ENGINES.values()
+    if entry.requires == ('binary',))
+_OASES_MODEL_CLASSES = frozenset(
+    entry.class_name for entry in ENGINES.values()
+    if 'oases' in entry.requires) | {"OASES"}
 
 # Examples that need a noticeably longer subprocess timeout (deep-ocean /
 # multi-model / Lytaev-grid / live-fetch runs may take several minutes each).
@@ -50,7 +47,6 @@ _LONG_TIMEOUT_STEMS = {
     "example_02_sound_speed_profiles",
     "example_17_boundary_conditions_layered",
     "example_22_ram_lytaev_grid",
-    "example_37_realworld_environment",
     # Three Bellhop runs over a 401-bin broadband grid plus two synthesis
     # passes: measured 178 s standalone on an IDLE machine, so it is over
     # the 120 s tier before any contention. The tier follows that
@@ -66,6 +62,13 @@ _LONG_TIMEOUT_STEMS = {
 _EXTRA_LONG_TIMEOUT_STEMS = {
     "example_19_broadband_comparison",
     "example_26_wave_propagation",
+    # Measured 193 s alone on an idle machine from the installed cache, 120 s
+    # of it one Bellhop run (800 Hz over 374 km at Bellhop's own beam count,
+    # about 26 000 beams; the receiver grid does not move it: 122 s at
+    # 150x350, 118 s at 75x175). 10 000 beams take 20 s but move the coherent
+    # field by 2 dB median per cell, so the example keeps the beam count and
+    # this tier follows the measurement, as for the two above.
+    "example_37_realworld_environment",
 }
 
 # Examples that source live ocean databases. These are *cache-first*: with the
@@ -289,7 +292,8 @@ _REAL_DEFECT_SIGNATURES = (
     "TypeError", "AttributeError", "ValueError", "KeyError",
     "ModelExecutionError", "ConfigurationError", "UnboundLocalError",
     "IndexError", "NameError", "ZeroDivisionError",
-    "execution failed", "unexpected keyword", "has no attribute",
+    "execution failed", "output is unusable", "unexpected keyword",
+    "has no attribute",
     "object is not", "not enough values", "too many values",
     # ConfigurationError's deck-refusal shape, as rendered by str(exc)
     # (no class name on the line) in "RAM error: {e}"-style handlers.
@@ -400,11 +404,13 @@ def test_detector_fails_on_a_traceback_or_an_unmarked_ram_error_line():
             _EXAMPLE,
             _FakeResult(_OLD_SWALLOWED_STDOUT, _OLD_SWALLOWED_STDERR),
         )
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError,
+                       match='printed a traceback for a real defect'):
         _check_no_swallowed_failure(
             _EXAMPLE, _FakeResult(stderr=_OLD_SWALLOWED_STDERR),
         )
-    with pytest.raises(AssertionError):
+    with pytest.raises(AssertionError,
+                       match='a broad handler swallowed a real defect'):
         _check_no_swallowed_failure(
             _EXAMPLE, _FakeResult(stdout=_OLD_SWALLOWED_STDOUT),
         )
@@ -448,7 +454,7 @@ def test_detector_accepts_the_suites_warning_stream():
     error-ish words without the error: shape and must pass."""
     _check_no_swallowed_failure(_EXAMPLE, _FakeResult(stderr=(
         "[2026/08/17 20:46:10 UTC] [WARN] [uacpy.examples.example_05:171] "
-        "RAM:mpiramS: raised dz from 0.385 m to 0.935 m for mpiramS runtime "
+        "RAM:mpirams: raised dz from 0.385 m to 0.935 m for mpiramS runtime "
         "cap (λ_p / 16). The Lytaev accuracy budget ε=1e-01 is not met on "
         "this grid — its predicted error is 4.30e-01.\n"
         "[2026/08/17 20:46:11 UTC] [WARN] [uacpy.examples.example_05:189] "
@@ -764,23 +770,24 @@ def test_the_bound_figure_check_can_see_a_pyplot_save(tmp_path):
 
 
 def test_the_ambiguity_surfaces_are_drawn_through_the_library():
-    """Example 38 hands its matched-field surfaces to ``plot_field`` as Fields
-    of kind ``'ambiguity'`` rather than drawing them itself.
+    """Example 38 hands its ``sonar.bartlett`` / ``sonar.mvdr`` surfaces to
+    ``plot_matched_field`` rather than drawing them itself.
 
     It used to build an ``imshow`` extent by hand, and an extent taken from the
     outer grid CENTRES rather than the cell edges shifts the whole surface half
     a cell — the peak is then reported at a position the processor never
-    scanned. ``plot_field`` computes those edges itself, so routing through it
-    removes the class of error instead of guarding it.
+    scanned. It then routed each surface through a hand-built ``Field`` and
+    hand-drew the truth star and the estimate circle, which is exactly what
+    ``plot_matched_field`` draws from the candidate axes.
     """
     source = (EXAMPLES_DIR / 'example_38_matched_field.py').read_text(
         encoding='utf-8')
-    assert "'kind': 'ambiguity'" in source and 'plot_field(' in source
-    for hand_rolled in ('imshow(', 'extent='):
+    assert 'plot_matched_field(' in source and 'true_position=' in source
+    for hand_rolled in ('imshow(', 'extent=', 'Field(', "'w*'"):
         assert hand_rolled not in source, (
-            f"example 38 is back to placing the surface itself ({hand_rolled});"
-            f" an extent from grid centres shifts it half a cell off the "
-            f"positions it was computed at.")
+            f"example 38 is back to placing the surface or its markers itself "
+            f"({hand_rolled}); plot_matched_field draws both from the "
+            f"candidate positions.")
 
 
 def test_the_comparison_examples_use_the_librarys_tl_difference_renderer():
@@ -864,7 +871,7 @@ def test_example_06_marks_the_profile_ranges_its_run_held():
     nowhere else. Lines at the midpoints between profiles annotate the figure
     with switches the run never made."""
     from uacpy.core.units import m_to_km
-    from uacpy.models._segmentation import segment_environment_by_range
+    from uacpy.models.kraken._segments import segment_environment_by_range
 
     source = (EXAMPLES_DIR / 'example_06_kraken_advanced.py').read_text(
         encoding='utf-8')
@@ -910,9 +917,180 @@ def test_example_10_band_power_window_holds_the_sweep():
     cq_call = _literal_kwargs(_first_call(tree, 'constant_q'), consts)
     cq = constant_q(lfm, chirp['sample_rate'], **cq_call)
     window = _literal_kwargs(_first_call(tree, 'plot_constant_q_psd'), consts)
-    in_band = (cq.frequencies >= chirp['fmin']) & (cq.frequencies <= chirp['fmax'])
+    in_band = (cq.frequencies >= chirp['freq_start']) & (cq.frequencies <= chirp['freq_end'])
     levels = power_to_dB(cq.power, 1e-6)[in_band]     # as the plotter scales it
     q1, q3 = np.percentile(levels, [25, 75])
     assert window['ymin'] <= q1 and q3 <= window['ymax'], (
         f"the in-band interquartile band {q1:.0f}..{q3:.0f} dB is not inside "
         f"the panel's {window['ymin']}..{window['ymax']} dB window")
+
+
+#: Hand-rolled spellings of a computation the package exports, and the call
+#: that replaces each. An example is read as the way to use uacpy, so one that
+#: re-derives an exported formula teaches the reader to bypass it.
+_HAND_ROLLED = {
+    "/ 10 ** (snr_dB / 10)) * rng.standard_normal": "comms.awgn",
+    "np.arccos(": "uacpy.acoustics.critical_angle / Modes.grazing_angles",
+    ".k.real": "Modes.phase_speeds",
+    "record['delay']": "Arrivals.delays",
+    "marker='*'": "plot_field(source=)",
+    "np.asarray(f.data)": "ResultStack.p",
+}
+
+#: example_34 refers its SNR to the clean beacon rather than to the echo-laden
+#: record it adds the noise to, which ``comms.awgn`` cannot express.
+_HAND_ROLLED_ALLOWED = {
+    ("example_34_janus_beacon", "/ 10 ** (snr_dB / 10)) * rng.standard_normal"),
+}
+
+
+def test_the_examples_call_the_package_for_what_it_exports():
+    """No example re-implements AWGN, the critical/modal grazing angle, modal
+    phase speeds, the arrival-delay list or the source marker.
+
+    Examples 32/33 hand-rolled AWGN beside example 31's ``comms.awgn``;
+    examples 15 and 41 spelled ``arccos(c/v)``, which the package keeps in one
+    home; 06 rebuilt ``phase_speeds`` and ``excitation``; 11 rebuilt
+    ``Arrivals.delays``; 04 and 06 drew source stars that
+    ``plot_field(source=)`` draws; 42, 43 and 44 stacked slab pressure by
+    hand where ``ResultStack.p`` returns it.
+    """
+    offences = []
+    for path in sorted(EXAMPLES_DIR.glob("example_*.py")):
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        for pattern, api in _HAND_ROLLED.items():
+            if (" ".join(pattern.split()) in text
+                    and (path.stem, pattern) not in _HAND_ROLLED_ALLOWED):
+                offences.append(f"{path.name}: {pattern!r} -> use {api}")
+    assert offences == [], "\n".join(offences)
+
+
+#: Deep imports an example may keep because the name has no public export
+#: yet, as ``(stem, module, name)``, each with the reason it stays.
+_PRIVATE_IMPORT_ALLOWED: set = {
+    # The example reads the JANUS standard's version and initial-band
+    # constants (JANUS_VERSION, FC_INITIAL, BW_INITIAL) from their module.
+    ("example_34_janus_beacon", "uacpy.comms", "janus"),
+}
+
+
+#: A public namespace deeper than ``uacpy.<package>``: the closed-form
+#: physics functions are documented as ``uacpy.core.acoustics``.
+_PUBLIC_NAMESPACE_EXTRAS = {"uacpy.core.acoustics"}
+
+
+def test_the_examples_import_from_the_public_namespaces():
+    """Every ``from uacpy… import name`` in an example imports from a public
+    namespace (``uacpy`` or ``uacpy.<package>``, plus
+    ``uacpy.core.acoustics``) whose ``__all__`` exports ``name``. A defining
+    module's own ``__all__`` does not count: ``core.exceptions`` and
+    ``core.metrics`` have one and are still not where a reader imports from.
+
+    Fifteen examples reached into defining modules (``acoustic_signal.
+    generate``, ``core.exceptions``, ``core.metrics``, ``comms.constellations`` …)
+    for names the public namespaces export, teaching readers import paths
+    that move whenever the code is reorganised."""
+    import importlib
+    offences = []
+    for path in sorted(EXAMPLES_DIR.glob("example_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and node.module
+                    and node.module.split(".")[0] == "uacpy"):
+                continue
+            public = (node.module in _PUBLIC_NAMESPACE_EXTRAS
+                      or (node.module.count(".") <= 1
+                          and node.module != "uacpy.core"))
+            exported = getattr(importlib.import_module(node.module),
+                               "__all__", ()) if public else ()
+            for alias in node.names:
+                if (alias.name not in exported and (
+                        path.stem, node.module, alias.name)
+                        not in _PRIVATE_IMPORT_ALLOWED):
+                    offences.append(f"{path.name}:{node.lineno} "
+                                    f"from {node.module} import {alias.name}")
+    assert offences == [], "\n".join(offences)
+
+
+# ── docs/figure_scripts: every documentation figure builds ─────────────────
+# docs/generate_model_figures.py regenerates the documentation figures and
+# exits non-zero when one fails. It runs here once per page module, with
+# UACPY_FIGURE_OUTPUT pointing the PNGs at the test's tmp_path, so the run
+# never rewrites docs/. A source checkout carries docs/; an installed package
+# does not, and then there is nothing to collect.
+DOCS_DIR = EXAMPLES_DIR.parent.parent / "docs"
+FIGURE_DRIVER = DOCS_DIR / "generate_model_figures.py"
+FIGURE_MODULES = sorted(
+    p for p in (DOCS_DIR / "figure_scripts").glob("*.py")
+    if not p.name.startswith("_"))
+
+# Wall clock measured on the 2026-10-03 figure baseline: the sonar page's
+# replica banks take 246 s and the SPARC page's six transients 300 s; every
+# other page takes under 60 s.
+_LONG_FIGURE_MODULES = {"sonar", "sparc"}
+
+# The datasets the data page reads from the install-time cache. Each of its
+# figures pins source='local', so the network cannot stand in for them.
+_DATA_FIGURE_DATASETS = ("gebco", "woa23", "emodnet", "sediment", "diesing",
+                         "graw", "crust1", "globsed", "seaice", "coastline")
+
+
+def _figure_module_marks(module: Path):
+    """``slow`` always; ``requires_binary`` / ``requires_oases`` from the
+    engines the module names, as for an example; the data page is skipped
+    when the install-time cache lacks one of its datasets."""
+    referenced = _referenced_names(module)
+    needs_oases = bool(referenced & _OASES_MODEL_CLASSES)
+    marks = [pytest.mark.slow]
+    if needs_oases or referenced & _BINARY_MODEL_CLASSES:
+        marks.append(pytest.mark.requires_binary)
+    if needs_oases:
+        marks.append(pytest.mark.requires_oases)
+    if module.stem == "data" and not _offline_cache_ready(
+            _DATA_FIGURE_DATASETS):
+        marks.append(pytest.mark.skip(
+            reason="the data page reads the install-time cache "
+                   "(./install.sh --data all)"))
+    return marks
+
+
+@pytest.mark.parametrize("module", [
+    pytest.param(p, marks=_figure_module_marks(p), id=p.stem)
+    for p in FIGURE_MODULES])
+def test_every_documentation_figure_builds(module, tmp_path):
+    """Every figure of one docs/figure_scripts page builds through the
+    driver and writes a well-formed PNG."""
+    stems = _figure_stems(module)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(EXAMPLES_DIR.parent.parent), env.get("PYTHONPATH", "")])
+    env.setdefault("MPLBACKEND", "Agg")
+    env["UACPY_FIGURE_OUTPUT"] = str(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(FIGURE_DRIVER), module.stem],
+        cwd=str(tmp_path), capture_output=True, text=True, env=env,
+        timeout=900 if module.stem in _LONG_FIGURE_MODULES else 300)
+    assert result.returncode == 0, (
+        f"{module.name}: a figure failed (rc={result.returncode}):\n"
+        f"--- stdout ---\n{result.stdout[-3000:]}\n"
+        f"--- stderr ---\n{result.stderr[-3000:]}")
+    assert f"[{module.stem}]" in result.stdout
+    written = {p.stem for p in tmp_path.glob("*.png")}
+    assert written == stems, (
+        f"{module.name}: FIGURES names {sorted(stems)}, the driver wrote "
+        f"{sorted(written)}")
+    _check_pngs_well_formed(tmp_path)
+
+
+def _figure_stems(module: Path) -> set:
+    """The stems a page's ``FIGURES`` mapping names, read from its source:
+    the keys of the dict literal assigned to ``FIGURES``."""
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "FIGURES"
+                        for t in node.targets)
+                and isinstance(node.value, ast.Dict)):
+            return {k.value for k in node.value.keys
+                    if isinstance(k, ast.Constant)}
+    raise AssertionError(f"{module.name}: no FIGURES dict literal")

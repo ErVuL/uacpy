@@ -70,7 +70,8 @@ class TestTLRmseBasic:
 
     def test_type_error_on_non_field(self):
         a = _tl_field(np.zeros((4, 4)), np.arange(4), np.arange(4))
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='must both be Fields or both be dB arrays'):
             uacpy.metrics.tl_rmse(a, object())
 
     def test_nan_no_data_cells_excluded(self):
@@ -108,6 +109,14 @@ class TestGridAlignment:
         a = _tl_field(data, d, r)
         b = _tl_field(data.copy(), d, r + 1.0)         # 1 m shift
         with pytest.raises(ConfigurationError, match="range axes differ"):
+            tl_rmse(a, b)
+
+    def test_two_grids_of_different_shape_point_at_the_resampling_metric(self):
+        d = np.linspace(5, 95, 10)
+        a = _tl_field(np.zeros((10, 19)), d, np.linspace(100, 2000, 19))
+        b = _tl_field(np.zeros((10, 10)), d, np.linspace(100, 2000, 10))
+        with pytest.raises(ConfigurationError,
+                           match="shape mismatch(?s:.*)tl_rmse_on_shared_ranges"):
             tl_rmse(a, b)
 
 
@@ -173,9 +182,9 @@ class TestKindsMustMatch:
         data = 60.0 + np.zeros((4, 5))
         return (
             _tl_field(data, d, r, model='A',
-                      metadata={'kind': 'pressure', 'unit': 'dB'}),
+                      kind='pressure', unit='dB'),
             _tl_field(data + 1.0, d, r, model='B',
-                      metadata={'kind': kind_b, 'unit': 'dB'}),
+                      kind=kind_b, unit='dB'),
         )
 
     @pytest.mark.parametrize('fn', [tl_rmse, tl_max_error, tl_bias])
@@ -193,8 +202,7 @@ class TestKindsMustMatch:
     def test_two_reverberation_fields_compare(self):
         a, b = self._pair('reverberation')
         a = _tl_field(np.asarray(a.data), a.coords['depth'], a.coords['range'],
-                      model='A', metadata={'kind': 'reverberation',
-                                           'unit': 'dB'})
+                      model='A', kind='reverberation', unit='dB')
         assert tl_rmse(a, b) == pytest.approx(1.0, abs=1e-9)
 
 
@@ -208,7 +216,7 @@ def _probability_field(value):
     return Field(data=np.full((2, 3), value),
                  coords={'depth': np.array([10.0, 20.0]),
                          'range': np.array([100.0, 200.0, 300.0])},
-                 metadata={'kind': 'probability_of_detection'})
+                 kind='probability_of_detection')
 
 
 class TestTlMetricsPreCheckTheUnit:
@@ -223,9 +231,11 @@ class TestTlMetricsPreCheckTheUnit:
 
     @pytest.mark.parametrize('metric', [tl_rmse, tl_max_error, tl_bias])
     def test_the_error_names_the_offending_argument(self, metric):
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(
+                ConfigurationError,
+                match='these are different physical quantities') as exc:
             metric(_uniform_tl_field(10.0), _probability_field(0.6))
-        assert 'field_b' in str(exc.value)
+        assert 'reference is' in str(exc.value)
 
     def test_two_dB_fields_compute_the_metrics(self):
         a, b = _uniform_tl_field(10.0), _uniform_tl_field(20.0)
@@ -239,3 +249,208 @@ class TestTlMetricsPreCheckTheUnit:
             coords={'depth': np.array([10.0, 20.0]),
                     'range': np.array([100.0, 200.0, 300.0])})
         assert tl_rmse(complex_field, _uniform_tl_field(60.0)) == pytest.approx(0.0)
+
+
+# ── The no-energy marker is no data, not a 600 dB loss ───────────────────────
+# One exactly-zero cell in 50 used to turn a 0.83 dB agreement into 75 dB.
+
+def _complex_pair(zero_col=None):
+    depths = np.array([10.0, 20.0])
+    ranges = np.linspace(100.0, 5000.0, 50)
+    a = (1.0 / ranges)[None, :] * np.ones((2, 1)) + 0j
+    b = 1.1 * a
+    if zero_col is not None:
+        b = b.copy()
+        b[:, zero_col] = 0.0
+    mk = lambda d: Field(data=d, coords={'depth': depths, 'range': ranges},
+                         model='Synthetic')
+    return mk(a), mk(b)
+
+
+class TestNoEnergyCellsAreLeftOutOfEveryMetric:
+    def test_a_zero_cell_does_not_move_the_rmse(self):
+        a, b = _complex_pair()
+        clean = tl_rmse(a, b)
+        a2, b2 = _complex_pair(zero_col=7)
+        with pytest.warns(UserWarning, match="2 cell"):
+            got = tl_rmse(a2, b2)
+        assert got == pytest.approx(clean, abs=1e-9)
+        with pytest.warns(UserWarning):
+            assert tl_max_error(a2, b2) == pytest.approx(
+                tl_max_error(a, b), abs=1e-9)
+        with pytest.warns(UserWarning):
+            assert tl_bias(a2, b2) == pytest.approx(tl_bias(a, b), abs=1e-9)
+
+    def test_a_deep_real_null_is_kept(self):
+        a, b = _complex_pair()
+        b.data[0, 3] = 1e-15            # 300 dB of real loss, not the marker
+        assert tl_max_error(a, b) > 200.0
+
+    def test_shared_ranges_leaves_the_marker_out_too(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        a, b = _complex_pair()
+        clean = tl_rmse_on_shared_ranges(a, b, depth=10.0)
+        a2, b2 = _complex_pair(zero_col=7)
+        with pytest.warns(UserWarning, match="no energy"):
+            got = tl_rmse_on_shared_ranges(a2, b2, depth=10.0)
+        assert got == pytest.approx(clean, abs=0.05)
+
+
+class TestSharedRangesStatesWhatItCompares:
+    def _field(self, depths, ranges, scale=1.0):
+        data = scale * (1.0 / np.asarray(ranges))[None, :] \
+            * np.ones((len(depths), 1)) + 0j
+        return Field(data=data, coords={'depth': np.asarray(depths, float),
+                                        'range': np.asarray(ranges, float)},
+                     model='Synthetic')
+
+    def test_two_different_nearest_depths_are_named(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        a = self._field([10.0, 20.0], np.linspace(100, 1000, 10))
+        b = self._field([12.0, 22.0], np.linspace(100, 1000, 10))
+        with pytest.warns(UserWarning, match="10 m in `field` and 12 m"):
+            tl_rmse_on_shared_ranges(a, b, depth=10.0)
+
+    def test_the_common_axis_is_the_coarser_spacing_not_the_shorter_axis(self):
+        """50 points at 20 m against 100 at 100 m: the coarser grid is the
+        100 m one, although it has more points. Read on it, 1/r agrees
+        exactly at every node both fields hold, so the RMS is 0; read on the
+        20 m axis, the coarse field is interpolated between its nodes and
+        is not."""
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        fine = self._field([10.0], np.linspace(20.0, 1000.0, 50))
+        coarse = self._field([10.0], np.linspace(100.0, 10000.0, 100))
+        assert tl_rmse_on_shared_ranges(fine, coarse, depth=10.0) == \
+            pytest.approx(0.0, abs=1e-9)
+
+    @pytest.mark.parametrize('depth, refused', [
+        (95.0 + 5.0 - 1e-6, False), (95.0 + 5.0 + 1e-6, True),
+        (5.0 - 5.0 + 1e-6, False), (5.0 - 5.0 - 1e-6, True),
+        (500.0, True)])
+    def test_a_depth_beyond_half_a_step_outside_the_axis_is_refused(
+            self, depth, refused):
+        """5..95 m every 10 m: a depth within half a step of an end reads
+        that end, a depth past it (500 m, a km-for-m slip) is refused
+        rather than compared at 95 m."""
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        z = np.linspace(5.0, 95.0, 10)
+        a = self._field(z, np.linspace(100, 1000, 10))
+        b = self._field(z, np.linspace(100, 1000, 10), scale=2.0)
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match=r"outside field's depth axis \[5, 95\]"):
+                tl_rmse_on_shared_ranges(a, b, depth=depth)
+        else:
+            assert tl_rmse_on_shared_ranges(a, b, depth=depth) == \
+                pytest.approx(20 * np.log10(2.0))
+
+    def test_a_real_field_not_in_dB_is_refused(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        a = self._field([10.0], np.linspace(100, 1000, 10))
+        pd = Field(data=np.full((1, 10), 0.5),
+                   coords={'depth': np.array([10.0]),
+                           'range': np.linspace(100, 1000, 10)},
+                   model='Synthetic', unit='Pa')
+        with pytest.raises(ConfigurationError, match="not dB"):
+            tl_rmse_on_shared_ranges(pd, a, depth=10.0)
+
+
+# ── (field, reference) on plain dB arrays and on 1-D cuts ────────────────────
+
+class TestMetricsTakeFieldAndReference:
+    """The four metrics spell their pair ``(field, reference)`` and the
+    signed difference is ``field - reference``."""
+
+    def test_keywords_are_field_and_reference(self):
+        a, b = _uniform_tl_field(10.0), _uniform_tl_field(20.0)
+        assert tl_bias(field=a, reference=b) == pytest.approx(-10.0)
+        assert tl_rmse(field=a, reference=b) == pytest.approx(10.0)
+        assert tl_max_error(field=a, reference=b) == pytest.approx(10.0)
+
+    def test_bias_is_field_minus_reference(self):
+        a, b = _uniform_tl_field(23.0), _uniform_tl_field(20.0)
+        assert tl_bias(a, b) == pytest.approx(3.0)
+        assert tl_bias(b, a) == pytest.approx(-3.0)
+
+
+class TestMetricsOnPlainDbArrays:
+    """A measured TL curve or a table from another code compares without
+    building a Field; the Field form runs the same computation."""
+
+    def test_arrays_give_the_numbers_their_fields_give(self):
+        rng = np.random.default_rng(3)
+        tl = 60.0 + 5.0 * rng.standard_normal((4, 6))
+        ref = tl + rng.standard_normal((4, 6))
+        d, r = np.linspace(10, 40, 4), np.linspace(100, 600, 6)
+        fa, fb = _tl_field(tl, d, r), _tl_field(ref, d, r)
+        for metric in (tl_rmse, tl_max_error, tl_bias):
+            assert metric(tl, ref) == metric(fa, fb)
+
+    def test_a_list_curve_compares(self):
+        assert tl_bias([60.0, 62.0, 64.0], [59.0, 61.0, 63.0]) == \
+            pytest.approx(1.0)
+        assert tl_rmse([60.0, 62.0], [60.0, 58.0]) == \
+            pytest.approx(np.sqrt(8.0))
+
+    def test_nan_and_the_no_energy_marker_are_left_out_of_arrays(self):
+        tl = np.array([60.0, np.nan, 600.0, 70.0])
+        ref = np.array([61.0, 50.0, 60.0, 71.0])
+        with pytest.warns(UserWarning, match="1 cell"):
+            assert tl_rmse(tl, ref) == pytest.approx(1.0)
+
+    def test_shape_mismatch_is_refused(self):
+        with pytest.raises(ConfigurationError, match="shape mismatch"):
+            tl_rmse(np.zeros(3), np.zeros(4))
+
+    def test_a_complex_array_is_refused(self):
+        with pytest.raises(ConfigurationError, match="complex array"):
+            tl_rmse(np.ones(3) + 0j, np.ones(3))
+
+    def test_a_window_on_arrays_is_refused(self):
+        with pytest.raises(ConfigurationError, match="no depth or range axis"):
+            tl_rmse(np.zeros(3), np.ones(3), range_window=(0.0, 1.0))
+
+    def test_a_field_and_an_array_together_are_refused(self):
+        with pytest.raises(ConfigurationError, match="both be Fields"):
+            tl_rmse(_uniform_tl_field(10.0), np.full((2, 3), 10.0))
+
+
+class TestMetricsOnOneDimensionalCuts:
+    """``field.at(depth=z)`` — the TL-vs-range curve a comparison most
+    often wants — is a Field on one ``range`` axis."""
+
+    def _grid(self, offset):
+        d = np.array([10.0, 20.0, 30.0])
+        r = np.linspace(100.0, 1000.0, 10)
+        data = 60.0 + np.arange(30.0).reshape(3, 10) + offset
+        return _tl_field(data, d, r)
+
+    def test_a_range_cut_compares(self):
+        a, b = self._grid(2.0).at(depth=20.0), self._grid(0.0).at(depth=20.0)
+        assert list(a.coords) == ['range']
+        assert tl_bias(a, b) == pytest.approx(2.0)
+
+    def test_the_range_window_applies_to_a_range_cut(self):
+        a = self._grid(0.0).at(depth=20.0)
+        data = np.asarray(a.data, dtype=float).copy()
+        data[:5] += 4.0
+        b = _tl_field(data[None, :], [20.0], a.coords['range']).at(depth=20.0)
+        r = a.coords['range']
+        assert tl_rmse(b, a, range_window=(r[0], r[4])) == pytest.approx(4.0)
+        assert tl_rmse(b, a, range_window=(r[5], r[-1])) == pytest.approx(0.0)
+
+    def test_a_depth_window_on_a_range_cut_is_refused(self):
+        a = self._grid(0.0).at(depth=20.0)
+        with pytest.raises(ConfigurationError, match="no depth axis"):
+            tl_rmse(a, a, depth_window=(0.0, 50.0))
+
+    def test_a_cut_against_a_grid_is_refused(self):
+        with pytest.raises(ConfigurationError, match="do not correspond"):
+            tl_rmse(self._grid(0.0).at(depth=20.0), self._grid(0.0))
+
+    def test_a_frequency_axis_is_refused(self):
+        f = Field(data=np.ones((2, 3)) + 0j,
+                  coords={'frequency': np.array([100.0, 200.0]),
+                          'range': np.array([100.0, 200.0, 300.0])})
+        with pytest.raises(ConfigurationError, match="depth and/or range"):
+            tl_rmse(f, f)

@@ -15,7 +15,6 @@ e.g. ``woa23_decav_t00_01.nc`` (annual temperature, 1°), ``..._s07_04.nc``
 
 import numpy as np
 
-from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.data._netcdf import netcdf_lock, open_netcdf
 
@@ -95,7 +94,7 @@ def _read(path, var, lat_idx, lon_idx):
         depth_var = ds.variables[names['depth']]
         value_var = ds.variables[names[var]]
     except KeyError as exc:
-        raise DataFetchError(
+        raise _cache.UnreadableCacheError(
             f"Local WOA23 file {path.name} is missing variable {exc}; "
             "its schema may have changed.",
             remediation="Re-run ./install.sh --data woa23 to refresh it.",
@@ -126,7 +125,7 @@ def column(period, lat_idx, lon_idx, *, resolution, decade):
     z, t = _read(t_path, 't_an', lat_idx, lon_idx)
     _, s = _read(s_path, 's_an', lat_idx, lon_idx)
     if z.size == 0:
-        raise DataFetchError(
+        raise _cache.UnreadableCacheError(
             "Local WOA23 file has an empty depth axis.",
             remediation="Re-run ./install.sh --data woa23 to refresh it.",
         )

@@ -86,7 +86,7 @@ class TestSSPInterpolationMethods:
             ssp=SoundSpeedProfile.from_pairs(np.column_stack([depths, speeds])),
         )
 
-        bellhop = Bellhop(verbose=False, interp_ssp='cubic',
+        bellhop = Bellhop(verbose=False, interp_ssp='spline',
                           work_dir=tmp_path, cleanup=False)
         result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
@@ -111,16 +111,16 @@ class TestSSPInterpolationMethods:
         rcv = Receiver(depths=np.array([50.0]),
                        ranges=np.linspace(500.0, 8000.0, 30))
         tl = {}
-        for scheme in ('linear', 'cubic'):
+        for scheme in ('linear', 'spline'):
             field = Bellhop(verbose=False, interp_ssp=scheme).compute_tl(
                 env=env, source=src, receiver=rcv)
             tl[scheme] = np.asarray(field.dB).ravel()
-        both = np.isfinite(tl['linear']) & np.isfinite(tl['cubic'])
+        both = np.isfinite(tl['linear']) & np.isfinite(tl['spline'])
         assert both.sum() > tl['linear'].size // 2
         # Identical decks reproduce bit-identically, so any real difference
         # proves the TopOpt letter reached the binary; 0.1 dB keeps the
         # assertion above numeric trivia.
-        assert np.max(np.abs(tl['linear'][both] - tl['cubic'][both])) > 0.1
+        assert np.max(np.abs(tl['linear'][both] - tl['spline'][both])) > 0.1
 
 
 class TestExtendToTargetMustBeBelowTheProfileStart:
@@ -131,7 +131,7 @@ class TestExtendToTargetMustBeBelowTheProfileStart:
     negative target was accepted."""
 
     def test_a_negative_target_on_a_1_point_profile_raises(self):
-        ssp = SoundSpeedProfile(depths=[5.0], data=[1500.0])
+        ssp = SoundSpeedProfile(depths=[5.0], sound_speed=[1500.0])
         with pytest.raises(ConfigurationError,
                            match="not below the profile's first sample"):
             ssp.extend_to(-10.0)
@@ -153,7 +153,7 @@ class TestExtendToTargetMustBeBelowTheProfileStart:
         assert float(deeper.depths[-1]) == pytest.approx(150.0)
         shallower = _profile_1d().extend_to(50.0)
         assert float(shallower.depths[-1]) == pytest.approx(50.0)
-        assert shallower.data[-1, 0] == pytest.approx(1495.0)
+        assert shallower.sound_speed[-1, 0] == pytest.approx(1495.0)
 
 
 def _profile_1d():

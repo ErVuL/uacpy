@@ -7,23 +7,31 @@ equation. Two seabeds, hard and soft, so the comparison is not read off a single
 bottom.
 
 Measured here, coupling does NOT track RAM more closely than the adiabatic
-treatment — it comes out slightly further away in both cases. Coupling changes
+treatment — it comes out further away in both cases, by 2.1 dB RMS on the hard
+seabed and 0.2 dB on the soft one. Coupling changes
 the answer, which is the point worth seeing; it does not automatically improve
 it. The printed table is the result, not this paragraph.
 
-Two constraints, both real limits rather than incidental settings:
+Two settings the comparison rests on:
 
-* n_segments is pinned to 2 for BOTH Kraken runs. The coupled path through AT's
-  field.exe writes a .shd whose header disagrees with its payload at 3 or more
-  segments, and the reader rejects it. Adiabatic is held at the same 2 so the
-  mode treatments differ only in coupling.
-* Kraken has no range-dependent bottom: both runs collapse the seabed to one
-  column (and say so). The hard/soft contrast survives, the sediment's range
-  variation does not — so part of every difference below is that missing degree
-  of freedom, not the mode theory.
+* n_segments (the range-independent segments the slope is cut into) is chosen
+  by convergence, and both Kraken runs share it so the mode treatments differ
+  only in coupling. Measured over 2-32 segments, the median TL moves by under
+  0.3 dB between 24 and 32 segments in all four runs, and the adiabatic field
+  by 0.4-0.9 dB RMS; at 2 segments the medians sit 1.4-3.9 dB off.
+  The coupled field still moves by 4-6 dB RMS point by point between 24 and
+  32 segments, so read its interference pattern as indicative, not converged.
+* Each Kraken profile carries the seabed column at its own range, layers
+  included — the multi-profile deck gives every profile block a full
+  environment — so both mode runs see the near column's thicker, slower
+  sediment over the 1-6 km window, as RAM does. Measured at 103 m, adiabatic
+  Kraken agrees with RAM to 1.9 / 1.9 dB RMS (hard / soft); one collapsed
+  column standing in for the whole run would differ by 8.4 / 16.0 dB. The
+  panels share their texture too: median |ΔTL| between range neighbours 1.4 /
+  0.3 dB for Kraken against 1.6 / 0.2 dB for RAM.
 
 Uses: Bottom.from_columns · SoundSpeedProfile.from_2d ·
-Kraken(n_segments=, mode_coupling=) · RAM(accuracy=) · plot_field ·
+Kraken(n_segments=, mode_coupling=) · RAM · plot_field ·
 plot.plot_field_difference · plot.shared_colorbar
 """
 
@@ -95,10 +103,13 @@ cases = {
         near_halfspace=(1800, 2.0, 0.2),
         far_layer=(3.0, 1650, 1.8, 0.3), far_halfspace=(2500, 2.5, 0.05))),
 }
+N_SEGMENTS = 24          # converged medians; see the docstring
 models = {
-    'RAM': uacpy.RAM(accuracy=1e-1),
-    'Kraken adiabatic': uacpy.Kraken(n_segments=2, mode_coupling='adiabatic'),
-    'Kraken coupled': uacpy.Kraken(n_segments=2, mode_coupling='coupled'),
+    'RAM': uacpy.RAM(),
+    'Kraken adiabatic': uacpy.Kraken(n_segments=N_SEGMENTS,
+                                     mode_coupling='adiabatic'),
+    'Kraken coupled': uacpy.Kraken(n_segments=N_SEGMENTS,
+                                   mode_coupling='coupled'),
 }
 
 fields = {case: {name: model.run(env, source, receiver)
@@ -106,9 +117,7 @@ fields = {case: {name: model.run(env, source, receiver)
           for case, env in cases.items()}
 
 mid_depth = float(receiver.depths[receiver.depths.size // 2])
-print(f"Against the RAM reference at {mid_depth:.0f} m "
-      f"(Kraken's seabed is collapsed to one column — part of every "
-      f"difference is that):")
+print(f"Against the RAM reference at {mid_depth:.0f} m:")
 rms = {}
 for case, per_model in fields.items():
     ram_cut = per_model['RAM'].at(depth=mid_depth).dB
@@ -137,7 +146,7 @@ diff_vmax = max(5.0, 5.0 * np.ceil(max(
 fig, axes = plt.subplots(3, 4, figsize=(22, 14))
 for row, (case, per_model) in enumerate(fields.items()):
     for col, name in enumerate(models):
-        uacpy.plot_field(per_model[name], axes[row, col], env=cases[case],
+        uacpy.plot.plot_field(per_model[name], axes[row, col], env=cases[case],
                          show_colorbar=False, vmin=vmin, vmax=vmax,
                          title=f'{case} — {name}')
     for name in models:                       # the same three as one cut
@@ -160,13 +169,15 @@ for col, (case, name) in enumerate([(c, n) for c in fields
 
 fig.suptitle('Range-dependent bottom — adiabatic vs coupled modes vs RAM\n'
              f'f={source.frequencies[0]:.0f} Hz, z_s={source.depths[0]:.0f} m, '
-             f'n_segments=2, window {receiver.ranges[0] / 1000:.0f}-'
+             f'n_segments={N_SEGMENTS}, window {receiver.ranges[0] / 1000:.0f}-'
              f'{receiver.ranges[-1] / 1000:.0f} km of a '
              f'{BATHYMETRY[0, 1]:.0f}-{BATHYMETRY[-1, 1]:.0f} m slope',
              fontsize='large', fontweight='bold', y=0.995)
 # Margins first: each bar takes its space from the panels as they stand, so a
 # subplots_adjust after them would move the panels back over the bars.
-fig.subplots_adjust(left=0.05, top=0.90, bottom=0.06, wspace=0.18, hspace=0.30)
+# wspace leaves the gap between column 3 and the TL-cut column room for the
+# upper bar, its label, and column 4's own tick labels and y label.
+fig.subplots_adjust(left=0.05, top=0.90, bottom=0.06, wspace=0.40, hspace=0.30)
 # Two bars, because there are two quantities: one over the six TL panels,
 # one over the four residuals. Asking for a single bar across both would
 # be refused — they are not on one scale, and could not honestly share one.

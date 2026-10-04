@@ -42,7 +42,7 @@ print(f"  band     : Fc={janus.FC_INITIAL / 1e3:.2f} kHz, "
       f"Bw={janus.BW_INITIAL / 1e3:.2f} kHz, Cd=6.25 ms")
 
 # 32 preamble chips + 144 data chips of FH-BFSK.
-waveform = janus.janus_modulate(bits, fs)
+waveform = janus.janus_modulate(bits, sample_rate=fs)
 uacpy.io.write_wav(OUT / 'example_34_janus.wav', waveform, fs,
                    metadata={'title': 'JANUS baseline packet',
                              'comment': 'NATO STANAG 4748, initial band'})
@@ -56,6 +56,9 @@ echo = np.zeros_like(received)
 echo[delay:] = 0.4 * received[:received.size - delay]
 received = received + echo
 snr_dB = 12.0
+# The SNR is referred to the clean beacon's power, not to the echo-laden record,
+# so the noise is scaled here rather than by comms.awgn (which refers it to the
+# power of the array it is given).
 received = received + np.sqrt(
     np.mean(waveform ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(
         received.size)
@@ -74,14 +77,14 @@ axes[0].specgram(waveform, NFFT=256, Fs=fs, noverlap=224, cmap='jet')
 axes[0].axhline(janus.FC_INITIAL, color='w', ls='--', lw=0.8)
 axes[0].set_ylim(janus.FC_INITIAL - janus.BW_INITIAL,
                  janus.FC_INITIAL + janus.BW_INITIAL)
-axes[0].set_title('FH-BFSK waveform — hopping over 13 tone pairs', loc='left')
+axes[0].set_title('FH-BFSK waveform — hopping over 13 tone pairs')
 axes[0].set_xlabel('Time [s]')
 axes[0].set_ylabel('Frequency [Hz]')
 
 axes[1].plot(metric)
 axes[1].axvline(int(np.argmax(metric)), color='g', ls=':', lw=1,
                 label='detected preamble')
-axes[1].set_title('GO-CFAR preamble detection statistic', loc='left')
+axes[1].set_title('GO-CFAR preamble detection statistic')
 axes[1].set_xlabel('Alignment column (¼-chip)')
 axes[1].set_ylabel('CFAR statistic')
 axes[1].grid(alpha=0.3)

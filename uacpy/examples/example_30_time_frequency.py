@@ -17,6 +17,7 @@ plot_taup · plot_cwt · plot_wigner_ville · plot_cepstrum · plot_radon
 
 import os
 import sys
+import warnings
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 
@@ -26,7 +27,7 @@ import uacpy
 from uacpy.acoustic_signal import (cepstrum, cwt, fk_transform,
                                    radon_transform, taup_transform,
                                    wigner_ville)
-from uacpy.acoustic_signal.generate import ricker_wavelet
+from uacpy.acoustic_signal import ricker_wavelet
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -47,7 +48,7 @@ wavefield = (
 wavefield *= np.hanning(n_times)[:, None] * np.hanning(n_channels)[None, :]
 # normalize=True makes the panel a density (x² per Hz·rad/m) whose sum over
 # Δf·Δk is the gather's mean square; plot_fk reads that scaling off the result.
-fk = fk_transform(wavefield, fs, dx, normalize=True)
+fk = fk_transform(wavefield, fs, dx, scaling='density')
 
 # (B) Two linear events in a pulsed gather, for the τ-p slant stack.
 gather_fs, gather_nt, gather_nx, gather_dx = 1000.0, 512, 48, 10.0
@@ -58,15 +59,22 @@ x_gather = np.arange(gather_nx) * gather_dx
 gather = sum(ricker_wavelet(t_gather[:, None], 40.0,
                             delay=tau + slowness * x_gather[None, :])
              for slowness, tau in [(1 / 1800.0, 0.04), (-1 / 2500.0, 0.13)])
-slownesses, taus, slant_stack = taup_transform(
-    gather, gather_fs, gather_dx, p_max=1 / 1200.0, n_slowness=301)
+# |p| runs to 1/1200 s/m so the 1500 m/s reference line lands on the panel.
+# The 40 Hz pulses on 10 m spacing alias beyond about 6.2e-4 s/m, past both
+# events (1/1800 and 1/2500 s/m); taup_transform says so, and it is printed.
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    slownesses, taus, slant_stack = taup_transform(
+        gather, gather_fs, gather_dx, p_max=1 / 1200.0, n_slowness=301)
+for warning in caught:
+    print(f"  noted: {str(warning.message).split(' — ')[0]}")
 
 # (C, D) One transient with two components, for the CWT and Wigner-Ville.
 t = np.arange(1024) / fs
 transient = (
     np.sin(2 * np.pi * 150 * t) * np.exp(-0.5 * ((t - 0.20) / 0.03) ** 2)
     + np.sin(2 * np.pi * 500 * t) * np.exp(-0.5 * ((t - 0.40) / 0.03) ** 2))
-cwt_frequencies, scalogram = cwt(transient, fs, wavelet='morlet', n_freqs=140)
+scalogram = cwt(transient, fs, wavelet='morlet', n_freqs=140)
 wv_f, wv_t, wigner = wigner_ville(transient, fs)
 
 # (E) A broadband pulse and its echo, for the cepstrum.
@@ -76,8 +84,7 @@ echo_delay = 0.040
 shift = int(echo_delay * fs)
 with_echo = pulse.copy()
 with_echo[shift:] += 0.7 * pulse[:-shift]
-cepstral = cepstrum(with_echo)
-quefrency = np.arange(cepstral.size) / fs
+quefrency, cepstral = cepstrum(with_echo, sample_rate=fs)
 # Search 8-100 ms of quefrency: below ~8 ms the cepstrum is dominated by the
 # pulse's own spectral envelope (its 4 ms Gaussian width), which would outrank
 # the echo rahmonic the peak search is after.
@@ -116,8 +123,7 @@ uacpy.plot.plot_taup(slownesses, taus, slant_stack, ax=axes[0, 1],
                      sound_speed=1500,
                      title='τ-p slant stack + 1500 m/s')
 
-uacpy.plot.plot_cwt(cwt_frequencies, scalogram, fs, ax=axes[1, 0],
-                    title='Morlet CWT scalogram')
+scalogram.plot(ax=axes[1, 0], title='Morlet CWT scalogram')
 axes[1, 0].set_yscale('log')
 
 uacpy.plot.plot_wigner_ville(wv_f, wv_t, wigner, ax=axes[1, 1], vmin=0.0,

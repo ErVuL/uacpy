@@ -20,7 +20,6 @@ from figure_scripts._common import WIDE, shallow_water
 
 import uacpy
 from uacpy.acoustic_signal import (
-    add_noise,
     ambiguity_function,
     analytic_signal,
     cwt,
@@ -33,10 +32,11 @@ from uacpy.acoustic_signal import (
     instantaneous_frequency,
     inverse_fk,
     lfm_chirp,
+    make_bandlimited_noise,
     modal_group_velocity,
-    mseq,
+    m_sequence,
     nwave,
-    processing_gain,
+    processing_gain_dB,
     pulse_compression,
     ricker_wavelet,
     simulate_reception,
@@ -49,7 +49,7 @@ from uacpy.acoustic_signal import (
     wigner_ville,
 )
 from uacpy.models import Bellhop, Kraken, RunMode
-from uacpy.visualization import draw_sound_cone, plot_band_levels, plot_psd
+from uacpy.plot import draw_sound_cone, plot_band_levels, plot_psd
 from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 # Write into docs/guide/figures/ rather than docs/models/figures/.
@@ -81,23 +81,23 @@ def waveform_gallery():
     fs = 8000.0
     t = np.arange(int(0.10 * fs)) / fs
 
-    t_lfm, lfm = lfm_chirp(200.0, 1200.0, 0.10, fs)
-    t_hfm, hfm = hfm_chirp(200.0, 1200.0, 0.10, fs)
-    t_burst, burst = tone_burst(400.0, 8, fs)
+    t_lfm, lfm = lfm_chirp(200.0, 1200.0, 0.10, sample_rate=fs)
+    t_hfm, hfm = hfm_chirp(200.0, 1200.0, 0.10, sample_rate=fs)
+    t_burst, burst = tone_burst(400.0, 8, sample_rate=fs)
     ricker = ricker_wavelet(t, 200.0)
     gauss = gaussian_pulse(t, delay=0.05, duration=0.012)
     nw = nwave(t - 0.02, 200.0)
-    hann4, hann4_title = sparc_pulse(t - 0.02, 2 * np.pi * 200.0, 'H')
-    chips = mseq(6)
+    hann4, hann4_title = sparc_pulse(t - 0.02, 200.0, 'H')
+    chips = m_sequence(6)
 
     panels = [
-        (t_lfm, lfm, 'lfm_chirp(200, 1200, 0.1, fs)'),
-        (t_hfm, hfm, 'hfm_chirp(200, 1200, 0.1, fs)'),
-        (t_burst, burst, 'tone_burst(400, 8, fs)'),
+        (t_lfm, lfm, 'lfm_chirp(200, 1200, 0.1, sample_rate=fs)'),
+        (t_hfm, hfm, 'hfm_chirp(200, 1200, 0.1, sample_rate=fs)'),
+        (t_burst, burst, 'tone_burst(400, 8, sample_rate=fs)'),
         (t, ricker, 'ricker_wavelet(t, 200)'),
         (t, gauss, 'gaussian_pulse(t, 0.05, 0.012)'),
         (t, nw, 'nwave(t - 0.02, 200)'),
-        (t, hann4, f"sparc_pulse(t - 0.02, w, 'H') — {hann4_title}"),
+        (t, hann4, f"sparc_pulse(t - 0.02, f, 'H') — {hann4_title}"),
     ]
     fig, axes = plt.subplots(2, 4, figsize=(13.0, 5.2))
     for ax, (tt, sig, label) in zip(axes.ravel(), panels):
@@ -108,7 +108,7 @@ def waveform_gallery():
         ax.grid(alpha=0.3)
     ax = axes.ravel()[-1]
     ax.step(np.arange(chips.size), chips, where='mid', lw=0.9, color='#8c2d04')
-    ax.set_title('mseq(6) — 63 chips, ±1', fontsize=8.5, fontweight='bold')
+    ax.set_title('m_sequence(6) — 63 chips, ±1', fontsize=8.5, fontweight='bold')
     ax.set_xlabel('Chip index', fontsize=8)
     ax.tick_params(labelsize=7)
     ax.set_ylim(-1.6, 1.6)
@@ -125,8 +125,8 @@ def waveform_gallery():
 def chirp_sweep_laws():
     """LFM and HFM side by side: the sweep law each one obeys."""
     fs = 8000.0
-    t_lfm, lfm = lfm_chirp(200.0, 1600.0, 0.20, fs)
-    t_hfm, hfm = hfm_chirp(200.0, 1600.0, 0.20, fs)
+    t_lfm, lfm = lfm_chirp(200.0, 1600.0, 0.20, sample_rate=fs)
+    t_hfm, hfm = hfm_chirp(200.0, 1600.0, 0.20, sample_rate=fs)
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.2), sharey=True)
     for ax, sig, tt, name in [(axes[0], lfm, t_lfm, 'lfm_chirp — linear sweep'),
@@ -158,7 +158,7 @@ def _bellhop_arrivals():
     env, _, _ = shallow_water()
     source = uacpy.Source(depths=25.0, frequencies=3000.0)
     point = uacpy.Receiver(depths=60.0, ranges=3000.0)
-    return Bellhop(n_beams=6000, alpha=(-60.0, 60.0)).run(
+    return Bellhop(n_beams=6000, launch_angles=(-60.0, 60.0)).run(
         env, source, point, run_mode=RunMode.ARRIVALS)
 
 
@@ -166,32 +166,35 @@ def pulse_compression_gain():
     """Compress an LFM chirp back out of a modelled multipath channel."""
     rng = np.random.default_rng(0)
     fs = 20_000.0
-    fmin, fmax, T = 1000.0, 5000.0, 0.05
-    _, tx = lfm_chirp(fmin, fmax, T, fs)
+    freq_start, freq_end, T = 1000.0, 5000.0, 0.05
+    _, tx = lfm_chirp(freq_start, freq_end, T, sample_rate=fs)
 
     arr = _bellhop_arrivals()
     taps = arr.amplitudes * np.exp(1j * arr.phases)
     _, rx = simulate_reception(analytic_signal(tx), taps, arr.delays, fs)
     rx = np.real(rx)
-    noisy = add_noise(rx, fs, source_level=180.0, noise_level=72.0,
-                      fc=3000.0, bandwidth=4000.0, rng=rng)
+    # The 0 dB-source record placed at SL = 180 dB re 1 µPa at 1 m, in Pa,
+    # plus noise at 72 dB re 1 µPa²/Hz over the chirp's band.
+    clean = rx * 1e-6 * 10.0 ** (180.0 / 20.0)
+    _, noise = make_bandlimited_noise(3000.0, 4000.0, rx.size / fs, sample_rate=fs,
+                                      psd_level_dB=72.0, rng=rng)
+    noisy = clean + noise
     t_rx = np.arange(noisy.size) / fs
 
     lags, comp = pulse_compression(analytic_signal(noisy), analytic_signal(tx), fs)
-    gain = processing_gain(fmax - fmin, T)
+    gain = processing_gain_dB(freq_end - freq_start, T)
     span = (arr.delays.min(), arr.delays.max())
 
     # Input SNR, measured rather than asserted: signal RMS over the arrival
-    # window against the RMS of the noise that add_noise actually drew.
-    clean = rx * 10.0 ** (180.0 / 20.0)
+    # window against the RMS of the noise actually drawn.
     inside = (t_rx >= span[0]) & (t_rx <= span[1])
     snr_dB = 20.0 * np.log10(np.sqrt(np.mean(clean[inside] ** 2))
                              / np.std(noisy - clean))
 
     fig, axes = plt.subplots(2, 1, figsize=(9.5, 6.4))
     win = (t_rx > 1.85) & (t_rx < 2.45)
-    axes[0].plot(t_rx[win], noisy[win] / 1e6, lw=0.4, color='#9aa5b1')
-    axes[0].plot(t_rx[win], envelope(noisy)[win] / 1e6, lw=0.7, color='#c0392b',
+    axes[0].plot(t_rx[win], noisy[win], lw=0.4, color='#9aa5b1')
+    axes[0].plot(t_rx[win], envelope(noisy)[win], lw=0.7, color='#c0392b',
                  label='envelope()')
     axes[0].set_title(f'Received — a 50 ms chirp smeared over '
                       f'{1e3 * (span[1] - span[0]):.0f} ms of Bellhop '
@@ -206,7 +209,7 @@ def pulse_compression_gain():
     axes[1].axvspan(*span, color='#f0ad4e', alpha=0.18,
                     label='Bellhop arrival window')
     axes[1].set_title(f'Matched-filter output — the channel impulse response, '
-                      f'resolved to 1/B = {1e3 / (fmax - fmin):.2f} ms '
+                      f'resolved to 1/B = {1e3 / (freq_end - freq_start):.2f} ms '
                       f'(processing gain 10·log10(BT) = {gain:.0f} dB)',
                       fontweight='bold', fontsize=10)
     axes[1].set_xlabel('Delay (s)')
@@ -228,9 +231,9 @@ def pulse_compression_gain():
 def ambiguity_surfaces():
     """LFM against HFM: range-Doppler coupling versus Doppler tolerance."""
     fs = 20_000.0
-    fmin, fmax, T = 1000.0, 5000.0, 0.05
-    _, lfm = lfm_chirp(fmin, fmax, T, fs)
-    _, hfm = hfm_chirp(fmin, fmax, T, fs)
+    freq_start, freq_end, T = 1000.0, 5000.0, 0.05
+    _, lfm = lfm_chirp(freq_start, freq_end, T, sample_rate=fs)
+    _, hfm = hfm_chirp(freq_start, freq_end, T, sample_rate=fs)
     doppler = np.linspace(-300.0, 300.0, 121)
 
     fig, axes = plt.subplots(1, 2, figsize=(11.0, 4.4), sharey=True)
@@ -264,7 +267,7 @@ def _two_tones_and_a_click(fs=2000.0, n=2048):
     t = np.arange(n) / fs
     tones = (np.sin(2 * np.pi * 100.0 * t) + np.sin(2 * np.pi * 130.0 * t))
     tones = tones * np.exp(-0.5 * ((t - 0.35) / 0.13) ** 2)
-    _, click = tone_burst(500.0, 3, fs)
+    _, click = tone_burst(500.0, 3, sample_rate=fs)
     signal = tones
     i0 = int(0.72 * fs)
     signal[i0:i0 + click.size] += 2.0 * click
@@ -286,8 +289,8 @@ def resolution_tradeoff():
                      f'Δf ≈ {fs / nperseg:.0f} Hz, Δt = {nperseg / fs * 1e3:.0f} ms',
                      fontweight='bold', fontsize=10)
         ax.set_xlabel('Time (s)')
-    freqs, W = cwt(sig, fs, frequencies=np.logspace(np.log10(20.0),
-                                                    np.log10(900.0), 160))
+    freqs, _, W = cwt(sig, fs, frequencies=np.logspace(np.log10(20.0),
+                                                       np.log10(900.0), 160))
     axes[2].pcolormesh(t, freqs, _dB(W, floor=-40.0), shading='auto',
                        cmap='magma', vmin=-40.0, vmax=0.0)
     axes[2].set_title('cwt(wavelet="morlet") — Δf/f constant',
@@ -320,7 +323,7 @@ def wigner_ville_cross_terms():
 
     f_s, t_s, Sxx = spectrogram(sig, fs, nperseg=64, noverlap=60)
     f_w, t_w, W = wigner_ville(sig, fs)
-    f_p, t_p, P = wigner_ville(sig, fs, freq_window=63, time_window=25)
+    f_p, t_p, P = wigner_ville(sig, fs, lag_smoothing=63, time_smoothing=25)
 
     fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2), sharey=True)
     axes[0].pcolormesh(t_s, f_s, _power_dB(Sxx, floor=-35.0), shading='auto',
@@ -330,7 +333,7 @@ def wigner_ville_cross_terms():
     for ax, ff, tt, D, name in [
             (axes[1], f_w, t_w, W, 'wigner_ville() — sharp, with a cross-term'),
             (axes[2], f_p, t_p, P,
-             'wigner_ville(freq_window=63, time_window=25)')]:
+             'wigner_ville(lag_smoothing=63, time_smoothing=25)')]:
         ax.pcolormesh(tt, ff, _power_dB(np.maximum(D, 0.0), floor=-35.0),
                       shading='auto', cmap='magma', vmin=-35.0, vmax=0.0)
         ax.set_title(name, fontweight='bold', fontsize=10)
@@ -365,9 +368,10 @@ def _vertical_array_gather():
     depths = np.linspace(4.0, 96.0, 64)
     source = uacpy.Source(depths=25.0, frequencies=250.0)
     receiver = uacpy.Receiver(depths=depths, ranges=1000.0)
-    field = Bellhop(n_beams=6000, alpha=(-80.0, 80.0)).run(
+    field = Bellhop(n_beams=6000, launch_angles=(-80.0, 80.0)).run(
         env, source, receiver, run_mode=RunMode.TIME_SERIES,
-        source_waveform=pulse, sample_rate=fs, output_duration=0.85)
+        source_waveform=pulse, sample_rate=fs, t_start=0.62,
+        output_duration=0.2)
     times = np.asarray(field.coords['time'])
     gather = np.real(np.asarray(field.data))[:, 0, :].T
     keep = (times >= 0.62) & (times <= 0.82)
@@ -451,7 +455,7 @@ def modal_warping():
           for f in sweep]
     n_modes = min(len(k) for k in kr)
     k_matrix = np.real(np.array([k[:n_modes] for k in kr]))
-    v_group = modal_group_velocity(sweep, k_matrix)
+    v_group = modal_group_velocity(sweep, k_horizontal=k_matrix)
 
     fs, n = 150.0, 2048
     df = fs / n
@@ -462,7 +466,7 @@ def modal_warping():
                      uacpy.Receiver(depths=50.0, ranges=range_m),
                      run_mode=RunMode.BROADBAND)
     _, h = impulse_response_from_transfer_function(
-        np.asarray(H.data).ravel(), frequencies, fs, n)
+        np.asarray(H.data).ravel(), frequencies=frequencies, sample_rate=fs, n_samples=n)
     arrival = h[int(round(range_m / c * fs)):]
     warped, t_warp = warp_signal(arrival, fs, range_m, c)
     fs_warp = 1.0 / float(t_warp[1] - t_warp[0])
@@ -517,10 +521,10 @@ def spectra_and_bands():
 
     _, x, fs = synthesize_noise_from_psd(
         target, f_target, duration=30.0, sample_rate=25_000,
-        n_fft=65536, interp='log', rng=rng)
+        nfft=65536, interp='log', rng=rng)
     frequencies, power = welch(x, fs, nperseg=32768)
     band = (frequencies >= 20.0) & (frequencies <= 11_000.0)
-    centers, levels = decidecade_band_levels(power[band], frequencies[band])
+    centers, levels = decidecade_band_levels(power[band], frequencies=frequencies[band])
 
     shown = frequencies >= 10.0
     fig, axes = plt.subplots(1, 2, figsize=(12.0, 4.4))

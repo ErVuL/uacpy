@@ -15,7 +15,7 @@ SPARC reads neither.
 
 Uses: Kraken auto-detection · Bounce(work_dir=) · BoundaryProperties(
 acoustic_type='file', reflection_file=) · ReflectionCoefficient.plot ·
-plot_field · plot.compare · plot.plot_field_difference
+plot_field · plot.compare · plot.plot_field_difference · uacpy.acoustics.critical_angle
 """
 
 import os
@@ -61,8 +61,10 @@ bottom = uacpy.BoundaryProperties(
 env = uacpy.Environment(name="Elastic bottom test", bathymetry=100.0,
                         ssp=1500.0, bottom=bottom)
 source = uacpy.Source(depths=50.0, frequencies=100.0)
+# Ranges start at 300 m: closer in, the deepest receivers see direct and
+# surface-reflected paths steeper than Kraken's 26.8° mode window carries.
 receiver = uacpy.Receiver(depths=np.linspace(5, 95, 50),
-                          ranges=np.linspace(100, 10000, 100))
+                          ranges=np.linspace(300, 10000, 98))
 
 # Approach 1: Kraken sees shear_speed > 0 and routes itself to krakenc.
 kraken_tl, t_kraken = median_time(
@@ -71,7 +73,7 @@ kraken_tl, t_kraken = median_time(
 # Approach 2: BOUNCE writes the reflection coefficients, Scooter reads them.
 # A pinned work_dir keeps the .brc/.irc files after the run.
 bounce, t_bounce = median_time(
-    lambda: uacpy.Bounce(c_low=1400.0, c_high=10000.0, rmax=10000.0,
+    lambda: uacpy.Bounce(c_low=1400.0, c_high=10000.0, rmax_m=10000.0,
                          work_dir=OUT / 'bounce_brc').run(
         env=env, source=source,
         receiver=uacpy.Receiver(depths=np.array([50.0]),
@@ -85,8 +87,8 @@ env_from_file = uacpy.Environment(
         sound_speed=1600.0, density=1.8, attenuation=0.2),
 )
 scooter_tl, t_scooter = median_time(
-    lambda: uacpy.Scooter(c_low=bounce.metadata['c_low'],
-                          c_high=bounce.metadata['c_high']).run(
+    lambda: uacpy.Scooter(c_low=bounce.run_settings.engine.c_low,
+                          c_high=bounce.run_settings.engine.c_high).run(
         env_from_file, source, receiver))
 
 residual = kraken_tl.dB - scooter_tl.dB
@@ -98,8 +100,8 @@ print(f"  |Kraken − Scooter|: mean {mean_diff:.2f} dB, "
 print("  Judge the two on the mean and the percentile: a large single-cell gap "
       "is where the\n  methods put an interference null a little differently, "
       "and near a null a small\n  shift in position is a big shift in dB.")
-print(f"  {len(bounce.theta)} reflection angles, "
-      f"|R| in [{bounce.R.min():.3f}, {bounce.R.max():.3f}]")
+print(f"  {len(bounce.angles)} reflection angles, "
+      f"|R| in [{bounce.magnitude.min():.3f}, {bounce.magnitude.max():.3f}]")
 print(f"  timing: Kraken {t_kraken:.3f} s against BOUNCE {t_bounce:.3f} s + "
       f"Scooter {t_scooter:.3f} s (medians of {N_REPEATS})")
 print("  That ratio is a property of THIS grid and frequency — a krakenc mode "
@@ -107,9 +109,9 @@ print("  That ratio is a property of THIS grid and frequency — a krakenc mode 
       "which changes the sum\n  entirely once you run more than once.")
 
 fig, axes = plt.subplots(2, 3, figsize=(18, 9))
-uacpy.plot_field(kraken_tl, axes[0, 0], vmin=50, vmax=100,
+uacpy.plot.plot_field(kraken_tl, axes[0, 0], vmin=50, vmax=100,
                  title='1: Kraken (auto krakenc)')
-uacpy.plot_field(scooter_tl, axes[0, 1], vmin=50, vmax=100,
+uacpy.plot.plot_field(scooter_tl, axes[0, 1], vmin=50, vmax=100,
                  title='2: Scooter (BOUNCE .brc)')
 uacpy.plot.plot_field_difference(
     kraken_tl, scooter_tl, axes[0, 2],
@@ -121,7 +123,7 @@ bounce.plot(ax=axes[1, 0])
 # Mark the compressional critical angle, arccos(c_water / c_p): |R| is 1 below
 # it and falls past it. The shear speed (400 m/s) is below the water speed, so
 # there is no shear critical angle.
-critical = np.degrees(np.arccos(env.ssp.data.min() / bottom.sound_speed))
+critical = uacpy.acoustics.critical_angle(bottom.sound_speed, float(env.ssp.sound_speed.min()))
 axes[1, 0].axvline(critical, color='r', ls='--', lw=1.5, alpha=0.7)
 axes[1, 0].text(critical + 2, 0.5, f'critical\n≈{critical:.1f}°', color='red',
                 fontsize='small')

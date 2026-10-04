@@ -40,17 +40,21 @@ import pytest
 import uacpy
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
 from uacpy.io.oases_writer import (
+    OasnReplicaGrid,
     write_oasn_input,
     write_oasp_input,
     write_oasr_input,
     write_oast_input,
 )
 from uacpy.io.oases_reader import (
+    _read_oasn_covariance_payload,
+    _read_oasn_replicas_payload,
+    _read_oasr_reflection_payload,
     read_oasn_covariance,
     read_oasn_replicas,
     read_oasr_reflection_coefficients,
-    read_oast_tl,
 )
+from uacpy.io._parsers import parse_oast_tl
 from uacpy.tests.conftest import make_pekeris
 
 _SRC = uacpy.Source(depths=50.0, frequencies=100.0)
@@ -64,6 +68,7 @@ def _deck_lines(path):
     return [ln for ln in Path(path).read_text().splitlines() if ln.strip()]
 
 
+@pytest.mark.requires_oases
 class TestVendoredArrayBoundsAreTheContract:
     """The limits the wrapper enforces are ``src/compar.f``'s, not the
     manual's: ``oases_install.tex:190-198`` still documents NLA = 200 and
@@ -87,9 +92,21 @@ class TestVendoredArrayBoundsAreTheContract:
         assert self._param('NRMAX') == self._param('NRD')
 
     def test_wavenumber_bound_is_two_to_the_npexp(self):
+        import importlib
+        import pkgutil
         from uacpy.io.oases_writer import _OASES_MAX_WAVENUMBERS
-        from uacpy.models.oases import _OASES_NP
-        assert _OASES_MAX_WAVENUMBERS == _OASES_NP == 2 ** self._param('NPEXP')
+        import uacpy.models.oases as package
+        assert _OASES_MAX_WAVENUMBERS == 2 ** self._param('NPEXP')
+        # One definition: every module of the models that reads the bound
+        # reads the writer's, and none carries a copy of its own.
+        modules = [importlib.import_module(f'{package.__name__}.{m.name}')
+                   for m in pkgutil.iter_modules(package.__path__)]
+        readers = [m for m in modules if hasattr(m, '_OASES_MAX_WAVENUMBERS')]
+        assert {m.__name__.rpartition('.')[2] for m in readers} == {
+            '_common', '_sampling', 'oass'}
+        for module in readers:
+            assert module._OASES_MAX_WAVENUMBERS is _OASES_MAX_WAVENUMBERS
+        assert not [m for m in modules if hasattr(m, '_OASES_NP')]
 
     def test_the_manuals_install_table_is_stale(self):
         # oases_install.tex:196-198 documents the OLD defaults. If this ever
@@ -137,7 +154,7 @@ class TestNegativeFlagValuesCannotReachTheDeck:
     def test_ssp_speeds_cannot_go_negative_either(self):
         # A negative CC on a water record would flag a TI layer mid-column.
         with pytest.raises(ConfigurationError, match='must be positive'):
-            uacpy.SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, -1490.0])
+            uacpy.SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, -1490.0])
 
 
 class TestPinnedWavenumberCountKeepsTheWholeSpectrum:
@@ -148,13 +165,37 @@ class TestPinnedWavenumberCountKeepsTheWholeSpectrum:
 
     def test_oast_block_vii_is_nw_one_nw(self, tmp_path):
         path = tmp_path / 'oast_run.dat'
-        write_oast_input(path, make_pekeris(), _SRC, _RCV, nw_samples=1024)
+        write_oast_input(path, make_pekeris(), _SRC, _RCV, n_wavenumbers=1024)
         assert '1024 1 1024' in _deck_lines(path)
 
     def test_oasp_block_vii_is_nw_one_nw_intf(self, tmp_path):
         path = tmp_path / 'oasp_run.dat'
-        write_oasp_input(path, make_pekeris(), _SRC, _RCV, nw_samples=1000)
+        write_oasp_input(path, make_pekeris(), _SRC, _RCV, n_wavenumbers=1000)
         assert '1000 1 1000 40' in _deck_lines(path)
+
+
+class TestOaspFrequencyRecordDefaults:
+    """With no ``n_time_samples`` / ``freq_max`` the OASP frequency record
+    ``NX FR1 FR2 DT …`` carries NX = 4096 and FR2 = 2.5 x the centre
+    frequency; OASES ties FR2 to nothing but FR1 (oasp.tex:131), so both are
+    uacpy's defaults. Explicit values replace them."""
+
+    @staticmethod
+    def _frequency_record(tmp_path, **kw):
+        path = tmp_path / 'oasp_run.dat'
+        write_oasp_input(path, make_pekeris(), _SRC, _RCV, **kw)
+        return [ln for ln in _deck_lines(path)
+                if ln.startswith(('4096 ', '2048 '))]
+
+    def test_the_defaults_write_nx_4096_and_fr2_at_2_5_times_the_centre(
+            self, tmp_path):
+        record, = self._frequency_record(tmp_path)
+        assert record.startswith('4096 0.000000000 250.000000000 ')
+
+    def test_explicit_values_replace_the_defaults(self, tmp_path):
+        record, = self._frequency_record(tmp_path, n_time_samples=2048,
+                                         freq_max=300.0)
+        assert record.startswith('2048 0.000000000 300.000000000 ')
 
 
 class TestOasrPlotAxisBlockGates:
@@ -179,12 +220,12 @@ class TestOasrPlotAxisBlockGates:
         assert self._BLOCK_VII_ROW in lines
 
     def test_nfou_zero_drops_the_angle_axes_only(self, tmp_path):
-        lines = self._deck(tmp_path, freq_output_increment=0)
+        lines = self._deck(tmp_path, plot_frequency_step=0)
         assert self._BLOCK_VI_ROW not in lines
         assert self._BLOCK_VII_ROW in lines
 
     def test_naou_zero_drops_the_frequency_axes_only(self, tmp_path):
-        lines = self._deck(tmp_path, angle_output_increment=0)
+        lines = self._deck(tmp_path, plot_angle_step=0)
         assert self._BLOCK_VI_ROW in lines
         assert self._BLOCK_VII_ROW not in lines
 
@@ -211,7 +252,7 @@ class TestRcoTableFollowsTheManual:
         return path
 
     def test_code_two_reads_as_an_angle_table(self, tmp_path):
-        data = read_oasr_reflection_coefficients(self._table(tmp_path, 2))
+        data = _read_oasr_reflection_payload(self._table(tmp_path, 2))
         assert data['sampling_type'] == 'angle'
         assert data['n_frequencies'] == 1
         assert data['frequencies'] == [50.0]
@@ -224,7 +265,7 @@ class TestRcoTableFollowsTheManual:
                            np.deg2rad([r[2] for r in self._ROWS]))
 
     def test_code_one_reads_as_a_slowness_table(self, tmp_path):
-        data = read_oasr_reflection_coefficients(self._table(tmp_path, 1))
+        data = _read_oasr_reflection_payload(self._table(tmp_path, 1))
         assert data['sampling_type'] == 'slowness'
         # The file column is s/km (oasjun21.f:103 writes slw*1e3); the
         # reader returns s/m.
@@ -239,16 +280,35 @@ class TestRcoTableFollowsTheManual:
         for name in ('t.rco', 't.dat'):
             with warnings.catch_warnings():
                 warnings.simplefilter('error')
-                data = read_oasr_reflection_coefficients(
+                data = _read_oasr_reflection_payload(
                     self._table(tmp_path, 1, name))
             assert data['sampling_type'] == 'slowness', name
+
+    def test_the_file_reads_as_the_reflection_coefficient_carrier(
+            self, tmp_path):
+        from uacpy.core.results import ReflectionCoefficient
+        path = self._table(tmp_path, 2)
+        rc = read_oasr_reflection_coefficients(path)
+        assert isinstance(rc, ReflectionCoefficient) and rc.model == ''
+        np.testing.assert_allclose(rc.angles, [r[0] for r in self._ROWS])
+        np.testing.assert_allclose(rc.magnitude, [r[1] for r in self._ROWS])
+        np.testing.assert_allclose(rc.phase, np.deg2rad([r[2] for r in self._ROWS]))
+        assert rc.frequencies.tolist() == [50.0]
+        assert rc.metadata['sampling_type'] == 'angle'
+
+    def test_a_slowness_table_is_not_read_as_angles(self, tmp_path):
+        """The carrier is indexed by grazing angle; a slowness table has no
+        sound speed to convert with, so it is refused by name."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        with pytest.raises(UnsupportedFeatureError, match='slowness'):
+            read_oasr_reflection_coefficients(self._table(tmp_path, 1))
 
     def test_a_disagreeing_extension_warns_and_follows_the_header(
             self, tmp_path):
         """A slowness table renamed .trc keeps its abscissa, with a warning
         naming both the extension and the header code."""
         with pytest.warns(UserWarning, match=r"\.trc.*slowness"):
-            data = read_oasr_reflection_coefficients(
+            data = _read_oasr_reflection_payload(
                 self._table(tmp_path, 1, 't.trc'))
         assert data['sampling_type'] == 'slowness'
         assert np.allclose(data['angles_or_slowness'][0],
@@ -297,7 +357,7 @@ class TestXsmLayoutFollowsTheManual:
         return path
 
     def test_header_and_indexing(self, tmp_path):
-        data = read_oasn_covariance(self._write(tmp_path))
+        data = _read_oasn_covariance_payload(self._write(tmp_path))
         assert data['title'] == self._TITLE
         assert data['n_receivers'] == self._NRCV
         assert data['n_frequencies'] == self._NFREQ
@@ -313,12 +373,73 @@ class TestXsmLayoutFollowsTheManual:
                     assert cov[ifreq - 1, ircv - 1, jrcv - 1] == (
                         self._value(ifreq, ircv, jrcv))
 
+    def test_the_file_reads_as_the_covariance_carrier(self, tmp_path):
+        from uacpy.core.results import Covariance
+        path = self._write(tmp_path)
+        cov = read_oasn_covariance(path, receiver_depths=[10, 20, 30])
+        assert isinstance(cov, Covariance) and cov.model == ''
+        np.testing.assert_array_equal(cov.covariance,
+                                      _read_oasn_covariance_payload(path)['covariance'])
+        assert cov.frequencies.tolist() == [20.0, 30.0]
+        assert cov.receiver_positions[:, 2].tolist() == [10.0, 20.0, 30.0]
+        # Depths that do not match the file's receiver count are not used.
+        assert read_oasn_covariance(
+            path, receiver_depths=[10, 20]).receiver_positions is None
+        assert cov.metadata['white_noise_level'] == 50.0
+
+    @pytest.mark.requires_oases
+    def test_oasn_returns_the_file_in_pascal_squared_per_hertz(
+            self, tmp_path, monkeypatch):
+        """The ``.xsm`` holds linear power in the reference of the deck's
+        dB noise levels, µPa²/Hz (OASES forms ``10**(dB/10)``,
+        ``oasnun22.f:228``). The reader returns it as written; OASN returns
+        it times ``REFERENCE_PRESSURE_WATER**2`` — one float64 product
+        stored back in the file's complex64 — with ``metadata['unit']``
+        and the plot's colour-bar label saying Pa²/Hz."""
+        import matplotlib.pyplot as plt
+        from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+        from uacpy.models.oases import OASN
+        xsm = self._write(tmp_path)
+        work = tmp_path / 'run'
+
+        class _Proc:
+            returncode, stdout, stderr = 0, '', ''
+
+        def _binary_writes_the_xsm(model, *args, **kwargs):
+            (work / 'oasn_run.xsm').write_bytes(xsm.read_bytes())
+            return _Proc()
+
+        monkeypatch.setattr(OASN, '_run_subprocess', _binary_writes_the_xsm)
+        env = uacpy.Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(
+                acoustic_type='half-space', sound_speed=1700.0,
+                density=1.8, attenuation=0.5))
+        cov = OASN(surface_noise_level=70.0, verbose=False,
+                   work_dir=str(work), cleanup=False).compute_covariance(
+            env, uacpy.Source(depths=10.0, frequencies=[20.0, 30.0]),
+            uacpy.Receiver(depths=[10.0, 20.0, 30.0], ranges=[0.0]))
+        raw = read_oasn_covariance(xsm).covariance
+        assert raw.dtype == np.complex64
+        assert cov.covariance.dtype == raw.dtype
+        np.testing.assert_array_equal(
+            cov.covariance,
+            (raw.astype(np.complex128) * REFERENCE_PRESSURE_WATER ** 2)
+            .astype(np.complex64))
+        assert cov.unit == 'Pa²/Hz'
+        assert 'unit' not in cov.metadata
+        fig, _ = cov.plot()
+        try:
+            assert fig.axes[-1].get_ylabel() == '|C| (Pa²/Hz)'
+        finally:
+            plt.close(fig)
+
 
 class TestRpoLayoutFollowsTheManual:
     """A ``.rpo`` built from the header WRITEs and the replica loop of
     ``oasn.tex:651-689`` — IRCV innermost, then IYR, IXR, IZR, IFREQ — must
     read back on the ``(n_freq, n_z, n_x, n_y, n_rcv)`` axes with the grid in
-    the deck's own mixed units (z in m, x/y in km, ``oasn.tex:109-111``,
+    metres (the file holds z in m and x/y in km, ``oasn.tex:109-111``,
     :365-371) and the on-disk linear gain converted back to the dB the deck
     stated (``oasnun22.f:99``)."""
 
@@ -356,12 +477,12 @@ class TestRpoLayoutFollowsTheManual:
         return path
 
     def test_axes_units_and_gain(self, tmp_path):
-        data = read_oasn_replicas(self._write(tmp_path))
+        data = _read_oasn_replicas_payload(self._write(tmp_path))
         assert data['title'] == 'replica run'
         assert (data['n_z'], data['n_x'], data['n_y']) == (3, 2, 1)
-        # Grid fields come back in the deck's units: z in m, x/y in km.
+        # Every grid field comes back in metres; the file holds x/y in km.
         assert (data['z_min'], data['z_max']) == (10.0, 90.0)
-        assert (data['x_min'], data['x_max']) == (0.5, 2.5)
+        assert (data['x_min'], data['x_max']) == (500.0, 2500.0)
         # Receiver rows are X, Y, Z in metres (oasn.tex:47-49, :666-668).
         assert data['receiver_positions'][0].tolist() == [1.5, 0.0, 30.0]
         assert data['receiver_positions'][1].tolist() == [0.0, 0.0, 60.0]
@@ -374,6 +495,19 @@ class TestRpoLayoutFollowsTheManual:
                 for ircv in range(1, self._NRCV + 1):
                     assert rep[0, iz - 1, ix - 1, 0, ircv - 1] == (
                         self._value(iz, ix, 1, ircv))
+
+    def test_the_file_reads_as_the_replicas_carrier(self, tmp_path):
+        from uacpy.core.results import Replicas
+        path = self._write(tmp_path)
+        rep = read_oasn_replicas(path)
+        assert isinstance(rep, Replicas) and rep.model == ''
+        np.testing.assert_array_equal(rep.replicas,
+                                      _read_oasn_replicas_payload(path)['replicas'])
+        assert list(rep.candidates) == ['depth', 'x', 'y']
+        assert rep.candidates['depth'].tolist() == [10.0, 50.0, 90.0]
+        assert rep.candidates['x'].tolist() == [500.0, 2500.0]   # metres
+        assert rep.frequencies.tolist() == [25.0]
+        assert rep.metadata['title'] == 'replica run'
 
 
 class TestPltTabulatedAxes:
@@ -410,7 +544,7 @@ class TestPltTabulatedAxes:
         ys = [41.0, 42.0, 43.0]
         (tmp_path / 'r.plt').write_text(
             '\n'.join(f' {v}' for v in xs + ys) + '\n\n')
-        out = read_oast_tl(plp, [10.0])
+        out = parse_oast_tl(plp, [10.0])
         assert out['tl'].tolist() == [ys]
 
     def test_a_parameterised_curve_writes_no_block(self, tmp_path):
@@ -423,7 +557,7 @@ class TestPltTabulatedAxes:
         ys = [61.0, 62.0, 63.0]
         (tmp_path / 'r.plt').write_text(
             '\n'.join(f' {v}' for v in ys) + '\n\n')
-        out = read_oast_tl(plp, [10.0])
+        out = parse_oast_tl(plp, [10.0])
         assert out['tl'].tolist() == [ys]
         assert out['ranges'].tolist() == [1000.0, 1500.0, 2000.0]
 
@@ -433,7 +567,7 @@ class TestPltTabulatedAxes:
         plp = self._plp(tmp_path, [('NTLRAN', 3, 0.0, 0.0, 0.0, 2.0)])
         (tmp_path / 'r.plt').write_text(' 10.0\n 20.0\n 30.0\n\n')
         with pytest.raises(FileFormatError, match='no ordinate'):
-            read_oast_tl(plp, [10.0])
+            parse_oast_tl(plp, [10.0])
 
 
 @pytest.mark.requires_oases
@@ -448,11 +582,11 @@ class TestContourOffsetZeroInvokesTheBinarysOwnDefault:
 
     def _run(self, tmp_path, offset):
         from uacpy.models import OAST
-        from uacpy.models.oases import _oases_subprocess_env
+        from uacpy.models.oases._common import _oases_subprocess_env
         base = 'oast_run'
         write_oast_input(tmp_path / f'{base}.dat', make_pekeris(), _SRC, _RCV,
                          options='N T J', integration_offset=offset,
-                         nw_samples=1024)
+                         n_wavenumbers=1024)
         proc = subprocess.run(
             [str(OAST(verbose=False)._exe)], cwd=tmp_path,
             env=_oases_subprocess_env(base),
@@ -477,21 +611,22 @@ class TestReplicaGridCapIsRefusedBeforeLaunch:
     written no ``.rpo``. ``write_oasn_input`` therefore refuses the deck
     with a typed error before any launch."""
 
-    def _write(self, tmp_path, **counts):
+    def _write(self, tmp_path, replica):
         write_oasn_input(
             tmp_path / 'oasn_run.dat', make_pekeris(), _SRC,
             uacpy.Receiver(depths=np.linspace(20.0, 90.0, 4), ranges=[0.0]),
-            options='R J', nw_samples=256, **counts)
+            options='R J', n_wavenumbers=256, replica=replica)
 
-    @pytest.mark.parametrize('axis', ['replica_nz', 'replica_nx',
-                                      'replica_ny'])
+    @pytest.mark.parametrize('axis', ['z', 'x', 'y'])
     def test_202_on_any_axis_raises_before_any_deck_reaches_the_binary(
             self, tmp_path, axis):
         with pytest.raises(ConfigurationError, match='NSMAX = 201'):
-            self._write(tmp_path, **{axis: 202})
+            self._write(tmp_path, OasnReplicaGrid(**{axis: (None, None, 202)}))
 
     def test_201_per_axis_is_the_densest_legal_grid(self, tmp_path):
-        self._write(tmp_path, replica_nz=201, replica_nx=201, replica_ny=1)
+        self._write(tmp_path, OasnReplicaGrid(z=(None, None, 201),
+                                              x=(None, None, 201),
+                                              y=(None, None, 1)))
         deck = (tmp_path / 'oasn_run.dat').read_text()
         assert ' 201\n' in deck
 
@@ -553,25 +688,25 @@ class TestOasrTablesAcceptFortranRealSpellings:
         return p
 
     def test_a_letterless_three_digit_exponent_parses(self, tmp_path):
-        from uacpy.io.oases_reader import read_oasr_reflection_coefficients
-        data = read_oasr_reflection_coefficients(
+        from uacpy.io.oases_reader import _read_oasr_reflection_payload
+        data = _read_oasr_reflection_payload(
             self._write(tmp_path, '0.123457-118'))
         assert data['magnitude'][0][0] == pytest.approx(
             1.23457e-119, rel=1e-6)
 
     def test_a_d_exponent_parses(self, tmp_path):
-        from uacpy.io.oases_reader import read_oasr_reflection_coefficients
-        data = read_oasr_reflection_coefficients(
+        from uacpy.io.oases_reader import _read_oasr_reflection_payload
+        data = _read_oasr_reflection_payload(
             self._write(tmp_path, '     1.5D+00'))
         assert data['magnitude'][0][0] == pytest.approx(1.5, rel=1e-12)
 
     def test_a_d_exponent_header_frequency_parses(self, tmp_path):
-        from uacpy.io.oases_reader import read_oasr_reflection_coefficients
+        from uacpy.io.oases_reader import _read_oasr_reflection_payload
         p = tmp_path / 'hdr.trc'
         p.write_text(
             "     1.0D+01     100.000   1   2\n"
             "      10.000      1  # Frequency, # of angles\n"
             "      10.000000       0.500000      5.000000\n"
         )
-        data = read_oasr_reflection_coefficients(p)
+        data = _read_oasr_reflection_payload(p)
         assert data['freq_min'] == pytest.approx(10.0, rel=1e-12)

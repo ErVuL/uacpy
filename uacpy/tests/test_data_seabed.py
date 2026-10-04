@@ -7,6 +7,14 @@ import pytest
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import seabed
+from uacpy.data.sediment import transect_fetcher
+
+
+def _live_emodnet_transect(start, end, **kw):
+    """The live EMODnet WFS alone along a transect (the chain would try the
+    cached polygons first)."""
+    return transect_fetcher(seabed.fetch_bottom_emodnet, 'EMODnet')(
+        start, end, **kw)
 
 
 def _geojson(folk_5cl, txt):
@@ -28,10 +36,24 @@ def test_web_mercator_transform():
 def test_fetch_seabed_substrate_parses(monkeypatch):
     monkeypatch.setattr(seabed, 'http_get',
                         lambda url, **kw: _geojson(2, '2. Sand'))
-    sub = seabed.fetch_seabed_substrate((56.0, 3.0))
-    assert sub['folk_5cl'] == 2
-    assert sub['folk_5cl_txt'] == '2. Sand'
-    assert 'EMODnet' in sub['source']
+    sub = seabed.fetch_emodnet_substrate((56.0, 3.0))
+    assert sub.folk_class == 2
+    assert sub.details['folk_5cl_txt'] == '2. Sand'
+    assert sub.folk_class_scheme == 'folk5'
+    assert sub.provenance.source.id == 'emodnet'
+    assert sub.provenance.requested_point == (56.0, 3.0)
+
+
+@pytest.mark.parametrize('body', [
+    _geojson(None, None),
+    json.dumps({'features': [{'properties': {'folk_5cl_txt': 'x'}}]}).encode(),
+], ids=['null-code', 'no-code'])
+def test_a_polygon_without_a_folk_code_is_no_coverage(monkeypatch, body):
+    """The offline index skips such features; the live fetch refuses them
+    with the chains' own error, so ``'auto'`` falls through."""
+    monkeypatch.setattr(seabed, 'http_get', lambda url, **kw: body)
+    with pytest.raises(DataFetchError, match='no Folk class'):
+        seabed.fetch_emodnet_substrate((56.0, 3.0))
 
 
 # The coarse Folk class (ϕ=−1) is outside Hamilton's continental-terrace range,
@@ -43,19 +65,21 @@ def test_fetch_seabed_substrate_parses(monkeypatch):
     (3, -1.0),   # Coarse-grained
     (4, 3.0),    # Mixed
 ])
-def test_fetch_bottom_grain_size_classes(monkeypatch, folk, phi):
+def test_fetch_bottom_emodnet_grain_size_classes(monkeypatch, folk, phi):
     monkeypatch.setattr(seabed, 'http_get',
                         lambda url, **kw: _geojson(folk, f'{folk}. x'))
-    bp = seabed.fetch_bottom((56.0, 3.0))
+    bp = seabed.fetch_bottom_emodnet((56.0, 3.0))
     assert isinstance(bp, BoundaryProperties)
     assert bp.acoustic_type == 'half-space'   # universal, model-agnostic
     assert bp.grain_size_phi == phi           # ϕ retained as metadata
+    assert [(p.source.id, p.requested_point) for p in bp.data_sources] == [
+        ('emodnet', (56.0, 3.0))]
 
 
-def test_fetch_bottom_hard_substrate(monkeypatch):
+def test_fetch_bottom_emodnet_hard_substrate(monkeypatch):
     monkeypatch.setattr(seabed, 'http_get',
                         lambda url, **kw: _geojson(5, '5. Rock'))
-    bp = seabed.fetch_bottom((56.0, 3.0))
+    bp = seabed.fetch_bottom_emodnet((56.0, 3.0))
     assert bp.acoustic_type == 'half-space'      # limestone preset, not grain-size
 
 
@@ -63,21 +87,21 @@ def test_no_coverage_raises(monkeypatch):
     monkeypatch.setattr(seabed, 'http_get',
                         lambda url, **kw: json.dumps({'features': []}).encode())
     with pytest.raises(DataFetchError, match='European seas only'):
-        seabed.fetch_bottom((0.0, -140.0))         # mid-Pacific: no EMODnet data
+        seabed.fetch_bottom_emodnet((0.0, -140.0))         # mid-Pacific: no EMODnet data
 
 
-def test_fetch_bottom_transect(monkeypatch):
+def test_live_emodnet_along_a_transect_gives_a_range_dependent_bottom(monkeypatch):
     from uacpy.core.environment import Bottom
     monkeypatch.setattr(seabed, 'http_get',
                         lambda url, **kw: _geojson(2, '2. Sand'))
-    rdb = seabed.fetch_bottom_transect((0.0, 0.0), (1.0, 0.0), n_points=4)
+    rdb = _live_emodnet_transect((0.0, 0.0), (1.0, 0.0), n_points=4)
     assert isinstance(rdb, Bottom)
     assert rdb.ranges.shape == (4,) and rdb.halfspace_sound_speed.shape == (4,)
     assert rdb.ranges[0] == 0.0
     assert (rdb.halfspace_sound_speed > 1500).all()
 
 
-def test_fetch_bottom_transect_holds_gaps(monkeypatch):
+def test_live_emodnet_along_a_transect_holds_gaps(monkeypatch):
     # First point covered (Sand), rest uncovered → forward-filled, no raise.
     calls = {'n': 0}
 
@@ -88,21 +112,21 @@ def test_fetch_bottom_transect_holds_gaps(monkeypatch):
         return json.dumps({'features': []}).encode()
 
     monkeypatch.setattr(seabed, 'http_get', flaky)
-    rdb = seabed.fetch_bottom_transect((0.0, 0.0), (1.0, 0.0), n_points=3)
+    rdb = _live_emodnet_transect((0.0, 0.0), (1.0, 0.0), n_points=3)
     assert (rdb.halfspace_sound_speed == rdb.halfspace_sound_speed[0]).all()   # held across gaps
 
 
-def test_fetch_bottom_transect_all_uncovered_raises(monkeypatch):
+def test_live_emodnet_along_an_uncovered_transect_raises(monkeypatch):
     monkeypatch.setattr(seabed, 'http_get',
                         lambda url, **kw: json.dumps({'features': []}).encode())
     with pytest.raises(DataFetchError, match='along the transect'):
-        seabed.fetch_bottom_transect((0.0, -140.0), (1.0, -140.0), n_points=3)
+        _live_emodnet_transect((0.0, -140.0), (1.0, -140.0), n_points=3)
 
 
 @pytest.mark.requires_network
 def test_live_emodnet_north_sea():
     try:
-        bp = seabed.fetch_bottom((56.0, 3.0))      # North Sea: sandy
+        bp = seabed.fetch_bottom_emodnet((56.0, 3.0))      # North Sea: sandy
     except DataFetchError as exc:
         pytest.skip(f"EMODnet unreachable: {exc.message}")
     assert isinstance(bp, BoundaryProperties)
@@ -160,4 +184,47 @@ def test_a_polar_request_gets_the_typed_no_coverage_error(monkeypatch, lat):
     monkeypatch.setattr(seabed, 'http_get',
                         lambda url, **kw: json.dumps({'features': []}).encode())
     with pytest.raises(DataFetchError, match='no seabed substrate'):
-        seabed.fetch_seabed_substrate((lat, 0.0))
+        seabed.fetch_emodnet_substrate((lat, 0.0))
+
+
+class TestASeabedSampleNamesItsFolkScheme:
+    """A Folk class means nothing without its scheme (EMODnet's 1-5 code vs
+    Folk's ``'sG'``), so a record refuses one without the other, and
+    ``samples_table`` lays any samples side by side."""
+
+    @staticmethod
+    def _prov(source='emodnet'):
+        from uacpy.data import SOURCES, DataProvenance
+        return DataProvenance(source=SOURCES[source],
+                              requested_point=(56.0, 3.0))
+
+    def test_a_folk_class_without_its_scheme_is_refused(self):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.data import SeabedSample
+        with pytest.raises(ConfigurationError, match='folk_class_scheme'):
+            SeabedSample(grain_size_phi=None, material=None, folk_class=2,
+                         folk_class_scheme=None, sample_point=None,
+                         distance_km=None, provenance=self._prov())
+
+    def test_a_scheme_names_the_class(self):
+        from uacpy.data import SeabedSample
+        s = SeabedSample(grain_size_phi=None, material=None, folk_class=2,
+                         folk_class_scheme='folk5', sample_point=None,
+                         distance_km=None, provenance=self._prov())
+        assert (s.folk_class, s.folk_class_scheme) == (2, 'folk5')
+
+    def test_the_table_is_one_row_per_sample(self):
+        pytest.importorskip('pandas')
+        from uacpy.data import SeabedSample, samples_table
+        a = SeabedSample(grain_size_phi=None, material=None, folk_class=2,
+                         folk_class_scheme='folk5', sample_point=None,
+                         distance_km=None, provenance=self._prov())
+        b = SeabedSample(grain_size_phi=3.0, material=None, folk_class=None,
+                         folk_class_scheme=None, sample_point=(30.5, -40.5),
+                         distance_km=1.2,
+                         provenance=self._prov('grainsize'))
+        frame = samples_table(a, b)
+        assert frame['source'].tolist() == ['emodnet', 'grainsize']
+        assert frame['sample_lat'].tolist()[1] == 30.5
+        assert frame['folk_class_scheme'].tolist()[0] == 'folk5'
+

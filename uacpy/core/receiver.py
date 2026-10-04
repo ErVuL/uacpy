@@ -6,14 +6,24 @@ import warnings
 
 import numpy as np
 from typing import TYPE_CHECKING, Any, Union, List, Optional
-from dataclasses import dataclass
 
-from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.constants import DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M
-from uacpy.core._carrier_validate import (
-    _DeepCopyMixin,
-    _reject_complex, _require_non_negative, _require_strictly_increasing,
+from uacpy.core._repr import axis, build
+from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core.deck_limits import (
+    DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
 )
+from uacpy.core._validate import (
+    reject_complex, require_non_negative, require_strictly_increasing,
+)
+from uacpy.core._carrier import (
+    DeepCopyMixin, RevalidateOnAssignMixin, carrier,
+)
+from uacpy.core._export import CarrierExport
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+
+__all__ = [
+    'Receiver',
+]
 
 
 #: Constructor sentinel for ``ranges``: ``None`` means "not given", which
@@ -24,15 +34,20 @@ _RANGES_NOT_GIVEN: Any = None
 
 
 # eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
-@dataclass(eq=False)
-class Receiver(_DeepCopyMixin):
+# The constructor keeps the input types the Parameters section documents;
+# without them ``inspect.signature`` / ``help()`` would advertise a default the
+# field annotation refuses (``ranges: np.ndarray = None``).
+@carrier(eq=False, init_annotations=dict(
+    depths=Union[float, List[float], np.ndarray],
+    ranges=Optional[Union[float, List[float], np.ndarray]],
+))
+class Receiver(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     """
     Acoustic receiver definition
 
     Represents one or more receivers (hydrophones) at specified depths and
-    ranges.  For grid-type receivers, the model evaluates the field on the
-    full depth x range cartesian grid; for line-type receivers, depths and
-    ranges are paired point-by-point.
+    ranges. The model evaluates the field on the full depth x range
+    cartesian grid.
 
     Parameters
     ----------
@@ -44,18 +59,6 @@ class Receiver(_DeepCopyMixin):
         Receiver range(s) in meters. Default is single point at 0m. More
         than one must be strictly increasing, with a minimum step of
         ``DECK_RANGE_RESOLUTION_M``.
-    receiver_type : str, optional
-        Receiver *sampling layout*. ``'grid'`` (default) evaluates the field
-        on the full depth×range cross-product and is the only implemented
-        layout. ``'line'`` — depths and ranges paired point-by-point, e.g. a
-        glider track or tilted array — names the axis but **raises**: no
-        model's result assembly collapses the grid to paired samples, so
-        accepting it would silently return the cross-product instead. Use
-        ``'grid'`` and index the diagonal:
-        ``tl[np.arange(len(depths)), np.arange(len(ranges))]``. Note this
-        ``'line'`` is a coordinate-pairing rule, unrelated to
-        :class:`~uacpy.Source`'s ``source_type='line'`` (a physical
-        line-source geometry).
 
     Attributes
     ----------
@@ -63,12 +66,23 @@ class Receiver(_DeepCopyMixin):
         Receiver depths
     ranges : ndarray
         Receiver ranges
-    receiver_type : str
-        Receiver type
     n_depths : int
         Number of depth points
     n_ranges : int
         Number of range points
+
+    Notes
+    -----
+    Paired samples — depths and ranges paired point-by-point, e.g. a
+    glider track or tilted array — come from a grid run: every model
+    returns the full depth×range cross-product. Run a grid over the
+    track's distinct depths and ranges and index the pairs, which works
+    for any track (a glider's yo-yo included)::
+
+        zu, iz = np.unique(track_depths, return_inverse=True)
+        ru, ir = np.unique(track_ranges, return_inverse=True)
+        tl = model.run(env, src, Receiver(depths=zu, ranges=ru)).dB
+        paired = tl[iz, ir]      # one value per track point
 
     Examples
     --------
@@ -90,7 +104,6 @@ class Receiver(_DeepCopyMixin):
 
     depths: np.ndarray
     ranges: np.ndarray = _RANGES_NOT_GIVEN
-    receiver_type: str = 'grid'
 
     if TYPE_CHECKING:
         # The two roles of a dataclass field annotation, separated: the
@@ -100,74 +113,69 @@ class Receiver(_DeepCopyMixin):
         # section documents. Declaring both through the field annotation
         # alone gives the union to every attribute read, so ``r.ranges.max()``
         # and ``for d in r.depths`` are reported as errors in downstream code
-        # that runs correctly. Never executed, so the decorator compiles the
-        # runtime ``__init__`` from the fields exactly as before.
+        # that runs correctly. Never executed; the runtime ``__init__`` is
+        # ``@carrier``'s, with the same parameters.
         def __init__(
             self,
             depths: Union[float, List[float], np.ndarray],
             ranges: Optional[Union[float, List[float], np.ndarray]] = None,
-            receiver_type: str = 'grid',
         ) -> None: ...
 
     def __post_init__(self):
-        if self.receiver_type != 'grid':
-            raise ConfigurationError(
-                f"receiver_type must be 'grid'; got {self.receiver_type!r}. "
-                "receiver_type='line' is not implemented — every model "
-                "returns the full depth x range grid, so the paired "
-                "(depths[i], ranges[i]) sampling would be silently ignored. "
-                "Use receiver_type='grid' and index the diagonal yourself: "
-                "tl[np.arange(len(depths)), np.arange(len(ranges))]."
-            )
         if self.ranges is None:
-            # stacklevel=3, not 2: a dataclass reaches ``__post_init__``
-            # through the ``__init__`` the decorator compiles from a string,
-            # so level 2 is that generated frame and attributes the warning
-            # to ``<string>:6``. Every call site then shares one dedup key
-            # and only the first ``Receiver(depths=…)`` in a program warns.
-            # ``skip_file_prefixes`` cannot fix it — the generated frame's
-            # ``<string>`` filename matches no package prefix, so the walk
-            # stops there (measured).
-            # The count survives the second-entry-point test that retired
-            # most hand-counts: the models build a ``Receiver`` internally,
-            # but every one of those passes an explicit ``ranges=``, so this
-            # branch is reachable only from a user's own constructor call.
+            # The walk, not a count: ``@carrier``'s ``__init__`` and the
+            # rebuild an assignment runs are package frames the walk steps
+            # over, so the warning names the user's line from a
+            # ``Receiver(depths=…)`` and from ``receiver.ranges = None``
+            # alike, and each call site keeps its own dedup key.
             warnings.warn(
                 "Receiver: ranges not given, defaulting to a single point at "
                 "0 m (the source location), which is singular for TL/pressure "
                 "runs; pass explicit ranges= to avoid this.",
-                UserWarning,
-                stacklevel=3,
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             # An array, not the 0.0 scalar: the field declares ndarray, and
             # the atleast_1d cast below turns either into the same array([0.]).
-            self.ranges = np.zeros(1)
+            object.__setattr__(self, 'ranges', np.zeros(1))
 
         # Ahead of the float64 casts below, which discard an imaginary part —
         # see _reject_complex for the two ways they do it.
-        _reject_complex(self.depths, "receiver depths")
-        _reject_complex(self.ranges, "receiver ranges")
-        self.depths = np.atleast_1d(np.array(self.depths, dtype=np.float64))
-        self.ranges = np.atleast_1d(np.array(self.ranges, dtype=np.float64))
+        reject_complex(self.depths, "receiver depths")
+        reject_complex(self.ranges, "receiver ranges")
+        # Stored with object.__setattr__: a plain store to a set field is an
+        # assignment, which rebuilds the Receiver through this method
+        # (_RevalidateOnAssignMixin).
+        object.__setattr__(self, 'depths', np.atleast_1d(
+            np.array(self.depths, dtype=np.float64)))
+        object.__setattr__(self, 'ranges', np.atleast_1d(
+            np.array(self.ranges, dtype=np.float64)))
+        for name in ('depths', 'ranges'):
+            shape = getattr(self, name).shape
+            if len(shape) != 1:
+                raise ConfigurationError(
+                    f"Receiver.{name} must be a scalar or a 1-D axis; got "
+                    f"shape {shape}. The Receiver is the cross-product of "
+                    f"its depth and range axes (the grid is built for "
+                    f"you), so pass the two 1-D axes, not a meshgrid.")
 
         if self.depths.size < 1:
             raise ConfigurationError(
-                "receiver depths must contain at least one value, got empty array"
+                "receiver depths must contain at least one value, got empty array."
             )
         if self.ranges.size < 1:
             raise ConfigurationError(
-                "receiver ranges must contain at least one value, got empty array"
+                "receiver ranges must contain at least one value, got empty array."
             )
 
-        _require_non_negative(
+        require_non_negative(
             self.depths, "receiver depths", hint="metres, positive down from surface")
-        _require_non_negative(
+        require_non_negative(
             self.ranges, "receiver ranges", hint="metres, outward from source")
 
-        _require_strictly_increasing(self.depths, "Receiver.depths",
-                                     min_step=DECK_DEPTH_RESOLUTION_M)
-        _require_strictly_increasing(self.ranges, "Receiver.ranges",
-                                     min_step=DECK_RANGE_RESOLUTION_M)
+        require_strictly_increasing(self.depths, "Receiver.depths",
+                                    min_step=DECK_DEPTH_RESOLUTION_M)
+        require_strictly_increasing(self.ranges, "Receiver.ranges",
+                                    min_step=DECK_RANGE_RESOLUTION_M)
 
     @property
     def n_depths(self) -> int:
@@ -199,17 +207,13 @@ class Receiver(_DeepCopyMixin):
         """Maximum receiver range."""
         return float(np.max(self.ranges))
 
-    def __repr__(self) -> str:
-        return f"Receiver(grid: {self.n_depths} depths × {self.n_ranges} ranges)"
+    def grid(self):
+        """``(Z, R)``: the depth and range (m) of every receiver of the
+        grid, each of shape ``(n_depths, n_ranges)`` — the depth-first
+        layout of a ``(depth, range)`` Field, so ``Z[i, j]`` and
+        ``R[i, j]`` are where ``field.data[i, j]`` was computed."""
+        return np.meshgrid(self.depths, self.ranges, indexing='ij')
 
-# The dataclass compiles ``__init__`` from the *field* annotations, so
-# ``inspect.signature`` / ``help()`` would advertise a default the annotation
-# refuses (``ranges: np.ndarray = None``). Restate the input types on the
-# generated ``__init__`` so the runtime signature says what the block above
-# and the Parameters section say. Annotations only: no default, no field and
-# no behaviour changes, and the class annotations — which are what an
-# attribute read is checked against — are untouched.
-Receiver.__init__.__annotations__.update(
-    depths=Union[float, List[float], np.ndarray],
-    ranges=Optional[Union[float, List[float], np.ndarray]],
-)
+    def __repr__(self) -> str:
+        return build('Receiver', [axis(self.depths, 'depths', 'm'),
+                                  axis(self.ranges, 'ranges', 'm')])

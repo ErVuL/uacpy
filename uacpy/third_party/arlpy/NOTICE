@@ -11,8 +11,8 @@ Files in UACPY containing arlpy-adapted code:
 
     uacpy/core/acoustics/seawater.py
         Functions adapted from arlpy.uwa (BSD-3-Clause, (c) 2016 Mandar Chitre):
-          - soundspeed          (Mackenzie 1981)
-          - density             (Fofonoff IES-80)
+          - sound_speed_mackenzie (Mackenzie 1981)
+          - density               (Fofonoff IES-80)
           - doppler
 
     uacpy/core/acoustics/boundaries.py
@@ -23,7 +23,7 @@ Files in UACPY containing arlpy-adapted code:
         Functions adapted from arlpy.uwa (BSD-3-Clause, (c) 2016 Mandar Chitre):
           - bubble_resonance
           - bubble_surface_loss
-          - bubble_soundspeed
+          - bubble_sound_speed
 
     Volume-attenuation models (Thorp, Francois-Garrison) live in
     uacpy/core/absorption.py and were re-derived from the upstream

@@ -19,53 +19,43 @@ every replica in the search grid is a cheap analytic re-sum.
 Typical use::
 
     modes = Kraken().compute_modes(env, source)
-    bank  = replica_bank(modes, array_depths, cand_depths, cand_ranges)
+    bank  = replica_bank(modes, array_depths=zs, candidate_depths=cz,
+                         candidate_ranges=cr)   # Replicas on (depth, range)
     K     = csdm(measured_snapshots)          # (n_rcv, n_snap) -> (n_rcv, n_rcv)
-    surf  = bartlett(K, bank)                 # (n_cand_depths, n_cand_ranges)
+    amb   = bartlett(K, bank)                 # ambiguity Field, dB re peak
+    best  = amb.max()                         # the estimate, with its coords
 
-Against ``acoustic_signal.arrays``
-----------------------------------
-:mod:`uacpy.acoustic_signal.arrays` runs the same two processors over a
-plane-wave steering bank. They share the numerical core
-(``core/_beamforming``) and differ in four stated ways, so a number carried
-from one to the other needs converting:
+Against ``acoustic_signal.beamforming``
+---------------------------------------
+:func:`bartlett` and :func:`mvdr` here are
+:func:`uacpy.acoustic_signal.bartlett` / :func:`~uacpy.acoustic_signal.mvdr`
+over a :class:`~uacpy.core.results.Replicas` bank, returned as an ambiguity
+Field. They differ from the array functions' defaults in two stated ways:
 
-=====================  ============================  ==========================
-                       ``sonar`` (this module)       ``acoustic_signal.arrays``
-=====================  ============================  ==========================
-covariance             :func:`csdm`                  ``sample_covariance``
-                                                     (identical estimate; this
-                                                     one adds
-                                                     ``diagonal_loading``)
-weight bank            ``replicas`` ``(N, *grid)``   ``steering``
-                       — column-major, one column    ``(n_angles, N)`` —
-                       per candidate                 row-major, one row per
-                                                     angle
-Bartlett scaling       normalised to ``[0, 1]``:     unnormalised
-                       divided by ``tr K``           ``e^H R e``
-MVDR scaling           max-scaled to 1               unscaled ``1/(w^H R^-1 w)``
-MVDR loading default   ``diagonal_loading=0.01``     ``diagonal_loading=1e-06``
-=====================  ============================  ==========================
+* normalisation: Bartlett here is ``normalize='trace'`` (a perfect match to
+  a rank-one CSDM scores 1) and MVDR ``normalize='max'``; the array
+  functions default to ``'none'``;
+* MVDR loading: ``diagonal_loading=0.01`` here, ``1e-06`` there.
 
 The loading defaults differ on purpose and are **not** aligned: a replica bank
 over a dense candidate grid is routinely rank-deficient against a short
 snapshot record, which is why ``1e-2`` is the default here (see
 :func:`mvdr`); the array-processing surface assumes a full-rank sample
-covariance and only needs a numerical floor. ``core/_beamforming``'s docstring
-states that each surface keeps its own loading, normalisation and NaN policy.
+covariance and only needs a numerical floor. The covariance estimate is the
+same under both names: :func:`csdm` and ``sample_covariance`` (which adds
+``diagonal_loading``).
 """
 
 from __future__ import annotations
 
-from typing import Tuple, Union
+from typing import Union
 
-import warnings
 
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core._beamforming import (
-    loaded_inverse, quadratic_form, snapshot_covariance)
+from uacpy.core.acoustics import modal_field, mode_shapes_at
+from uacpy.core._beamforming import snapshot_covariance
 
 __all__ = [
     "synthesize_replica",
@@ -79,62 +69,33 @@ __all__ = [
 _ArrayLike = Union[float, np.ndarray]
 
 
-def _interp_modes(modes, z: np.ndarray) -> np.ndarray:
-    """Interpolate the mode shapes ``phi_m(z)`` to depths ``z``.
-
-    Returns shape ``(len(z), n_modes)``. Complex mode shapes (krakenc) are
-    interpolated component-wise.
-    """
-    z = np.atleast_1d(np.asarray(z, dtype=float))
-    phi = modes.phi  # (n_depth, n_modes)
-    zp = modes.depths
-    # np.interp end-clamps outside [zp[0], zp[-1]], returning a flat
-    # plateau that looks like physics; the modal sum in
-    # Modes.modal_propagation_loss raises for the same condition, so this
-    # path does too.
-    if float(np.min(z)) < float(zp[0]) or float(np.max(z)) > float(zp[-1]):
-        raise ConfigurationError(
-            f"matched_field: depth(s) [{float(np.min(z)):g}, "
-            f"{float(np.max(z)):g}] m fall outside the mode tabulation "
-            f"[{float(zp[0]):g}, {float(zp[-1]):g}] m — the mode shapes are "
-            f"unknown there (a clamped value would be a flat, wrong "
-            f"replica). Tabulate the modes over the full source/receiver "
-            f"span (Kraken().compute_modes does).")
-    if np.iscomplexobj(phi):
-        out = np.empty((z.size, phi.shape[1]), dtype=np.complex128)
-        for m in range(phi.shape[1]):
-            out[:, m] = np.interp(z, zp, phi[:, m].real) + 1j * np.interp(
-                z, zp, phi[:, m].imag
-            )
-        return out
-    out = np.empty((z.size, phi.shape[1]), dtype=float)
-    for m in range(phi.shape[1]):
-        out[:, m] = np.interp(z, zp, phi[:, m])
-    return out
-
-
 def synthesize_replica(
     modes,
-    src_depth: float,
+    *,
+    source_depth: float,
     ranges: _ArrayLike,
     array_depths: _ArrayLike,
 ) -> np.ndarray:
-    """Complex pressure at ``array_depths`` for a source at ``(src_depth, ranges)``.
+    """Complex pressure at ``array_depths`` for a source at ``(source_depth, ranges)``.
 
-    Evaluates the KRAKEN far-field modal sum. The result is proportional to the
-    physical replica vector; the omitted global complex scalar
-    (``A_s exp(i pi/4) rho(z_s) / sqrt(2 pi)`` — source level, source-depth
-    density and a constant phase, per Medwin & Clay / Computational Ocean
-    Acoustics) is common to every sensor and divides out of the Bartlett/MVDR
-    processors. Uses the asymptotic (far-field) Hankel form, valid for
+    Evaluates the KRAKEN far-field modal sum through
+    :func:`uacpy.core.acoustics.modal_field` with unit source density, on
+    shapes read by :func:`uacpy.core.acoustics.mode_shapes_at`. The result is
+    proportional to the physical replica vector; the omitted global scalar
+    (source level and the source-depth density ``rho(z_s)``) is common to
+    every sensor and divides out of the Bartlett/MVDR processors. Uses the asymptotic (far-field) Hankel form, valid for
     ``k_m r >> 1`` — the same approximation ``field.exe`` makes; it is not a
     near-source field.
+
+    Everything after ``modes`` is keyword-only: the depths and ranges are
+    all float arrays, so a positional call in another order would swap them
+    silently rather than fail.
 
     Parameters
     ----------
     modes : Modes
         KRAKEN eigenpairs (``k``, ``phi``, ``depths``).
-    src_depth : float
+    source_depth : float
         Hypothesized source depth (m).
     ranges : float or ndarray, shape (R,)
         Source-receiver range(s) (m). Must be > 0.
@@ -155,20 +116,17 @@ def synthesize_replica(
             f"{int(np.argmax(r <= 0))} ({r[r <= 0][0]:g} m)")
     z = np.atleast_1d(np.asarray(array_depths, dtype=float))
 
-    k = np.asarray(modes.k, dtype=np.complex128)            # (M,)
-    phi_s = _interp_modes(modes, np.atleast_1d(
-        np.asarray(src_depth, dtype=float)))[0]             # (M,)
-    phi_r = _interp_modes(modes, z)                          # (N, M)
-
-    # (M, R): per-mode range term, far-field (asymptotic Hankel) convention.
-    # Under exp(-i k r) a mode decays for Im(k) <= 0. Raw Kraken eigenvalues
-    # already carry that sign while Modes.with_attenuation builds Im(k) > 0;
-    # a passive medium can only attenuate, so the sign is forced and either
-    # input synthesises a decaying replica.
-    k = k.real - 1j * np.abs(k.imag)
-    rng_term = np.exp(-1j * np.outer(k, r)) / np.sqrt(k)[:, None]
-    p = (phi_r * phi_s[None, :]) @ rng_term                 # (N, R)
-    p = p / np.sqrt(r)[None, :]
+    # The shapes at the source and the sensors come from the tabulation the
+    # way every modal sum in the package reads them (refused outside it, not
+    # clamped), and the sum is the package's asymptotic one. Its
+    # e^{-i pi/4} sqrt(2 pi) and the unit source density are the global
+    # scalar this replica leaves out anyway.
+    phi_s = mode_shapes_at(modes.phi, modes.depths,
+                           np.atleast_1d(np.asarray(source_depth, dtype=float)),
+                           outside='raise')[0]               # (M,)
+    phi_r = mode_shapes_at(modes.phi, modes.depths, z,
+                           outside='raise')                  # (N, M)
+    p = modal_field(modes.k, phi_s, phi_r, r, source_density=1.0)  # (N, R)
 
     if np.ndim(ranges) == 0:
         p = p[:, 0]
@@ -177,32 +135,62 @@ def synthesize_replica(
     return p
 
 
+def _vertical_array(depths) -> np.ndarray:
+    """``(N, 3)`` ``(x, y, z)`` positions of a vertical line array at the
+    origin with its elements at ``depths``: the geometry a replica bank over
+    ``(depth, range)`` candidates is computed for."""
+    z = np.atleast_1d(np.asarray(depths, dtype=float))
+    return np.column_stack([np.zeros_like(z), np.zeros_like(z), z])
+
+
 def replica_bank(
     modes,
+    *,
     array_depths: np.ndarray,
     candidate_depths: np.ndarray,
     candidate_ranges: np.ndarray,
-) -> np.ndarray:
+):
     """Replica vectors over a candidate ``(depth, range)`` grid.
 
+    Everything after ``modes`` is keyword-only, as on
+    :func:`synthesize_replica`: three float arrays in a positional call
+    would swap silently.
+
     Models a **vertical line array**: every sensor in ``array_depths`` shares
-    the candidate range, so each replica column applies one range to all
-    elements. A horizontal/tilted array (elements at differing ranges) would
-    need per-element ranges and is out of scope here.
+    the candidate range, so each replica applies one range to all elements.
+    A horizontal/tilted array (elements at differing ranges) would need
+    per-element ranges and is out of scope here.
+
+    Parameters
+    ----------
+    modes : Modes
+        The modes the replicas are synthesised from.
+    array_depths : ndarray
+        Depths (m) of the vertical array's sensors.
+    candidate_depths, candidate_ranges : ndarray
+        The candidate source grid (m).
 
     Returns
     -------
-    ndarray, shape ``(N, n_cand_depths, n_cand_ranges)``
-        ``bank[:, i, j]`` is the replica vector for a source at
-        ``(candidate_depths[i], candidate_ranges[j])`` on ``array_depths``.
+    Replicas
+        One frequency (``modes.frequencies``), ``candidates``
+        ``{'depth': candidate_depths, 'range': candidate_ranges}``, and
+        ``replicas[0, i, j]`` the replica vector over ``array_depths`` for a
+        source at ``(candidate_depths[i], candidate_ranges[j])``;
+        ``receiver_positions`` is the vertical array at the origin.
     """
+    from uacpy.core.results import Replicas
     z_arr = np.atleast_1d(np.asarray(array_depths, dtype=float))
     cz = np.atleast_1d(np.asarray(candidate_depths, dtype=float))
     cr = np.atleast_1d(np.asarray(candidate_ranges, dtype=float))
-    bank = np.empty((z_arr.size, cz.size, cr.size), dtype=np.complex128)
+    bank = np.empty((1, cz.size, cr.size, z_arr.size), dtype=np.complex128)
     for i, zs in enumerate(cz):
-        bank[:, i, :] = synthesize_replica(modes, zs, cr, z_arr)
-    return bank
+        bank[0, i] = synthesize_replica(modes, source_depth=zs, ranges=cr,
+                                        array_depths=z_arr).T
+    return Replicas(replicas=bank, candidates={'depth': cz, 'range': cr},
+                    receiver_positions=_vertical_array(z_arr),
+                    frequencies=getattr(modes, 'frequencies', None),
+                    model=getattr(modes, 'model', ''))
 
 
 def _slab_pressure(slab, array_depths) -> np.ndarray:
@@ -219,13 +207,13 @@ def _slab_pressure(slab, array_depths) -> np.ndarray:
             "replica_bank_from_field: slab must be complex narrowband pressure "
             f"(kind='pressure', complex dtype); got "
             f"kind={getattr(slab, 'kind', None)!r}, unit={slab.unit!r}, "
-            f"dtype={slab.data.dtype}"
+            f"dtype={slab.data.dtype}."
         )
     coords = list(slab.coords)
     if coords != ["depth", "range"]:
         raise ConfigurationError(
             "replica_bank_from_field: each slab needs canonical "
-            f"['depth', 'range'] coords (depth = array elements); got {coords}"
+            f"['depth', 'range'] coords (depth = array elements); got {coords}."
         )
     if array_depths is not None:
         want = np.atleast_1d(np.asarray(array_depths, dtype=float))
@@ -241,7 +229,7 @@ def _slab_pressure(slab, array_depths) -> np.ndarray:
     return np.asarray(slab.p, dtype=np.complex128)
 
 
-def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
+def replica_bank_from_field(field, *, array_depths=None):
     """MFP replica bank from a coherent ``Field`` produced by *any* model.
 
     Model-agnostic counterpart of :func:`replica_bank` (which is KRAKEN-mode
@@ -263,9 +251,11 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
       fields over ``source_depth`` — what a multi-source model run returns; the
       stack axis becomes the candidate-depth axis.
 
-    The ``depth`` (receiver) axis is moved to position 0; every remaining axis is
-    a candidate-grid axis kept in canonical order, so the result drops straight
-    into :func:`bartlett` / :func:`mvdr`. Those unit-normalise each replica, so
+    The ``depth`` (receiver) axis becomes the element axis, last; every
+    remaining axis is a candidate-grid axis kept in canonical order, named
+    as the ambiguity surface names it (the field's ``source_depth`` is the
+    candidate ``'depth'``), so the result drops straight into
+    :func:`bartlett` / :func:`mvdr`. Those unit-normalise each replica, so
     the per-position amplitude and the global source scalar divide out — no
     normalisation is needed here, exactly as for the modal sum.
 
@@ -292,25 +282,27 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
 
     Returns
     -------
-    ndarray, shape ``(N, *candidate_grid)``
-        ``N`` array elements first; the candidate-grid axes are the field's
-        non-``depth`` axes in order. ``np.unravel_index(surf.argmax(),
-        surf.shape)`` then indexes those coord vectors for the localization
-        estimate.
+    Replicas
+        One frequency (the field's), ``candidates`` the field's
+        non-``depth`` axes in order (``{'depth', 'range'}`` for a
+        source-depth sweep, ``{'range'}`` for one source depth), the
+        element axis last, and ``receiver_positions`` the vertical array
+        at the field's ``depth`` axis.
     """
+    from uacpy.core.results import Replicas
     # ResultStack over source_depth → stack slab pressures into a new
-    # candidate-depth axis (axis 1), giving (N, n_cand_depths, n_ranges).
+    # candidate-depth axis, giving (1, n_cand_depths, n_ranges, N).
     if hasattr(field, "slabs") and hasattr(field, "coordinate_name"):
         if field.coordinate_name != "source_depth":
             raise ConfigurationError(
                 "replica_bank_from_field: a ResultStack must stack over "
                 "'source_depth' (the candidate-depth axis); got "
-                f"{field.coordinate_name!r}"
+                f"{field.coordinate_name!r}."
             )
         ref = field.slabs[0]
         cols = []
         for slab in field.slabs:
-            cols.append(_slab_pressure(slab, array_depths))
+            cols.append(_slab_pressure(slab, array_depths).T)
             # Same (array, range) shape is necessary but not sufficient: two
             # slabs sampled on *different* depth or range vectors of equal
             # length would stack into a bank with an undefined candidate axis
@@ -327,7 +319,12 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
                     f"on {ref.coords['depth'].size} x "
                     f"{ref.coords['range'].size}."
                 )
-        return np.ascontiguousarray(np.stack(cols, axis=1), dtype=np.complex128)
+        return Replicas(
+            replicas=np.stack(cols, axis=0)[None],
+            candidates={'depth': field.coordinate,
+                        'range': ref.coords['range']},
+            receiver_positions=_vertical_array(ref.coords['depth']),
+            frequencies=ref.frequencies, model=ref.model)
 
     # Single Field.
     if getattr(field, "kind", None) != "pressure" or not field.is_complex:
@@ -350,7 +347,7 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
     if "depth" not in coords:
         raise ConfigurationError(
             "replica_bank_from_field: field needs a 'depth' axis (the array "
-            f"elements, as receivers); got axes {coords}"
+            f"elements, as receivers); got axes {coords}."
         )
     if array_depths is not None:
         want = np.atleast_1d(np.asarray(array_depths, dtype=float))
@@ -364,11 +361,13 @@ def replica_bank_from_field(field, *, array_depths=None) -> np.ndarray:
                 f"{want.shape}."
             )
     sensor_pos = coords.index("depth")
-    # np.array (copy) — field.p is a read-only view; without copying, a
-    # depth-first contiguous field would alias the Field's buffer and hand back
-    # a read-only bank that aliases the source. The bank must be owned/writeable.
-    bank = np.moveaxis(np.array(field.p, dtype=np.complex128), sensor_pos, 0)
-    return np.ascontiguousarray(bank)
+    bank = np.moveaxis(np.asarray(field.p, dtype=np.complex128),
+                       sensor_pos, -1)
+    candidates = {('depth' if name == 'source_depth' else name):
+                  field.coords[name] for name in coords if name != 'depth'}
+    return Replicas(replicas=bank[None], candidates=candidates,
+                    receiver_positions=_vertical_array(field.coords['depth']),
+                    frequencies=field.frequencies, model=field.model)
 
 
 def csdm(snapshots: np.ndarray) -> np.ndarray:
@@ -403,109 +402,102 @@ def csdm(snapshots: np.ndarray) -> np.ndarray:
     return snapshot_covariance(snapshots, "csdm")
 
 
-def _flatten_bank(replicas: np.ndarray) -> Tuple[np.ndarray, Tuple[int, ...]]:
-    """(N, *grid) -> unit-norm (N, G) columns plus the grid shape."""
-    N = replicas.shape[0]
-    grid_shape = replicas.shape[1:]
-    E = replicas.reshape(N, -1)
-    norms = np.linalg.norm(E, axis=0)
-    # An identically-zero replica column is a candidate position the forward
-    # model put no energy at (a shadow-zone cell from a ray/PE bank, or a
-    # source depth on a pressure-release boundary where every mode shape
-    # vanishes). Dividing it by 1 leaves it zero, which :func:`bartlett` scores
-    # as a genuine zero ("nothing matches here"); the unguarded 0/0 would put a
-    # NaN in the surface and raise a RuntimeWarning instead.
-    norms[norms == 0] = 1.0
-    return E / norms[None, :], grid_shape
+def _single_frequency_bank(covariance, replicas, who):
+    """``(K, rows)``: the CSDM as a complex ``(N, N)`` matrix and the one
+    frequency's replica rows of ``replicas``. Refuses anything but a
+    one-frequency :class:`~uacpy.core.results.Replicas` over the CSDM's
+    ``N`` elements."""
+    from uacpy.core.results import Replicas
+    if not isinstance(replicas, Replicas):
+        raise ConfigurationError(
+            f"{who}: replicas must be a Replicas set (replica_bank or "
+            f"replica_bank_from_field); got {type(replicas).__name__}. For a "
+            f"bare weight array use uacpy.acoustic_signal.{who}, which "
+            f"returns the linear surface.")
+    if replicas.n_frequencies != 1:
+        raise ConfigurationError(
+            f"{who}: a CSDM is one frequency, but the replicas hold "
+            f"{replicas.n_frequencies}; pick one, or use Covariance.{who} "
+            f"for a covariance per frequency.")
+    K = np.asarray(covariance, dtype=np.complex128)
+    if K.shape != (replicas.n_receivers, replicas.n_receivers):
+        raise ConfigurationError(
+            f"{who}: the CSDM is {K.shape}, but the replicas are over "
+            f"{replicas.n_receivers} array elements; build both on the same "
+            f"array.")
+    return K, replicas.replicas[0]
 
 
-def bartlett(K: np.ndarray, replicas: np.ndarray) -> np.ndarray:
-    """Bartlett (linear) matched-field ambiguity surface, normalized to [0, 1].
+def bartlett(covariance: np.ndarray, replicas):
+    """Bartlett (linear) matched-field ambiguity surface.
 
-    ``P_B = e^H K e / (e^H e * tr K)`` with unit-norm replicas. Equals 1 where a
-    replica matches a rank-one CSDM exactly; robust but broad-lobed.
-
-    :meth:`uacpy.core.results.Covariance.bartlett` is the same processor over
-    an OASN ``.xsm`` covariance: multi-frequency, replica-index-last, and left
-    unnormalised, so its surface is this one times ``tr K``.
+    :func:`uacpy.acoustic_signal.bartlett` with ``normalize='trace'``:
+    ``P_B = e^H K e / tr K`` with unit-norm replicas ``e``, so a replica
+    matching a rank-one CSDM exactly scores 1; robust but broad-lobed.
+    :meth:`uacpy.core.results.Covariance.bartlett` is the same processor
+    over an OASN ``.xsm`` covariance, multi-frequency and unnormalised.
 
     Parameters
     ----------
-    K : ndarray, shape ``(N, N)``
-        CSDM.
-    replicas : ndarray, shape ``(N, *grid)``
-        Replica bank (e.g. from :func:`replica_bank`).
+    covariance : ndarray, shape ``(N, N)``
+        CSDM (:func:`csdm`), ``K`` in the formula above.
+    replicas : Replicas
+        One frequency's replica bank (:func:`replica_bank`,
+        :func:`replica_bank_from_field`).
 
     Returns
     -------
-    ndarray, shape ``grid``
-        Real ambiguity surface; argmax is the localization estimate.
+    Field
+        ``kind='ambiguity'`` in dB re the surface's peak, on the replicas'
+        candidate axes; ``.max()`` is the localization estimate.
+        ``reference`` is the peak ``P_B`` (``reference_unit='1'``), so
+        ``reference * 10**(field.data / 10)`` is ``P_B`` itself.
     """
-    E, grid_shape = _flatten_bank(replicas)
-    K = np.asarray(K, dtype=np.complex128)
-    trK = np.real(np.trace(K))
-    # The shared Bartlett/MVDR core (core/_beamforming); E is column-major
-    # (N, G), the kernel takes row-major weights.
-    num = quadratic_form(K, E.T)
-    # A CSDM with zero trace is a positive-semidefinite matrix of zeros, so the
-    # numerator is zero too: divide by 1 to return an all-zero surface rather
-    # than 0/0. :func:`mvdr` warns on the same condition because there the
-    # matrix has to be inverted.
-    surf = num / (trK if trK != 0 else 1.0)
-    return surf.reshape(grid_shape)
+    from uacpy.acoustic_signal.beamforming import bartlett as power
+    from uacpy.core.results import ambiguity_field
+    K, rows = _single_frequency_bank(covariance, replicas, 'bartlett')
+    return ambiguity_field(power(K, rows, normalize='trace'),
+                           replicas.candidates, reference_unit='1',
+                           frequencies=replicas.frequencies,
+                           model=replicas.model)
 
 
 def mvdr(
-    K: np.ndarray, replicas: np.ndarray, diagonal_loading: float = 1e-2
-) -> np.ndarray:
-    """Minimum-variance (Capon/MVDR) ambiguity surface, normalized to max 1.
+    covariance: np.ndarray, replicas, *,
+    diagonal_loading: float = 1e-2
+):
+    """Minimum-variance (Capon/MVDR) matched-field ambiguity surface.
 
-    ``P_MV = 1 / (e^H Kinv e)`` for unit-norm replicas, with diagonal loading
-    ``K + diagonal_loading * tr(K)/N * I``. Small loading gives sharp Capon
-    peaks but is
-    sensitive to environmental mismatch; larger loading flattens the surface
-    toward Bartlett for robustness. Loading is required when ``K`` is
-    rank-deficient (e.g. a single snapshot) — hence the 1e-2 default here,
-    where ``K`` comes from :func:`csdm` over measured snapshots.
-    :meth:`uacpy.core.results.Covariance.mvdr` is the same processor over
-    OASN's full-rank ``.xsm`` covariance and defaults to 1e-6; at equal
-    loading the two agree up to the max-scaling applied below, and both
-    return NaN for a degenerate candidate point.
+    :func:`uacpy.acoustic_signal.mvdr` with ``normalize='max'``:
+    ``P_MV = 1 / (e^H Kinv e)`` for unit-norm replicas, with diagonal
+    loading ``K + diagonal_loading * tr(K)/N * I``. Small loading gives sharp
+    Capon peaks but is sensitive to environmental mismatch; larger loading
+    flattens the surface toward Bartlett for robustness. Loading is required
+    when ``K`` is rank-deficient (e.g. a single snapshot) — hence the 1e-2
+    default here, where ``K`` comes from :func:`csdm` over measured
+    snapshots. :meth:`uacpy.core.results.Covariance.mvdr` is the same
+    processor over OASN's full-rank ``.xsm`` covariance and defaults to
+    1e-6. A candidate the processor cannot evaluate is NaN.
 
     Parameters
     ----------
-    K : ndarray, shape ``(N, N)``
-        CSDM.
-    replicas : ndarray, shape ``(N, *grid)``
-        Replica bank.
+    covariance : ndarray, shape ``(N, N)``
+        CSDM (:func:`csdm`), ``K`` in the formulas above.
+    replicas : Replicas
+        One frequency's replica bank.
     diagonal_loading : float, optional
         Diagonal-loading fraction of the average eigenvalue. Default 1e-2.
 
     Returns
     -------
-    ndarray, shape ``grid``
-        Real ambiguity surface, scaled so its maximum is 1.
+    Field
+        As :func:`bartlett`; ``reference`` is 1, the peak of the max-scaled
+        surface.
     """
-    E, grid_shape = _flatten_bank(replicas)
-    K = np.asarray(K, dtype=np.complex128)
-    # Loading is a *fraction of* tr(K)/N, so it vanishes with the trace: it
-    # rescues a rank-deficient CSDM that still carries power, but a CSDM with
-    # no power at all (silent snapshots) leaves K singular and every candidate
-    # point undefined.
-    if np.real(np.trace(K)) <= 0.0:
-        warnings.warn(
-            "mvdr: the CSDM carries no power, so the ambiguity surface is "
-            "undefined; returning NaN.", UserWarning, stacklevel=2)
-        return np.full(grid_shape, np.nan)
-    denom = quadratic_form(loaded_inverse(K, diagonal_loading), E.T)
-    # e^H Kinv e is strictly positive for a positive-definite K and a non-zero
-    # replica. A non-positive value therefore means the loaded CSDM inverted
-    # without staying positive-definite, or the replica column was zero — mark
-    # that candidate undefined instead of emitting a negative or infinite
-    # "peak" that the max-scaling below would then normalise the surface to.
-    denom[denom <= 0] = np.nan
-    surf = 1.0 / denom
-    m = np.nanmax(surf)
-    if m and np.isfinite(m):
-        surf = surf / m
-    return surf.reshape(grid_shape)
+    from uacpy.acoustic_signal.beamforming import mvdr as power
+    from uacpy.core.results import ambiguity_field
+    K, rows = _single_frequency_bank(covariance, replicas, 'mvdr')
+    return ambiguity_field(
+        power(K, rows, diagonal_loading=diagonal_loading, normalize='max'),
+        replicas.candidates, reference_unit='1',
+        frequencies=replicas.frequencies, model=replicas.model)

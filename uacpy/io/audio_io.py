@@ -24,7 +24,9 @@ needs it yet.
 
 :func:`read_wav` reads back what :func:`write_wav` writes, and
 :func:`read_wav_metadata` recovers the ``INFO`` block, so a file this module
-produces is not a one-way trip. Both accept the encodings the writer emits.
+produces is not a one-way trip. :func:`read_wav` accepts the encodings the
+writer emits, in a plain or a ``WAVE_FORMAT_EXTENSIBLE`` header, so a
+recorder's own 24-bit or multichannel file reads too.
 """
 
 import struct
@@ -34,7 +36,10 @@ from typing import Optional, Union
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, FileFormatError, IOWarning,
+)
 
 #: ``encoding`` → (WAVE format tag, bits per sample). Tag 1 is PCM, 3 is
 #: IEEE float.
@@ -45,6 +50,15 @@ _ENCODINGS = {
     'float32': (3, 32),
     'float64': (3, 64),
 }
+
+#: ``WAVE_FORMAT_EXTENSIBLE``: the real format tag is the first two bytes of
+#: the SubFormat GUID at ``fmt[24:26]``.
+_EXTENSIBLE_TAG = 0xFFFE
+
+#: Above this many channels, a signal with more channels than frames is read
+#: as a channel-first ``(n_channels, n)`` array rather than written as a file
+#: of thousands of channels a few samples long.
+_MAX_CHANNELS_GUESSED = 64
 
 #: ``metadata`` key → its four-character ``INFO`` chunk id.
 _INFO_TAGS = {
@@ -93,7 +107,7 @@ def _info_chunk(metadata: dict) -> bytes:
 def write_wav(
     filepath: Union[str, Path],
     signal: np.ndarray,
-    fs: float,
+    sample_rate: float,
     *,
     encoding: str = 'pcm16',
     normalize: Optional[bool] = None,
@@ -108,8 +122,9 @@ def write_wav(
     signal : ndarray
         Real samples, ``(n,)`` mono or ``(n, n_channels)`` — one column per
         channel, written interleaved. Must be finite.
-    fs : float
-        Sample rate in Hz, rounded to the nearest integer for the header.
+    sample_rate : float
+        Sample rate in Hz, rounded to the nearest integer for the header;
+        a rate that is not an integer warns with the relative error.
     encoding : {'pcm16', 'pcm24', 'pcm32', 'float32', 'float64'}
         Sample format. The integer encodings map ±1.0 to full scale; the
         float encodings write the values themselves. Default ``'pcm16'``.
@@ -127,8 +142,10 @@ def write_wav(
     Raises
     ------
     ConfigurationError
-        Unknown ``encoding`` or metadata key, empty or >2-D ``signal``,
-        non-finite samples, or a non-positive ``fs``.
+        Unknown ``encoding`` or metadata key, empty, complex or >2-D
+        ``signal``, a 2-D ``signal`` with more channels than frames and more
+        than 64 channels (a channel-first array: pass its ``.T``), non-finite
+        samples, or a non-positive ``sample_rate``.
 
     Notes
     -----
@@ -166,6 +183,13 @@ def write_wav(
         )
     format_tag, bits = _ENCODINGS[encoding]
 
+    if np.iscomplexobj(signal):
+        raise ConfigurationError(
+            "write_wav: signal is complex; a WAV file holds real samples, and "
+            "casting would discard the imaginary part.",
+            remediation="Upconvert a baseband record to passband first "
+                        "(uacpy.comms.upconvert), or pass np.real(signal) if "
+                        "the real part is what you mean.")
     samples = np.asarray(signal, dtype=np.float64)
     if samples.ndim == 1:
         samples = samples[:, np.newaxis]
@@ -176,6 +200,13 @@ def write_wav(
                         "multichannel.",
         )
     n_frames, n_channels = samples.shape
+    if n_channels > max(n_frames, _MAX_CHANNELS_GUESSED):
+        raise ConfigurationError(
+            f"write_wav: signal is shaped {samples.shape}, which reads as "
+            f"(n_channels, n) — {n_channels} channels of {n_frames} frames "
+            f"each.",
+            remediation="Pass signal.T: write_wav takes (n, n_channels), the "
+                        "layout read_wav returns.")
     if n_frames == 0 or n_channels == 0:
         raise ConfigurationError(
             f"write_wav: signal has shape {samples.shape} — nothing to write.",
@@ -188,12 +219,21 @@ def write_wav(
             remediation="A non-finite sample has no encoding — clean the "
                         "signal (np.nan_to_num, or drop the bad span) first.",
         )
-    rate = int(round(float(fs)))
+    rate = int(round(float(sample_rate)))
     if rate <= 0:
         raise ConfigurationError(
-            f"write_wav: sample rate {fs} is not positive.",
+            f"write_wav: sample rate {sample_rate} is not positive.",
             remediation="Pass the rate the signal was generated at, in Hz.",
         )
+    if rate != float(sample_rate):
+        # The WAV header holds an integer rate; the file's time axis then
+        # runs at rate/sample_rate of the signal's own.
+        warnings.warn(
+            f"write_wav: the sample rate {float(sample_rate)!r} Hz is written "
+            f"as {rate} Hz, the integer the WAV header holds; the file's "
+            f"time axis is off by a relative "
+            f"{abs(rate - float(sample_rate)) / float(sample_rate):.3g}.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     if normalize is None:
         normalize = format_tag == 1
@@ -214,7 +254,7 @@ def write_wav(
                 f"past full scale for {encoding} and were clipped — pass "
                 f"normalize=True to rescale, or encoding='float32' to keep "
                 f"the absolute values.",
-                stacklevel=2,
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             flat = np.clip(flat, -1.0, 1.0)
         # Symmetric full scale (2**(bits-1) - 1), so +1.0 and -1.0 encode to
@@ -256,28 +296,49 @@ def write_wav(
         handle.write(data_pad)
 
 
-def _chunks(raw: bytes):
-    """Walk a RIFF file's top-level chunks, yielding ``(id, payload)``.
+def _read_riff(filepath: Union[str, Path]) -> bytes:
+    """The bytes of a ``.wav`` the caller names.
 
-    Chunks are word-aligned with a pad byte the declared size does not count,
-    so the walk steps by the padded length or it drifts one byte and reads the
-    rest of the file as garbage.
+    A path that does not exist is the argument's fault, so it raises
+    :class:`ConfigurationError`; a file that is there but wrong raises
+    :class:`FileFormatError` from the walk below.
+    """
+    path = Path(filepath)
+    if not path.is_file():
+        raise ConfigurationError(
+            f"read_wav: no file at {str(path)!r}.",
+            remediation="Check the path and its extension.")
+    return path.read_bytes()
+
+
+def _chunks(raw: bytes):
+    """Walk a RIFF file's top-level chunks, yielding ``(id, payload, size)``.
+
+    ``size`` is the length the chunk header declares; ``payload`` holds the
+    bytes actually present, so a chunk cut short by the end of the file has
+    ``len(payload) < size``. Chunks are word-aligned with a pad byte the
+    declared size does not count, so the walk steps by the padded length or
+    it drifts one byte and reads the rest of the file as garbage.
     """
     if raw[:4] != b'RIFF' or raw[8:12] != b'WAVE':
-        raise ConfigurationError(
+        raise FileFormatError(
             "read_wav: not a RIFF/WAVE file.",
-            remediation="Check the path; this reads the .wav files write_wav "
-                        "produces, not .aiff/.flac/.mp3.")
+            remediation="Check the path; this reads PCM and IEEE-float .wav "
+                        "files, not .aiff/.flac/.mp3.")
     offset = 12
     while offset + 8 <= len(raw):
         chunk_id = raw[offset:offset + 4]
         size = struct.unpack('<I', raw[offset + 4:offset + 8])[0]
-        yield chunk_id, raw[offset + 8:offset + 8 + size]
+        yield chunk_id, raw[offset + 8:offset + 8 + size], size
         offset += 8 + size + (size % 2)
 
 
 def read_wav(filepath: Union[str, Path]):
-    """Read a ``.wav`` written by :func:`write_wav` (or anything like it).
+    """Read a PCM or IEEE-float ``.wav``, such as :func:`write_wav` writes.
+
+    A ``WAVE_FORMAT_EXTENSIBLE`` header (format tag ``0xFFFE``, what most
+    24-bit and multichannel recorders write) is read through the format tag
+    its SubFormat GUID carries.
 
     Parameters
     ----------
@@ -293,46 +354,67 @@ def read_wav(filepath: Union[str, Path]):
         encoding comes back as written — that is the point of it, so nothing
         rescales a calibrated signal on the way in.
     sample_rate : float
-        Hz. The argument order mirrors ``write_wav(path, signal, fs)``.
+        Hz. The argument order mirrors ``write_wav(filepath, signal, sample_rate)``.
 
     Raises
     ------
     ConfigurationError
+        ``filepath`` names no file.
+    FileFormatError
         Not a RIFF/WAVE file, no ``fmt ``/``data`` chunk, a ``fmt `` chunk
         shorter than a format block, a ``data`` chunk that is not a whole
-        number of frames, or a format this module does not write
+        number of frames, or a format this module does not read
         (compressed, or a bit depth outside 16/24/32).
+
+    Warns
+    -----
+    IOWarning
+        The ``data`` chunk holds fewer bytes than its header declares (an
+        interrupted copy or recording). The whole frames present are
+        returned, and the warning names declared and available bytes.
     """
-    raw = Path(filepath).read_bytes()
+    raw = _read_riff(filepath)
     fmt = data = None
-    for chunk_id, payload in _chunks(raw):
+    for chunk_id, payload, size in _chunks(raw):
         if chunk_id == b'fmt ' and fmt is None:
             fmt = payload
         elif chunk_id == b'data' and data is None:
-            data = payload
+            data, data_size = payload, size
     if fmt is None or data is None:
-        raise ConfigurationError(
+        raise FileFormatError(
             f"read_wav: {'fmt ' if fmt is None else 'data'} chunk missing.",
             remediation="The file is truncated or not a wav; every WAVE file "
                         "carries both.")
 
     if len(fmt) < 16:
-        raise ConfigurationError(
+        raise FileFormatError(
             f"read_wav: fmt chunk holds {len(fmt)} bytes; a WAVE format "
             f"block is at least 16.",
             remediation="The file is truncated or not a wav.")
     format_tag, n_channels, rate = struct.unpack('<HHI', fmt[:8])
     bits = struct.unpack('<H', fmt[14:16])[0]
+    if format_tag == _EXTENSIBLE_TAG and len(fmt) >= 26:
+        format_tag = struct.unpack('<H', fmt[24:26])[0]
     if (format_tag, bits) not in {(tag, b) for tag, b in _ENCODINGS.values()}:
-        raise ConfigurationError(
+        raise FileFormatError(
             f"read_wav: format tag {format_tag} at {bits} bits is not one "
             f"this module handles.",
-            remediation=f"It reads {sorted(_ENCODINGS)} — PCM and IEEE float. "
-                        f"A compressed or extensible wav needs soundfile.")
+            remediation=f"It reads {sorted(_ENCODINGS)} — PCM and IEEE float, "
+                        f"plain or extensible. A compressed wav needs "
+                        f"decoding first (scipy.io.wavfile or soundfile).")
 
     frame_bytes = n_channels * bits // 8
+    if frame_bytes and len(data) < data_size:
+        whole = len(data) - len(data) % frame_bytes
+        warnings.warn(
+            f"read_wav: the data chunk declares {data_size} bytes but the "
+            f"file holds {len(data)}; returning the {whole // frame_bytes} "
+            f"whole frame(s) present. The file was cut short (an "
+            f"interrupted copy or recording).",
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        data = data[:whole]
     if frame_bytes == 0 or len(data) % frame_bytes:
-        raise ConfigurationError(
+        raise FileFormatError(
             f"read_wav: data chunk holds {len(data)} bytes, not a whole "
             f"number of {frame_bytes}-byte frames ({n_channels} channel(s) "
             f"at {bits} bits).",
@@ -366,9 +448,14 @@ def read_wav_metadata(filepath: Union[str, Path]) -> dict:
 
     Returns an empty dict when the file carries no ``INFO`` block, which is the
     common case: most recorders write none.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        The file to read.
     """
     by_tag = {tag: key for key, tag in _INFO_TAGS.items()}
-    for chunk_id, payload in _chunks(Path(filepath).read_bytes()):
+    for chunk_id, payload, _size in _chunks(_read_riff(filepath)):
         if chunk_id != b'LIST' or payload[:4] != b'INFO':
             continue
         found, offset = {}, 4

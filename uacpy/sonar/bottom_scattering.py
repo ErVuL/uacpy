@@ -24,16 +24,21 @@ ref. 9). Jackson, Winebrenner & Ishimaru (1986), JASA 79, 1410-1422.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Dict, Optional, Union
 
 import numpy as np
 from scipy.special import erf, gamma as _gamma
 
-from uacpy.core.bottom import Bottom, BoundaryProperties, SeabedColumn
-from uacpy.core.sediment import _hamilton_kp
+from uacpy.core.boundary import BoundaryProperties
+from uacpy.core._repr import FieldsRepr
+from uacpy.core.bottom import Bottom, SeabedColumn
+from uacpy.core.sediment import (
+    apl_uw_density_ratio, apl_uw_sound_speed_ratio, hamilton_attenuation)
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._export import CarrierExport
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
+from uacpy.core._validate import require_positive_finite_scalar
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = [
@@ -94,45 +99,10 @@ _GH_WEIGHTS = (0.295410, 1.181636, 0.295410)
 _GH_NODES = (1.224745, 0.0, -1.224745)
 
 
-def _grain_size_density_ratio(mz: float) -> float:
-    """Eq. 2."""
-    if mz < 1.0:
-        return 0.007797 * mz ** 2 - 0.17057 * mz + 2.3139
-    if mz < 5.3:
-        return (-0.0165406 * mz ** 3 + 0.2290201 * mz ** 2
-                - 1.1069031 * mz + 3.0455)
-    return -0.0012973 * mz + 1.1565
-
-
-def _grain_size_speed_ratio(mz: float) -> float:
-    """Eq. 3."""
-    if mz < 1.0:
-        return 0.002709 * mz ** 2 - 0.056452 * mz + 1.2778
-    if mz < 5.3:
-        return (-0.0014881 * mz ** 3 + 0.0213937 * mz ** 2
-                - 0.1382798 * mz + 1.3425)
-    return -0.0024324 * mz + 1.0019
-
-
-def _grain_size_alpha_over_f(mz: float) -> float:
-    """Eq. 5, dB m^-1 kHz^-1 — Hamilton's parameterisation, which
-    :func:`~uacpy.core.sediment._hamilton_kp` already is.
-
-    TR 9407 p. IV-8 reproduces Hamilton (1972) rather than refitting it, so
-    the report's Eq. 5 and the sediment model's ``k_p`` are the same four
-    regressions. They were spelled out twice and agreed to 1.78e-15 over
-    every input a caller can reach (-1 to 9 phi, measured on 100 001
-    points). The only divergence was past 9.5 phi, where this copy returned
-    the printed literal ``0.0601`` and the regression gives 0.060075 —
-    0.042 % apart, on a branch both clamps exclude.
-    """
-    return _hamilton_kp(mz)
-
-
 def _grain_size_loss_parameter(mz: float, speed_ratio: float) -> float:
     """Eq. 4 with Hamilton's alpha2/f: ``delta = (alpha2/f) nu c1 ln10 / 40 pi``
     with c1 in m/ms, the 1.528 m/ms the report states it used."""
-    return (_grain_size_alpha_over_f(mz) * speed_ratio
+    return (hamilton_attenuation(mz) * speed_ratio
             * (TABLE_WATER_SOUND_SPEED / 1000.0) * np.log(10.0) / (40.0 * np.pi))
 
 
@@ -149,21 +119,21 @@ def _grain_size_spectral_strength(mz: float) -> float:
     return 0.00207 * h ** 2 * _H0_CM ** 2
 
 
-def _checked_grain_size(grain_size_phi: float, caller: str) -> float:
+def _checked_grain_size(grain_size_phi: float, who: str) -> float:
     """``Mz`` for a caller-supplied grain size: non-finite rejected, outside
     the interval Eqs. 2-10 are defined on clamped with a warning."""
     mz = float(grain_size_phi)
     if not np.isfinite(mz):
         raise ConfigurationError(
-            f"BottomParameters.{caller}: grain_size_phi must be "
+            f"BottomParameters.{who}: grain_size_phi must be "
             f"finite; got {grain_size_phi!r}.")
     lo, hi = _GRAIN_SIZE_RANGE
     if mz < lo or mz > hi:
         warnings.warn(
-            f"BottomParameters.{caller}: Mz={mz:g} is outside the "
+            f"BottomParameters.{who}: Mz={mz:g} is outside the "
             f"{lo:g} <= Mz <= {hi:g} interval TR 9407 Eqs. 2-10 are defined "
             f"on (p. IV-8); evaluating at the nearer end.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
         mz = min(max(mz, lo), hi)
     return mz
 
@@ -172,13 +142,13 @@ def _grain_size_from_speed_ratio(speed_ratio: float) -> float:
     """Invert Eq. 3 for Mz on [-1, 9] (monotone decreasing there): the
     report's preferred route from geoacoustics to grain size (p. IV-12)."""
     lo, hi = _GRAIN_SIZE_RANGE
-    if speed_ratio >= _grain_size_speed_ratio(lo):
+    if speed_ratio >= apl_uw_sound_speed_ratio(lo):
         return lo
-    if speed_ratio <= _grain_size_speed_ratio(hi):
+    if speed_ratio <= apl_uw_sound_speed_ratio(hi):
         return hi
     for _ in range(60):
         mid = 0.5 * (lo + hi)
-        if _grain_size_speed_ratio(mid) > speed_ratio:
+        if apl_uw_sound_speed_ratio(mid) > speed_ratio:
             lo = mid
         else:
             hi = mid
@@ -186,7 +156,7 @@ def _grain_size_from_speed_ratio(speed_ratio: float) -> float:
 
 
 @dataclass(frozen=True)
-class BottomParameters:
+class BottomParameters(FieldsRepr, CarrierExport):
     """The six seabed inputs of TR 9407 Table 1.
 
     Parameters
@@ -213,6 +183,9 @@ class BottomParameters:
     :meth:`from_sediment`, :meth:`from_grain_size`, :meth:`from_geoacoustics`,
     or from a uacpy seabed with :meth:`from_bottom` / :meth:`from_environment`,
     rather than by hand where you can.
+
+    On the export protocol: ``to_dict`` / ``from_dict`` through the
+    constructor, ``to_xarray`` / ``to_netcdf`` with the fields as JSON.
     """
     density_ratio: float
     speed_ratio: float
@@ -222,6 +195,11 @@ class BottomParameters:
     spectral_exponent: float = _DEFAULT_SPECTRAL_EXPONENT
 
     def __post_init__(self):
+        # Plain floats, so the repr and an exported record read the same
+        # whichever route (a numpy computation or a literal) built the field.
+        for item in fields(self):
+            object.__setattr__(self, item.name,
+                               float(getattr(self, item.name)))
         for name, (lo, hi) in _LIMITS.items():
             value = float(getattr(self, name))
             if not np.isfinite(value):
@@ -235,7 +213,7 @@ class BottomParameters:
                     f"limits TR 9407 recommends ({lo:g} {'<' if strict_low else '<='} "
                     f"{name} <= {hi:g}, Section IV.A.8): 'extreme values ... may "
                     f"yield suspect results'.",
-                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+                    ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
         # 0 < alpha < 1 (p. IV-27) is the spectral-exponent limit 2 < gamma < 4,
         # inside the recommended range; a value on or past it breaks Eqs. 36-41.
         if not 2.0 < float(self.spectral_exponent) < 4.0:
@@ -253,8 +231,10 @@ class BottomParameters:
         warning, the relations being fits over that interval only.
         """
         mz = _checked_grain_size(grain_size_phi, 'from_grain_size')
-        nu = _grain_size_speed_ratio(mz)
-        return cls(density_ratio=_grain_size_density_ratio(mz),
+        # Eqs. 2, 3 and 5 are the sediment model's own relations: TR 9407
+        # p. IV-9 reproduces Hamilton (1972) for Eq. 5 rather than refitting it.
+        nu = apl_uw_sound_speed_ratio(mz)
+        return cls(density_ratio=apl_uw_density_ratio(mz),
                    speed_ratio=nu,
                    loss_parameter=_grain_size_loss_parameter(mz, nu),
                    volume_parameter=_grain_size_volume_parameter(mz),
@@ -344,7 +324,7 @@ class BottomParameters:
                     ) -> 'BottomParameters':
         """From a uacpy seabed — the bridge from ``uacpy.data`` to this model.
 
-        ``bottom`` is a :class:`~uacpy.core.bottom.BoundaryProperties`, a
+        ``bottom`` is a :class:`~uacpy.core.boundary.BoundaryProperties`, a
         :class:`~uacpy.core.bottom.SeabedColumn` or a range-dependent
         :class:`~uacpy.core.bottom.Bottom` (read at ``range`` in m, nearest
         column). The **surficial** material is what scatters at these
@@ -438,12 +418,12 @@ class BottomParameters:
         scattering model in one call.
         """
         depth = float(env.bathymetry.eval(range=range))
-        water_c = float(np.asarray(env.get_sound_speed(depth, range=range)).ravel()[0])
+        water_c = float(np.asarray(env.ssp.sound_speed_at(depth, range=range)).ravel()[0])
         return cls.from_bottom(env.bottom, water_sound_speed=water_c,
                                water_density=float(env.water_density),
                                range=range, method=method)
 
-    def with_(self, **changes) -> 'BottomParameters':
+    def replace(self, **changes) -> 'BottomParameters':
         """A copy with some fields replaced (e.g. a fitted ``sigma2``)."""
         return replace(self, **changes)
 
@@ -496,11 +476,11 @@ APL_UW_SEDIMENTS: Dict[str, Union[BottomParameters, float]] = {
 }
 
 
-def _grazing(caller: str, grazing_deg) -> np.ndarray:
+def _grazing(who: str, grazing_deg) -> np.ndarray:
     theta = np.asarray(grazing_deg, dtype=float)
     if np.any(~np.isfinite(theta) | (theta < 0.0) | (theta > 90.0)):
         raise ConfigurationError(
-            f"{caller}: grazing angles must be finite and within 0-90 deg "
+            f"{who}: grazing angles must be finite and within 0-90 deg "
             f"(TR 9407 IV.A.8); got {theta!r}.")
     return theta
 
@@ -608,25 +588,24 @@ def apl_uw_bottom_backscatter(grazing_deg, frequency: float,
     fitted to backscatter data; for harder ones to ``gamma`` and ``w2``.
     """
     theta_deg = _grazing('apl_uw_bottom_backscatter', grazing_deg)
-    f = float(frequency)
-    c1 = float(water_sound_speed)
-    if not (np.isfinite(f) and f > 0.0 and np.isfinite(c1) and c1 > 0.0):
-        raise ConfigurationError(
-            f"apl_uw_bottom_backscatter: frequency and water_sound_speed must "
-            f"be > 0 and finite; got {frequency!r}, {water_sound_speed!r}.")
+    f = require_positive_finite_scalar(
+        frequency, "apl_uw_bottom_backscatter", "frequency", " Hz")
+    c1 = require_positive_finite_scalar(
+        water_sound_speed, "apl_uw_bottom_backscatter", "water_sound_speed",
+        " m/s")
     lo, hi = _FREQUENCY_LIMITS_HZ
     if not lo <= f <= hi:
         warnings.warn(
             f"apl_uw_bottom_backscatter: frequency {f:g} Hz is outside the "
             f"{lo/1e3:g}-{hi/1e3:g} kHz band TR 9407 recommends (IV.A.8); the "
             f"model was fitted there and carries no accuracy statement outside.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     lo, hi = _WATER_SPEED_LIMITS
     if not lo <= c1 <= hi:
         warnings.warn(
             f"apl_uw_bottom_backscatter: water_sound_speed {c1:g} m/s is "
             f"outside the {lo:g}-{hi:g} m/s range TR 9407 recommends (IV.A.8).",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     p = params
     theta_deg = np.maximum(theta_deg, _MIN_GRAZING_DEG)

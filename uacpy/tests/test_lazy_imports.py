@@ -1,7 +1,7 @@
 """The lazy-import promise of ``import uacpy`` (PEP 562).
 
-``uacpy/__init__`` eagerly loads only :mod:`uacpy.core`; the model
-wrappers, plotting, DSP and data subpackages — and with them scipy and
+``uacpy/__init__`` eagerly loads only the core carriers; the result
+types, the model wrappers, plotting, DSP and data subpackages — and with them scipy and
 matplotlib — are paid for on first attribute access. Every test here runs
 in a fresh subprocess because the promise is about a cold interpreter:
 the pytest process itself has long since imported everything.
@@ -12,6 +12,7 @@ user's first attribute access — fails here instead.
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,10 @@ from pathlib import Path
 import pytest
 
 import uacpy
+
+#: Every test here pins a repo convention (sources, docs, packaging), not
+#: runtime behaviour: ``-m "not convention"`` deselects the module.
+pytestmark = pytest.mark.convention
 
 _REPO_ROOT = Path(uacpy.__file__).parent.parent
 
@@ -110,9 +115,10 @@ def test_lazy_names_are_advertised():
 _INIT_PATH = Path(uacpy.__file__).resolve()
 
 
-def _statically_re_imported_targets():
+def _statically_re_imported_targets(init_path=_INIT_PATH):
     """``{bound name: (module, attribute)}`` for every ``from ... import ...``
-    inside the ``if TYPE_CHECKING:`` block of ``uacpy/__init__.py``.
+    inside the ``if TYPE_CHECKING:`` block of ``init_path``
+    (``uacpy/__init__.py`` by default).
 
     ``from uacpy import models`` yields ``('uacpy', 'models')``, which names
     the module ``uacpy.models``; ``from uacpy.models import Bellhop`` yields
@@ -120,7 +126,7 @@ def _statically_re_imported_targets():
     verbatim. One rule reads both tables' spellings."""
     import ast
 
-    tree = ast.parse(_INIT_PATH.read_text(encoding='utf-8'))
+    tree = ast.parse(init_path.read_text(encoding='utf-8'))
     targets = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.If):
@@ -202,9 +208,10 @@ def test_every_model_wrapper_is_reachable_from_the_top_level():
     ``uacpy.NewModel``, with nothing failing. Runs in-process: importing
     ``uacpy.models`` here does not affect the cold-import tests above, which
     each run in their own subprocess."""
-    from uacpy.tests.conftest import concrete_model_classes
+    from uacpy.models._registry import engine_classes
 
-    wrappers = set(concrete_model_classes())
+    classes = {cls.__name__: cls for cls in engine_classes().values()}
+    wrappers = set(classes)
     reachable = set(uacpy._LAZY_ATTRS) | set(vars(uacpy))
     missing = sorted(wrappers - reachable)
     assert not missing, (
@@ -213,54 +220,119 @@ def test_every_model_wrapper_is_reachable_from_the_top_level():
         f"AttributeError (docs/DEV.md section 3, step 4)")
 
     for name in sorted(wrappers):
-        assert getattr(uacpy, name) is concrete_model_classes()[name], name
+        assert getattr(uacpy, name) is classes[name], name
 
 
-def test_one_public_way_to_ask_for_an_absorption():
-    """The bare per-km formulas are PRIVATE: ``absorption_thorp`` and
-    ``absorption_francois_garrison`` answer the same question with the unit
-    as a **value** (``units='dB/km'`` / ``'dB/m'`` / ``'dB/wavelength'``)
-    rather than baked into a name, and return a carrier that can convert and
-    plot itself.
+#: The subpackages whose ``__init__`` resolves its names on first access
+#: from an ``_EXPORTS`` table (``{name: defining module}``).
+_LAZY_PACKAGES = ('uacpy.core', 'uacpy.models')
 
-    This test used to assert the opposite — that the bare formulas stayed
-    importable from ``uacpy.core.absorption``. It was written 2026-08-18,
-    five weeks before ``absorption_thorp`` existed (2026-09-23), when the
-    formula was the only way to get the number. The harmonisation added the
-    replacement and did not revisit the rule. Runs in-process — it inspects
-    the surface, not import order."""
-    import uacpy.core.absorption as absorption
-    for name in ('thorp_dB_per_km', 'francois_garrison_dB_per_km'):
+
+@pytest.mark.parametrize('package', _LAZY_PACKAGES)
+def test_each_lazy_package_restates_its_table_for_type_checkers(package):
+    """The ``if TYPE_CHECKING:`` block of a lazy subpackage imports exactly
+    the names its ``_EXPORTS`` table resolves, each from the module the table
+    names, and the submodules its ``__all__`` lists: what a checker reads in
+    place of ``__getattr__``."""
+    import importlib
+    module = importlib.import_module(package)
+    table = {name: (target, name) for name, target in module._EXPORTS.items()}
+    table.update({name: (package, name)
+                  for name in getattr(module, '_LISTED_SUBMODULES', ())})
+    mirror = _statically_re_imported_targets(Path(module.__file__))
+    assert mirror == table, (
+        f"{package}: static mirror and lazy table differ; only in the "
+        f"mirror: {sorted(set(mirror.items()) - set(table.items()))}, only "
+        f"in the table: {sorted(set(table.items()) - set(mirror.items()))}")
+
+
+@pytest.mark.parametrize('package', _LAZY_PACKAGES)
+def test_every_name_a_lazy_package_lists_resolves_and_is_cached(package):
+    """Every ``__all__`` name of a lazy subpackage resolves in a cold
+    interpreter and is bound on the package afterwards, so its
+    ``__getattr__`` runs once per name."""
+    result = _run_python(
+        "import importlib\n"
+        f"package = importlib.import_module({package!r})\n"
+        "failures = []\n"
+        "for name in package.__all__:\n"
+        "    try:\n"
+        "        value = getattr(package, name)\n"
+        "    except Exception as exc:\n"
+        "        failures.append(f'{name}: {type(exc).__name__}: {exc}')\n"
+        "        continue\n"
+        "    if vars(package).get(name) is not value:\n"
+        "        failures.append(f'{name}: resolved but not cached')\n"
+        "if failures:\n"
+        "    raise SystemExit('\\n'.join(failures))\n"
+    )
+    _assert_clean_exit(result)
+
+
+def test_importing_the_models_package_loads_no_engine():
+    """``import uacpy.models`` reads the engine registry and nothing else;
+    naming one engine loads that engine's module, not the others."""
+    result = _run_python(
+        "import sys\n"
+        "import uacpy.models\n"
+        "loaded = sorted(m for m in sys.modules\n"
+        "                if m.startswith('uacpy.models.'))\n"
+        "assert loaded == ['uacpy.models._registry'], loaded\n"
+        "uacpy.models.Scooter\n"
+        "assert 'uacpy.models.scooter' in sys.modules\n"
+        "assert 'uacpy.models.bellhop' not in sys.modules\n"
+    )
+    _assert_clean_exit(result)
+
+
+def test_the_absorption_formulas_are_array_functions_at_uacpy_acoustics():
+    """An absorption is asked for at two levels, one computation each:
+    ``uacpy.acoustics`` holds the formulas on plain arrays, named
+    ``absorption_<model>`` like ``sound_speed_mackenzie`` and returning dB/km,
+    and a law's ``table`` returns a carrier whose unit is a value, written on
+    those formulas. The formulas are ``uacpy.acoustics`` names, not top-level
+    ones; the laws (one object per model, which an Environment holds) are
+    top-level. Runs in-process — it inspects the surface, not import
+    order."""
+    import uacpy.acoustics as acoustics
+    from uacpy.core.acoustics import attenuation
+    for name in ('absorption_thorp', 'absorption_francois_garrison',
+                 'absorption_biological'):
+        assert getattr(acoustics, name) is getattr(attenuation, name), name
         assert not hasattr(uacpy, name), name
-        assert not hasattr(absorption, name), (
-            f"{name} is public again — absorption_* already answers it")
-    # The one public way, in each of its spellings.
     assert hasattr(uacpy, 'Thorp') and hasattr(uacpy, 'FrancoisGarrison')
-    assert hasattr(uacpy, 'absorption_thorp')
-    assert hasattr(uacpy, 'absorption_francois_garrison')
-    # and the formulas still exist, under names that say they are internal
-    assert callable(absorption._thorp_dB_per_km)
-    assert callable(absorption._francois_garrison_dB_per_km)
+    for name in ('thorp_dB_per_km', 'francois_garrison_dB_per_km',
+                 'biological_dB_per_km'):
+        assert not hasattr(acoustics, name) and not hasattr(uacpy, name), name
 
 
-def test_uacpy_plot_is_an_attribute_alias_not_a_module_path():
-    """docs/guide/plotting.md §1: ``uacpy.plot`` aliases
-    ``uacpy.visualization.plots`` (so ``from uacpy.plot import ...`` raises
-    ``ModuleNotFoundError``), and exactly four conveniences are re-exported
-    at the top level as the same objects."""
+def test_uacpy_plot_is_a_module_re_exporting_every_plotter():
+    """docs/guide/plotting.md §1: ``uacpy.plot`` is a module, so both
+    ``uacpy.plot.plot_field`` and ``from uacpy.plot import plot_field``
+    resolve, each to the object ``uacpy.visualization.plots`` defines, and it
+    is the plotters' one public path: none is reachable as ``uacpy.<name>``."""
     result = _run_python(
         "import uacpy\n"
         "import uacpy.visualization.plots as plots\n"
-        "assert uacpy.plot is plots\n"
-        "for name in ('plot_result', 'plot_field', 'plot_overview',\n"
-        "             'compare_models'):\n"
-        "    assert getattr(uacpy, name) is getattr(plots, name), name\n"
-        "try:\n"
-        "    from uacpy.plot import plot_field  # noqa: F401\n"
-        "except ModuleNotFoundError:\n"
-        "    pass\n"
-        "else:\n"
-        "    raise SystemExit('from uacpy.plot import ... did not raise')\n"
+        "from uacpy.plot import plot_field\n"
+        "assert plot_field is plots.plot_field\n"
+        "assert list(uacpy.plot.__all__) == list(plots.__all__)\n"
+        "for name in plots.__all__:\n"
+        "    assert getattr(uacpy.plot, name) is getattr(plots, name), name\n"
+        "for name in plots.__all__:\n"
+        "    assert getattr(uacpy, name, None) is not getattr(plots, name), name\n"
+    )
+    _assert_clean_exit(result)
+
+
+def test_import_uacpy_leaves_the_plot_module_unloaded():
+    """``uacpy.plot`` loads matplotlib, so ``import uacpy`` must not import
+    it; the first ``uacpy.plot`` access does."""
+    result = _run_python(
+        "import sys, uacpy\n"
+        "assert 'uacpy.plot' not in sys.modules\n"
+        "uacpy.plot\n"
+        "assert 'uacpy.plot' in sys.modules\n"
     )
     _assert_clean_exit(result)
 
@@ -273,7 +345,7 @@ def test_importing_visualization_leaves_rcparams_untouched():
         "import matplotlib\n"
         "before = dict(matplotlib.rcParams)\n"
         "import uacpy\n"
-        "uacpy.plot  # resolves the alias -> imports uacpy.visualization\n"
+        "uacpy.plot  # imports uacpy.plot -> uacpy.visualization\n"
         "changed = [k for k, v in matplotlib.rcParams.items()\n"
         "           if before.get(k) != v]\n"
         "assert not changed, f'rcParams touched: {changed}'\n"
@@ -284,7 +356,7 @@ def test_importing_visualization_leaves_rcparams_untouched():
 def test_importing_the_plotting_surface_leaves_the_comms_toolkit_unloaded():
     """``uacpy/__init__`` advertises a lazy-cost design, and the plotters keep
     their compute-side imports inside the functions that use them. A single
-    module-scope ``from uacpy.comms.receive import ...`` in the comms plotter
+    module-scope ``from uacpy.comms.<module> import ...`` in the comms plotter
     pulled the whole toolkit — and scipy.signal behind it — into every
     ``import uacpy.visualization``."""
     result = _run_python(
@@ -398,7 +470,11 @@ def _core_imports_of_visualization():
                 walk(child, inner)
                 module = (child.module or '') if isinstance(
                     child, ast.ImportFrom) else ''
-                if module.startswith('uacpy.visualization'):
+                names = ([alias.name for alias in child.names]
+                         if isinstance(child, ast.ImportFrom) else [])
+                if (module.startswith('uacpy.visualization')
+                        or (module == 'uacpy'
+                            and 'visualization' in names)):
                     found.append((str(path.relative_to(_CORE_DIR.parent)),
                                   child.lineno, enclosing))
 
@@ -424,13 +500,14 @@ def test_core_reaches_up_into_visualization():
     ids=[f'{p}:{n}' for p, n, _ in _CORE_VISUALIZATION_IMPORTS])
 def test_each_core_import_of_visualization_sits_in_a_function_body(
         relative_path, lineno, enclosing):
-    """``uacpy/__init__`` eagerly loads ``uacpy.core`` and
-    ``uacpy.visualization.plots`` imports ``uacpy.core`` at module scope, so
-    one of these hoisted to file scope makes ``import uacpy`` raise
-    ``ImportError`` from a partially initialised module."""
+    """``uacpy/__init__`` eagerly loads the core carriers and
+    ``uacpy.visualization.plots`` imports them at module scope, so a
+    carrier's one of these hoisted to file scope makes ``import uacpy`` raise
+    ``ImportError`` from a partially initialised module; a result module's
+    one would load the plotting stack with the first result type."""
     assert enclosing is not None, (
         f"{relative_path}:{lineno} imports uacpy.visualization at module "
-        f"scope; import uacpy raises ImportError on that")
+        f"scope")
 
 
 @pytest.mark.parametrize(
@@ -450,21 +527,25 @@ def test_each_core_import_of_visualization_says_why_it_is_deferred(
 
 
 def test_the_restated_export_lists_stay_in_sync():
-    """``uacpy.visualization`` restates ``uacpy.visualization.plots``'s public
-    surface and ``uacpy`` restates ``uacpy.core``'s — deliberately, so the
-    short spellings work. A restatement can drift; this pins that every
-    plotter the plots package exports is exported by visualization too, and
-    that every core name the top level exports is the core object."""
+    """The plotters have one public path, ``uacpy.plot``, which exposes
+    ``uacpy.visualization.plots`` object for object; ``uacpy.visualization``
+    holds no plotter (it holds the style and the coastline backdrop). And
+    ``uacpy`` restates ``uacpy.core``'s names deliberately, so this pins that
+    every core name the top level exports is the core object."""
     import uacpy
     import uacpy.core as core
+    import uacpy.plot
     import uacpy.visualization as viz
     import uacpy.visualization.plots as plots
-    missing = [n for n in plots.__all__
-               if callable(getattr(plots, n, None)) and n not in viz.__all__]
-    assert missing == [], f"plots exports not restated by visualization: {missing}"
-    drifted = [n for n in viz.__all__
-               if n in plots.__all__ and getattr(viz, n) is not getattr(plots, n)]
-    assert drifted == [], f"visualization re-exports a different object: {drifted}"
+    assert set(uacpy.plot.__all__) == set(plots.__all__)
+    drifted = [n for n in plots.__all__
+               if getattr(uacpy.plot, n) is not getattr(plots, n)]
+    assert drifted == [], f"uacpy.plot exposes a different object: {drifted}"
+    third = sorted(set(viz.__all__) & set(plots.__all__))
+    assert third == [], f"uacpy.visualization re-exports plotters: {third}"
+    leaked = [n for n in plots.__all__ if callable(getattr(plots, n, None))
+              and getattr(viz, n, None) is getattr(plots, n)]
+    assert leaked == [], f"plotters reachable as uacpy.visualization.<name>: {leaked}"
     import types
     # ``uacpy.metrics`` is the root shim MODULE over ``uacpy.core.metrics``:
     # two module objects with one content, not a drift — compare objects only.
@@ -474,3 +555,230 @@ def test_the_restated_export_lists_stay_in_sync():
                   and getattr(uacpy, n) is not getattr(core, n)]
     assert core_drift == [], f"uacpy re-exports a different core object: {core_drift}"
 
+
+
+def test_uacpy_acoustics_is_an_importable_module_over_core_acoustics():
+    """The docs name ``uacpy.acoustics``; ``from uacpy.acoustics import spl``
+    must work as well as attribute access, and the facade carries exactly the
+    core package's names, each the same object."""
+    import uacpy
+    import uacpy.core.acoustics as core_acoustics
+    from uacpy.acoustics import spl
+    assert spl is core_acoustics.spl
+    assert sorted(uacpy.acoustics.__all__) == sorted(core_acoustics.__all__)
+    drifted = [n for n in core_acoustics.__all__
+               if getattr(uacpy.acoustics, n) is not getattr(core_acoustics, n)]
+    assert drifted == [], drifted
+
+
+def test_the_acoustics_docstring_lists_every_subject_module_it_re_exports():
+    """``help(uacpy.acoustics)`` describes the namespace: every sub-module a
+    public name comes from is one of the listed subjects."""
+    import uacpy.core.acoustics as core_acoustics
+    sources = {getattr(core_acoustics, n).__module__.rsplit('.', 1)[-1]
+               for n in core_acoustics.__all__}
+    listed = set(re.findall(r'^\* ``(\w+)``', core_acoustics.__doc__, re.M))
+    assert sources <= listed, sorted(sources - listed)
+
+
+def test_the_root_namespace_offers_no_stdlib_helper():
+    """``dir(uacpy)`` is documented as the full index; the stdlib module the
+    lazy loader uses is not part of it."""
+    import uacpy
+    assert 'importlib' not in dir(uacpy)
+
+
+def test_parallel_declares_its_public_names():
+    import uacpy.parallel as parallel
+    assert sorted(parallel.__all__) == ['Job', 'ParallelResult', 'run_parallel']
+
+
+def test_the_child_stack_limit_and_its_opt_out_are_documented():
+    """Model binaries run with a raised RLIMIT_STACK (the child alone); the
+    opt-out variable ``_stack`` reads is in the user manual."""
+    import uacpy._stack as stack
+    names = set(re.findall(r"'(UACPY_\w+)'", Path(stack.__file__).read_text()))
+    assert names == {'UACPY_NO_STACK_RAISE'}
+    manual = (Path(uacpy.__file__).parents[1] / 'DOCUMENTATION.md').read_text()
+    assert 'UACPY_NO_STACK_RAISE' in manual and 'RLIMIT_STACK' in manual
+
+
+def test_every_dotted_uacpy_name_in_the_core_docstrings_resolves():
+    """A ``uacpy.a.b`` spelled in a core docstring is a line a user copies;
+    each must resolve (``uacpy.plots`` did not — the namespace is
+    ``uacpy.plot``)."""
+    import importlib
+    root = Path(uacpy.__file__).parent
+    files = list((root / 'core').rglob('*.py')) + [
+        root / name for name in ('metrics.py', 'parallel.py', 'analytic.py',
+                                 'acoustics.py', '__init__.py')]
+    unresolved = []
+    for f in files:
+        for m in re.finditer(r'``(uacpy(?:\.\w+)+)', f.read_text()):
+            parts = m.group(1).split('.')
+            obj = uacpy
+            for k, part in enumerate(parts[1:], 1):
+                try:
+                    obj = getattr(obj, part)
+                except AttributeError:
+                    try:
+                        obj = importlib.import_module('.'.join(parts[:k + 1]))
+                    except ModuleNotFoundError:
+                        unresolved.append(f"{f.name}: {m.group(1)}")
+                        break
+    assert unresolved == [], unresolved
+
+
+class TestPublicReexports:
+    """Public namespace contract."""
+
+    def test_sound_speed_profile_at_top_level(self):
+        from uacpy import SoundSpeedProfile
+        assert SoundSpeedProfile is uacpy.core.environment.SoundSpeedProfile
+
+    def test_environment_helpers_at_core(self):
+        from uacpy.core import SoundSpeedProfile, generate_sea_surface
+        assert SoundSpeedProfile is uacpy.core.environment.SoundSpeedProfile
+        assert generate_sea_surface is uacpy.core.altimetry.generate_sea_surface
+
+    def test_acoustic_signal_is_importable_submodule(self):
+        import uacpy.acoustic_signal as sig
+        assert sig is uacpy.acoustic_signal
+
+    def test_signal_analysis_classes_reachable(self):
+        sig = uacpy.acoustic_signal
+        # Estimators/transforms are free functions; FRF is a class. Each
+        # estimator is named for the statistic it returns, so the doors are
+        # what a call site reaches for.
+        for name in ('welch', 'welch',
+                     'sound_exposure', 'constant_q',
+                     'constant_q',
+                     'probabilistic_welch',
+                     'probabilistic_welch',
+                     'probabilistic_sound_exposure',
+                     'probabilistic_constant_q',
+                     'probabilistic_constant_q',
+                     'FRF', 'fk_transform', 'spectrogram'):
+            assert hasattr(sig, name), f"uacpy.acoustic_signal.{name} not reachable"
+            assert name in sig.__all__, f"{name} missing from __all__"
+        for retired in RETIRED_SPECTRAL_NAMES:
+            assert not hasattr(sig, retired), (
+                f"{retired} is back: there is one function per statistic, "
+                f"each carrying only the parameters it can honour — no "
+                f"alias that hides which statistic it is, and no general "
+                f"estimator whose arguments have to be policed against one "
+                f"another")
+
+    def test_metrics_is_importable_submodule(self):
+        import uacpy.metrics as m
+        assert m is uacpy.metrics
+        assert hasattr(m, 'tl_rmse')
+        assert hasattr(m, 'tl_max_error')
+        assert hasattr(m, 'tl_bias')
+
+    @pytest.mark.parametrize('name, core', [('materials', 'uacpy.core.materials'),
+                                            ('units', 'uacpy.core.units')])
+    def test_materials_and_units_are_importable_modules(self, name, core):
+        import importlib
+        module = importlib.import_module(f'uacpy.{name}')
+        assert module is getattr(uacpy, name)
+        assert module.__name__ == f'uacpy.{name}'
+        source = importlib.import_module(core)
+        assert module.__all__ == source.__all__
+        assert all(getattr(module, n) is getattr(source, n)
+                   for n in source.__all__)
+
+
+#: Every name the spectral reshape retired. The attribute check below sees
+#: only the package namespace; the text sweep sees docstrings, comments,
+#: error messages, guides and examples — which is where all of them actually
+#: survived a rename, because a ``psd(``-shaped search does not match
+#: ``from uacpy.acoustic_signal import ..., psd`` on its own line.
+RETIRED_SPECTRAL_NAMES = (
+    'psd', 'ppsd', 'sel', 'spectral_estimate',
+    'probabilistic_spectral_estimate', 'power_spectral_density',
+    'power_spectrum', 'constant_q_psd', 'constant_q_spectrum',
+    'constant_q_spectral_density', 'probabilistic_power_spectral_density',
+    'probabilistic_power_spectrum', 'probabilistic_constant_q_spectrum',
+    'PSDResult', 'PPSDResult', 'CQPSDResult', 'CQPPSDResult', 'SELResult',
+    'ConstantQEstimate', 'SPECTRAL_METHODS', 'SPECTRAL_SCALINGS',
+)
+
+
+#: The retired names that are also ordinary short words: ``psd`` is a
+#: parameter of ``decidecade_band_levels``, ``sel`` a local in half a dozen
+#: readers, ``mode='psd'`` scipy's own. For these, only an API-SHAPED
+#: reference counts — a code span, an import, a Sphinx role or a call.
+_SHORT_RETIRED = ('psd', 'ppsd', 'sel')
+
+
+#: Spellings that legitimately contain a retired name: the live functions
+#: whose names embed one, and the one place the guide explains the short
+#: names are gone.
+_RETIREMENT_ALLOWED = (
+    'synthesize_noise_from_psd', 'plot_psd', 'plot_ppsd', 'plot_sel',
+    'plot_constant_q_psd', 'plot_constant_q_ppsd', 'as_psd', 'integrate_psd',
+    'sound_exposure', 'isel',
+    # xarray's own selector, which several readers document by name
+    "sel(method='nearest')", '.sel(',
+    'RETIRED_SPECTRAL_NAMES', '_RETIREMENT_ALLOWED', '_SHORT_RETIRED',
+    'no `psd` / `ppsd`',
+)
+
+
+def _api_shaped(name):
+    """Patterns that mean "the function ``name``", not a word spelled that way.
+
+    A code span, a docstring literal, an import, a Sphinx role or a call —
+    the shapes an API reference takes. A bare ``psd`` in
+    ``if np.any(psd < 0)`` is a parameter and not a finding.
+    """
+    import re
+    escaped = re.escape(name)
+    return [re.compile(p.format(n=escaped)) for p in (
+        r'import\s+[^\n]*\b{n}\b', r':func:`[^`]*{n}`',
+        r'(?<![\w.`]){n}\(',
+    )]
+
+
+def test_no_retired_spectral_name_survives_in_text():
+    """The rename has to reach prose, not just the namespace.
+
+    Every defect this sweep would have caught lived in a docstring, a comment,
+    a runtime error message, a guide or an example — places a ``hasattr``
+    check cannot see and a call-shaped grep does not match.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    targets = sorted(
+        [p for p in (root / 'uacpy').rglob('*.py')
+         if 'third_party' not in str(p) and '/build/' not in str(p)]
+        + list((root / 'docs').rglob('*.md'))
+        + [root / 'DOCUMENTATION.md'])
+    assert len(targets) > 100, f"sweep found only {len(targets)} files"
+
+    long_names = [n for n in RETIRED_SPECTRAL_NAMES if n not in _SHORT_RETIRED]
+    short_patterns = {n: _api_shaped(n) for n in _SHORT_RETIRED}
+    hits = []
+    for path in targets:
+        if path.name == Path(__file__).name:
+            continue
+        for lineno, line in enumerate(path.read_text(encoding='utf-8')
+                                      .splitlines(), 1):
+            if any(ok in line for ok in _RETIREMENT_ALLOWED):
+                continue
+            if line.lstrip().startswith(('def ', 'async def ')):
+                continue        # a local helper may share an ordinary word
+            found = next((n for n in long_names
+                          if re.search(rf'(?<![\w.]){re.escape(n)}(?![\w])',
+                                       line)), None)
+            if found is None:
+                found = next((n for n, pats in short_patterns.items()
+                              if any(p.search(line) for p in pats)), None)
+            if found is not None:
+                hits.append(f"{path.relative_to(root)}:{lineno}: {found}"
+                            f" -> {line.strip()[:90]}")
+    assert not hits, "retired spectral names still in the text:\n  " + \
+        "\n  ".join(hits[:25])

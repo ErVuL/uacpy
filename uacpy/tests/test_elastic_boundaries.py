@@ -94,7 +94,9 @@ class TestElasticOverFluidHalfspaceGuard:
     @pytest.mark.parametrize('model_cls', [Kraken])
     def test_rejects_fast_with_alternatives(self, model_cls):
         src, rcv = self._src_rcv()
-        with pytest.raises(UnsupportedFeatureError) as exc:
+        with pytest.raises(
+                UnsupportedFeatureError,
+                match='elastic sediment layer over a fluid halfspace') as exc:
             model_cls().run(self._elastic_over_fluid(), src, rcv)
         assert 'Scooter' in str(exc.value)
 
@@ -133,6 +135,15 @@ class TestElasticOverFluidHalfspaceGuard:
         assert not np.isfinite(tl[2]).any()      # in elastic halfspace: all NaN
 
 
+@pytest.fixture
+def receiver_10x10():
+    """Ten depths 10-90 m by ten ranges 1-5 km."""
+    return Receiver(
+        depths=np.linspace(10, 90, 10),
+        ranges=np.linspace(1000, 5000, 10)
+    )
+
+
 class TestElasticBoundaryAutoDetection:
     """Test automatic elastic boundary detection in Kraken."""
 
@@ -153,20 +164,13 @@ class TestElasticBoundaryAutoDetection:
             bottom=bottom
         )
 
-    @pytest.fixture
-    def receiver_small(self):
-        return Receiver(
-            depths=np.linspace(10, 90, 10),
-            ranges=np.linspace(1000, 5000, 10)
-        )
-
-    def test_kraken_detects_elastic_bottom(self, elastic_env, source, receiver_small):
+    def test_kraken_detects_elastic_bottom(self, elastic_env, source, receiver_10x10):
         """Test that Kraken detects an elastic bottom and dispatches to krakenc."""
         kraken = Kraken(verbose=False)
-        result = kraken.compute_tl(elastic_env, source, receiver_small)
+        result = kraken.compute_tl(elastic_env, source, receiver_10x10)
 
         assert result is not None
-        assert result.data.shape == (len(receiver_small.depths), len(receiver_small.ranges))
+        assert result.data.shape == (len(receiver_10x10.depths), len(receiver_10x10.ranges))
         assert np.all(np.isfinite(result.data))
         assert isinstance(result, Field)
 
@@ -176,14 +180,14 @@ class TestElasticBoundaryAutoDetection:
         assert np.any(result.dB > 0)
         assert np.all(result.dB < 200)
 
-    def test_kraken_fluid_bottom(self, fluid_env, source, receiver_small):
+    def test_kraken_fluid_bottom(self, fluid_env, source, receiver_10x10):
         """Test that Kraken works with a fluid bottom (dispatches to kraken.exe)."""
         kraken = Kraken(verbose=False)
 
-        result = kraken.compute_tl(fluid_env, source, receiver_small)
+        result = kraken.compute_tl(fluid_env, source, receiver_10x10)
 
         assert result is not None
-        assert result.data.shape == (len(receiver_small.depths), len(receiver_small.ranges))
+        assert result.data.shape == (len(receiver_10x10.depths), len(receiver_10x10.ranges))
         assert np.all(np.isfinite(result.data))
         # Same bands as the elastic sibling: TL < 200 dB rules out a field
         # collapsed to numerical zero, and this 100 m guide at 1-5 km sits
@@ -200,7 +204,7 @@ class TestElasticBoundaryAutoDetection:
         assert m.select_backend(elastic_env) == 'krakenc'
         assert m.select_backend(fluid_env) == 'kraken'
 
-    def test_elastic_vs_fluid_difference(self, elastic_env, fluid_env, source, receiver_small):
+    def test_elastic_vs_fluid_difference(self, elastic_env, fluid_env, source, receiver_10x10):
         """A shear-supporting seabed must move the field.
 
         The two environments differ only in ``shear_speed`` (400 vs 0 m/s),
@@ -212,8 +216,8 @@ class TestElasticBoundaryAutoDetection:
         """
         kraken = Kraken(verbose=False)
 
-        result_elastic = kraken.compute_tl(elastic_env, source, receiver_small)
-        result_fluid = kraken.compute_tl(fluid_env, source, receiver_small)
+        result_elastic = kraken.compute_tl(elastic_env, source, receiver_10x10)
+        result_fluid = kraken.compute_tl(fluid_env, source, receiver_10x10)
 
         # .dB is the dB view regardless of how the Field stores its data.
         diff = np.abs(result_elastic.dB - result_fluid.dB)
@@ -232,7 +236,7 @@ class TestBounceReflectionCoefficients:
 
     def test_bounce_output_files(self, elastic_env, source, receiver_bounce, tmp_path):
         """Test that BOUNCE creates both .brc and .irc files."""
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
+        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
 
         result = bounce.run(
             env=elastic_env,
@@ -254,7 +258,7 @@ class TestBounceReflectionCoefficients:
         self, elastic_env, source, receiver_bounce, tmp_path,
     ):
         """Test that BOUNCE returns valid reflection coefficient data."""
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
+        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
 
         result = bounce.run(
             env=elastic_env,
@@ -262,9 +266,9 @@ class TestBounceReflectionCoefficients:
             receiver=receiver_bounce,
         )
 
-        angles = result.theta
-        R_mag = result.R
-        phases = result.phi
+        angles = result.angles
+        R_mag = result.magnitude
+        phases = result.phase
 
         assert len(angles) > 0
         assert len(R_mag) == len(angles)
@@ -298,17 +302,10 @@ class TestBounceToScooterWorkflow:
     """Test BOUNCE → SCOOTER workflow using .brc files."""
 
     @pytest.fixture
-    def receiver_small(self):
-        return Receiver(
-            depths=np.linspace(10, 90, 10),
-            ranges=np.linspace(1000, 5000, 10)
-        )
-
-    @pytest.fixture
     def receiver_bounce(self):
         return Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
-    def test_bounce_scooter_vs_direct_elastic(self, elastic_env, source, receiver_small, receiver_bounce, tmp_path):
+    def test_bounce_scooter_vs_direct_elastic(self, elastic_env, source, receiver_10x10, receiver_bounce, tmp_path):
         """A tabulated ``.brc`` must reproduce the elastic half-space it came from.
 
         Both runs are Scooter on the same waveguide; the only difference is
@@ -325,7 +322,7 @@ class TestBounceToScooterWorkflow:
         table/half-space mismatch shows up.
         """
         # Workflow 1: BOUNCE → SCOOTER
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
+        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
         bounce_result = bounce.run(
             env=elastic_env,
             source=source,
@@ -348,10 +345,10 @@ class TestBounceToScooterWorkflow:
         )
 
         scooter = Scooter(verbose=False, c_low=1400.0, c_high=10000.0)
-        result_with_file = scooter.compute_tl(env_with_rc, source, receiver_small)
+        result_with_file = scooter.compute_tl(env_with_rc, source, receiver_10x10)
 
         # Workflow 2: Direct elastic
-        result_direct = scooter.compute_tl(elastic_env, source, receiver_small)
+        result_direct = scooter.compute_tl(elastic_env, source, receiver_10x10)
 
         diff = np.abs(result_with_file.dB - result_direct.dB)
         mean_diff = np.nanmean(diff)
@@ -364,14 +361,7 @@ class TestBounceToScooterWorkflow:
 class TestWorkflowComparison:
     """Compare Kraken auto-detection vs BOUNCE→SCOOTER workflows."""
 
-    @pytest.fixture
-    def receiver_small(self):
-        return Receiver(
-            depths=np.linspace(10, 90, 10),
-            ranges=np.linspace(1000, 5000, 10)
-        )
-
-    def test_kraken_vs_bounce_scooter(self, elastic_env, source, receiver_small, tmp_path):
+    def test_kraken_vs_bounce_scooter(self, elastic_env, source, receiver_10x10, tmp_path):
         """The two elastic-boundary routes must land on the same field.
 
         krakenc's normal-mode sum against Scooter's wavenumber integration
@@ -384,10 +374,10 @@ class TestWorkflowComparison:
         """
         # Approach 1: Kraken auto-detection
         kraken = Kraken(verbose=False)
-        result_kraken = kraken.compute_tl(elastic_env, source, receiver_small)
+        result_kraken = kraken.compute_tl(elastic_env, source, receiver_10x10)
 
         # Approach 2: BOUNCE → SCOOTER
-        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax=10000.0, work_dir=tmp_path)
+        bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
         receiver_bounce = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
 
         bounce_result = bounce.run(
@@ -412,7 +402,7 @@ class TestWorkflowComparison:
         )
 
         scooter = Scooter(verbose=False, c_low=1400.0, c_high=10000.0)
-        result_scooter = scooter.compute_tl(env_with_rc, source, receiver_small)
+        result_scooter = scooter.compute_tl(env_with_rc, source, receiver_10x10)
 
         # Both should produce valid results
         assert result_kraken is not None

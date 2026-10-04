@@ -29,7 +29,8 @@ p(r, z) = ∫₀^∞ G(k, z) J₀(k r) k dk                          (back to ra
 depth axis with linear finite elements — the water column and every sediment
 layer become media of their own — and solves that ODE at each `k`. uacpy then
 evaluates the integral in-tree, as a direct sum over the wavenumber grid at
-each requested receiver range ([`uacpy.io.grn_reader`](../guide/io.md)).
+each requested receiver range ([`GreensFunction`](../guide/io.md), which
+`uacpy.io.read_grn_file` returns).
 
 That chain contains exactly one physical approximation, and it is in the last
 step. What is summed is not the Bessel integral above but its **fast-field**
@@ -45,7 +46,7 @@ one has a knob that converges it:
 |---|---|
 | Depth mesh too coarse | `n_mesh` |
 | Wavenumber axis truncated | `c_low`, `c_high` (width), `taper` (edge shape) |
-| Wavenumber axis undersampled | `rmax_multiplier` |
+| Wavenumber axis undersampled | `rmax_factor` |
 | Far-field (fast-field) kernel | none — structural; stay a few `λ` off the source |
 
 That is what "reference-grade" means here. It is not that Scooter is
@@ -148,10 +149,10 @@ There is no `INCOHERENT_TL`: incoherent summation needs a decomposition into
 paths or modes, and Scooter has neither — it produces the complex field
 directly.
 
-The default is `COHERENT_TL`, **always**. Unlike Bellhop and Kraken, Scooter
-does not promote a multi-frequency source to `BROADBAND` for you; handing one
-to the default mode raises a `ConfigurationError` naming the two modes that do
-take a band.
+The default is `COHERENT_TL`, **always**. Like every model, Scooter's default
+mode rejects a multi-frequency `Source`: it raises a `ConfigurationError`
+naming the two modes that do take a band. Only Kraken switches its default, and
+only on a multi-element `frequencies=` run argument, never on the `Source`.
 
 ---
 
@@ -165,8 +166,8 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 |---|---|---|
 | `c_low` | `None` | Lower phase-speed bound. `None` ⇒ `0.95 × min(SSP)`. Sets `k_max = ω/c_low`. |
 | `c_high` | `None` | Upper phase-speed bound. `None` ⇒ `1.05 × max(SSP, bottom)`. Sets `k_min = ω/c_high`. A vacuum or rigid bottom has no speed to cap on, so this resolves to the toolbox's unbounded value (`1e9`) instead. |
-| `rmax_multiplier` | `None` | Spectral `RMax = receiver.ranges.max() × this`. `None` ⇒ `2.0` for `COHERENT_TL`, `3.0` for `BROADBAND`/`TIME_SERIES`. |
-| `spectrum` | `'positive'` | Which wavenumber branch the transform integrates: `'positive'`, `'negative'`, `'both'`. |
+| `rmax_factor` | `None` | Spectral `RMax = receiver.ranges.max() × this`. `None` ⇒ `2.0` for `COHERENT_TL`, `3.0` for `BROADBAND`/`TIME_SERIES`. |
+| `wavenumber_spectrum` | `'positive'` | Which wavenumber branch the transform integrates: `'positive'`, `'negative'`, `'both'`. |
 | `stabilizing_attenuation_off` | `False` | Zero Scooter's contour offset. Leave it alone unless you know why. |
 | `taper` | `0.0` | Hanning roll-off of the wavenumber kernel over this fraction of the spectral span at **each** edge, applied before the transform. `0` = off, matching `fieldsco.m`, which disables it and calls it *"user play (at your own risk)"*. A rectangular edge's sidelobes fall at 6 dB/octave, a Hann edge's at 18 (Abraham, *Underwater Acoustic Signal Processing*, Sect. 4.10). See the gotcha below before raising it. |
 
@@ -243,13 +244,9 @@ def run_with_greens_function(env, source, receiver, **knobs):
         field = Scooter(work_dir=Path(tmp), **knobs).run(env, source, receiver)
         return field, read_grn_file(field.metadata['grn_file'])
 
-def _wavenumbers(grn):
-    """Horizontal wavenumbers behind a ``.grn``: ``k = 2πf / c``."""
-    return 2.0 * np.pi * grn['freq'] / grn['cVec']
-
 _, grn = run_with_greens_function(env, source, receiver)
-k = _wavenumbers(grn)
-G = np.abs(grn['G'][0, 0])                       # (n_rd, n_k)
+k = grn.wavenumbers()                            # k = 2πf / c
+G = np.abs(grn.data[0, 0])                     # (n_rd, n_k)
 ```
 
 ![Scooter Green's function](figures/scooter_greens_function.png)
@@ -313,9 +310,16 @@ channel that costs 0.19 dB median beyond 2 km — and **29.8 dB at 100 m**, one
 water depth out. That is a second near-source limit, separate from the
 fast-field one in [§1](#1-what-it-solves) and scaled by the water depth rather
 than the wavelength: 100 m here is already 13 λ, well clear of "a few
-wavelengths", and still wrong. Below a couple of water depths, raise `c_high`
-(5.5× the wavenumbers here) and check whether the answer moved. Narrow the
-window only to isolate a mechanism, never to save time.
+wavelengths", and still wrong. The criterion is an ANGLE, not a range: a path
+at grazing `θ` in water of speed `c` is integrated only while
+`θ <= arccos(c / c_high)` (17.8° for the default `c_high` over a transparent
+1500 m/s bottom), and a run whose receivers see a steeper direct or
+surface-reflected path warns. `c_high=1e9` (5.5× the wavenumbers here) restores
+the missing paths. A second, smaller error survives even inside the cut: the
+hard `k_min` edge rings, 1.9 dB at 1.2 km (three water depths) in a Lloyd
+geometry whose paths all sit below the cut; a small `taper` (`taper=0.05`)
+removes it (61.19 dB against the exact 61.18). Narrow the window only to
+isolate a mechanism, never to save time.
 
 [Kraken's version of this figure](kraken.md) shows the same window bounding a
 *mode set* rather than an integration interval — the two views of the same
@@ -375,7 +379,7 @@ line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
 reference = np.asarray(Scooter().run(env, source, line).dB,
                        dtype=float).ravel()
 others = [('Kraken (normal modes)', Kraken(), 'C1'),
-          ('Bellhop (Gaussian beams)', Bellhop(n_beams=3000), 'C2')]
+          ('Bellhop (hat beams)', Bellhop(n_beams=3000), 'C2')]
 for label, model, colour in others:
     tl = np.asarray(model.run(env, source, line).dB, dtype=float).ravel()
     ...  # plot tl, and |tl - reference|
@@ -391,7 +395,7 @@ consistently several dB out and misplaces nulls outright: 100 m at 200 Hz is
 that costs.
 
 Run the comparison as images rather than lines with
-[`uacpy.compare_models`](../guide/plotting.md).
+[`uacpy.plot.compare_models`](../guide/plotting.md).
 
 ### Broadband: exact, one solve at a time
 
@@ -425,7 +429,7 @@ env = uacpy.Environment(                     # 100 m shelf → 400 m over 20 km
 )
 source = uacpy.Source(depths=50.0, frequencies=100.0)
 
-flat = Scooter().run(env, source, receiver)  # UserWarning: bathymetry collapsed
+flat = Scooter().run(env, source, receiver)  # FallbackWarning: bathymetry collapsed
 ```
 
 ![Scooter range collapse](figures/scooter_range_collapse.png)
@@ -434,9 +438,9 @@ uacpy does not refuse the run. It collapses the bathymetry to a single depth,
 warns, and solves that:
 
 ```
-UserWarning: Scooter does not support range-dependent bathymetry; collapsed
-to 400.0 m (method='max', range 100.0–400.0 m). Override via
-`collapse={'bathymetry': 'min'|'median'|'mean'|'max'|'initial'}`.
+FallbackWarning: Scooter does not support range-dependent bathymetry;
+collapsed to 400.0 m (method='max', range 100.0–400.0 m). Override via
+`collapse={'bathymetry': 'max'|'median'|'mean'|'min'|'initial'}`.
 ```
 
 The top panel answers a different question than the one asked: a flat 400 m
@@ -452,7 +456,7 @@ and the warning is uacpy saying so.
 ## 7. Gotchas
 
 **`RMax` comes from the receiver grid.** The spectral `RMax` is
-`receiver.ranges.max() × rmax_multiplier`, and it sets the wavenumber spacing:
+`receiver.ranges.max() × rmax_factor`, and it sets the wavenumber spacing:
 `Δk ≈ π / (2·RMax)` (`scooter.f90:69,77`). Replacing the integral by a discrete
 sum over `k` makes the range output **periodic** with period `R = 2π/Δk`, which
 works out at **4·RMax** — so the default multiplier of 2 puts the first source
@@ -480,10 +484,11 @@ the mesh reaches it.
 at `0` lets Scooter size the mesh from the frequency, which is usually what you
 want; raise it if the result changes when you do.
 
-**`n_mesh` below 100 does nothing, silently.** Scooter floors the count at 100
+**`n_mesh` below 100 does nothing.** Scooter floors the count at 100
 points per medium (`scooter.f90:110`), and the `.prt` still echoes back the
-value you asked for — so there is no signal that it was overridden. A
-convergence study over `n_mesh` = 20, 40, 60, 80, 100 returns five *identical*
+value you asked for, so the binary gives no signal that it was overridden;
+uacpy warns (`FallbackWarning` "… has no effect …") wherever the frequency-scaled
+count falls under the floor. A convergence study over `n_mesh` = 20, 40, 60, 80, 100 returns five *identical*
 answers and reads as converged: at 50 Hz in the 100 m channel above, `n_mesh` of
 34, 40, 70 and 100 all give bit-identical TL, and only 150 moves it. Step by
 factors above 100. Going the other way, setting `n_mesh` below half what Scooter
@@ -523,9 +528,9 @@ cube alone that is `2 + 3·nr / (nfreq·nsd·nrd)`, which is **3.7×** on a
 single-frequency deck of 900 receiver depths and 499 ranges: counting the cube
 by itself under-reads the peak by whatever the range count makes it. uacpy
 estimates the peak before writing the deck and compares it with
-`MemAvailable`: over half of it warns (`UserWarning`),
-over all of it raises, and if the host's free memory cannot be read it falls
-back to a fixed 2 GiB cube cap. A 3 GiB cube is nothing on a 64 GiB
+`MemAvailable`: over half of it warns (`NumericsWarning`),
+over all of it raises, and if the host's free memory cannot be read a peak over
+2 GiB warns and is never refused. A 3 GiB cube is nothing on a 64 GiB
 workstation and fatal on a 4 GiB laptop; a fixed limit is wrong at both ends.
 
 **The transform carries the `.grn`'s own precision.** `Green` is declared
@@ -554,12 +559,14 @@ field, and the periodic images then die away before they reach your window. COA
 Eq. (4.115) puts the offset that buys 60 dB of wrap-around suppression at
 `ε ≈ 1.1·Δk`, so Scooter's `Δk` is the textbook value, not a guess. It also
 means a pole on the real axis — a lossless waveguide, where the images never
-decay — cannot blow up. The `.grn` reports the offset in `grn_data['atten']`,
+decay — cannot blow up. `read_grn_file` reports the offset as `GreensFunction.stabilizing_attenuation`,
 and the transform integrates along that same shifted contour and re-multiplies
 by `e^{εr}` to restore the true range decay. Setting
 `stabilizing_attenuation_off=True` zeroes it, which is occasionally what a
 convergence study wants and otherwise a way to let wrap-around back into a
 result that will still look plausible.
+
+Scooter's measured agreement with closed forms and the published benchmarks, and its known limits there, are on the [validation page](validation.md).
 
 ---
 

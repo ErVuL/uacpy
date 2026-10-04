@@ -7,18 +7,19 @@ to any other carrier type).
 import pytest
 
 import copy
-import warnings
 
 import numpy as np
 
 import uacpy
-from uacpy.core.bottom import (
-    SedimentLayer, BoundaryProperties, SeabedColumn, Bottom,
-)
+from uacpy.core.boundary import SedimentLayer, BoundaryProperties
+from uacpy.core.bottom import SeabedColumn, Bottom
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.environment import Environment
 from uacpy.core.materials import get_material, list_materials
+from uacpy.models.ram import _seabed as ram_seabed
 from uacpy.core.surface import Surface
+from uacpy.tests.conftest import (range_independent_layered_env,
+                                  wide_range_dependent_env)
+from uacpy.tests.conftest import recorded_warnings
 
 
 def _hs(cp=1800.0, rho=1.9, a=0.3, cs=0.0, a_s=0.0):
@@ -70,14 +71,15 @@ class TestAcousticTypeInference:
         assert env.bottom.columns[0].halfspace.sound_speed == 1600.0
 
     def test_explicit_vacuum_with_params_raises(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='ignores half-space acoustic parameters'):
             BoundaryProperties(acoustic_type='vacuum', sound_speed=1600.0)
 
     def test_vacuum_bottom_reductions_stay_parameter_free(self):
         cols = [SeabedColumn([], BoundaryProperties(acoustic_type='vacuum'))
                 for _ in range(2)]
         b = Bottom.from_columns(cols, ranges=[0.0, 5000.0])
-        assert b.select_range('mean').acoustic_type == 'vacuum'
+        assert b.collapse_range('mean').acoustic_type == 'vacuum'
         assert b.halfspace_at(range=2500.0).acoustic_type == 'vacuum'
 
 
@@ -110,11 +112,14 @@ class TestBottomQueries:
             [SedimentLayer(5, 1600, 1.5, 0.3, shear_speed=200)], _hs())).is_elastic
 
     def test_bottom_rejects_column_count_range_mismatch_and_nonmonotone_ranges(self):
-        with pytest.raises(ConfigurationError):       # ranges=None needs 1 column
+        with pytest.raises(ConfigurationError,       # ranges=None needs 1 column
+                           match='needs exactly one column'):
             Bottom(columns=[SeabedColumn([], _hs()), SeabedColumn([], _hs())])
-        with pytest.raises(ConfigurationError):       # length mismatch
+        with pytest.raises(ConfigurationError,       # length mismatch
+                           match='must match columns length'):
             Bottom(columns=[SeabedColumn([], _hs())], ranges=[0, 1])
-        with pytest.raises(ConfigurationError):       # non-monotone ranges
+        with pytest.raises(ConfigurationError,       # non-monotone ranges
+                           match='Bottom.ranges must be strictly increasing'):
             Bottom.from_columns([SeabedColumn([], _hs())] * 2, ranges=[5, 5])
 
 
@@ -144,11 +149,19 @@ class TestSeabedColumnAccessors:
     def test_no_eval(self):
         assert not hasattr(SeabedColumn, 'eval')
 
+    def test_layer_at_maps_a_boundary_depth_to_the_upper_layer(self):
+        c = self._col()                       # 0-10 m: 1600, 10-30 m: 1700
+        assert c.layer_at(5.0).sound_speed == 1600
+        assert c.layer_at(10.0).sound_speed == 1600      # boundary → upper
+        assert c.layer_at(20.0).sound_speed == 1700
+        assert c.layer_at(30.0).sound_speed == 1700      # stack bottom → upper
+        assert c.layer_at(30.5) is None                  # below the stack
+
     def test_at_and_sample_agree_on_boundary_convention(self):
-        # at() and sample_at_depths() must share one layer-boundary rule:
+        # at() and RAM's sample_at_depths share one layer-boundary rule:
         # a depth exactly on an internal boundary maps to the UPPER layer.
         c = self._col()                                  # 0-10:1600, 10-30:1700
-        cs, _, _ = c.sample_at_depths(n_points=4, max_thickness=30)
+        cs, _, _ = ram_seabed.sample_at_depths(c, n_points=4, max_thickness=30)
         # sample depths 0, 10, 20, 30 → upper layer at the 10 m interface
         assert cs[0] == c.at(depth=0).sound_speed == 1600
         assert cs[1] == c.at(depth=10).sound_speed == 1600   # boundary → upper
@@ -161,13 +174,14 @@ class TestSeabedColumnAccessors:
 class TestHalfspaceColumn:
     def test_breakpoints(self):
         col = SeabedColumn(layers=[], halfspace=_hs(cp=1800.0))
-        bp = col.to_piecewise_breakpoints(seafloor_depth=100.0, zmax=400.0)
+        bp = ram_seabed.piecewise_breakpoints(col, seafloor_depth=100.0,
+                                              zmax=400.0)
         assert bp['sound_speed'] == [(100.0, 1800.0), (400.0, 1800.0)]
 
     def test_collapse_degrades_to_halfspace(self):
         col = SeabedColumn(layers=[], halfspace=_hs(cp=1800.0))
         for m in ('halfspace', 'top_layer', 'volume_average'):
-            assert col.collapse(m).sound_speed == 1800.0
+            assert col.collapse_layers(m).sound_speed == 1800.0
 
 
 # ─── layered column ─────────────────────────────────────────────────────────
@@ -175,7 +189,8 @@ class TestHalfspaceColumn:
 class TestLayeredColumn:
     def test_breakpoints_step_function(self):
         col = SeabedColumn(_layers(), _hs(cp=1800))
-        bp = col.to_piecewise_breakpoints(100.0, 400.0, ('sound_speed',))
+        bp = ram_seabed.piecewise_breakpoints(col, 100.0, 400.0,
+                                              ('sound_speed',))
         # layer1 10 m, layer2 20 m from seafloor 100 → deepest layer bottom 130
         assert bp['sound_speed'] == [
             (100.0, 1600.0), (110.0, 1600.0),     # layer 1 (10 m)
@@ -187,13 +202,13 @@ class TestLayeredColumn:
         assert SeabedColumn(_layers(), _hs()).total_thickness() == 30.0
 
     def test_collapse_top_layer(self):
-        c = SeabedColumn(_layers(), _hs(cp=1800)).collapse('top_layer')
+        c = SeabedColumn(_layers(), _hs(cp=1800)).collapse_layers('top_layer')
         assert c.sound_speed == 1600 and c.density == 1.5
 
     def test_collapse_volume_average(self):
         # weights: layer thk [10,20] + halfspace weight = last layer thk (20)
         # cp = (10*1600 + 20*1700 + 20*1800) / (10+20+20) = 86000/50 = 1720
-        c = SeabedColumn(_layers(), _hs(cp=1800, rho=1.9, a=0.3)).collapse('volume_average')
+        c = SeabedColumn(_layers(), _hs(cp=1800, rho=1.9, a=0.3)).collapse_layers('volume_average')
         assert c.sound_speed == pytest.approx(1720.0)
 
     def test_collapse_carries_halfspace_roughness(self):
@@ -202,9 +217,9 @@ class TestLayeredColumn:
         hs = _hs(cp=1800)
         hs.roughness = 0.25
         col = SeabedColumn(_layers(), hs)
-        assert col.collapse('top_layer').roughness == 0.25
-        assert col.collapse('volume_average').roughness == 0.25
-        assert col.collapse('halfspace').roughness == 0.25
+        assert col.collapse_layers('top_layer').roughness == 0.25
+        assert col.collapse_layers('volume_average').roughness == 0.25
+        assert col.collapse_layers('halfspace').roughness == 0.25
 
 
 # ─── carrier construction ───────────────────────────────────────────────────
@@ -286,15 +301,17 @@ class TestLayeredBottom:
         )
         env = uacpy.Environment(name='test', bathymetry=100, bottom=lb)
 
-        assert env.has_layered_bottom
-        assert not env.has_range_dependent_bottom
-        assert env.bottom.columns[0] is lb
+        assert (env.bottom.is_layered and not env.bottom.is_range_dependent)
+        assert not (env.bottom.is_range_dependent and not env.bottom.is_layered)
+        # A copy of the caller's column, not the column itself.
+        assert env.bottom.columns[0] == lb
+        assert env.bottom.columns[0] is not lb
         assert env.bottom.columns[0].halfspace.sound_speed == 1800
 
     def test_environment_plain_boundary_properties(self):
         """A half-space bottom is a non-layered, range-independent Bottom."""
         env = uacpy.Environment(name='test', bathymetry=100)
-        assert not env.has_layered_bottom and not env.bottom.is_range_dependent
+        assert not (env.bottom.is_layered and not env.bottom.is_range_dependent) and not env.bottom.is_range_dependent
         assert isinstance(env.bottom, uacpy.Bottom)
 
 
@@ -341,20 +358,20 @@ class TestRDHalfspace:
         assert b.halfspace_sound_speed.tolist() == [1600, 1700, 1800]
         assert b.halfspace_density.tolist() == [1.5, 1.6, 1.7]
 
-    def test_select_range(self):
+    def test_collapse_range(self):
         b = self._b()
-        assert b.select_range('r0').columns[0].halfspace.sound_speed == 1600
-        assert b.select_range('rmax').columns[0].halfspace.sound_speed == 1800
-        assert b.select_range('mean').columns[0].halfspace.sound_speed == pytest.approx(1700)
-        assert b.select_range('median').columns[0].halfspace.sound_speed == pytest.approx(1700)
+        assert b.collapse_range('r0').columns[0].halfspace.sound_speed == 1600
+        assert b.collapse_range('rmax').columns[0].halfspace.sound_speed == 1800
+        assert b.collapse_range('mean').columns[0].halfspace.sound_speed == pytest.approx(1700)
+        assert b.collapse_range('median').columns[0].halfspace.sound_speed == pytest.approx(1700)
 
-    def test_select_range_mean_carries_roughness(self):
+    def test_collapse_range_mean_carries_roughness(self):
         lo = _hs(); lo.roughness = 0.5
         hi = _hs(); hi.roughness = 1.5
         b = Bottom.from_columns([SeabedColumn([], lo), SeabedColumn([], hi)],
                                 ranges=[0, 5000])
-        assert b.select_range('mean').columns[0].halfspace.roughness == pytest.approx(1.0)
-        assert b.select_range('median').columns[0].halfspace.roughness == pytest.approx(1.0)
+        assert b.collapse_range('mean').columns[0].halfspace.roughness == pytest.approx(1.0)
+        assert b.collapse_range('median').columns[0].halfspace.roughness == pytest.approx(1.0)
 
 
 # ─── range-dependent layered: nearest only ──────────────────────────────────
@@ -384,11 +401,12 @@ class TestRDLayered:
         assert b.halfspace_at(range=7000).sound_speed == 2200
 
     def test_max_total_thickness(self):
-        assert self._b().max_total_thickness() == 30.0   # near column 10+20
+        assert self._b().total_thickness_max() == 30.0   # near column 10+20
 
     def test_mean_range_collapse_raises(self):
-        with pytest.raises(ConfigurationError):
-            self._b().select_range('mean')
+        with pytest.raises(ConfigurationError,
+                           match='is undefined for a layered bottom'):
+            self._b().collapse_range('mean')
 
     def test_all_sound_speeds(self):
         speeds = self._b().all_sound_speeds()
@@ -491,7 +509,7 @@ def test_collapse_over_parameter_free_halfspace(kind, method):
     col = SeabedColumn(
         layers=_layers(),
         halfspace=BoundaryProperties(acoustic_type=kind, roughness=1.5))
-    out = col.collapse(method)
+    out = col.collapse_layers(method)
     assert out.acoustic_type == kind
     assert out.roughness == pytest.approx(1.5)
 
@@ -504,7 +522,7 @@ def test_collapse_over_file_halfspace_keeps_reflection_file():
         halfspace=BoundaryProperties(acoustic_type='file',
                                      reflection_file='bottom.brc'))
     for method in ('halfspace', 'top_layer', 'volume_average'):
-        out = col.collapse(method)
+        out = col.collapse_layers(method)
         assert out.acoustic_type == 'file'
         assert out.reflection_file == 'bottom.brc'
 
@@ -514,9 +532,9 @@ def test_each_collapse_mode_reduces_the_column_to_its_own_speed():
     mean over 1600(10 m), 1700(20 m) and the half-space at the deepest layer's
     weight (20 m) = 1720 m/s."""
     col = SeabedColumn(layers=_layers(), halfspace=_hs(cp=1800.0))
-    assert col.collapse('top_layer').sound_speed == pytest.approx(1600.0)
-    assert col.collapse('volume_average').sound_speed == pytest.approx(1720.0)
-    assert col.collapse('halfspace').sound_speed == pytest.approx(1800.0)
+    assert col.collapse_layers('top_layer').sound_speed == pytest.approx(1600.0)
+    assert col.collapse_layers('volume_average').sound_speed == pytest.approx(1720.0)
+    assert col.collapse_layers('halfspace').sound_speed == pytest.approx(1800.0)
 
 
 @pytest.mark.parametrize('layers', [[], _layers()])
@@ -525,7 +543,7 @@ def test_collapse_rejects_unknown_method_in_both_branches(layers):
     rejects a typo just like the layered path."""
     col = SeabedColumn(layers=layers, halfspace=_hs())
     with pytest.raises(ConfigurationError, match='unknown method'):
-        col.collapse('bogus')
+        col.collapse_layers('bogus')
 
 
 def test_at_depth_carries_layer_name():
@@ -556,7 +574,7 @@ def test_collapse_reports_the_seabed_surface_roughness():
                               attenuation=0.4, roughness=0.35)],
         halfspace=_hs())
     col.halfspace.roughness = 0.1
-    assert col.collapse('volume_average').roughness == pytest.approx(0.1)
+    assert col.collapse_layers('volume_average').roughness == pytest.approx(0.1)
 
 
 class TestAccessorsReturnCopies:
@@ -593,7 +611,7 @@ class TestAccessorsReturnCopies:
 
 
 class TestReductionsReturnCopies:
-    """The reductions that *pick* a column — ``select_range('r0'/'rmax')``,
+    """The reductions that *pick* a column — ``collapse_range('r0'/'rmax')``,
     ``'median'`` on a layered bottom, and the one-column-in/one-column-out
     early return — put that column straight into the new ``Bottom``, so the
     result shared its ``SeabedColumn`` with the parent and a write through
@@ -612,13 +630,13 @@ class TestReductionsReturnCopies:
     @pytest.mark.parametrize('method, index', [('r0', 0), ('rmax', -1)])
     def test_a_picked_column_does_not_write_back(self, method, index):
         b = self._rd()
-        b.select_range(method).columns[0].halfspace.sound_speed = 9999.0
+        b.collapse_range(method).columns[0].halfspace.sound_speed = 9999.0
         assert b.columns[index].halfspace.sound_speed == pytest.approx(
             1600.0 if index == 0 else 1800.0)
 
     def test_a_layered_median_does_not_write_back(self):
         b = self._rd(layered=True)
-        b.select_range('median').columns[0].layers[0].sound_speed = 9999.0
+        b.collapse_range('median').columns[0].layers[0].sound_speed = 9999.0
         assert b.columns[1].layers[0].sound_speed == pytest.approx(1600.0)
 
     def test_collapse_on_the_range_axis_does_not_write_back(self):
@@ -628,7 +646,7 @@ class TestReductionsReturnCopies:
 
     def test_a_range_independent_bottom_does_not_write_back(self):
         b = Bottom.from_column(SeabedColumn(layers=[], halfspace=_hs()))
-        b.select_range('r0').columns[0].halfspace.attenuation = 7.0
+        b.collapse_range('r0').columns[0].halfspace.attenuation = 7.0
         assert b.columns[0].halfspace.attenuation == pytest.approx(0.3)
 
     def test_to_halfspace_does_not_write_back(self):
@@ -640,7 +658,7 @@ class TestReductionsReturnCopies:
                              [('r0', 1600.0), ('rmax', 1800.0),
                               ('mean', 1700.0), ('median', 1700.0)])
     def test_the_copies_carry_the_reduced_values(self, method, expected):
-        got = self._rd().select_range(method).columns[0].halfspace
+        got = self._rd().collapse_range(method).columns[0].halfspace
         assert got.sound_speed == pytest.approx(expected)
 
 
@@ -655,8 +673,8 @@ class TestSingleNodeRangesSurvivesReduction:
                                       density=1.8, attenuation=0.5)
 
     @pytest.mark.parametrize('method', ['r0', 'rmax', 'mean', 'median'])
-    def test_select_range_keeps_the_single_node(self, method):
-        assert self._bottom().select_range(method).ranges.tolist() == [5000.0]
+    def test_collapse_range_keeps_the_single_node(self, method):
+        assert self._bottom().collapse_range(method).ranges.tolist() == [5000.0]
 
     def test_collapse_layers_keeps_the_single_node(self):
         out = self._bottom().collapse(layers='halfspace')
@@ -664,20 +682,20 @@ class TestSingleNodeRangesSurvivesReduction:
 
     def test_env_max_range_survives(self):
         env = uacpy.Environment(name='t', bathymetry=100.0,
-                                bottom=self._bottom().select_range('r0'))
-        assert env.max_range == pytest.approx(5000.0)
+                                bottom=self._bottom().collapse_range('r0'))
+        assert env.range_max == pytest.approx(5000.0)
 
     def test_a_real_reduction_drops_the_axis(self):
         """Two columns down to one: the range axis no longer describes the
         result, so it goes."""
         b = Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1700.0, 1800.0],
                                    density=1.8, attenuation=0.5)
-        assert b.select_range('r0').ranges is None
-        assert b.select_range('mean').ranges is None
+        assert b.collapse_range('r0').ranges is None
+        assert b.collapse_range('mean').ranges is None
 
     def test_a_range_independent_bottom_stays_range_independent(self):
         b = Bottom.from_halfspace(_hs())
-        assert b.select_range('r0').ranges is None
+        assert b.collapse_range('r0').ranges is None
         assert b.collapse(layers='halfspace').ranges is None
 
 
@@ -753,9 +771,9 @@ def test_halfspace_at_mixed_types_defaults_to_nearest():
         bot.halfspace_at(range=5_000.0, interp='linear')
 
 
-def test_select_range_mean_refuses_mixed_types():
+def test_collapse_range_mean_refuses_mixed_types():
     """Averaging across boundary types would fold construction placeholders
-    into the numbers — same guard Surface.collapse applies."""
+    into the numbers — same guard Surface.collapse_range applies."""
     bot = Bottom(
         columns=[
             SeabedColumn(layers=[], halfspace=BoundaryProperties(
@@ -766,7 +784,7 @@ def test_select_range_mean_refuses_mixed_types():
         ranges=[0.0, 10_000.0])
     for method in ('mean', 'median'):
         with pytest.raises(ConfigurationError, match="single boundary type"):
-            bot.select_range(method)
+            bot.collapse_range(method)
 
 
 def test_all_sound_speeds_skips_precalc_placeholder():
@@ -800,7 +818,7 @@ class TestSelectRangeFileColumns:
         b = Bottom.from_columns(
             [self._file_col('bot.brc', 0.1), self._file_col('bot.brc', 0.3)],
             ranges=[0.0, 5000.0])
-        out = b.select_range(method).columns[0].halfspace
+        out = b.collapse_range(method).columns[0].halfspace
         assert out.acoustic_type == 'file'
         assert out.reflection_file == 'bot.brc'
         assert out.roughness == pytest.approx(0.2)
@@ -811,7 +829,7 @@ class TestSelectRangeFileColumns:
             [self._file_col('a.brc'), self._file_col('b.brc')],
             ranges=[0.0, 5000.0])
         with pytest.raises(ConfigurationError, match='reflection files'):
-            b.select_range(method)
+            b.collapse_range(method)
 
 
 class TestBottomAndSurfaceShareOneNearestRule:
@@ -828,10 +846,10 @@ class TestBottomAndSurfaceShareOneNearestRule:
         from uacpy.core import _grid
         from uacpy.core import bottom as bottom_module
         from uacpy.core import surface as surface_module
-        assert (bottom_module._nearest_index_on_axis
-                is _grid._nearest_index_on_axis)
-        assert (surface_module._nearest_index_on_axis
-                is _grid._nearest_index_on_axis)
+        assert (bottom_module.nearest_index_on_axis
+                is _grid.nearest_index_on_axis)
+        assert (surface_module.nearest_index_on_axis
+                is _grid.nearest_index_on_axis)
 
     @pytest.mark.parametrize('bad', [float('nan'), float('inf'),
                                      float('-inf')])
@@ -841,7 +859,7 @@ class TestBottomAndSurfaceShareOneNearestRule:
             [SeabedColumn(_layers(), _hs()), SeabedColumn(_layers(), _hs())],
             ranges=[0.0, 5000.0])
         surface = Surface(
-            properties=[BoundaryProperties(acoustic_type='vacuum'),
+            nodes=[BoundaryProperties(acoustic_type='vacuum'),
                         BoundaryProperties(acoustic_type='vacuum')],
             ranges=[0.0, 5000.0])
         with pytest.raises(ConfigurationError, match='finite label'):
@@ -856,9 +874,11 @@ class TestBottomAndSurfaceShareOneNearestRule:
             [SeabedColumn(_layers(), _hs()), SeabedColumn(_layers(), _hs())],
             ranges=[0.0, 5000.0])
         for bad in (float('nan'), float('inf')):
-            with pytest.raises(ConfigurationError):
+            with pytest.raises(ConfigurationError,
+                               match='is not a finite label'):
                 bottom.column_index_at(range=bad)
-            with pytest.raises(ConfigurationError):
+            with pytest.raises(ConfigurationError,
+                               match='is not a finite label'):
                 bottom.at(range=bad)
         assert bottom.columns[bottom.column_index_at(range=5000.0)] \
             is bottom.columns[1]
@@ -890,9 +910,11 @@ class TestSedimentLayerPresetCopiesRoughness:
         # Every shipped preset carries roughness 0.0, so the parity tests
         # above pass whether or not from_preset copies the field; a patched
         # preset makes the copy observable.
+        from types import MappingProxyType
         from uacpy.core import materials
         rough = dict(materials.MATERIALS['sand'], roughness=0.05)
-        monkeypatch.setitem(materials.MATERIALS, 'sand', rough)
+        monkeypatch.setattr(materials, 'MATERIALS', MappingProxyType(
+            {**materials.MATERIALS, 'sand': MappingProxyType(rough)}))
         layer = SedimentLayer.from_preset('sand', thickness=1.0)
         assert layer.roughness == pytest.approx(0.05)
 
@@ -912,7 +934,8 @@ class TestSedimentLayerCoercesNumericFieldsToFloat:
         assert 'cp=1650' in repr(layer)
 
     def test_a_non_numeric_string_is_refused_at_construction(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError,
+                           match='could not convert string to float'):
             SedimentLayer(thickness=10.0, sound_speed='fast', density=1.9)
 
     def test_numpy_scalars_construct(self):
@@ -966,7 +989,8 @@ class TestBoundaryCarrierLabelsMustBeFiniteScalars:
         # The blend path never reaches ``_nearest_index``: np.interp carried
         # the NaN into every blended property and BoundaryProperties then
         # reported a non-finite density.
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='is not a finite label') as exc:
             _range_dependent_bottom().halfspace_at(range=np.nan,
                                                    interp='linear')
         assert "range=nan is not a finite label" in str(exc.value)
@@ -1004,12 +1028,12 @@ class TestBoundaryCarrierLabelsMustBeFiniteScalars:
             layers=[SedimentLayer(thickness=10.0, sound_speed=1550.0,
                                   density=1.4, attenuation=0.3)],
             halfspace=_halfspace(1800.0))
-        cp, rho, attn = col.sample_at_depths(4)
+        cp, rho, attn = ram_seabed.sample_at_depths(col, 4)
         assert np.allclose(cp, 1550.0)
 
     def test_surface_at_nan_range_raises(self):
         surface = Surface(
-            properties=[BoundaryProperties(acoustic_type='vacuum'),
+            nodes=[BoundaryProperties(acoustic_type='vacuum'),
                         BoundaryProperties(acoustic_type='rigid')],
             ranges=[0.0, 5000.0])
         with pytest.raises(ConfigurationError,
@@ -1018,53 +1042,17 @@ class TestBoundaryCarrierLabelsMustBeFiniteScalars:
 
     def test_surface_at_a_finite_range_returns_the_nearest_node(self):
         surface = Surface(
-            properties=[BoundaryProperties(acoustic_type='vacuum'),
+            nodes=[BoundaryProperties(acoustic_type='vacuum'),
                         BoundaryProperties(acoustic_type='rigid')],
             ranges=[0.0, 5000.0])
         assert surface.at(range=4000.0).acoustic_type == 'rigid'
-
-
-def _column(thickness, speed):
-    return SeabedColumn(
-        layers=[SedimentLayer(thickness=thickness, sound_speed=speed,
-                              density=1.5, attenuation=0.5,
-                              shear_speed=400.0, shear_attenuation=1.0),
-                SedimentLayer(thickness=2.0 * thickness, sound_speed=speed + 50,
-                              density=1.7, attenuation=0.6)],
-        halfspace=BoundaryProperties(
-            acoustic_type='half-space', sound_speed=1900.0, density=2.0,
-            attenuation=0.1, shear_speed=600.0, shear_attenuation=0.5),
-    )
-
-
-def _wide_range_dependent_env(n_columns=24, n_bathy=97, r_end=60000.0):
-    """A bottom with many columns under a wavy seafloor with many nodes.
-
-    The two axes deliberately do not line up, so most bathymetry nodes fall
-    between bottom columns and the nearest-column rule actually has to choose.
-    """
-    ranges = np.linspace(0.0, r_end, n_columns)
-    bottom = Bottom(
-        columns=[_column(10.0 + 5.0 * (i % 7), 1650.0 + 10.0 * (i % 11))
-                 for i in range(n_columns)],
-        ranges=ranges)
-    r_bathy = np.linspace(0.0, r_end, n_bathy)
-    z_bathy = 120.0 + 60.0 * np.sin(r_bathy / r_end * 6.0 * np.pi)
-    return Environment(name='wide-rd',
-                       bathymetry=list(zip(r_bathy.tolist(), z_bathy.tolist())),
-                       ssp=1500.0, bottom=bottom)
-
-
-def _range_independent_env():
-    return Environment(name='ri', bathymetry=[(0.0, 60.0), (5000.0, 400.0)],
-                       ssp=1500.0, bottom=_column(4.0, 1600.0))
 
 
 class TestColumnIndexAt:
     """``Bottom.column_index_at`` names the column ``Bottom.at`` would copy."""
 
     def test_it_indexes_the_column_at_returns(self):
-        env = _wide_range_dependent_env()
+        env = wide_range_dependent_env()
         bottom = env.bottom
         for r in np.linspace(0.0, 60000.0, 61):
             i = bottom.column_index_at(range=float(r))
@@ -1075,7 +1063,7 @@ class TestColumnIndexAt:
             assert live.halfspace.sound_speed == copied.halfspace.sound_speed
 
     def test_it_returns_the_only_index_for_a_range_independent_bottom(self):
-        bottom = _range_independent_env().bottom
+        bottom = range_independent_layered_env().bottom
         assert bottom.n_ranges == 1
         assert bottom.column_index_at(range=0.0) == 0
         assert bottom.column_index_at(range=1e9) == 0
@@ -1084,22 +1072,22 @@ class TestColumnIndexAt:
         # The whole point of the accessor: no deep copy stands between the
         # caller and the carrier, which is why the docstring calls it
         # read-only and points mutation at ``at``.
-        bottom = _wide_range_dependent_env().bottom
+        bottom = wide_range_dependent_env().bottom
         i = bottom.column_index_at(range=30000.0)
         assert bottom.columns[i] is bottom.columns[i]
         assert bottom.columns[i] is not bottom.at(range=30000.0)
 
     @pytest.mark.parametrize('bad', [np.nan, np.inf, -np.inf])
     def test_it_rejects_a_non_finite_range_the_way_at_does(self, bad):
-        bottom = _wide_range_dependent_env().bottom
-        with pytest.raises(ConfigurationError):
+        bottom = wide_range_dependent_env().bottom
+        with pytest.raises(ConfigurationError, match='is not a finite label'):
             bottom.column_index_at(range=bad)
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError, match='is not a finite label'):
             bottom.at(range=bad)
 
     def test_it_rejects_an_array_range_the_way_at_does(self):
-        bottom = _wide_range_dependent_env().bottom
-        with pytest.raises(ConfigurationError):
+        bottom = wide_range_dependent_env().bottom
+        with pytest.raises(ConfigurationError, match='is not a scalar label'):
             bottom.column_index_at(range=np.array([0.0, 1.0]))
 
 
@@ -1109,7 +1097,7 @@ class TestAtAndIselReturnCopies:
     ``column_index_at`` a read-only counterpart rather than a replacement."""
 
     def test_mutating_an_at_result_leaves_the_carrier_alone(self):
-        bottom = _wide_range_dependent_env().bottom
+        bottom = wide_range_dependent_env().bottom
         before = copy.deepcopy(bottom.columns[3])
         got = bottom.at(range=float(bottom.ranges[3]))
         got.layers[0].thickness = 12345.0
@@ -1123,10 +1111,52 @@ class TestAtAndIselReturnCopies:
         assert len(bottom.columns[3].layers) == len(before.layers)
 
     def test_isel_hands_back_a_copy_too(self):
-        bottom = _wide_range_dependent_env().bottom
+        bottom = wide_range_dependent_env().bottom
         before = float(bottom.columns[2].layers[0].thickness)
         bottom.isel(range=2).layers[0].thickness = 999.0
         assert float(bottom.columns[2].layers[0].thickness) == before
+
+
+class TestConstructionNeverAliasesTheCallersObjects:
+    """A seabed or surface carrier holds copies of the nodes it is built
+    from, so an edit the caller makes to a layer, a half-space or a column
+    afterwards never reaches the carrier (D22)."""
+
+    def test_a_column_copies_its_layers_and_half_space(self):
+        layer = SedimentLayer(thickness=10.0, sound_speed=1650.0, density=1.9)
+        halfspace = _hs()
+        column = SeabedColumn(layers=[layer], halfspace=halfspace)
+        layer.thickness = 99.0
+        halfspace.density = 2.5
+        assert column.layers[0].thickness == 10.0
+        assert column.halfspace.density == pytest.approx(1.9)
+        assert column.layers[0] is not layer
+        assert column.halfspace is not halfspace
+
+    def test_a_bottom_copies_its_columns(self):
+        column = SeabedColumn(layers=[], halfspace=_hs())
+        bottom = Bottom.from_column(column)
+        column.halfspace.density = 2.5
+        assert bottom.columns[0].halfspace.density == pytest.approx(1.9)
+        assert bottom.columns[0] is not column
+
+    def test_a_surface_copies_its_nodes(self):
+        from uacpy.core.surface import Surface
+        node = BoundaryProperties(roughness=0.5)
+        surface = Surface(nodes=[node])
+        node.roughness = 3.0
+        assert surface.nodes[0].roughness == 0.5
+        assert surface.nodes[0] is not node
+
+    def test_an_assignment_copies_too(self):
+        """Assigning a node rebuilds the carrier through its constructor, which
+        copies it like any other."""
+        column = SeabedColumn(layers=[], halfspace=_hs())
+        halfspace = _hs(cp=1700.0)
+        column.halfspace = halfspace
+        halfspace.density = 2.5
+        assert column.halfspace.sound_speed == pytest.approx(1700.0)
+        assert column.halfspace.density == pytest.approx(1.9)
 
 
 class TestBottomDelegatedWritesReachTheHalfspaces:
@@ -1162,8 +1192,7 @@ class TestBottomDelegatedWritesReachTheHalfspaces:
         b = Bottom.from_halfspaces([0.0, 5000.0],
                                    sound_speed=[1600.0, 1700.0],
                                    density=1.8, attenuation=0.4)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             b.sound_speed = 1650.0
         (w,) = [w for w in caught if 'sets all 2 range' in str(w.message)]
         assert w.filename == __file__
@@ -1177,18 +1206,37 @@ class TestBottomDelegatedWritesReachTheHalfspaces:
 
     def test_a_single_column_write_is_silent(self):
         b = Bottom.from_halfspace(_hs())
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with recorded_warnings() as caught:
             b.roughness = 0.5
         assert not [w for w in caught if issubclass(w.category, UserWarning)]
         assert b.halfspace_at(range=0.0).roughness == pytest.approx(0.5)
 
-    def test_type_fields_are_not_assignable(self):
+    def test_a_type_field_write_rebuilds_every_half_space(self):
+        """``acoustic_type`` and ``reflection_file`` couple to the other
+        fields, so a delegated write goes through the ``BoundaryProperties``
+        constructor on every node: a rigid type drops the half-space
+        parameters, and a reflection file on a rigid node is the conflict
+        the constructor refuses, which leaves the node as it was."""
         b = Bottom.from_halfspace(_hs())
-        for name, value in (('acoustic_type', 'rigid'),
-                            ('reflection_file', 'bottom.brc')):
-            with pytest.raises(ConfigurationError, match='cannot be assigned'):
-                setattr(b, name, value)
+        b.acoustic_type = 'rigid'
+        assert repr(b.columns[0].halfspace) == 'BoundaryProperties(rigid)'
+        with pytest.raises(ConfigurationError, match='ignores half-space'):
+            b.reflection_file = 'bottom.brc'
+        assert b.columns[0].halfspace.reflection_file is None
+
+    def test_a_write_one_node_refuses_changes_no_node(self):
+        """Every node is rebuilt before any is changed: a density write a
+        rigid column refuses leaves the half-space column beside it as it
+        was, not half-written."""
+        b = Bottom.from_columns(
+            [SeabedColumn(layers=[], halfspace=_hs()),
+             SeabedColumn(layers=[], halfspace=BoundaryProperties(
+                 acoustic_type='rigid'))],
+            ranges=[0.0, 1000.0])
+        with pytest.raises(ConfigurationError, match='Bottom.density = 2.5'):
+            b.density = 2.5
+        assert b.columns[0].halfspace.density == pytest.approx(1.9)
+        assert repr(b.columns[1].halfspace) == 'BoundaryProperties(rigid)'
 
     def test_numeric_rules_mirror_the_constructor(self):
         b = Bottom.from_halfspace(_hs())
@@ -1230,7 +1278,7 @@ class TestBottomDelegatedWritesReachTheHalfspaces:
 
 class TestSeabedColumnDelegatedWritesReachTheHalfspace:
     """The same shadow-write hazard one level down: ``at`` / ``collapse`` /
-    ``sample_at_depths`` read ``layers`` / ``halfspace``, never a flat
+    RAM's seabed samples read ``layers`` / ``halfspace``, never a flat
     instance attribute, so ``column.sound_speed = …`` delegates to the
     half-space under the same rules as the ``Bottom`` write."""
 
@@ -1256,28 +1304,32 @@ class TestGrainSizeMustBeAFiniteNumberEverywhere:
 
     @pytest.mark.parametrize('bad', [float('nan'), float('inf'), 'abc'])
     def test_the_constructor_refuses_it(self, bad):
-        from uacpy.core.bottom import BoundaryProperties
-        with pytest.raises((ConfigurationError, ValueError)):
+        from uacpy.core.boundary import BoundaryProperties
+        with pytest.raises(
+                (ConfigurationError, ValueError),
+                match='grain_size_phi must be finite|could not convert string to float'):
             BoundaryProperties(acoustic_type='half-space', sound_speed=1600.0,
                                grain_size_phi=bad)
 
-    def test_the_shared_delegated_write_validator_refuses_it(self):
-        # The one validator behind the SeabedColumn/Bottom/Surface writes.
-        from uacpy.core.bottom import BoundaryProperties, _validate_boundary_write
+    def test_a_delegated_write_refuses_it(self):
+        # The SeabedColumn/Bottom/Surface writes rebuild the node through
+        # the BoundaryProperties constructor, so they refuse what it refuses.
+        from uacpy.core.surface import Surface
         node = BoundaryProperties(acoustic_type='half-space', sound_speed=1600.0)
+        bottom = Bottom.from_halfspace(node)
         with pytest.raises(ConfigurationError, match='grain_size_phi'):
-            _validate_boundary_write('Bottom', 'grain_size_phi', float('nan'),
-                                     [node])
-        assert _validate_boundary_write('Bottom', 'grain_size_phi', 2.5,
-                                        [node]) == 2.5
-        assert _validate_boundary_write('Surface', 'grain_size_phi', None,
-                                        [node]) is None
+            bottom.grain_size_phi = float('nan')
+        bottom.grain_size_phi = 2.5
+        assert bottom.columns[0].halfspace.grain_size_phi == 2.5
+        surface = Surface(nodes=[node])
+        surface.grain_size_phi = None
+        assert surface.nodes[0].grain_size_phi is None
 
     def test_a_surface_node_refuses_it_at_construction(self):
-        from uacpy.core.bottom import BoundaryProperties
+        from uacpy.core.boundary import BoundaryProperties
         from uacpy.core.surface import Surface
         with pytest.raises(ConfigurationError, match='grain_size_phi'):
-            Surface(properties=[BoundaryProperties(
+            Surface(nodes=[BoundaryProperties(
                 acoustic_type='half-space', sound_speed=1600.0,
                 grain_size_phi=float('inf'))])
 
@@ -1295,9 +1347,10 @@ class TestTheAttenuationCeilingAdvisesShearOnItsOwnScale:
 
     @staticmethod
     def _remediation(field):
-        from uacpy.core._carrier_validate import _require_attenuation_in_range
-        with pytest.raises(ConfigurationError) as exc:
-            _require_attenuation_in_range(1000.0, f"BoundaryProperties {field}")
+        from uacpy.core._validate import require_attenuation_in_range
+        with pytest.raises(ConfigurationError,
+                           match='dB/wavelength exceeds') as exc:
+            require_attenuation_in_range(1000.0, f"BoundaryProperties {field}")
         return exc.value.remediation
 
     def test_the_shipped_sand_preset_carries_the_shear_value_the_advice_denied(self):
@@ -1319,14 +1372,15 @@ class TestTheAttenuationCeilingAdvisesShearOnItsOwnScale:
 
     def test_both_fields_refuse_the_same_value_at_the_same_bound(self):
         # The remedy text branched; the threshold did not.
-        from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
-        from uacpy.core._carrier_validate import _require_attenuation_in_range
+        from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        from uacpy.core._validate import require_attenuation_in_range
         for field in ('attenuation', 'shear_attenuation'):
             label = f"BoundaryProperties {field}"
-            _require_attenuation_in_range(
+            require_attenuation_in_range(
                 MAX_ATTENUATION_DB_PER_WAVELENGTH, label)
-            with pytest.raises(ConfigurationError):
-                _require_attenuation_in_range(
+            with pytest.raises(ConfigurationError,
+                               match='dB/wavelength exceeds'):
+                require_attenuation_in_range(
                     float(np.nextafter(MAX_ATTENUATION_DB_PER_WAVELENGTH,
                                        np.inf)),
                     label)
@@ -1357,15 +1411,15 @@ class TestTheAcousticTypeGuardCatchesOnlyWhatFromStringRaises:
 
     @pytest.mark.parametrize('value', _BAD, ids=[repr(v) for v in _BAD])
     def test_from_string_refuses_it_as_a_configuration_error(self, value):
-        from uacpy.core.constants import BoundaryType
+        from uacpy.core.boundary import BoundaryType
         # The narrow clause is only correct while this is the sole type that
         # escapes, so the sweep is the pin, not the narrowing itself.
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError, match='invalid boundary type'):
             BoundaryType.from_string(value)
 
     @pytest.mark.parametrize('value', _BAD, ids=[repr(v) for v in _BAD])
     def test_the_wrapper_relabels_every_one_of_them(self, value):
-        from uacpy.core._carrier_validate import _validate_acoustic_type
+        from uacpy.core.boundary import _validate_acoustic_type
         with pytest.raises(ConfigurationError,
                            match='is not recognized') as exc:
             _validate_acoustic_type(value, 'BoundaryProperties')
@@ -1375,9 +1429,26 @@ class TestTheAcousticTypeGuardCatchesOnlyWhatFromStringRaises:
         assert isinstance(exc.value.__cause__, ConfigurationError)
 
     def test_a_valid_type_passes_through_silently(self):
-        from uacpy.core._carrier_validate import _validate_acoustic_type
-        for value in ('half-space', 'halfspace', 'vacuum', 'V', 'file'):
+        from uacpy.core.boundary import _validate_acoustic_type
+        for value in ('half-space', 'HALF-SPACE', 'vacuum', 'rigid', 'file'):
             assert _validate_acoustic_type(value, 'BoundaryProperties') is None
+
+
+class TestEachBoundaryTypeSaysWhatItCarries:
+    """Every writer, wrapper and reduction asks the type whether its numbers
+    are geoacoustics and whether it takes parameters at all, so each member's
+    answer is pinned: only a half-space carries geoacoustics, and only vacuum
+    and rigid are parameter-free (a reflection table has a file)."""
+
+    def test_only_a_half_space_is_geoacoustic(self):
+        from uacpy.core.boundary import BoundaryType
+        assert {t for t in BoundaryType if t.is_geoacoustic} == {
+            BoundaryType.HALF_SPACE}
+
+    def test_only_vacuum_and_rigid_are_parameter_free(self):
+        from uacpy.core.boundary import BoundaryType
+        assert {t for t in BoundaryType if t.is_parameter_free} == {
+            BoundaryType.VACUUM, BoundaryType.RIGID}
 
 
 def test_seabed_column_from_halfspace_takes_only_the_halfspace():
@@ -1391,3 +1462,17 @@ def test_seabed_column_from_halfspace_takes_only_the_halfspace():
     col = SeabedColumn.from_halfspace(hs)
     assert col.layers == [] and col.halfspace is not hs
     assert col.halfspace == hs
+
+
+@pytest.mark.parametrize('hamilton_fit', ['abyssal-hill', 'abyssal-plain'])
+def test_bottom_from_grain_size_reaches_every_hamilton_fit(hamilton_fit):
+    """``Bottom.from_grain_size`` wraps ``BoundaryProperties.from_grain_size``
+    and forwards ``hamilton_fit=``: a deep-ocean seabed built from the Bottom
+    factory gets the abyssal fit it names, not the continental-terrace one."""
+    phi = 6.0
+    want = BoundaryProperties.from_grain_size(phi, hamilton_fit=hamilton_fit)
+    shelf = BoundaryProperties.from_grain_size(phi)
+    got = Bottom.from_grain_size(phi, hamilton_fit=hamilton_fit).halfspace_at(range=0.0)
+    for name in ('sound_speed', 'density', 'attenuation'):
+        assert getattr(got, name) == getattr(want, name), name
+    assert (got.sound_speed, got.density) != (shelf.sound_speed, shelf.density)

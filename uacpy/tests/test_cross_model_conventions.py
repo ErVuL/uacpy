@@ -1,48 +1,42 @@
 """Cross-model output conventions, asserted on VALUES, engine by engine.
 
-Pins the three conventions every engine is supposed to share, on one tiny
-100-m Pekeris case (fluid half-space bottom, 100 Hz, ranges [0, 500, 1000] m,
-depths [50, 110] m — one water-column receiver, one below the seafloor):
+Pins the conventions the engines share on one tiny 100-m Pekeris case (fluid
+half-space bottom, 100 Hz, ranges [0, 500, 1000] m, depths [50, 110] m — one
+water-column receiver, one below the seafloor). What every registered engine
+owes on the same grid (the NaN r = 0 column and its warning, a finite water
+column at r > 0, the requested axes kept, the ``PhaseReference`` member) is
+held by ``test_engine_conformance.py``; this module pins which engine does
+what:
 
-1. **r = 0 column is NaN.** A point-source field carries a ``1/sqrt(r)``
-   cylindrical-spreading factor that is singular on the source axis, so every
-   engine returns the r = 0 column as NaN (no data) and finite values at
-   r > 0. RAM regressed here once without any test noticing — the r = 0
-   convention was asserted for Kraken/Scooter but never for RAM. OASP and
-   OASS join this contract too (``R0_ENGINES``): both once returned finite
-   numbers on the source axis.
-
-2. **Below-seafloor receivers.** The engines whose solvers stop meshing at
+1. **Below-seafloor receivers.** The engines whose solvers stop meshing at
    the seafloor (Bellhop, Scooter, SPARC, RAM) return NaN there — on the
    *requested* depth axis, never a clamped one — while the engines that mesh
    the sediment (Kraken with a penetrable bottom, OAST) return a finite
    physical transmitted field. The suite previously asserted only the
    warnings, not the values.
 
-3. **Field dtype/unit/identity.** Bellhop, Kraken, Scooter and RAM emit
+2. **Field dtype/unit/identity.** Bellhop, Kraken, Scooter and RAM emit
    complex pressure (``unit='Pa'``, ``phase_reference='travelling_wave'``);
    OAST emits real TL in dB (its ``.plt`` carries no phase); SPARC emits real
    ``p(t)`` (``unit='Pa'``, ``phase_reference='time_domain_native'``). RAM's
-   PE reference speed is stamped as ``metadata['pe_reference_speed']`` — the
-   old ``'c0'`` key is gone.
+   PE reference speed is the run settings' ``c0``.
 
-Each engine runs exactly once (module-scoped fixtures); all three contracts
-are asserted on the same Field, so the whole module costs one tiny run per
+Each engine runs exactly once (module-scoped fixtures); both contracts are
+asserted on the same Field, so the whole module costs one tiny run per
 engine.
 """
 
 from __future__ import annotations
 
-import re
 import warnings
 
 import numpy as np
 import pytest
 
 import uacpy
-from uacpy import Receiver, Source
+from uacpy import BoundaryProperties, Environment, Receiver, Source
 from uacpy.models import RAM, SPARC, Bellhop, Kraken, RunMode, Scooter
-from uacpy.models.oases import OASP, OASS, OAST
+from uacpy.models.oases import OASP, OAST
 from uacpy.tests.conftest import make_pekeris
 
 pytestmark = pytest.mark.requires_binary
@@ -67,83 +61,61 @@ def _receiver():
     return Receiver(depths=DEPTHS.copy(), ranges=RANGES.copy())
 
 
-#: Warning messages captured while each module-scoped engine fixture ran,
-#: keyed by fixture name. ``pytest.warns`` cannot reach back into a
-#: module-scoped fixture that has already run for an earlier test, so the
-#: fixtures record what their one run warned and the warning contracts are
-#: asserted from this record.
-RUN_WARNINGS: dict = {}
-
-
-def _run_recorded(key, runner):
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        field = runner()
-    RUN_WARNINGS[key] = [str(w.message) for w in caught]
-    return field
+def _run_quietly(runner):
+    """``runner()``, with the warnings its model run raises silenced."""
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return runner()
 
 
 @pytest.fixture(scope='module')
 def bellhop_field():
-    return _run_recorded('bellhop_field', lambda: Bellhop(verbose=False).run(
+    return _run_quietly(lambda: Bellhop(verbose=False).run(
         _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def kraken_field():
-    return _run_recorded('kraken_field', lambda: Kraken(verbose=False).run(
+    return _run_quietly(lambda: Kraken(verbose=False).run(
         _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def scooter_field():
-    return _run_recorded('scooter_field', lambda: Scooter(verbose=False).run(
+    return _run_quietly(lambda: Scooter(verbose=False).run(
         _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def ram_field():
-    return _run_recorded('ram_field', lambda: RAM(verbose=False).run(
+    return _run_quietly(lambda: RAM(verbose=False).run(
         _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def sparc_field():
     # SPARC's only mode is TIME_SERIES (it synthesises p(t) directly);
-    # n_t_out kept small so its per-depth subprocess march stays in seconds.
-    return _run_recorded(
-        'sparc_field', lambda: SPARC(verbose=False, n_t_out=256).run(
-            _pekeris(), _source(), _receiver(), run_mode=RunMode.TIME_SERIES))
+    # n_time_samples kept small so its per-depth subprocess march stays in seconds.
+    # SPARC refuses a half-space bottom, so it marches the same water over a
+    # rigid floor, chosen explicitly.
+    env = _pekeris()
+    rigid = Environment(name='conventions-rigid-floor', bathymetry=env.depth,
+                        ssp=env.ssp,
+                        bottom=BoundaryProperties(acoustic_type='rigid'))
+    return _run_quietly(lambda: SPARC(verbose=False, n_time_samples=256).run(
+        rigid, _source(), _receiver(), run_mode=RunMode.TIME_SERIES))
 
 
 @pytest.fixture(scope='module')
 def oast_field():
-    return _run_recorded('oast_field', lambda: OAST(verbose=False).run(
+    return _run_quietly(lambda: OAST(verbose=False).run(
         _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
 
 
 @pytest.fixture(scope='module')
 def oasp_field():
-    return _run_recorded('oasp_field', lambda: OASP(verbose=False).run(
+    return _run_quietly(lambda: OASP(verbose=False).run(
         _pekeris(), _source(), _receiver(), run_mode=RunMode.COHERENT_TL))
-
-
-@pytest.fixture(scope='module')
-def oass_field():
-    # OASS scatters from a rough seabed, so its Pekeris variant carries a
-    # non-zero bottom roughness; the returned Field is a real dB
-    # reverberation LOSS on the same (depth, range) grid — not a level.
-    # OASES writes -10·log10 E[|p_scat|²] in REVINT
-    # (oases/src/oassun26.f:853-858: CVMAGS squares, VALG10 takes log10,
-    # VSMUL scales by -5E0) and uacpy's reader applies no sign change, so a
-    # LARGER number is a WEAKER scattered field — the same direction as
-    # transmission loss, which is why this grid shares TL's colour scale.
-    # A reverberation level is recovered as RL = SL - this.
-    return _run_recorded(
-        'oass_field',
-        lambda: OASS(correlation_length=10.0, verbose=False).run(
-            _pekeris(roughness=0.5), _source(), _receiver(),
-            run_mode=RunMode.REVERBERATION))
 
 
 # Every runnable engine; OAST additionally needs the OASES binaries.
@@ -151,14 +123,6 @@ ALL_ENGINES = [
     'bellhop_field', 'kraken_field', 'scooter_field', 'ram_field',
     'sparc_field',
     pytest.param('oast_field', marks=pytest.mark.requires_oases),
-]
-# The r = 0 contract is also asserted for OASP (complex .trf pressure) and
-# OASS (reverberation loss) — both singular on the source axis like every
-# point-source field, and both once returned finite numbers there.
-R0_ENGINES = ALL_ENGINES + [
-    pytest.param('oasp_field', marks=pytest.mark.requires_oases),
-    pytest.param('oass_field', marks=[pytest.mark.requires_oases,
-                                      pytest.mark.slow]),
 ]
 # Engines that mask sub-seafloor receivers to NaN vs. engines that mesh the
 # sediment and return the physical transmitted field there (base.py
@@ -179,49 +143,7 @@ def _finite_over_extra_axes(field):
     return np.isfinite(data).all(axis=extra) if extra else np.isfinite(data)
 
 
-# ── 1. r = 0 column ───────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize('engine', R0_ENGINES)
-def test_r0_column_is_nan_for_every_engine(engine, request):
-    """The r = 0 column of a point-source run is NaN at every depth."""
-    field = request.getfixturevalue(engine)
-    assert float(field.coords['range'][0]) == 0.0
-    r0 = np.asarray(field.data)[:, 0, ...]
-    assert np.isnan(r0).all(), (
-        f"{field.model}: expected the r=0 column to be all-NaN (singular "
-        f"1/sqrt(r) point-source spreading), got {r0!r}"
-    )
-
-
-@pytest.mark.parametrize('engine', R0_ENGINES)
-def test_r0_column_warns_for_every_engine(engine, request):
-    """source-receiver.md §7 "The source is at range zero":
-    the r = 0 column comes back NaN *with a
-    UserWarning* naming the singularity. The NaN half is pinned above; this
-    pins the warning, read back from the fixture-time record (Bellhop's text
-    says ``r=0``, the shared base helper says ``r = 0`` — the pattern admits
-    both)."""
-    request.getfixturevalue(engine)          # make sure the run happened
-    messages = RUN_WARNINGS[engine]
-    assert any(re.search(r'r\s*<?=\s*0', m) for m in messages), (
-        f"{engine}: the r=0 column was masked without the documented "
-        f"UserWarning; warnings seen: {messages!r}")
-
-
-@pytest.mark.parametrize('engine', R0_ENGINES)
-def test_water_column_receiver_is_finite_at_positive_ranges(engine, request):
-    """The NaN at r = 0 is a masked column, not a broken run: the in-water
-    receiver row is fully finite at every r > 0."""
-    field = request.getfixturevalue(engine)
-    finite = _finite_over_extra_axes(field)
-    assert finite[I_WATER, 1:].all(), (
-        f"{field.model}: in-water receiver row has non-finite samples at "
-        f"r > 0 (finite map {finite[I_WATER]})"
-    )
-
-
-# ── 2. below-seafloor receivers ───────────────────────────────────────────
+# ── 1. below-seafloor receivers ───────────────────────────────────────────
 
 
 @pytest.mark.parametrize('engine', MASKING_ENGINES)
@@ -250,16 +172,7 @@ def test_sub_seafloor_receiver_is_finite_for_transmitting_engines(
     )
 
 
-@pytest.mark.parametrize('engine', ALL_ENGINES)
-def test_requested_depth_axis_is_preserved(engine, request):
-    """Masking happens on the requested depth axis — no engine substitutes a
-    clamped/native axis for the receiver depths that were asked for."""
-    field = request.getfixturevalue(engine)
-    np.testing.assert_array_equal(np.asarray(field.coords['depth']), DEPTHS)
-    np.testing.assert_array_equal(np.asarray(field.coords['range']), RANGES)
-
-
-# ── 3. dtype / unit / identity ────────────────────────────────────────────
+# ── 2. dtype / unit / identity ────────────────────────────────────────────
 
 
 COMPLEX_PA_ENGINES = ['bellhop_field', 'kraken_field', 'scooter_field',
@@ -281,42 +194,24 @@ def test_tl_engines_return_complex_pascal_travelling_wave(engine, request):
     assert np.isfinite(dB[I_WATER, 1:]).all()
 
 
-PHASE_REFERENCE_ENGINES = COMPLEX_PA_ENGINES + [
-    'sparc_field',
-    pytest.param('oasp_field', marks=pytest.mark.requires_oases),
-]
-
-
-@pytest.mark.parametrize('engine', PHASE_REFERENCE_ENGINES)
-def test_phase_reference_is_stamped_as_the_enum_member(engine, request):
-    """Every wrapper's ``phase_reference`` arrives as a ``PhaseReference``
-    member, not a bare string.
-
-    ``PhaseReference`` is a ``str`` enum, so ``==``, ``.upper()``,
-    ``json.dumps`` and ``csv`` cannot tell the two spellings apart — only
-    ``str()``/``repr()`` can, which is what a log line, a plot annotation or a
-    saved metadata header renders. ``PropagationModel._result_kwargs``
-    coerces; a wrapper that passes ``phase_reference=`` to the results
-    constructor directly instead bypasses the coercion.
-    """
-    from uacpy.core.results import PhaseReference
-    field = request.getfixturevalue(engine)
-    assert isinstance(field.phase_reference, PhaseReference), (
-        f"{engine} stamped {field.phase_reference!r} "
-        f"({type(field.phase_reference).__name__})")
-
-
 def test_no_model_bypasses_the_phase_reference_coercion():
     """The writer-side half: in ``uacpy/models/``, a literal
     ``phase_reference=`` may only be an argument to ``_result_kwargs`` or
-    ``_stamp_result``, which coerce it. Passing it straight to a results
-    constructor is what produces the bare string the test above catches, and
-    it is invisible to any single-engine assertion."""
+    ``_stamp_result`` (or the ``_extract`` functions they call,
+    ``result_kwargs`` / ``stamp_result``), which coerce it. Passing it straight to a results
+    constructor is what produces the bare string
+    ``test_engine_conformance.py::test_every_mode_returns_its_declared_output``
+    catches, and it is invisible to any single-engine assertion."""
     import ast
     from pathlib import Path
+    from uacpy.tests._doc_gate import (engines_missing_from,
+                                       package_python_files)
     models_dir = Path(uacpy.__file__).parent / 'models'
+    paths = package_python_files(models_dir)
+    missing = engines_missing_from(paths, models_dir)
+    assert not missing, f"the sweep read no file of the engine(s) {missing}"
     offenders = []
-    for path in sorted(models_dir.glob('*.py')):
+    for path in paths:
         tree = ast.parse(path.read_text(encoding='utf-8'))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -331,8 +226,10 @@ def test_no_model_bypasses_the_phase_reference_coercion():
             callee = node.func
             name = (callee.attr if isinstance(callee, ast.Attribute)
                     else getattr(callee, 'id', ''))
-            if name not in ('_result_kwargs', '_stamp_result'):
-                offenders.append(f"{path.name}:{node.lineno} -> {name}(...)")
+            if name not in ('_result_kwargs', '_stamp_result',
+                            'result_kwargs', 'stamp_result'):
+                offenders.append(f"{path.relative_to(models_dir)}:"
+                                 f"{node.lineno} -> {name}(...)")
     assert not offenders, (
         "a bare-string phase_reference reaches a results constructor "
         "uncoerced at: " + ", ".join(offenders))
@@ -361,6 +258,104 @@ def test_oasp_shares_the_travelling_wave_sign_with_scooter(oasp_field):
         f"flip reads ~180 deg"
     )
     assert np.abs(ratio) == pytest.approx(1.0, rel=0.15)
+
+
+@pytest.mark.requires_oases
+def test_oasn_replicas_are_scooters_pressure_on_the_same_geometry():
+    """OASES-2 / OASES-3: an OASN replica is the complex pressure a unit
+    source at the candidate point puts on the array, so on the same geometry
+    it is Scooter's field, sign included.
+
+    OASN writes the normal stress ``σ_zz = -p``; the wrapper negates it and
+    tags the travelling-wave convention, so the array-summed phase to
+    Scooter is ~0 deg (the raw stress reads ~180). With a pinned wavenumber
+    count large enough for the 5 km grid the level converges onto Scooter:
+    measured 0.00-0.02 dB at 2-5 km for NW = 16384 and 0.02-0.10 dB for
+    8192, where the automatic default reads 0.5-3.3 dB low toward the
+    grid's far edge."""
+    from uacpy.models import OASN
+    arr = np.array([20.0, 40.0, 60.0, 80.0])
+    xs = np.array([2000.0, 3000.0, 4000.0, 5000.0])
+    env = make_pekeris(name='replica-pekeris', bathymetry=100.0)
+    src = Source(depths=30.0, frequencies=150.0)
+    sco = Scooter(verbose=False).run(env, src, Receiver(depths=arr,
+                                                        ranges=xs))
+    P = np.asarray(sco.data).T                                # (x, rcv)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        rep = OASN(verbose=False, replica_xmin=1000.0, replica_xmax=5000.0, replica_nx=5,
+                   replica_zmin=30.0, replica_zmax=30.0, replica_nz=1, n_wavenumbers=16384).run(
+            env, src, Receiver(depths=arr, ranges=[0.0]), RunMode.REPLICA)
+    assert rep.phase_reference == 'travelling_wave'
+    np.testing.assert_allclose(rep.candidates['x'][1:], xs)
+    R = np.asarray(rep.replicas)[0, 0, 1:, 0, :]              # (x, rcv)
+    phase = np.angle(np.sum(R * np.conj(P), axis=1), deg=True)
+    assert (np.abs(phase) < 5.0).all(), phase
+    level = 10 * np.log10(np.sum(np.abs(R) ** 2, axis=1)
+                          / np.sum(np.abs(P) ** 2, axis=1))
+    assert (np.abs(level) < 0.2).all(), level
+
+
+@pytest.mark.requires_oases
+def test_oast_line_source_matches_scooters_line_source_tl():
+    """OASES-11: ``Source(source_type='line')`` runs OAST's plane geometry
+    (option 'P', written from the Source) and its TL is the package's
+    line-source level — Scooter's on the same geometry, measured within
+    0.35 dB from 1 km out. A point source on the same grid is ~30 dB
+    weaker, so the tolerance cannot pass on the wrong geometry."""
+    env = make_pekeris(name='line-pekeris', bathymetry=100.0)
+    rcv = Receiver(depths=[50.0], ranges=np.linspace(1000.0, 5000.0, 9))
+    line = Source(depths=25.0, frequencies=100.0, source_type='line')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        oast = OAST(verbose=False).run(env, line, rcv)
+    assert 'P' in oast.run_settings.engine.options.split()
+    sco = Scooter(verbose=False).run(env, line, rcv)
+    diff = np.asarray(oast.data)[0] - np.asarray(sco.dB)[0]
+    assert np.abs(diff).max() < 0.75, diff
+
+
+@pytest.mark.requires_oases
+def test_oasp_line_source_is_scooters_line_source_pressure():
+    """Decision A4: ``Source(source_type='line')`` runs OASP's plane
+    geometry (option 'P', written from the Source), and its complex pressure
+    is Scooter's line-source pressure on the same geometry: |ratio| within
+    0.1 and phase within 10 deg from 1 km out. A point source on the same
+    grid is ~30 dB weaker, so the ratio cannot pass on the wrong
+    geometry."""
+    env = make_pekeris(name='line-pekeris', bathymetry=100.0)
+    rcv = Receiver(depths=[50.0], ranges=np.linspace(1000.0, 5000.0, 9))
+    line = Source(depths=25.0, frequencies=100.0, source_type='line')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        oasp = OASP(verbose=False).run(env, line, rcv)
+    assert 'P' in oasp.run_settings.engine.options.split()
+    f_bin = float(np.atleast_1d(oasp.frequencies)[0])
+    sco = Scooter(verbose=False).run(
+        env, Source(depths=25.0, frequencies=f_bin, source_type='line'), rcv)
+    ratio = np.asarray(oasp.data)[0] / np.asarray(sco.data)[0]
+    assert np.abs(np.abs(ratio) - 1.0).max() < 0.1, np.abs(ratio)
+    assert np.abs(np.angle(ratio, deg=True)).max() < 10.0, \
+        np.angle(ratio, deg=True)
+
+
+@pytest.mark.requires_oases
+def test_oasp_coherent_tl_is_the_field_at_the_source_frequency():
+    """OASES-1: ``OASP().run(env, Source(frequencies=100), rcv)`` returns
+    the field at 100 Hz — its phase to Scooter at 100 Hz stays within a few
+    degrees out to 5 km. The 2047-bin default sweep returned the 99.976 Hz
+    bin instead, whose phase error grew linearly with range (measured 14.5
+    deg at 2.5 km, 28.7 deg at 5 km)."""
+    env = make_pekeris(name='ctl-pekeris', bathymetry=100.0)
+    rcv = Receiver(depths=[50.0], ranges=np.linspace(2500.0, 5000.0, 6))
+    src = Source(depths=25.0, frequencies=100.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        oasp = OASP(verbose=False).run(env, src, rcv)
+    sco = Scooter(verbose=False).run(env, src, rcv)
+    angles = np.angle(np.asarray(oasp.data)[0] / np.asarray(sco.data)[0],
+                      deg=True)
+    assert np.abs(angles).max() < 8.0, angles
 
 
 @pytest.mark.requires_oases
@@ -406,24 +401,24 @@ def test_result_identity_stamp(engine, request):
 def test_concrete_backend_names(kraken_field, scooter_field, ram_field,
                                 sparc_field):
     """The backend stamp names the binary that ran, not the wrapper: Kraken's
-    TL comes from field.exe, RAM's flat-bathy dispatch lands on mpiramS."""
-    assert kraken_field.backend == 'field'
+    TL is the modes binary's, RAM's flat-bathy dispatch lands on mpiramS."""
+    assert kraken_field.backend == 'kraken'
     assert scooter_field.backend == 'scooter'
-    assert ram_field.backend == 'mpiramS'
+    assert ram_field.backend == 'mpirams'
     assert sparc_field.backend == 'sparc'
 
 
-def test_ram_metadata_key_is_pe_reference_speed(ram_field):
-    """RAM stamps its PE expansion speed as ``pe_reference_speed`` (m/s);
-    the ambiguous ``'c0'`` metadata key is retired."""
+def test_ram_pe_reference_speed_is_the_settings_c0(ram_field):
+    """RAM's PE expansion speed (m/s) is its run settings' ``c0``, stated
+    once: neither ``pe_reference_speed`` nor ``c0`` is a metadata copy."""
     md = ram_field.metadata or {}
-    assert 'pe_reference_speed' in md, sorted(md)
+    assert 'pe_reference_speed' not in md, sorted(md)
     assert 'c0' not in md, sorted(md)
-    c0 = float(md['pe_reference_speed'])
+    c0 = float(ram_field.run_settings.engine.c0)
     assert 1400.0 < c0 < 1800.0   # a sound speed, not a flag or an index
 
 
-# ── 4. shared geometry conventions ────────────────────────────────────────
+# ── 3. shared geometry conventions ────────────────────────────────────────
 
 
 def test_depth_swap_reciprocity_on_a_range_independent_channel():
@@ -577,3 +572,34 @@ def test_every_engine_reports_one_line_source_level():
     spread = max(levels.values()) - min(levels.values())
     assert spread < 2.0, levels
 
+
+def test_every_quoted_model_helper_reference_resolves():
+    """A ``base._name`` / ``_conventions._name`` pointer in a comment or
+    docstring names a real function. The line-source normalisation helper
+    moved from ``models/base.py`` to ``models/_conventions.py`` and four
+    pointers kept naming ``base._line_source_unit_at_1m``, so a reader
+    checking the line-source level (a units question) found nothing."""
+    import importlib
+    import pathlib
+    import re as _re
+    import uacpy
+    modules = {name: importlib.import_module(f'uacpy.models.{name}')
+               for name in ('base', '_conventions')}
+    pattern = _re.compile(
+        r'(?:``|\()(?:uacpy\.models\.)?(base|_conventions)\.(_\w+)(?:``|\))')
+    root = pathlib.Path(uacpy.__file__).parent
+    here = pathlib.Path(__file__).resolve()
+    found, broken = 0, []
+    for path in sorted(root.rglob('*.py')):
+        # This file names the stale spelling in its own docstring.
+        if 'third_party' in path.parts or path.resolve() == here:
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            for match in pattern.finditer(line):
+                found += 1
+                if not hasattr(modules[match.group(1)], match.group(2)):
+                    broken.append(f"{path.relative_to(root)}:{number} "
+                                  f"{match.group(0)}")
+    assert found >= 4, f"the sweep found only {found} reference(s)"
+    assert not broken, "references to no such helper:\n  " + \
+        "\n  ".join(broken)

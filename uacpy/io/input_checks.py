@@ -1,8 +1,7 @@
 """What a reader or writer checks before it trusts its input.
 
-``equally_spaced`` answers whether a grid is uniform, which is what a deck
-format that can only express a start/step/count has to know before it writes
-one; ``reject_unknown_kwargs`` refuses a keyword the writer does not take
+Whether a grid is uniform is :func:`uacpy.core._validate.equally_spaced`;
+``reject_unknown_kwargs`` refuses a keyword the writer does not take
 rather than dropping it silently; ``_collapsed_pair_index`` locates the
 collapsed entry in a boundary or reflection table.
 """
@@ -10,71 +9,6 @@ collapsed entry in a boundary or reflection table.
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
-
-
-def equally_spaced(x: np.ndarray, tol: float = 1e-9) -> bool:
-    """
-    Test whether vector x is composed of equally-spaced values.
-
-    Parameters
-    ----------
-    x : ndarray
-        Vector to test
-    tol : float, optional
-        Tolerance for equality test. Default is 1e-9.
-
-    Returns
-    -------
-    is_equal : bool
-        True if x is equally spaced within tolerance
-
-    Notes
-    -----
-    Compares the input vector against a linearly spaced vector with
-    the same start, end, and number of points. Returns True if the
-    maximum absolute difference is less than the tolerance.
-
-    This is useful for determining if a vector can be represented
-    compactly (e.g., "N points from x0 to x1") rather than storing
-    all values explicitly.
-
-    Translated from OALIB equally_spaced.m
-
-    Examples
-    --------
-    >>> # Equally spaced
-    >>> x = np.linspace(0, 10, 11)
-    >>> equally_spaced(x)
-    True
-
-    >>> # Not equally spaced
-    >>> x = np.array([0, 1, 3, 7, 10])
-    >>> equally_spaced(x)
-    False
-
-    >>> # Jitter on one interior sample beyond tolerance
-    >>> x = np.linspace(0, 10, 11); x[5] += 1e-6
-    >>> equally_spaced(x)
-    False
-    """
-    x = np.asarray(x).ravel()
-    n = len(x)
-
-    if n <= 1:
-        return True
-
-    # Generate equally spaced vector
-    x_linspace = np.linspace(x[0], x[-1], n)
-
-    # Compute maximum deviation
-    delta = np.abs(x - x_linspace)
-
-    # bool(), not the bare comparison: ``np.max(...) < tol`` is a numpy scalar,
-    # and np.bool_ is NOT a Python bool — ``isinstance(r, bool)`` and
-    # ``r is True`` are both False, and json.dumps raises TypeError on it. The
-    # ``n <= 1`` branch above already returns a real bool, so without this the
-    # return type depended on the input length.
-    return bool(np.max(delta) < tol)
 
 
 def reject_unknown_kwargs(writer: str, kwargs: dict, known) -> None:

@@ -31,7 +31,7 @@ def _band_exposure(data, sample_rate, **options):
     is Pa²·s per band and whose ``bands`` are the ``(low, centre, high)``
     edges those values sit on.
     """
-    from uacpy.acoustic_signal.estimate import sound_exposure
+    from uacpy.acoustic_signal.spectral import sound_exposure
     return sound_exposure(data, sample_rate, **options)
 
 
@@ -45,27 +45,33 @@ class TestReadersNameWhatWritesTheFile:
 
     def test_oasn_covariance_not_found_names_the_option_letter(self, tmp_path):
         from uacpy.io.oases_reader import read_oasn_covariance
-        with pytest.raises(FileFormatError) as exc:
+        with pytest.raises(FileFormatError,
+                           match='OASN covariance file not found') as exc:
             read_oasn_covariance(tmp_path / 'absent.xsm')
         assert "'N'" in exc.value.remediation
         assert '.xsm' in exc.value.remediation
 
     def test_oasn_replicas_not_found_names_the_option_letter(self, tmp_path):
         from uacpy.io.oases_reader import read_oasn_replicas
-        with pytest.raises(FileFormatError) as exc:
+        with pytest.raises(FileFormatError,
+                           match='OASN replica file not found') as exc:
             read_oasn_replicas(tmp_path / 'absent.rpo')
         assert "'R'" in exc.value.remediation
         assert '.rpo' in exc.value.remediation
 
     def test_oasr_reflection_not_found_names_the_option_letter(self, tmp_path):
         from uacpy.io.oases_reader import read_oasr_reflection_coefficients
-        with pytest.raises(FileFormatError) as exc:
+        with pytest.raises(
+                FileFormatError,
+                match='OASR reflection coefficient file not found') as exc:
             read_oasr_reflection_coefficients(tmp_path / 'absent.rco')
         assert "'T'" in exc.value.remediation
 
     def test_oasp_trf_not_found_sends_the_user_to_the_run_log(self, tmp_path):
         from uacpy.io.oases_reader import read_oasp_trf
-        with pytest.raises(FileFormatError) as exc:
+        with pytest.raises(
+                FileFormatError,
+                match='OASP transfer function file not found') as exc:
             read_oasp_trf(tmp_path / 'absent.trf', receiver_depths=[10.0])
         assert 'stdout' in exc.value.remediation
 
@@ -75,7 +81,8 @@ class TestReadersNameWhatWritesTheFile:
         nothing. A remediation naming only the letter sends that user in a
         circle."""
         from uacpy.io.oases_reader import read_oases_rhs_header
-        with pytest.raises(FileFormatError) as exc:
+        with pytest.raises(FileFormatError,
+                           match='mean-field file not found') as exc:
             read_oases_rhs_header(tmp_path / 'absent.rhs')
         assert "'s'" in exc.value.remediation
         assert 'rough' in exc.value.remediation.lower()
@@ -91,7 +98,9 @@ class TestTruncatedFortranRecordsNameTheFile:
         p = tmp_path / 'truncated.trf'
         p.write_bytes(b'\x01\x02')
         with open(p, 'rb') as f:
-            with pytest.raises(FileFormatError) as exc:
+            with pytest.raises(
+                    FileFormatError,
+                    match='Unexpected EOF reading Fortran record head') as exc:
                 read_fortran_record(f, 'i')
         assert 'truncated.trf' in str(exc.value)
         assert 'byte 2' in str(exc.value)
@@ -102,7 +111,9 @@ class TestTruncatedFortranRecordsNameTheFile:
         p.write_bytes((4).to_bytes(4, 'little') + b'abcd' + b'\x00')
         from uacpy.io._fortran_helpers import read_fortran_record
         with open(p, 'rb') as f:
-            with pytest.raises(FileFormatError) as exc:
+            with pytest.raises(
+                    FileFormatError,
+                    match='Unexpected EOF reading Fortran record tail') as exc:
                 read_fortran_record(f, 'i')
         assert 'shorttail.trf' in str(exc.value)
         assert '4-byte payload' in str(exc.value)
@@ -123,27 +134,31 @@ class TestEmptyInputNamesBothLengths:
     sizes, so the caller reads the answer instead of bisecting."""
 
     def test_bit_error_rate_names_both_stream_lengths(self):
-        from uacpy.comms.receive import bit_error_rate
-        with pytest.raises(ConfigurationError) as exc:
-            bit_error_rate([], [1, 0, 1])
+        from uacpy.comms.metrics import bit_error_rate
+        with pytest.raises(ConfigurationError,
+                           match='bit_error_rate: empty input') as exc:
+            bit_error_rate(reference=[], received=[1, 0, 1])
         assert '0 bits' in str(exc.value)
         assert '3' in str(exc.value)
 
     def test_symbol_error_rate_names_both_stream_lengths(self):
-        from uacpy.comms.receive import symbol_error_rate
-        with pytest.raises(ConfigurationError) as exc:
-            symbol_error_rate([1, 2], [])
+        from uacpy.comms.metrics import symbol_error_rate
+        with pytest.raises(ConfigurationError,
+                           match='symbol_error_rate: empty input') as exc:
+            symbol_error_rate(reference=[1, 2], received=[])
         assert '2 symbols' in str(exc.value)
 
     def test_evm_names_both_stream_lengths(self):
-        from uacpy.comms.receive import evm
-        with pytest.raises(ConfigurationError) as exc:
-            evm([], [1 + 0j])
+        from uacpy.comms.metrics import evm
+        with pytest.raises(ConfigurationError,
+                           match='evm: empty input') as exc:
+            evm(received=[], reference=[1 + 0j])
         assert '0 symbols' in str(exc.value)
 
     def test_ofdm_demodulate_names_the_block_length_it_needed(self):
-        from uacpy.comms.modulate import ofdm_demodulate
-        with pytest.raises(ConfigurationError) as exc:
+        from uacpy.comms.ofdm import ofdm_demodulate
+        with pytest.raises(ConfigurationError,
+                           match='signal shorter than one block') as exc:
             ofdm_demodulate(np.zeros(3, dtype=complex), n_subcarriers=8,
                             cp_len=2)
         msg = str(exc.value)
@@ -151,28 +166,30 @@ class TestEmptyInputNamesBothLengths:
         assert '8 + 2 = 10' in msg
 
     def test_matched_filter_metric_names_both_lengths(self):
-        from uacpy.comms.receive import matched_filter_metric
-        with pytest.raises(ConfigurationError) as exc:
+        from uacpy.comms.sync import matched_filter_metric
+        with pytest.raises(ConfigurationError,
+                           match='preamble longer than signal') as exc:
             matched_filter_metric(np.zeros(4), np.zeros(9))
         msg = str(exc.value)
         assert '9 samples' in msg
         assert '4' in msg
 
     def test_spread_on_an_empty_code_names_a_generator_to_call(self):
-        from uacpy.comms.modulate import spread
-        with pytest.raises(ConfigurationError) as exc:
+        from uacpy.comms.coding import spread
+        with pytest.raises(ConfigurationError,
+                           match='spread: empty code') as exc:
             spread([1, -1], [])
         assert 'm_sequence' in str(exc.value)
 
     def test_apply_channel_on_an_empty_h_names_the_identity_channel(self):
-        from uacpy.comms.link import apply_channel
-        with pytest.raises(ConfigurationError) as exc:
+        from uacpy.comms.channel import apply_channel
+        with pytest.raises(ConfigurationError, match='empty channel h') as exc:
             apply_channel(np.zeros(4), [])
         assert 'h=[1.0]' in str(exc.value)
 
     def test_run_parallel_on_no_jobs_names_the_job_constructor(self):
         from uacpy.parallel import run_parallel
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError, match='jobs is empty') as exc:
             run_parallel([])
         assert 'Job(' in str(exc.value)
 
@@ -182,7 +199,8 @@ class TestConstraintMessagesNameTheOffendingValue:
 
     def test_probability_of_detection_names_the_out_of_range_pf(self):
         from uacpy.sonar.detection import probability_of_detection
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match=r'pf must be in \(0, 1\)') as exc:
             probability_of_detection(3.0, pf=1.5)
         assert '1.5' in str(exc.value)
 
@@ -194,19 +212,23 @@ class TestConstraintMessagesNameTheOffendingValue:
 
     def test_albersheim_snr_names_the_offending_pulse_count(self):
         from uacpy.sonar.detection import albersheim_snr
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='n_pulses must be >= 1') as exc:
             albersheim_snr(0.5, 1e-4, n_pulses=0)
         assert 'got 0' in str(exc.value)
 
     def test_column_scattering_strength_names_the_offending_thickness(self):
         from uacpy.sonar.scattering import column_scattering_strength
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='thickness_m must be > 0') as exc:
             column_scattering_strength(-30.0, thickness_m=0.0)
         assert 'got 0.0' in str(exc.value)
 
     def test_detection_threshold_energy_names_both_offending_inputs(self):
         from uacpy.sonar.detection import detection_threshold_energy
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(
+                ConfigurationError,
+                match='bandwidth_hz and integration_time_s must be > 0') as exc:
             detection_threshold_energy(0.5, 1e-4, bandwidth_hz=-1.0,
                                        integration_time_s=2.0)
         msg = str(exc.value)
@@ -214,8 +236,9 @@ class TestConstraintMessagesNameTheOffendingValue:
         assert 'integration_time_s=2.0' in msg
 
     def test_rrc_filter_names_the_offending_rolloff(self):
-        from uacpy.comms.link import rrc_filter
-        with pytest.raises(ConfigurationError) as exc:
+        from uacpy.comms.phy import rrc_filter
+        with pytest.raises(ConfigurationError,
+                           match=r'rolloff must be in \[0, 1\]') as exc:
             rrc_filter(sps=4, rolloff=1.5, span=8)
         assert '1.5' in str(exc.value)
 
@@ -223,7 +246,8 @@ class TestConstraintMessagesNameTheOffendingValue:
         from uacpy.comms.janus import JanusPacket
         pkt = JanusPacket(class_id=16, app_type=99,
                           app_data=np.zeros(34, dtype=int))
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match=r'app_type must be 0\.\.63') as exc:
             pkt.to_bits()
         assert '99' in str(exc.value)
 
@@ -231,13 +255,15 @@ class TestConstraintMessagesNameTheOffendingValue:
         from uacpy.comms.janus import JanusPacket
         pkt = JanusPacket(class_id=16, app_type=1,
                           app_data=np.zeros(10, dtype=int))
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='app_data must be 34 bits') as exc:
             pkt.to_bits()
         assert 'got 10' in str(exc.value)
 
     def test_omp_estimate_names_both_ends_of_the_interval(self):
-        from uacpy.comms.receive import omp_estimate
-        with pytest.raises(ConfigurationError) as exc:
+        from uacpy.comms.equalize import omp_estimate
+        with pytest.raises(ConfigurationError,
+                           match='need 1 <= sparsity <= n_taps') as exc:
             omp_estimate(np.zeros(8, dtype=complex), np.ones(8), n_taps=4,
                          sparsity=9)
         msg = str(exc.value)
@@ -245,11 +271,13 @@ class TestConstraintMessagesNameTheOffendingValue:
         assert 'n_taps=4' in msg
 
     def test_impulse_response_names_both_shapes(self):
-        from uacpy.acoustic_signal.system import (
-            impulse_response_from_transfer_function)
-        with pytest.raises(ConfigurationError) as exc:
+        from uacpy.acoustic_signal.channel import (
+            impulse_response_from_transfer_function,
+        )
+        with pytest.raises(ConfigurationError,
+                           match='H and frequencies shapes differ') as exc:
             impulse_response_from_transfer_function(
-                np.ones(3, dtype=complex), np.array([1.0, 2.0]),
+                np.ones(3, dtype=complex), frequencies=np.array([1.0, 2.0]),
                 sample_rate=1000.0)
         msg = str(exc.value)
         assert '(2,)' in msg
@@ -265,7 +293,8 @@ class TestJanusSeparatesTheDopplerStageFromDetection:
         from uacpy.comms.janus import janus_demodulate
         rng = np.random.default_rng(0)
         noise = rng.standard_normal(4096)
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='preamble not found — no window') as exc:
             janus_demodulate(noise, 44100.0, doppler_max_speed=0.0)
         msg = str(exc.value)
         assert 'start=' in msg
@@ -284,18 +313,20 @@ class TestJanusSeparatesTheDopplerStageFromDetection:
 
         def fake_detect(*args, **kwargs):
             calls.append(1)
-            return (0, None) if len(calls) == 1 else (None, None)
+            return (0, None, True) if len(calls) == 1 else (None, None, False)
 
         monkeypatch.setattr(janus, '_detect', fake_detect)
         monkeypatch.setattr(janus, '_estimate_doppler',
-                            lambda *a, **k: 1.002)
+                            lambda *a, **k: 0.002)
         rng = np.random.default_rng(0)
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(
+                ConfigurationError,
+                match='preamble not found after Doppler correction') as exc:
             janus.janus_demodulate(rng.standard_normal(8192), 44100.0,
                                    doppler_max_speed=5.0)
         msg = str(exc.value)
         assert 'after Doppler correction' in msg
-        assert '1.002' in msg
+        assert 'a = v/c = +0.002000' in msg
         assert 'doppler_max_speed=5.0' in msg
         assert len(calls) == 2
 
@@ -304,51 +335,113 @@ class TestVisualizationNamesWhatToSupply:
 
     def test_compare_on_an_empty_list_names_the_cut_it_needs(self):
         from uacpy.visualization.plots.fields import compare
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='compare: no fields to plot') as exc:
             compare([])
         assert 'field.at' in str(exc.value)
 
     def test_compare_models_names_both_accepted_shapes(self):
         from uacpy.visualization.plots.fields import compare_models
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='compare_models: no fields to plot') as exc:
             compare_models([])
         assert 'dict' in str(exc.value)
 
 
-def _inline_remediations():
+#: Shared validators that raise with the remediation their CALLER passes in:
+#: ``(module, function)`` -> why the pass-through is by design. The fix is
+#: then written where the refusal originates, at every call, so the sweep
+#: reads those calls instead of counting the raise as indirect.
+_REMEDIATION_PASS_THROUGH = {
+    ('sonar/sonar_equation.py', '_require_se_field'):
+        "one signal-excess kind guard for the three Field doors of the "
+        "sonar equation; each names how to build the field it needs.",
+    ('core/_validate.py', 'require_real_signal'):
+        "one real-signal guard for seven estimators; each caller names its "
+        "own alternative (fk_transform for a complex gather).",
+    ('models/_budget.py', 'memory_budget'):
+        "one memory policy for five engines; each names the knobs that "
+        "shrink its own estimate (n_time_samples, depth_decimation, ...).",
+    ('models/_window.py', 'steep_path_notice'):
+        "one steep-path notice for the wavenumber engines; each names the "
+        "knob that keeps its paths (leaky_modes, c_high).",
+    ('acoustic_signal/delay_profile.py', '_fold_notice'):
+        "one fold notice for every synthesis record; each caller names its "
+        "own way out (energy_fraction, record=, frequencies=).",
+    ('core/absorption.py', 'warn_if_band_absorption_frozen'):
+        "one frozen-law warning for the band engines; each names its own "
+        "remedy (sub-bands, per-frequency runs).",
+}
+
+
+def _package_sources():
+    """``(path relative to the package, source)`` of every shipped module."""
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parent.parent
+    return [(str(path.relative_to(pkg)), path.read_text())
+            for path in sorted(pkg.rglob('*.py'))
+            if 'tests' not in path.parts and 'third_party' not in path.parts]
+
+
+def _inline_remediations(sources=None):
     """``([(site, text)], indirect count)`` for every ``remediation=`` written
     inline at a ``raise`` in shipped code.
 
     A site passing a variable (``remediation=remedy``) builds its text
     elsewhere, so the literal is not visible here; those are counted rather
     than read, and the count is pinned by the caller so the blind spot cannot
-    grow unremarked."""
+    grow unremarked. A conditional expression choosing between literals
+    (``"a" if x else f"b"``) is read: every branch is at the raise site. A
+    listed shared validator (:data:`_REMEDIATION_PASS_THROUGH`) raising with
+    its own ``remediation`` parameter is read at its callers: each call's
+    ``remediation=`` is swept like a raise site's. ``sources`` defaults to
+    the shipped package (:func:`_package_sources`)."""
     import ast
-    from pathlib import Path
 
-    pkg = Path(__file__).resolve().parent.parent
-    inline = (ast.Constant, ast.JoinedStr, ast.BinOp)
+    inline = (ast.Constant, ast.JoinedStr, ast.BinOp, ast.IfExp)
     found, indirect = [], 0
-    for path in sorted(pkg.rglob('*.py')):
-        if 'tests' in path.parts or 'third_party' in path.parts:
-            continue
-        tree = ast.parse(path.read_text(), filename=str(path))
+
+    def read(site, value):
+        nonlocal indirect
+        if not isinstance(value, inline):
+            indirect += 1
+            return
+        text = ' '.join(n.value for n in ast.walk(value)
+                        if isinstance(n, ast.Constant)
+                        and isinstance(n.value, str))
+        found.append((site, text))
+
+    trees = [(path, ast.parse(text, filename=path))
+             for path, text in (sources if sources is not None
+                                else _package_sources())]
+    pass_through = {name for (_, name) in _REMEDIATION_PASS_THROUGH}
+    for path, tree in trees:
+        # The function each node sits in, innermost first.
+        enclosing = {}
+        for func in ast.walk(tree):
+            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for node in ast.walk(func):
+                    enclosing[node] = func
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Raise) or not isinstance(
-                    node.exc, ast.Call):
-                continue
-            for kw in node.exc.keywords:
-                if kw.arg != 'remediation':
-                    continue
-                if not isinstance(kw.value, inline):
-                    indirect += 1
-                    continue
-                text = ' '.join(
-                    n.value for n in ast.walk(kw.value)
-                    if isinstance(n, ast.Constant)
-                    and isinstance(n.value, str))
-                found.append(
-                    (f'{path.relative_to(pkg)}:{node.lineno}', text))
+            if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                func = enclosing.get(node)
+                listed = (func is not None
+                          and (path, func.name) in _REMEDIATION_PASS_THROUGH)
+                params = ({a.arg for a in func.args.args
+                           + func.args.kwonlyargs} if listed else set())
+                for kw in node.exc.keywords:
+                    if kw.arg != 'remediation':
+                        continue
+                    if isinstance(kw.value, ast.Name) and kw.value.id in params:
+                        continue
+                    read(f'{path}:{node.lineno}', kw.value)
+            elif (isinstance(node, ast.Call)
+                  and getattr(node.func, 'id', getattr(node.func, 'attr', None))
+                  in pass_through):
+                for kw in node.keywords:
+                    if kw.arg == 'remediation':
+                        read(f'{path}:{node.lineno}', kw.value)
     return found, indirect
 
 
@@ -357,7 +450,7 @@ def test_no_inline_remediation_says_only_to_check_your_input():
     renders a "How to fix:" heading over advice the user cannot act on.
 
     Scope: remediations written *inline* at the raise site — see
-    ``_inline_remediations``. Nine sites build their text elsewhere and are out
+    ``_inline_remediations``. Ten sites build their text elsewhere and are out
     of that sweep's reach rather than clean; it reports what it can see, and
     the tables it cannot are read directly below.
     """
@@ -373,6 +466,28 @@ def test_no_inline_remediation_says_only_to_check_your_input():
     # (``_geo.require_source``); their remediations are literals at the call
     # sites, which this sweep of raise sites does not read.
     assert indirect <= 9, f'{indirect} remediations now built indirectly'
+
+
+def test_a_shared_validators_pass_through_is_read_at_its_callers():
+    """A listed validator that raises with its caller's ``remediation`` adds no
+    indirect site, and each caller's text is read; the same pass-through in an
+    unlisted function, and a variable remediation anywhere else, still count
+    as indirect."""
+    validate = (
+        "def require_real_signal(data, caller, *, remediation=None):\n"
+        "    raise ConfigurationError('x', remediation=remediation)\n"
+        "def require_other(data, *, remediation=None):\n"
+        "    raise ConfigurationError('x', remediation=remediation)\n")
+    caller = (
+        "def radon(d):\n"
+        "    require_real_signal(d, 'radon', remediation='Use fk_transform.')\n"
+        "def other(d, text):\n"
+        "    raise ConfigurationError('y', remediation=text)\n")
+    found, indirect = _inline_remediations([
+        ('core/_validate.py', validate), ('signal_module', caller)])
+    assert ('signal_module:2', 'Use fk_transform.') in found
+    # require_other's pass-through is unlisted; other() passes a variable.
+    assert indirect == 2
 
 
 def test_no_remediation_offers_only_the_editable_install_command():
@@ -417,7 +532,7 @@ def _pressure_slab(depth, range_):
 
 def _stack_of_slabs(depths):
     """A source-depth ResultStack whose slabs sit on the given depth axes."""
-    from uacpy.core.results.field import ResultStack
+    from uacpy.core.results.stack import ResultStack
     r = np.linspace(500, 4000, 6)
     slabs = [_pressure_slab(z, r) for z in depths]
     return ResultStack(slabs, np.arange(float(len(depths))),
@@ -438,35 +553,39 @@ def _guard_cases():
     short; each entry triggers exactly one raise.
     """
     from uacpy.acoustic_signal.detect import (
-        ambiguity_function, matched_filter, processing_gain)
-    from uacpy.acoustic_signal.arrays import sample_covariance
-    from uacpy.acoustic_signal.estimate import (
-        decidecade_band_levels, decidecade_bands)
-    from uacpy.acoustic_signal.system import impulse_response
-    from uacpy.acoustic_signal.estimate import (
-        constant_q_spectrogram, constant_q_transform)
-    from uacpy.acoustic_signal.system import modal_group_velocity
+        ambiguity_function, matched_filter, processing_gain_dB)
+    from uacpy.acoustic_signal.beamforming import sample_covariance
+    from uacpy.acoustic_signal.bands import (
+        decidecade_band_levels, decidecade_bands,
+    )
+    from uacpy.acoustic_signal.channel import impulse_response
+    from uacpy.acoustic_signal.cqt import (
+        constant_q_spectrogram, constant_q_transform,
+    )
+    from uacpy.acoustic_signal.dispersion import modal_group_velocity
     from uacpy.acoustic_signal.generate import (
         synthesize_noise_from_psd)
-    from uacpy.acoustic_signal.generate import bpsk_modulate, mseq
-    from uacpy.acoustic_signal.estimate import (
+    from uacpy.acoustic_signal.generate import bpsk_modulate, m_sequence
+    from uacpy.acoustic_signal.timefreq import (
         ComplexCepstrum, analytic_signal, cepstrum, complex_cepstrum, cwt,
-        inverse_complex_cepstrum, inverse_cwt, wigner_ville)
-    from uacpy.acoustic_signal.arrays import (
+        inverse_complex_cepstrum, inverse_cwt, wigner_ville,
+    )
+    from uacpy.acoustic_signal.gathers import (
         fk_transform, inverse_fk, inverse_radon, inverse_taup,
-        radon_transform, taup_transform)
+        radon_transform, taup_transform,
+    )
     from uacpy.comms.janus import janus_decode
-    from uacpy.comms.link import OFDMReceiver, OFDMTransmitter
+    from uacpy.comms.transceiver import OFDMReceiver, OFDMTransmitter
     from uacpy.sonar.matched_field import (
         replica_bank_from_field, synthesize_replica)
     from uacpy.sonar.reverberation import total_reverberation
     from uacpy.sonar.sonar_equation import (
         detection_range, noise_background, passive_signal_excess_field,
-        probability_of_detection_field)
+        transition_probability_field)
 
     z4 = np.linspace(5, 95, 4)
     return [
-        # ── acoustic_signal/arrays.py ────────────────────────────────
+        # ── acoustic_signal/gathers.py ───────────────────────────────
         ('fk_transform_window_list_length',
          lambda: fk_transform(np.zeros((8, 4)), 1000.0, 1.0, window=['hann']),
          ('got 1 entries',)),
@@ -483,7 +602,7 @@ def _guard_cases():
          lambda: taup_transform(np.zeros(8), 1000.0, 1.0),
          ('got shape (8,)',)),
         ('inverse_taup_taup_ndim',
-         lambda: inverse_taup(np.zeros(8), [1.0], 1000.0, 1.0, 4),
+         lambda: inverse_taup(np.zeros(8), 1000.0, 1.0, [1.0], 4),
          ('got shape (8,)',)),
         ('inverse_fk_FK_ndim',
          lambda: inverse_fk(np.zeros(8)),
@@ -491,16 +610,16 @@ def _guard_cases():
         ('fk_transform_data_ndim',
          lambda: fk_transform(np.zeros(8), 1000.0, 1.0),
          ('got shape (8,)',)),
-        # ── acoustic_signal/estimate.py ──────────────────────────────────
+        # ── acoustic_signal/timefreq.py ──────────────────────────────────
         ('analytic_signal_data_ndim',
          lambda: analytic_signal(np.zeros((2, 3))),
          ('got shape (2, 3)',)),
         ('wigner_ville_window_length',
-         lambda: wigner_ville(np.zeros(32), 1000.0, time_window=0),
+         lambda: wigner_ville(np.zeros(32), 1000.0, time_smoothing=0),
          ('got 0',)),
         ('wigner_ville_window_ndim',
          lambda: wigner_ville(np.zeros(32), 1000.0,
-                              time_window=np.zeros((2, 3))),
+                              time_smoothing=np.zeros((2, 3))),
          ('got shape (2, 3)',)),
         ('wigner_ville_data_ndim',
          lambda: wigner_ville(np.zeros((2, 3)), 1000.0),
@@ -532,51 +651,51 @@ def _guard_cases():
          lambda: matched_filter(np.zeros((2, 3)), np.zeros(4)),
          ('received shape (2, 3)', 'replica shape (4,)')),
         ('processing_gain_bt_product',
-         lambda: processing_gain(0.0, 2.0),
+         lambda: processing_gain_dB(0.0, 2.0),
          ('bandwidth_hz=0.0', 'duration_s=2.0')),
         ('ambiguity_function_waveform_ndim',
          lambda: ambiguity_function(np.zeros((2, 3)), 1000.0),
          ('got shape (2, 3)',)),
-        # ── acoustic_signal/estimate.py ──────────────────────────────────
+        # ── acoustic_signal/spectral.py ──────────────────────────────────
         ('integration_time_shorter_than_one_sample',
          lambda: _band_exposure(np.ones(100), 1000.0, integration_time=1e-6),
          ('integration_time=1e-06', 'shorter than one sample')),
         ('no_band_fits_below_nyquist',
-         lambda: _band_exposure(np.ones(4096), 100.0, fmin=1000.0, fmax=2000.0),
-         ('got fmin=1000.0', 'fmax=2000.0')),
-        # ── acoustic_signal/estimate.py ─────────────────────────────────────
+         lambda: _band_exposure(np.ones(4096), 100.0, freq_min=1000.0, freq_max=2000.0),
+         ('got freq_min=1000.0', 'freq_max=2000.0')),
+        # ── acoustic_signal/bands.py ────────────────────────────────────────
         ('decidecade_bands_edges',
          lambda: decidecade_bands(0.0, 100.0),
-         ('got f_low=0.0', 'f_high=100.0')),
+         ('got freq_min=0.0', 'freq_max=100.0')),
         ('decidecade_band_levels_negative_psd',
          lambda: decidecade_band_levels(np.array([1.0, -2.0, -3.0]),
-                                        np.array([10.0, 20.0, 30.0])),
+                                        frequencies=np.array([10.0, 20.0, 30.0])),
          ('Got 2 negative value(s)', 'minimum -3')),
         ('decidecade_band_levels_frequency_order',
          lambda: decidecade_band_levels(np.array([1.0, 2.0, 3.0]),
-                                        np.array([10.0, 30.0, 20.0])),
+                                        frequencies=np.array([10.0, 30.0, 20.0])),
          ('Got 1 non-increasing step(s)', 'first at index 1')),
-        # ── acoustic_signal/system.py ───────────────────────────────────
+        # ── acoustic_signal/channel.py ──────────────────────────────────
         ('impulse_response_shapes',
-         lambda: impulse_response(np.ones(3), np.zeros(4), 1000.0),
+         lambda: impulse_response(np.ones(3), np.zeros(4), sample_rate=1000.0),
          ('amplitudes shape (3,)', 'delays_s shape (4,)')),
         ('impulse_response_negative_delays',
          lambda: impulse_response(np.ones(3), np.array([0.0, -1.0, -2.0]),
-                                  1000.0),
+                                  sample_rate=1000.0),
          ('got 2 negative value(s)', 'first at index 1')),
-        # ── acoustic_signal/estimate.py ────────────────────────────────
+        # ── acoustic_signal/cqt.py ─────────────────────────────────────
         ('constant_q_hop',
          lambda: constant_q_spectrogram(np.zeros(4096), 8000.0, hop=0),
          ('got 0',)),
         ('constant_q_data_ndim',
          lambda: constant_q_transform(np.zeros((2, 3)), 8000.0),
          ('got shape (2, 3)',)),
-        # ── acoustic_signal/system.py ─────────────────────────────────────
+        # ── acoustic_signal/dispersion.py ─────────────────────────────────
         ('modal_group_velocity_frequency_order',
-         lambda: modal_group_velocity([100.0, 50.0], [1.0, 2.0]),
+         lambda: modal_group_velocity([100.0, 50.0], k_horizontal=[1.0, 2.0]),
          ('got shape (2,)', '1 non-increasing step(s)')),
         ('modal_group_velocity_wavenumber_rows',
-         lambda: modal_group_velocity([1.0, 2.0, 3.0], np.zeros(2)),
+         lambda: modal_group_velocity([1.0, 2.0, 3.0], k_horizontal=np.zeros(2)),
          ('k_horizontal shape (2,)', '3 frequencies')),
         # ── acoustic_signal/generate.py ───────────────────────────
         ('synthesize_noise_frequency_order',
@@ -590,16 +709,16 @@ def _guard_cases():
          ('Fxx[0]=1', 'non-positive Pxx value(s)')),
         # ── acoustic_signal/generate.py ─────────────────────────────────
         ('bpsk_samples_per_chip_integer',
-         lambda: bpsk_modulate(np.array([1, -1, 1]), 100.0, 1000.0, 300.0),
+         lambda: bpsk_modulate(np.array([1, -1, 1]), 100.0, sample_rate=1000.0, chips_per_sec=300.0),
          ('sample_rate/chips_per_sec = 1000/300',)),
-        ('mseq_register_length',
-         lambda: mseq(20),
+        ('m_sequence_register_length',
+         lambda: m_sequence(20),
          ('got 20',)),
-        # ── acoustic_signal/arrays.py ────────────────────────────────────
+        # ── acoustic_signal/beamforming.py ───────────────────────────────
         ('sample_covariance_snapshots_ndim',
          lambda: sample_covariance(np.ones(8)),
          ('got shape (8,)',)),
-        # ── acoustic_signal/_signal_validate.py ──────────────────────────
+        # ── core/_validate.py ────────────────────────────────────────────
         ('require_finite_signal_nonfinite_count',
          lambda: analytic_signal(np.array([1.0, np.nan, 2.0, np.inf])),
          ('Got 2 non-finite value(s) of 4', 'first at flat index 1')),
@@ -618,8 +737,8 @@ def _guard_cases():
          ('block(s)', 'need >= 3')),
         # ── sonar ────────────────────────────────────────────────────────
         ('synthesize_replica_ranges_positive',
-         lambda: synthesize_replica(_FlatModes(), 50.0,
-                                    [1000.0, 0.0, -5.0], [10.0]),
+         lambda: synthesize_replica(_FlatModes(), source_depth=50.0,
+                                    ranges=[1000.0, 0.0, -5.0], array_depths=[10.0]),
          ('got 2 value(s) <= 0', 'first at index 1')),
         ('replica_bank_slab_depth_axis',
          lambda: replica_bank_from_field(_stack_of_slabs([z4]),
@@ -637,19 +756,19 @@ def _guard_cases():
          lambda: total_reverberation(np.array([1.0, 2.0]), np.array([])),
          ('Got sizes [2, 0]',)),
         ('noise_background_di_and_ag',
-         lambda: noise_background(60.0, 10.0, array_gain=12.0),
-         ('directivity_index=10.0', 'array_gain=12.0')),
+         lambda: noise_background(60.0, 10.0, array_gain_dB=12.0),
+         ('directivity_index_dB=10.0', 'array_gain_dB=12.0')),
         ('signal_excess_field_time_domain',
          lambda: passive_signal_excess_field(
-             _time_domain_field(), source_level=180.0, noise_level=60.0,
-             detection_threshold=10.0),
+             _time_domain_field(), source_level_dB=180.0, noise_level_dB=60.0,
+             detection_threshold_dB=10.0),
          ('Got axes [',)),
         ('pd_field_needs_real_dB',
-         lambda: probability_of_detection_field(_complex_se_field(),
+         lambda: transition_probability_field(_complex_se_field(),
                                                 sigma_dB=8.0),
          ('Got dtype complex',)),
         ('detection_range_shape_mismatch',
-         lambda: detection_range(np.zeros(3), np.zeros(4)),
+         lambda: detection_range(np.zeros(3), signal_excess_dB=np.zeros(4)),
          ('ranges_m shape (3,)', 'signal_excess_dB shape (4,)')),
     ]
 
@@ -674,7 +793,8 @@ class TestShapeAndArrayGuardsNameWhatTheyGot:
         [(call, frags) for _, call, frags in _GUARD_CASES],
         ids=[cid for cid, _, _ in _GUARD_CASES])
     def test_guard_names_the_offending_value(self, call, fragments):
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match=re.escape(fragments[0])) as exc:
             call()
         message = str(exc.value)
         for fragment in fragments:
@@ -690,8 +810,9 @@ class TestShapeAndArrayGuardsNameWhatTheyGot:
         instead: every lexical proxy for "names the offending value" that can
         be computed (a ``got`` cue, an interpolation count, an interpolation
         overlapping the guard) mis-scores files that are already complete —
-        ``comms/receive.py`` names both stream lengths in all five of its
-        messages and scores 0/5 on the ``got`` cue. A floor built on any of
+        the receiver's modules (``comms/sync.py``, ``equalize.py``,
+        ``metrics.py``) name both stream lengths in all five of their
+        messages and score 0/5 on the ``got`` cue. A floor built on any of
         them flagged 22 of 28 files and would need a whitelist longer than the
         set it measures. This counts the one thing that can be counted
         exactly.
@@ -706,6 +827,8 @@ def test_read_fortran_record_reports_a_stream_without_a_name():
     The message must still render rather than raising AttributeError from
     inside the error path."""
     from uacpy.io._fortran_helpers import read_fortran_record
-    with pytest.raises(FileFormatError) as exc:
+    with pytest.raises(
+            FileFormatError,
+            match='Unexpected EOF reading Fortran record head') as exc:
         read_fortran_record(io.BytesIO(b'\x01'), 'i')
     assert '<stream>' in str(exc.value)

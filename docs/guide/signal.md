@@ -18,7 +18,7 @@ from uacpy.acoustic_signal import (lfm_chirp, welch,
 ```
 
 Array processing — steering vectors, conventional and MVDR beamforming, MUSIC —
-also lives under `uacpy.acoustic_signal.arrays`, but it is documented in
+also lives under `uacpy.acoustic_signal`, but it is documented in
 [`arrays.md`](arrays.md). The sonar equation, detection theory and matched-field
 processing are in [`sonar.md`](sonar.md).
 
@@ -28,11 +28,11 @@ processing are in [`sonar.md`](sonar.md).
 
 | Sub-module | The question it answers | What it holds |
 |---|---|---|
-| `generate` | give me a signal | chirps, tone bursts, Ricker/Gaussian/N-wave, the SPARC pulse library; m-sequences and BPSK; PSD-to-time-series realisation, band-limited noise, SNR mixing |
+| `generate` | give me a signal | chirps, tone bursts, Ricker/Gaussian/N-wave, the SPARC pulse library; m-sequences and BPSK; PSD-to-time-series realisation, band-limited noise (SNR mixing is `uacpy.comms.awgn`) |
 | `estimate` | measure this signal | `welch`, `constant_q`, `sound_exposure` and a `probabilistic_` twin of each; the constant-Q transform and spectrogram; Hilbert, spectrogram, wavelet, Wigner-Ville, cepstrum; decidecade (ISO 18405) band edges and levels |
 | `arrays` | what does this array see | beamforming and steering vectors (see [`arrays.md`](arrays.md)), plus the f-k, tau-p and Radon gather transforms **and their inverses** — the ones that take a receiver spacing `dx` |
 | `detect` | is my transmission in there | matched filter, pulse compression, processing gain, ambiguity |
-| `system` | what did the channel do to it | `FRF` frequency-response estimation, impulse response and received-signal simulation, modal group velocity and waveguide warping |
+| `system` | what did the channel do to it | frequency-response estimation (`frf_welch`, `etfe`, `periodic_etfe`, `lsfir`, and `FRF` to configure one), impulse response and received-signal simulation, modal group velocity and waveguide warping |
 
 You will not type those names: every public name is re-exported from
 `uacpy.acoustic_signal`, so it is `uacpy.acoustic_signal.welch`, never
@@ -51,7 +51,15 @@ frequencies, power = welch(x, fs)
 f, t, Sxx = spectrogram(x, fs, nperseg=1024)
 ```
 
-`FRF` is the single exception — it is a class because it carries a fitted model.
+Each result also carries `.units` (the unit of every field) and the export
+protocol the model results have: `to_dict()` / `from_dict()`, `to_xarray()` /
+`from_xarray()` — every array on its axes, an axis being the earlier 1-D field
+of its length, so a spectrogram's `power` sits on `(frequencies, times)` — and
+`to_dataframe()` where the fields are equal-length columns (`welch`,
+`BandLevels`, a BER curve).
+
+Frequency-response estimation is functions too; `FRF` is a class only to hold
+one of them configured, and it keeps no result.
 
 **Levels are reference-free until the last step.** The estimators return
 Pa²/Hz, Pa² or Pa²·s — whichever `scaling` was asked for — all linear. The
@@ -78,35 +86,35 @@ the signal.
 
 | Call | Returns | Notes |
 |---|---|---|
-| `lfm_chirp(fmin, fmax, duration, sample_rate)` | `(t, s)` | linear sweep; instantaneous frequency ramps `fmin → fmax` |
-| `hfm_chirp(fmin, fmax, duration, sample_rate)` | `(t, s)` | hyperbolic sweep, a.k.a. linear period modulation |
-| `tone_burst(frequency, n_cycles, sample_rate, window=True)` | `(t, s)` | Hann-gated by default; `window=False` for a hard gate |
-| `ricker_wavelet(time, frequency, delay=None)` | `s` | second derivative of a Gaussian, AT centring `u = 2πFt − 8`. `delay` centres it where you ask instead and **broadcasts against `time`**, so one call lays a pulse on every trace of a moveout gather |
-| `gaussian_pulse(time, delay, duration)` | `s` | `exp(−((t − delay)/duration)²)` |
-| `nwave(time, frequency)` | `s` | `sin(ωt) − ½sin(2ωt)`, forced to zero outside `[0, 1/f]` |
-| `sparc_pulse(t, omega, pulse_type)` | `(s, title)` | the 11-shape SPARC library; `omega` is **rad/s**, and the second return is the shape's name |
-| `mseq(m)` | `s` | maximum-length sequence, `2**m − 1` chips of ±1 (standard BPSK mapping bit 0 → +1, bit 1 → −1, the same polarity as `comms.m_sequence`), `2 ≤ m ≤ 15` |
-| `bpsk_modulate(s_bipolar, fc, sample_rate, chips_per_sec)` | `s` | one carrier cycle-block per chip; requires an integer `sample_rate / chips_per_sec` |
-| `make_mseq_probe(fmin, fmax, sample_rate, T_tot)` | `probe` | 0.2 s leader + whole periods of `mseq(10)`, BPSK'd at `(fmin + fmax)/2`, zero-filled to exactly `round(T_tot · sample_rate)` samples |
+| `lfm_chirp(freq_start, freq_end, duration, *, sample_rate)` | `(t, s)` | linear sweep; instantaneous frequency ramps `freq_start → freq_end` |
+| `hfm_chirp(freq_start, freq_end, duration, *, sample_rate)` | `(t, s)` | hyperbolic sweep, a.k.a. linear period modulation |
+| `tone_burst(frequency, n_cycles, *, sample_rate, window='hann')` | `(t, s)` | Hann-gated by default; `window=None` for a hard gate |
+| `ricker_wavelet(times, frequency, delay=None)` | `s` | second derivative of a Gaussian, AT centring `u = 2πFt − 8`. `delay` centres it where you ask instead and **broadcasts against `time`**, so one call lays a pulse on every trace of a moveout gather |
+| `gaussian_pulse(times, delay, duration)` | `s` | `exp(−((t − delay)/duration)²)` |
+| `nwave(times, frequency)` | `s` | `sin(ωt) − ½sin(2ωt)`, forced to zero outside `[0, 1/f]` |
+| `sparc_pulse(times, frequency, pulse_type)` | `(s, title)` | the 11-shape SPARC library; `frequency` is the characteristic frequency in Hz, and the second return is the shape's name |
+| `m_sequence(n_register, taps=None)` | `s` | maximum-length sequence, `2**n − 1` chips of ±1 (standard BPSK mapping bit 0 → +1, bit 1 → −1); `taps=None` takes the Acoustics-Toolbox `mseq.m` primitive polynomial for `2 ≤ n ≤ 15`, explicit `taps` any primitive one. The same function is `uacpy.comms.m_sequence` |
+| `bpsk_modulate(chips, fc, *, sample_rate, chips_per_sec)` | `s` | one carrier cycle-block per chip; requires an integer `sample_rate / chips_per_sec` |
+| `make_mseq_probe(freq_min, freq_max, *, sample_rate, duration)` | `probe` | 0.2 s leader + whole periods of `m_sequence(10)`, BPSK'd at `(freq_min + freq_max)/2`, zero-filled to exactly `round(duration · sample_rate)` samples |
 
 ```python
 import numpy as np
 from uacpy.acoustic_signal import (
     lfm_chirp, hfm_chirp, tone_burst, ricker_wavelet,
-    gaussian_pulse, nwave, sparc_pulse, mseq,
+    gaussian_pulse, nwave, sparc_pulse, m_sequence,
 )
 
 fs = 8000.0
 t = np.arange(int(0.10 * fs)) / fs
 
-t_lfm, lfm = lfm_chirp(200.0, 1200.0, 0.10, fs)
-t_hfm, hfm = hfm_chirp(200.0, 1200.0, 0.10, fs)
-t_burst, burst = tone_burst(400.0, 8, fs)
+t_lfm, lfm = lfm_chirp(200.0, 1200.0, 0.10, sample_rate=fs)
+t_hfm, hfm = hfm_chirp(200.0, 1200.0, 0.10, sample_rate=fs)
+t_burst, burst = tone_burst(400.0, 8, sample_rate=fs)
 ricker = ricker_wavelet(t, 200.0)
 gauss = gaussian_pulse(t, delay=0.05, duration=0.012)
 nw = nwave(t - 0.02, 200.0)
-hann4, hann4_title = sparc_pulse(t - 0.02, 2 * np.pi * 200.0, 'H')
-chips = mseq(6)
+hann4, hann4_title = sparc_pulse(t - 0.02, 200.0, 'H')
+chips = m_sequence(6)
 ```
 
 ![Waveform catalogue](figures/signal_waveforms.png)
@@ -119,15 +127,15 @@ cycles of 400 Hz under a Hann taper. The Ricker's main lobe is **negative**
 convention gives, and it is worth knowing before you go looking for a bug. The
 N-wave and the Hanning-weighted four-sine both sit inside their finite support
 and are identically zero outside it; the argument `t - 0.02` is what places them
-at 20 ms, since both are defined from `t = 0`. `mseq(6)` is 63 chips, not 64.
+at 20 ms, since both are defined from `t = 0`. `m_sequence(6)` is 63 chips, not 64.
 
 ### The two chirps, and where their frequency actually is
 
 ```python
 from uacpy.acoustic_signal import spectrogram, instantaneous_frequency
 
-t_lfm, lfm = lfm_chirp(200.0, 1600.0, 0.20, fs)
-t_hfm, hfm = hfm_chirp(200.0, 1600.0, 0.20, fs)
+t_lfm, lfm = lfm_chirp(200.0, 1600.0, 0.20, sample_rate=fs)
+t_hfm, hfm = hfm_chirp(200.0, 1600.0, 0.20, sample_rate=fs)
 
 f, t_spec, Sxx = spectrogram(lfm, fs, nperseg=256, noverlap=240)
 f_inst = instantaneous_frequency(lfm, fs)
@@ -162,17 +170,23 @@ frequency of each.
 
 | Call | Returns | Units |
 |---|---|---|
-| `welch(data, sample_rate, *, scaling='density', nperseg=8192, noverlap=None, nfft=None, detrend='constant', average='mean', window=None, fmin=None, fmax=None, integration_time=None)` | `SpectralEstimate(frequencies, power)` carrying `.scaling`, `.method` | Pa²/Hz or Pa² per bin, linear |
-| `constant_q(data, sample_rate, *, scaling='density', fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', integration_time=None)` | same, on geometric bins | Pa²/Hz or Pa² per bin, linear |
-| `probabilistic_welch(data, sample_rate, *, scaling='density', seg_duration=1.0, overlap_pct=50, ddB=1.0, lvlmin=0, lvlmax=150, nperseg=8192, noverlap=None, window=None, fmin=None, fmax=None, integration_time=None, ref=1e-6)` | `ProbabilisticSpectralEstimate(frequencies, level_edges, pdf)` carrying `.mean_dB`, `.std_dB`, `.binwidth_dB`, `.seg_duration`, `.ref`, `.scaling`, `.method`, `.bands` | dB histogram per frequency |
-| `probabilistic_constant_q(data, sample_rate, *, scaling='density', fmin=20.0, …, ddB=1.0, lvlmin=0, lvlmax=150, ref=1e-6)` | same, one sample per frame rather than per segment | dB histogram per frequency |
-| `sound_exposure(data, sample_rate, *, band_type='decidecade', num_bands=30, nperseg=None, batch_size=None, fmin=8.9125, fmax=22387, integration_time=None)` | `SpectralEstimate` carrying `.bands`, `.band_type` | Pa²·s per standard band — the ISO 18405 sound exposure; `.plot()` / `plot_sel(ref=1e-6)` gives dB re 1 µPa²·s |
-| `probabilistic_sound_exposure(data, sample_rate, *, seg_duration=1.0, …, band_type='decidecade', …, ref=1e-6)` | `ProbabilisticSpectralEstimate` carrying `.bands` | dB re 1 µPa²·s histogram, one sample per segment |
-| `decidecade_bands(f_low, f_high)` | `(lower, centers, upper)` | Hz |
-| `decidecade_band_levels(psd, frequencies, ref=1e-6)` | `(centers, levels)` | dB re `ref²` |
+| `welch(data, sample_rate, *, scaling='density', nperseg=8192, noverlap=None, nfft=None, detrend='constant', average='mean', window=None, freq_min=None, freq_max=None, integration_time=None)` | `SpectralEstimate(frequencies, power)` carrying `.scaling`, `.method` | Pa²/Hz or Pa² per bin, linear |
+| `constant_q(data, sample_rate, *, scaling='density', freq_min=20.0, freq_max=None, bins_per_octave=24, window='hann', integration_time=None)` | same, on geometric bins | Pa²/Hz or Pa² per bin, linear |
+| `probabilistic_welch(data, sample_rate, *, scaling='density', segment_duration=1.0, segment_overlap_percent=50, level_step_dB=1.0, level_min_dB=0, level_max_dB=150, nperseg=8192, noverlap=None, detrend='constant', window=None, freq_min=None, freq_max=None, integration_time=None, ref=1e-6, axis=None)` | `ProbabilisticSpectralEstimate(frequencies, level_edges, pdf)` carrying `.mean_dB`, `.std_dB`, `.level_step_dB`, `.segment_duration`, `.ref`, `.scaling`, `.method`, `.bands` | dB histogram per frequency |
+| `probabilistic_constant_q(data, sample_rate, *, scaling='density', freq_min=20.0, …, level_step_dB=1.0, level_min_dB=0, level_max_dB=150, ref=1e-6)` | same, one sample per frame rather than per segment | dB histogram per frequency |
+| `sound_exposure(data, sample_rate, *, band_type='decidecade', n_bands=30, nperseg=None, batch_size=None, freq_min=8.9125, freq_max=22387, integration_time=None)` | `SpectralEstimate` carrying `.bands`, `.band_type` | Pa²·s per standard band — the ISO 18405 sound exposure; `.plot()` / `plot_sel(ref=1e-6)` gives dB re 1 µPa²·s |
+| `probabilistic_sound_exposure(data, sample_rate, *, segment_duration=1.0, …, band_type='decidecade', …, ref=1e-6)` | `ProbabilisticSpectralEstimate` carrying `.bands` | dB re 1 µPa²·s histogram, one sample per segment |
+| `decidecade_bands(freq_min, freq_max)` | `(lower, centers, upper)` of every IEC 61260-1 base-10 band overlapping the range | Hz |
+| `octave_bands(freq_min, freq_max, *, base=10)` | the same for the IEC 61260-1 octaves, every third decidecade (`base=2`: exact octaves) | Hz |
+| `standard_bands(freq_min, freq_max, *, band_type='decidecade', sample_rate=None, n_bands=None)` | `(lower, centers, upper)`: the bands `sound_exposure` reports that range on | Hz |
+| `band_levels(psd, frequencies, *, band_type='decidecade', ref=1e-6)` | `BandLevels(centres, levels)` on the `band_type` ladder, carrying `.lower`, `.upper`, `.band_type`, `.ref`; `.plot()` draws it | dB re `ref²` |
+| `decidecade_band_levels(psd, frequencies, *, ref=1e-6)` | `band_levels` on the decidecade ladder | dB re `ref²` |
 
-The probabilistic estimators accept a 1-D signal, a 2-D block (longer axis is
-time), or a list of 1-D arrays; the list form is the unambiguous one. There are
+The probabilistic estimators accept a 1-D signal, a multichannel block whose
+time axis `axis=` names under `welch`'s rule (the last axis by default, and a
+`read_wav`-shaped `(n_samples, n_channels)` block refused rather than guessed
+at), or a list of 1-D records; every channel's segments go into the one
+histogram. There are
 no `psd` / `ppsd` short names: a three-letter alias of a nine-word statistic is
 exactly where a density gets read as a spectrum.
 
@@ -184,8 +198,8 @@ can honour.
 | function | what it returns | its own parameters |
 |---|---|---|
 | `welch` | Pa²/Hz or Pa² on equal-width bins | `scaling`, `nperseg`, `noverlap`, `nfft`, `detrend`, `average`, `window` |
-| `constant_q` | the same two, on geometric bins | `scaling`, `fmin`, `fmax`, `bins_per_octave`, `hop`, `window` |
-| `sound_exposure` | Pa²·s per standard band | `band_type` (one of `BAND_TYPES`), `num_bands`, `nperseg`, `batch_size` |
+| `constant_q` | the same two, on geometric bins | `scaling`, `freq_min`, `freq_max`, `bins_per_octave`, `window` |
+| `sound_exposure` | Pa²·s per standard band | `band_type` (one of `BAND_TYPES`), `n_bands`, `nperseg`, `batch_size` |
 
 `scaling='density'` and `'spectrum'` are the same estimate divided, or not, by
 the bin's noise-equivalent bandwidth, so they share every other argument and
@@ -195,11 +209,11 @@ keyword: it is an energy, it needs bands, and it must refuse the knobs below,
 so it is its own function.
 
 Three arguments are shared, because one sentence describes each everywhere:
-`fmin` / `fmax`, the frequency range of the estimate, and `integration_time`,
+`freq_min` / `freq_max`, the frequency range of the estimate, and `integration_time`,
 the stretch of record it is taken over (seconds from the start). What an unset
 one falls back to is the estimator's own answer — Welch resolves the whole
-spectrum and the range crops what comes back, constant-Q runs 20 Hz to
-Nyquist, the ladder spans the 10 Hz to 20 kHz reporting range.
+spectrum and the range crops what comes back, constant-Q runs from 20 Hz to
+the last bin a tone's level can be read in (just under Nyquist), the ladder spans the 10 Hz to 20 kHz reporting range.
 
 **What each function does not take is the point.** `sound_exposure` has no
 `window`, `noverlap`, `detrend` or `average`: a band's value is the sum of the
@@ -216,22 +230,38 @@ them, and warns when a value you pass does not.
 
 **A band exposure is the Welch bins summed.** `sound_exposure` calls the Welch
 route per batch under the settings above and adds up the bins each band
-covers; there is no second estimator underneath, which is why the two agree to
-floating-point noise. At the default 1 Hz bins the seven lowest decidecade
-bands hold 2 to 7 FFT lines each, short of the ten a synthesised band level
-wants (Fahy, *Sound Intensity*). That is a resolution limit and not an error in
-the total — bins are orthogonal, so each one's energy lands in exactly one band
-— but energy near a band edge is assigned in whole-bin quanta. Raising
+covers, a bin straddling a band edge shared between the two bands in proportion
+to its overlap; there is no second estimator underneath, which is why the two
+agree to floating-point noise. At the default 1 Hz bins the seven lowest
+decidecade bands hold 2 to 7 FFT lines each, short of the ten a synthesised
+band level wants (Fahy, *Sound Intensity*). That is a resolution limit — few
+lines per band — and not an error in the total or the band width. Raising
 `nperseg` to about `10·sample_rate/2.3` (4.3 s of record) resolves them, at the
 cost of time resolution.
 
 Welch also forwards scipy's own two estimate-changing knobs: `average='median'`
 — the robust choice for a record with transients, where a passing ship moves
 the mean of the periodograms and leaves the median at the background (3.7 dB
-apart on a tape with one loud burst in it) — and `detrend=False`, which keeps
-the DC bin scipy otherwise removes per segment. `axis` and `return_onesided`
-are deliberately not forwarded: the axis comes from the input's own shape, and
-complex input already produces a two-sided spectrum with a warning.
+apart on a tape with one loud burst in it) — and `detrend=`, which
+`spectrogram` and `probabilistic_welch` take too, with the same default.
+`'constant'` (scipy's default) subtracts each segment's mean. On a stationary
+record that removes a DC offset; on a **transient** it fabricates one: a
+segment holding part of a pulse has a mean the pulse does not have, and
+subtracting it adds a step across the whole segment, which lands in the lowest
+bins. Measured at 8 kHz, `nperseg=1024`, lowest bins in dB re the spectral
+peak: a Gaussian-windowed 200 Hz tone reads −37.6 dB at DC under the default
+against −93.7 dB with `detrend=False` (spectrogram, worst frame: −59.6 against
+−98.4); a zero-mean pulse — a Ricker or N-wave — is unchanged. Pass
+`detrend=False` for pulses and model time series, where there is no offset to
+remove. `axis=` names the time axis
+of a multichannel record, and the result carries frequency last (one spectrum
+per channel). Left unset it is the last axis, as in scipy — except that an
+array shaped like `read_wav`'s `(n_samples, n_channels)` is refused rather than
+transformed across its channels (48 000 two-bin "spectra" for a 3-channel
+second at 48 kHz); pass `axis=0` for it. `spectrogram` and `constant_q` take the
+same `axis=`, and `sound_exposure` takes one channel at a time (`x[:, ch]`).
+`return_onesided` is not forwarded: complex input already produces a two-sided
+spectrum with a warning.
 
 Every estimate draws itself: `welch(x, fs).plot()` labels its own
 axis from the `scaling` and `method` it carries, the same convenience a model
@@ -244,7 +274,7 @@ The histogram estimators draw themselves the same way:
 call on a `method='constant_q'` estimate goes to `plot_constant_q_ppsd` —
 picked from the estimate's own `method`, so the two cannot be crossed. Calling
 the wrong plotter by hand raises and names the other one, because constant-Q
-bins are geometric and carry no `seg_duration`.
+bins are geometric and carry no `segment_duration`.
 
 | Estimate | `.plot()` draws | Underlying plotter |
 |---|---|---|
@@ -279,22 +309,32 @@ method is named for.
 |---|---|---|---|
 | Welch window | `hann` | `flattop` | `boxcar`, not an argument |
 | constant-Q window | `hann` | `hann` | — (a band sum needs orthogonal bins) |
-| Welch `noverlap` | `nperseg // 2` | `nperseg // 2` | `0`, not an argument |
+| Welch `noverlap` | `nperseg // 2` | 78.3 % of `nperseg`, rounded up | `0`, not an argument |
 | Welch `detrend` | `'constant'` | `'constant'` | `False`, not an argument |
 | `average` | `'mean'`, `'median'` for robustness | same | `'mean'`, not an argument |
 | short record | left as it is | left as it is | padded to whole segments (padding adds no energy) |
 | unit | Pa²/Hz | Pa² | Pa²·s per band |
 | plot label / title | dB re 1 µPa²/Hz, "Power spectral density" | dB re 1 µPa², "Power spectrum" | dB re 1 µPa²·s, "SEL" (bars) |
 
-`window=`, `noverlap=`, `detrend=` and `average=` are yours on `welch` and
-`constant_q`. On `sound_exposure` they do not exist: a band's value is the sum
+The default overlap is the window's: segments may sit at most `N / eta_w`
+apart before independent samples of the record go unused (Abraham §9.2.10.1),
+`eta_w` being the window's independent sample rate — 2.1 for hann, hence half
+a segment, and 4.60 for flat-top, hence 78.3 %. `frf_welch` and
+`spectrogram` (hann under both scalings, to resolve where energy sits rather
+than read a tone's level) take the same rule.
+
+`window=` is yours on `welch`, `probabilistic_welch`, `spectrogram` and
+`constant_q`; `noverlap=` and `detrend=` on `welch`, `probabilistic_welch` and
+`spectrogram` (constant-Q kernels subtract nothing); `average=` on `welch`. On
+`sound_exposure` they do not exist: a band's value is the sum
 of the bins inside it, which is the band's energy only when every bin is
 counted once and whole, so the enforcement is the signature rather than a
 runtime refusal.
 
-**`sound_exposure` is the Welch route, integrated — literally.** It calls
-`welch(..., scaling='exposure', window='boxcar')` internally on each batch of
-the record and sums the bins each band covers; there is no second estimator
+**`sound_exposure` is the Welch route, integrated — literally.** It runs the
+estimator `welch` runs (the private `_estimate`, with an internal
+`scaling='exposure'` that no public call accepts), with a boxcar window and no
+overlap, on each batch of the record and sums the bins each band covers; there is no second estimator
 underneath. That per-bin exposure is already the energy (the record is padded
 to whole segments and the average multiplied by the padded duration, which is
 the sum over segments), and energy adds, so the batching is memory rather than
@@ -304,11 +344,20 @@ whole number of those segments.
 
 At those 1 Hz bins the seven lowest decidecade bands hold 2 to 7 FFT lines
 each, short of the ten a synthesised band level wants (Fahy, *Sound
-Intensity*). That is a resolution limit and not an error in the total — bins
-are orthogonal, so each one's energy lands in exactly one band — but energy
-near a band edge is assigned in whole-bin quanta. Raising `nperseg` to about
-`10·sample_rate/2.3` (4.3 s of record) resolves them, at the cost of time
-resolution.
+Intensity*). That is a resolution limit and not an error in the total or the
+band width: each bin is split between the bands its interval overlaps, in
+proportion to the overlap, so a band integrates exactly its own width. Raising
+`nperseg` to about `10·sample_rate/2.3` (4.3 s of record) resolves them, at the
+cost of time resolution.
+
+Because the bins are weighted by overlap, `sound_exposure` and
+`decidecade_band_levels` (a PSD integrated over the exact band edges) measure
+the same band widths. Counting whole bins instead — each bin in the band its
+centre falls in — measures the 10 Hz band (2.31 Hz wide) over 3 bins, +1.14 dB
+on a flat spectrum, and the 16 Hz band (3.66 Hz) over 3 bins, −0.86 dB; the
+weights remove that. What remains between the two on one record is the
+difference between two estimators (boxcar segments against a Hann-windowed
+Welch average), which is estimation noise in the few-line bands.
 
 Banding a constant-Q estimate is not offered: its kernels overlap, so summing
 its bins would count the same energy more than once.
@@ -326,12 +375,26 @@ so there is no such name.
 Both follow one rule: **the tuple is the measurement, the attributes are what
 it means.** `frequencies, power = welch(x, fs)` and
 `frequencies, level_edges, pdf = probabilistic_welch(x, fs)` unpack
-the numbers; `.scaling`, `.method`, `.ref`, `.bands`, `.seg_duration`,
-`.mean_dB`, `.std_dB`, `.binwidth_dB` are attributes on whichever type carries
+the numbers; `.scaling`, `.method`, `.ref`, `.bands`, `.segment_duration`,
+`.mean_dB`, `.std_dB`, `.level_step_dB` are attributes on whichever type carries
 them, identical in name and meaning across the two, so code written against
 one reads the other.
 
-### Decidecade is the base-10 third-octave, not the base-2 one
+A Welch or exposure histogram also keeps the population it was built from:
+`.segment_levels_dB` holds every segment's level at every frequency, and
+`.segment_times` the centre of each segment. `.percentiles(q)` reads level
+percentiles off them, over every segment, where a quantile read off `pdf` is
+clipped by `level_min_dB`/`level_max_dB`. A `pdf` bin no segment fell in is 0,
+so a column integrates (`pdf[:, i].sum() * level_step_dB == 1`) and cumulates
+as it stands; a frequency with no level inside the window is a `NaN` column,
+and the plot draws empty bins blank. Both go through user-level functions on plain
+arrays: `level_histogram(levels_dB, level_edges, *, axis=0)` returns
+`(pdf, mean_dB, std_dB)`, the histogram every `probabilistic_*` estimator
+builds, and `level_percentiles(levels_dB, q, *, axis=0)` returns the
+percentiles. A constant-Q histogram keeps no per-segment levels: its frames per
+bin differ in number.
+
+### The ladders are base 10: decidecades and octaves
 
 `decidecade_bands` implements the IEC 61260-1 / ISO 18405 **base-10** system:
 centre frequencies are `1000 · 10^(n/10)`, band edges are `centre · 10^(±1/20)`,
@@ -339,15 +402,20 @@ and a band is therefore `10^(1/10)` wide — one tenth of a decade, or 0.3322
 octave. This is the convention underwater soundscape and ship-radiated-noise
 reporting uses, and it is also where the familiar third-octave centre
 frequencies come from: the standard series is built on powers of `10^(1/10)`,
-which is why 1, 10, 100 and 1000 Hz all land on band centres.
+which is why 1, 10, 100 and 1000 Hz all land on band centres. The base-10
+third-octave *is* the decidecade — ISO 18405's term, "the nearly equivalent and
+preferred decidecade" (Abraham, §3.3.1.1) — so the package has that one name
+for it.
 
 `sound_exposure` is written on that same ladder: its `band_type` defaults to
 `'decidecade'` and shares `decidecade_bands`'s edges exactly, so a band level
-and a band exposure are stated over the same bands. `band_type='third_octave'`
-selects the **base-2** system instead, `2^(1/3)` wide (0.3333 octave) on
-`2^(±1/6)` edges, with `'octave'` and `'linear'` (`num_bands` equal-width
-bands) as the other two ladders. Base-10 and base-2 are close, deliberately
-different, and not interchangeable in a report.
+and a band exposure are stated over the same bands. `band_type='octave'` is
+the IEC 61260-1 base-10 octave, every third decidecade (`10^(3/10)` wide, so
+the band four octaves above 1 kHz is centred on 15.85 kHz, not 16 kHz), and
+`'linear'` cuts `n_bands` equal-width bands. The same names select the same
+ladders everywhere: `octave_bands` gives the octave edges (`base=2` for exact
+octaves), `standard_bands(band_type=...)` the bands `sound_exposure` reports a
+range on, and `band_levels(band_type=...)` a PSD's levels on them.
 
 ### Density versus band level
 
@@ -355,7 +423,7 @@ different, and not interchangeable in a report.
 from uacpy.acoustic_signal import (synthesize_noise_from_psd,
                                    welch,
                                    decidecade_band_levels)
-from uacpy.visualization import plot_psd, plot_band_levels
+from uacpy.plot import plot_psd, plot_band_levels
 
 # A target soundscape: −17 dB/decade with a narrow 300 Hz tonal on top.
 rng = np.random.default_rng(0)
@@ -366,11 +434,11 @@ target = 1e-12 * 10.0 ** (level_dB / 10.0)          # Pa²/Hz
 
 _, x, fs = synthesize_noise_from_psd(
     target, f_target, duration=30.0, sample_rate=25_000,
-    n_fft=65536, interp='log', rng=rng)
+    nfft=65536, interp='log', rng=rng)
 
 frequencies, power = welch(x, fs, nperseg=32768)
 band = (frequencies >= 20.0) & (frequencies <= 11_000.0)
-centers, levels = decidecade_band_levels(power[band], frequencies[band])
+centers, levels = decidecade_band_levels(power[band], frequencies=frequencies[band])
 
 plot_psd(frequencies, power, label='welch() of the realisation',
          ymin=55, ymax=125)
@@ -399,8 +467,8 @@ takes your grid's smallest positive and largest frequency and asks for every
 decidecade band that **overlaps** that span. Overlapping, not contained: so
 unless an endpoint happens to land exactly on a band edge, the outermost band on
 each side reaches past the support, and a partial integral is not a band level.
-Those two bands are returned as `nan` with a one-time warning naming the
-support.
+Those two bands are returned as `nan`, deliberately without a warning: it
+would fire on every well-formed call. Mask them with `np.isfinite(levels)`.
 
 **"Slice generously" is not a remedy, because widening the grid moves the two
 `nan` bands outward without ever removing them.** Widening this page's
@@ -433,7 +501,7 @@ grid is too coarse at the bottom of the band set — raise `nperseg`.
 
 | Call | Returns | Use |
 |---|---|---|
-| `tone_phasor(x, times, frequency, *, window='hann', axis=-1)` | complex | amplitude and phase of **one** tone in a record |
+| `tone_phasor(data, times, frequency, *, window='hann', axis=-1)` | complex | amplitude and phase of **one** tone in a record |
 | `waveform_spectrum_at(waveform, sample_rate, frequencies)` | `S(f)` | the **whole** spectrum, at whatever frequencies you ask for |
 
 
@@ -450,14 +518,15 @@ interest is essentially never on a bin:
 | 0.50 bin | −1.42 dB | **90°** |
 
 **The phase reaches 90° before the level has moved 1.5 dB**, which is why a
-level check alone does not find this. `Field.extract_tone` and `uacpy.io.rts_to_pressure` both call it, so the two public routes to "the
+level check alone does not find this. `Field.extract_tone` and `uacpy.models.sparc.rts_to_pressure` both call it, so the two public routes to "the
 tone in this record" now agree to 1e-15 instead of disagreeing by the table
 above.
 
-One place still takes the nearest bin on purpose: `rts_to_pressure`'s
-`pulse_type=` deconvolution branch, which is a **ratio** at the same bin on
-both sides, so the leakage divides out — measured flat at 1e-15 dB across a
-whole bin.
+`rts_to_pressure`'s `pulse_type=` deconvolution branch takes the ratio of the
+record's and the known pulse's rectangular transforms, both evaluated at the
+frequency: taking the same bin on both sides nearly cancels the leakage but
+not quite (+0.06 dB and +6° at half a bin against a three-path channel), while
+the pair at the frequency is exact off-bin.
 
 ---
 
@@ -468,15 +537,15 @@ whole bin.
 | `analytic_signal(data)` | complex analytic signal | — (raises on complex input) |
 | `envelope(data)` | instantaneous amplitude, `abs(analytic_signal(data))` | no |
 | `instantaneous_frequency(data, sample_rate)` | Hz, same length as `data` | no |
-| `spectrogram(data, sample_rate, *, window='hann', nperseg=8192, noverlap=None, nfft=None, scaling='density', mode='psd')` | `SpectrogramResult(frequencies, times, power)` | no |
-| `cwt(data, sample_rate, frequencies=None, wavelet='morlet', *, w0=6.0, order=None, n_freqs=64)` | `CWTResult(frequencies, coefficients)` | `inverse_cwt`, approximately |
-| `wigner_ville(data, sample_rate, *, analytic=True, freq_window=None, time_window=None, nfft=None)` | `WignerVilleResult(frequencies, times, distribution)` | no |
-| `cepstrum(data, *, window=None, nfft=None, lifter=None)` | real cepstrum | no — phase is discarded |
+| `spectrogram(data, sample_rate, *, window='hann', nperseg=8192, noverlap=None, nfft=None, detrend='constant', scaling='density', mode='psd', axis=None)` | `SpectrogramResult(frequencies, times, power)`; `noverlap=None` is half a segment, as on `welch` | no |
+| `cwt(data, sample_rate, frequencies=None, wavelet='morlet', *, w0=6.0, order=None, n_freqs=64)` | `CWTResult(frequencies, times, coefficients)`; `times` is `arange(n) / sample_rate` | `inverse_cwt`, approximately |
+| `wigner_ville(data, sample_rate, *, analytic=True, lag_smoothing=None, time_smoothing=None, nfft=None)` | `WignerVilleResult(frequencies, times, distribution)` | no |
+| `cepstrum(data, *, sample_rate=None, window=None, nfft=None, lifter=None)` | `Cepstrum(quefrencies, cepstrum)`, the real cepstrum on its quefrency axis: seconds when `sample_rate` is given, samples otherwise | no — phase is discarded |
 | `complex_cepstrum(data)` | `ComplexCepstrum(cepstrum, delay)` — the **complex** cepstrum, and the linear-phase samples removed that its inverse needs back | `inverse_complex_cepstrum`, exactly |
-| `constant_q_transform(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, window='hann')` | `CQTResult(frequencies, coefficients)` — one centred frame, complex | no |
-| `constant_q_spectrogram(data, sample_rate, *, fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', scaling='spectrum')` | `CQSpectrogramResult(frequencies, times, power)` | no |
-| `constant_q(data, sample_rate, *, scaling='density', fmin=20.0, fmax=None, bins_per_octave=24, hop=None, window='hann', integration_time=None)` | `SpectralEstimate(frequencies, power)` — unset `fmax` means Nyquist | no |
-| `probabilistic_constant_q(data, sample_rate, *, scaling='density', fmin=20.0, …, ddB=1.0, lvlmin=0, lvlmax=150, ref=1e-6)` | `ProbabilisticSpectralEstimate(frequencies, level_edges, pdf)` with `.seg_duration = None` and `.method = 'constant_q'` | no |
+| `constant_q_transform(data, sample_rate, *, freq_min=20.0, freq_max=None, bins_per_octave=24, window='hann')` | `CQTResult(frequencies, coefficients)` — one centred frame, complex | no |
+| `constant_q_spectrogram(data, sample_rate, *, freq_min=20.0, freq_max=None, bins_per_octave=24, hop=None, window='hann', scaling='density')` | `CQSpectrogramResult(frequencies, times, power)` carrying `.scaling` | no |
+| `constant_q(data, sample_rate, *, scaling='density', freq_min=20.0, freq_max=None, bins_per_octave=24, window='hann', integration_time=None)` | `SpectralEstimate(frequencies, power)` — unset `freq_max` stops below the near-Nyquist bins whose image leaks into a tone's level (0.4795·fs at 24 bins per octave) | no |
+| `probabilistic_constant_q(data, sample_rate, *, scaling='density', freq_min=20.0, …, level_step_dB=1.0, level_min_dB=0, level_max_dB=150, ref=1e-6)` | `ProbabilisticSpectralEstimate(frequencies, level_edges, pdf)` with `.segment_duration = None` and `.method = 'constant_q'` | no |
 
 `cwt` offers three analysing wavelets: `'morlet'` (complex, best frequency
 resolution), `'paul'` (complex, best time resolution) and `'dog'` (real
@@ -498,9 +567,10 @@ give the record margin either side of the feature you care about.
 
 Constant-Q bins geometrically (`bins_per_octave=24` by default) instead of
 linearly, which is the right resolution law for a soundscape spanning decades.
-It is **not a separate family**: it is `method='constant_q'` on the estimators
-above, so `welch(x, fs, method='constant_q', fmin=20)` is the
-constant-Q counterpart of `welch(x, fs)`. The transform and the
+It is **not a separate family**: `constant_q(x, fs, freq_min=20)` is the
+constant-Q counterpart of `welch(x, fs)` (and `probabilistic_constant_q` of
+`probabilistic_welch`), runs the same estimator underneath and returns the same
+`SpectralEstimate`, whose `method` reads `'constant_q'`. The transform and the
 spectrogram keep their own names because they have no linear twin to share.
 
 The scaling default is the same under both methods — `'density'` — but what a
@@ -513,23 +583,25 @@ at 100 Hz and ~40× at 1 kHz.
 The probabilistic constant-Q estimate is the one to read carefully: each of its samples is
 a single unaveraged frame, so its per-bin `mean_dB` is the mean of a *single
 look's* dB levels. On noise that sits 2.51 dB (`10γ/ln10`) below the power mean
-`welch(..., method='constant_q')` returns from the same record — measured 2.507 ± 0.004 dB over
-four seeds, on 60 s of white noise at `bins_per_octave=24`. That is the
-two-degrees-of-freedom figure, and it holds across the band (2.48–2.53 dB) with
+`constant_q(...)` returns from the same record — measured 2.506 ± 0.003 dB (the
+median over bins) over four seeds, on 60 s of white noise at 8 kHz and
+`bins_per_octave=24`; single bins scatter about it by up to 0.5 dB below 100 Hz,
+where a bin holds fewer independent frames. That is the
+two-degrees-of-freedom figure, and it holds across the band with
 one exception: a bin essentially at Nyquist has no quadrature component left, so
-the offset climbs toward the one-dof value of 5.52 dB — measured 2.91 dB at
+the offset climbs toward the one-dof value of 5.52 dB — measured 5.24 dB at
 `f/fs = 0.4995`. The band *power* there is unaffected; what moves is the shape
 of its distribution.
 
 the Welch histogram's `mean_dB` carries the same bias, and how much of it
 depends on how many
-Welch segments a `seg_duration` chunk actually holds. `nperseg` is clamped to
-the chunk length, so at the defaults (`seg_duration=1.0`, `nperseg=8192`) a
+Welch segments a `segment_duration` chunk actually holds. `nperseg` is clamped to
+the chunk length, so at the defaults (`segment_duration=1.0`, `nperseg=8192`) a
 sample is **one look — the full 2.51 dB — at any `sample_rate` of 8192 Hz or
 below**, which is most of this package's own test and example rates. Measured on
 white noise: 2.49 dB at both 4 and 8 kHz (one look), 1.19 dB at 16 kHz (two),
 0.23 dB at 48 kHz (ten), against `(10/ln10)·(ψ(L) − ln L)` for `L` looks.
-Compare a `welch` (either method) against a target curve; read either `mean_dB`
+Compare a `welch` or `constant_q` spectrum against a target curve; read either `mean_dB`
 as the centre of the histogram it describes.
 
 ### The resolution trade-off
@@ -542,8 +614,8 @@ lines mark all three.
 ```python
 f, t_spec, Sxx = spectrogram(sig, fs, nperseg=64,  noverlap=56)   # Δf ≈ 31 Hz
 f, t_spec, Sxx = spectrogram(sig, fs, nperseg=512, noverlap=504)  # Δf ≈ 4 Hz
-freqs, W = cwt(sig, fs, frequencies=np.logspace(np.log10(20.0),
-                                                np.log10(900.0), 160))
+freqs, t_cwt, W = cwt(sig, fs, frequencies=np.logspace(np.log10(20.0),
+                                                       np.log10(900.0), 160))
 ```
 
 ![Time-frequency resolution trade-off](figures/signal_resolution.png)
@@ -577,7 +649,7 @@ term sitting between every pair of components.
 from uacpy.acoustic_signal import wigner_ville
 
 f_w, t_w, W = wigner_ville(sig, fs)
-f_p, t_p, P = wigner_ville(sig, fs, freq_window=63, time_window=25)
+f_p, t_p, P = wigner_ville(sig, fs, lag_smoothing=63, time_smoothing=25)
 ```
 
 ![Wigner-Ville and its cross-terms](figures/signal_wigner_ville.png)
@@ -636,8 +708,8 @@ wavenumber. Each has a standalone inverse.
 
 | Forward | Returns | Inverse |
 |---|---|---|
-| `fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None, window=None, nfft=None, normalize=False)` | `FKResult(frequencies, wavenumbers, power, spectrum)`, carrying `.scaling` (`'density'` when `normalize=True`, else `'power'`) | `inverse_fk(spectrum)` |
-| `taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201, p_max=None, *, x0=0.0, window=None, nfft=None)` | `TauPResult(slownesses, taus, panel)` | `inverse_taup(taup, slownesses, sample_rate, dx, nx, *, x0=0.0)` |
+| `fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None, window=None, nfft=None, scaling='power')` | `FKResult(frequencies, wavenumbers, power, spectrum)`, carrying `.scaling` (`'density'` or `'power'`, the `scaling=` passed); a gather with ≤ 64 time samples and more traces warns that it reads as `(nx, nt)` | `inverse_fk(spectrum)` |
+| `taup_transform(data, sample_rate, dx, slownesses=None, n_slowness=201, p_max=None, *, x0=0.0, window=None, nfft=None)` | `TauPResult(slownesses, taus, panel)` | `inverse_taup(taup, sample_rate, dx, slownesses, nx, *, x0=0.0)` |
 | `radon_transform(data, sample_rate, dx, moveout, kind='linear', x0=0.0)` | `RadonResult(moveout, taus, panel)` | `inverse_radon(R, sample_rate, dx, moveout, nx, kind='linear', x0=0.0)` |
 
 `radon_transform` scans three moveout families: `'linear'` (`t = τ + p·x`,
@@ -665,7 +737,7 @@ need amplitudes back; do not read either effect as a bug.
 
 ```python
 from uacpy.acoustic_signal import fk_transform, inverse_fk
-from uacpy.visualization import draw_sound_cone
+from uacpy.plot import draw_sound_cone
 
 # gather: (n_time, n_depth) from a Bellhop TIME_SERIES run on a 64-element
 # vertical array at 1 km; dz is the element spacing.
@@ -683,7 +755,12 @@ down = inverse_fk(spectrum * mask)
 The gather (top left) is a criss-cross: some events arrive later at deeper
 phones, some earlier. In f-k (top right) they separate into the two
 half-planes, the coherent energy falling inside the 1500 m/s sound cone that
-`draw_sound_cone` marks (what lies outside it is low-level speckle).
+`draw_sound_cone` marks. What lies outside it is spatial leakage, 27 dB or
+more below the peak: horizontal bands at the frequencies where the gather is
+strongest. The 64-element aperture ends abruptly, a rectangular window in
+depth whose sidelobes spread each frequency across k; a Hann taper over the
+phones takes the leakage down to −50 dB, at the price of the edge phones'
+signal.
 Muting the hatched quadrant and inverting gives a panel (bottom left) in which
 every event dips the same way — later with increasing depth, which is a
 down-going wave. Subtracting it from the original leaves the complement (bottom
@@ -701,14 +778,14 @@ means anything.
 
 **Units.** `power` is in one of two scalings, and the result says which in
 its `scaling` attribute (a fifth tuple element would have changed every
-four-wide unpack for one flag the plotter reads). With `normalize=True` it is
+four-wide unpack for one flag the plotter reads). With `scaling='density'` it is
 a two-sided density in `x²` per `Hz·rad/m`, `ΣP·Δf·Δk = ⟨x²⟩`, so for a
 pressure record the unit is Pa²·m/(Hz·rad) and `scaling` reads `'density'`.
-With the default `normalize=False` it is the raw `|FK|²` of the windowed,
+With the default `scaling='power'` it is the raw `|FK|²` of the windowed,
 zero-padded FFT: it grows with the record (`ΣP = Σx²·NF·NX` for a boxcar with
 no padding), carries no physical unit, and `scaling` reads `'power'`.
 `plot_fk(result)` labels the colour axis from that attribute — "PSD (dB re
-1µPa²·m/(Hz·rad))" for a density, "|FK|² (dB re 1µPa², unnormalised)" for
+1 µPa²·m/(Hz·rad))" for a density, "|FK|² (dB re 1 µPa², unnormalised)" for
 the raw panel — and with bare arrays `scaling=` must state it. Its
 `wavenumber_unit='cycles/m'` draws the abscissa as `ν = k/2π`; a density is
 then multiplied by 2π so that `ΣP·Δf·Δν` is still `⟨x²⟩` and the label reads
@@ -740,22 +817,29 @@ wants. Decide up front whether you are estimating power or filtering.
 
 | Call | Returns | Use |
 |---|---|---|
-| `impulse_response(amplitudes, delays_s, sample_rate, *, n_samples=None, fractional=True)` | `(t, h)` | discrete arrivals → channel IR |
-| `simulate_reception(transmit, amplitudes, delays_s, sample_rate)` | `(t, received)` | transmit waveform convolved with that IR |
-| `impulse_response_from_transfer_function(H, frequencies, sample_rate, n_samples=None)` | `(t, h)` | one-sided `H(f)` → real IR |
+| `impulse_response(amplitudes, delays_s, *, sample_rate, *, n_samples=None, fractional=True)` | `(t, h)` | discrete arrivals → channel IR |
+| `simulate_reception(source_waveform, amplitudes, delays_s, sample_rate)` | `(t, received)` | transmit waveform convolved with that IR |
+| `impulse_response_from_transfer_function(H, *, frequencies, sample_rate, n_samples=None)` | `(t, h)` | one-sided `H(f)` → real IR |
+| `synthesize_time_series(H, *, frequencies, source_waveform, sample_rate, t_start=0.0, window=None, nfft=None, axis=-1)` | `(t, p)` | `H(f)` and a transmitted waveform → the received pressure signal |
 | `channel_response(h, sample_rate, *, nfft=None)` | `(f, H)` | complex IR → two-sided `H(f)`, complex |
 | `transfer_function_from_impulse_response(h, sample_rate, *, t0=0.0, band=None, axis=-1)` | `(f, H)` | real IR → one-sided `H(f)`; the exact inverse of the row above-but-one |
-| `arrival_transfer_function(f, amplitudes, delays_s, *, delays_imag_s=None, phases_rad=None)` | `H(f)` | a sparse arrival list → its transfer function |
+| `arrival_transfer_function(frequencies, amplitudes, delays_s, *, delays_imag_s=None, phases_rad=None, trace_frequency=None, absorption=None)` | `H(f)` | a sparse arrival list → its transfer function; `trace_frequency` and `absorption` scale the `Im τ` absorption to each `f` by the law |
+| `arrival_grid_transfer_function(frequencies, cells, *, phase_offset=0.0, trace_frequency=None, absorption=None)` | `H(i, j, f)` | the same at every receiver of a grid (`cells[i][j]`, one arrival list per receiver); a cell no arrival reached is NaN — what `Arrivals.transfer_function()` and Bellhop's BROADBAND sum |
 | `broadband_propagation_loss(H, weights=None, *, axis=-1)` | dB | Ainslie Eq. 11.46 — the loss a signal with bandwidth actually suffers |
-| `gate_transfer_function(H, f, duration, *, origin='peak', window='boxcar')` | `H(f)` | keep only the paths within ±`duration` of the response centre |
+| `gate_transfer_function(H, *, frequencies, duration, origin='peak', window=None, axis=-1)` | `H(f)` | keep only the paths within ±`duration` of the response centre |
 | `rms_delay_spread(delays_s, powers)` | s | energy-weighted spread of a power delay profile |
 | `energy_support(delays_s, powers, fraction=0.999)` | s | delay span holding that share of the energy — what a synthesis window has to cover |
+| `synthesis_band(delays_s, powers, *, bandwidth, centre, record=None, energy_fraction=None, margin=1.2)` | Hz | the frequency grid that synthesises the profile un-aliased: a record of `margin × energy_support` (or `record`), never shorter than `1/bandwidth`; warns with the fold when the record does not reach the last arrival (`Arrivals.synthesis_band` wraps it) |
+| `received_amplitudes(amplitudes, delays_imag_s, phases, frequency, *, trace_frequency=None, absorption=None)` | complex | what each arrival delivers, `\|A\|·exp(e)·exp(i·phase)` with the `Im τ` absorption applied (`Arrivals.received_amplitudes` wraps it) |
+| `remove_delay(H, frequencies, delay, *, axis=-1)` | `H(f)` | `H·exp(+2πi·f·τ)`: advance a transfer function by a known delay, magnitude untouched (`Field.remove_delay` wraps it) |
+| `spectral_centroid(frequencies, weights)` | Hz | the weighted mean frequency, the plain mean for zero weights — the frequency a band-collapsing reducer pins |
 | `coherence_bandwidth(delays_s, powers, *, convention='inverse_spread')` | Hz | `1/(k·τ_rms)` |
 | `channel_regime(delays_s, powers, symbol_rate, *, rolloff=0)` | `ChannelRegime` | flat or frequency-selective at that symbol rate |
 | `coherence_factor(convention, factor=None)` | `k` | the `k` those two read, from `COHERENCE_BANDWIDTH_FACTORS` |
 | `uniform_frequency_step(frequencies)` | Hz | the `df` of a uniform ascending grid, or a refusal — what every `H(f)` → time route asks first |
-| `simulate_arrival_reception(transmit, amplitudes, delays_s, sample_rate, fc, *, delays_imag_s=None, phases_rad=None, …)` | `(received, t)` | a reception from a sparse arrival list **with** the carrier rotation and the `exp(ω·Im τ)` volume absorption |
-| `pulse_shaped_taps(gains, delays_s, symbol_rate, *, pulse='rc', rolloff, sps, span)` | `(times, taps)` | arrivals laid down through the modem's own pulse (`uacpy.comms`) |
+| `simulate_arrival_reception(source_waveform, amplitudes, delays_s, sample_rate, fc, *, delays_imag_s=None, phases_rad=None, absorption=None, …)` | `(t, received)` | a reception from a sparse arrival list **with** the carrier rotation and the volume absorption of `Im τ` (traced at `fc`) applied at every frequency of the waveform |
+| `simulate_arrival_grid(source_timeseries, cells, sample_rate, fc, *, time_window=None, t_start=None, absorption=None)` | `(t, traces)` | the same reception at every receiver of a grid (`cells[i][j]`, one arrival list per receiver) on ONE window spanning the whole grid's arrivals; a cell no arrival reached is NaN |
+| `pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc', rolloff, sps, span)` | `ChannelTaps` (`.taps` on `.delays_s`) | arrivals laid down through the modem's own pulse (`uacpy.comms`) |
 | `fractional_delay_taps(frac, half_len=8, beta=8.0)` | `2·half_len` taps | the sub-sample kernel `impulse_response` places arrivals with (`simulate_reception` through it) |
 
 `fractional=True` places each arrival with a windowed-sinc fractional-delay
@@ -783,7 +867,7 @@ a Bellhop arrival's phase:
 ```python
 from uacpy.acoustic_signal import analytic_signal, simulate_reception
 
-arr = Bellhop(n_beams=6000, alpha=(-60.0, 60.0)).run(
+arr = Bellhop(n_beams=6000, launch_angles=(-60.0, 60.0)).run(
     env, source, point, run_mode=RunMode.ARRIVALS)
 
 taps = arr.amplitudes * np.exp(1j * arr.phases)
@@ -823,10 +907,19 @@ Grid bins outside
 `[frequencies[0], frequencies[-1]]` are set to **zero**, not extrapolated: a
 band-limited model result carries no out-of-band energy, and holding the edge
 value would fabricate a DC or high-frequency plateau in the impulse response.
-It is the raw-array route; if you are holding a `Field` from a `BROADBAND` run,
-prefer [`Field.to_time_trace()` /
-`Field.synthesize_time_series()`](results.md#6-from-hf-to-pt), which handle bin
-placement, windowing and grid-independent amplitude for you.
+It returns the channel's discrete **taps** — an unscaled `irfft`, the `h`
+that `simulate_reception` convolves.
+
+`synthesize_time_series` answers the other question: the received **pressure
+signal** when a waveform goes through `H(f)`. It treats `H` as a spectral
+density (`p(t) = 2·Re Σ H·S·e^{2πift}·Δf`, `S` the waveform's exact DTFT on
+the axis), places a band whose start is not a multiple of `Δf` exactly, and
+returns the waveform itself for `H ≡ 1`. It is the array form of
+[`Field.synthesize_time_series()`](results.md#6-from-hf-to-pt) — same grid,
+same windowing, same warnings — which adds a start time estimated from the
+model's range and sound speed; the array form starts at `t_start=0.0`, the
+emission. Taps and received signal differ by the density scale and are not
+interchangeable.
 
 ### 6.0 These take plain arrays
 
@@ -851,15 +944,24 @@ rather than squared behind your back.
 
 `simulate_arrival_reception` is what `Arrivals`-driven Bellhop synthesis
 uses (`delayandsum` unpacks its dict into it). It differs from
-`simulate_reception` above in the two things that matter for a real channel:
-it rotates each arrival by the carrier and applies the volume absorption
-carried in `Im τ`, and it places arrivals with a fractional-delay kernel
-rather than snapping them to samples.
+`simulate_reception` above in the things that matter for a real passband
+channel: it takes a real waveform and applies each arrival's phase as
+`Re{A·e^{iφ}·hilbert(s)}` itself, it applies the volume absorption carried in
+`Im τ`, and it sizes an output window from the arrivals (or takes
+`time_window=`/`t_start=`). `simulate_reception` refuses complex amplitudes
+on a real `transmit` — multiplying a real waveform by `e^{iφ}` is not a phase
+rotation — which is why the recipe above passes `analytic_signal(tx)`. Both
+place arrivals with the same fractional-delay kernel.
 
 `arrival_transfer_function` is the same story for the sum itself. Note that
 ray codes put volume absorption in the **imaginary travel time**, not in the
 amplitude, so `delays_imag_s` is what gives a band its absorption slope;
-without it the list is lossless. And an amplitude there is a **magnitude** —
+without it the list is lossless. `Im τ` is exact at the frequency the list
+was traced at; pass that as `trace_frequency` with the environment's
+`absorption` and a Thorp or Francois-Garrison slope is exact across the band
+(`α(f)/α(f_t)`); without them the slope is linear in `f`, which is exact only
+for a constant dB/λ law. `simulate_arrival_reception` applies the same law to
+every frequency of the waveform. And an amplitude there is a **magnitude** —
 its sign belongs in `phases_rad` as π. Passing a negative amplitude is
 refused, because the package once had two implementations of this sum that
 disagreed on exactly that input by up to 10.7 dB per bin, in silence.
@@ -882,7 +984,7 @@ responses transforms in one call.
 from uacpy.acoustic_signal import (impulse_response_from_transfer_function,
                                    transfer_function_from_impulse_response)
 
-t, h = impulse_response_from_transfer_function(H, f, fs)
+t, h = impulse_response_from_transfer_function(H, frequencies=f, sample_rate=fs)
 f_back, H_back = transfer_function_from_impulse_response(h, fs, band=(f[0], f[-1]))
 ```
 
@@ -908,7 +1010,7 @@ a test that checks only angles will not see it.
 |---|---|---|
 | `matched_filter(received, replica, *, mode='full', normalize=True)` | ndarray | correlates against the conjugated, time-reversed replica; complex input supported |
 | `pulse_compression(received, replica, sample_rate, *, normalize=True)` | `(lags_s, compressed)` | the same, with a delay axis in seconds |
-| `processing_gain(bandwidth_hz, duration_s)` | float, dB | `10·log10(B·T)`; `bandwidth_hz` is the **waveform's** bandwidth, not the receiver's, so a CW pulse (`B ≈ 1/T`) correctly returns 0 dB |
+| `processing_gain_dB(bandwidth_hz, duration_s)` | float, dB | `10·log10(B·T)`; `bandwidth_hz` is the **waveform's** bandwidth, not the receiver's, so a CW pulse (`B ≈ 1/T`) correctly returns 0 dB |
 | `ambiguity_function(waveform, sample_rate, *, doppler_hz=None, n_doppler=101)` | `AmbiguityResult(delays_s, doppler_hz, amplitude)` | narrowband `\|χ(τ, ν)\|`, normalised to 1 at the origin |
 
 `normalize=True` divides by the replica energy, so a perfectly matched
@@ -920,21 +1022,23 @@ envelope of a real correlation is what you actually want to peak-pick.
 
 ```python
 from uacpy.acoustic_signal import (
-    lfm_chirp, analytic_signal, simulate_reception, add_noise,
-    envelope, pulse_compression, processing_gain,
+    lfm_chirp, analytic_signal, simulate_reception, make_bandlimited_noise,
+    envelope, pulse_compression, processing_gain_dB,
 )
 
 fs = 20_000.0
-fmin, fmax, T = 1000.0, 5000.0, 0.05
-_, tx = lfm_chirp(fmin, fmax, T, fs)
+freq_start, freq_end, T = 1000.0, 5000.0, 0.05
+_, tx = lfm_chirp(freq_start, freq_end, T, sample_rate=fs)
 
 taps = arr.amplitudes * np.exp(1j * arr.phases)
 _, rx = simulate_reception(analytic_signal(tx), taps, arr.delays, fs)
-noisy = add_noise(np.real(rx), fs, source_level=180.0, noise_level=72.0,
-                  fc=3000.0, bandwidth=4000.0, rng=rng)
+rx = np.real(rx) * 1e-6 * 10 ** (180.0 / 20)       # 0 dB source -> Pa at SL 180
+_, noise = make_bandlimited_noise(3000.0, 4000.0, rx.size / fs, sample_rate=fs,
+                                  psd_level_dB=72.0, rng=rng)
+noisy = rx + noise
 
 lags, comp = pulse_compression(analytic_signal(noisy), analytic_signal(tx), fs)
-gain = processing_gain(fmax - fmin, T)          # 23 dB
+gain = processing_gain_dB(freq_max - freq_min, T)          # 23 dB
 ```
 
 ![Pulse compression against a modelled channel](figures/signal_pulse_compression.png)
@@ -996,9 +1100,9 @@ points across ±`sample_rate/20`.
 
 | Call | Returns | Notes |
 |---|---|---|
-| `modal_group_velocity(frequencies, k_horizontal)` | m/s, same shape as `k_horizontal` | `dω/dk_r` by finite difference; `frequencies` must be strictly increasing, `k_horizontal` is `(n_freq,)` or `(n_freq, n_modes)` |
-| `warp_signal(signal, sample_rate, range_m, c=1500.0, *, oversample=None, interpolation='linear')` | `(warped, t_warp)` | `t_w = √(t² − t_r²)`, `t_r = range/c`; `oversample=None` takes Bonnel et al. (2020) Eqs. (13)–(14), a factor `2·(1 + t_r/t_max)` in (2, 4); a number overrides it (≥ 1, fractional allowed) and the round-trip error roughly halves per doubling |
-| `unwarp_signal(warped, t_warp, sample_rate, range_m, c=1500.0, *, interpolation='linear')` | `(t, signal)` | back onto the original grid |
+| `modal_group_velocity(frequencies, *, k_horizontal)` | m/s, same shape as `k_horizontal` | `dω/dk_r` by finite difference; `frequencies` must be strictly increasing, `k_horizontal` is `(n_freq,)` or `(n_freq, n_modes)` |
+| `warp_signal(data, sample_rate, range_m, sound_speed=1500.0, *, oversample=None, interpolation='linear')` | `(warped, t_warp)` | `t_w = √(t² − t_r²)`, `t_r = range/sound_speed`; `oversample=None` takes Bonnel et al. (2020) Eqs. (13)–(14), a factor `2·(1 + t_r/t_max)` in (2, 4); a number overrides it (≥ 1, fractional allowed) and the round-trip error roughly halves per doubling |
+| `unwarp_signal(warped, t_warp, sample_rate, range_m, sound_speed=1500.0, *, interpolation='linear')` | `(t, signal)` | back onto the original grid |
 
 `warp_signal` assumes `signal` **starts at the direct arrival** `t_r = range/c`.
 Feed it a record that starts earlier and the warp is meaningless; slice first.
@@ -1033,13 +1137,15 @@ from uacpy.acoustic_signal import (
 kr = [Kraken().compute_modes(env, uacpy.Source(depths=20.0,
                                                frequencies=float(f))).k
       for f in sweep]
-v_group = modal_group_velocity(sweep, k_matrix)
+n_modes = min(len(k) for k in kr)
+k_matrix = np.real(np.array([k[:n_modes] for k in kr]))
+v_group = modal_group_velocity(sweep, k_horizontal=k_matrix)
 
 H = Kraken().run(env, uacpy.Source(depths=20.0, frequencies=frequencies),
                  uacpy.Receiver(depths=50.0, ranges=5000.0),
                  run_mode=RunMode.BROADBAND)
 _, h = impulse_response_from_transfer_function(
-    np.asarray(H.data).ravel(), frequencies, fs, n)
+    np.asarray(H.data).ravel(), frequencies=frequencies, sample_rate=fs, n_samples=n)
 
 arrival = h[int(round(range_m / c * fs)):]
 warped, t_warp = warp_signal(arrival, fs, range_m, c)
@@ -1067,7 +1173,7 @@ overlap in both time and frequency. From there, mode-by-mode filtering in the
 warped domain and `unwarp_signal` back is the standard single-receiver
 source-range and geoacoustic-inversion route (Bonnel, Thode, Wright & Chapman,
 *Nonlinear time-warping made simple*, JASA **147**(3), 1897–1926, 2020,
-doi:10.1121/10.0000937 — the operator is Eqs. (7), (10) and (11) on p. 1907).
+doi:10.1121/10.0000937 — the operator is Eqs. (7), (10) and (11) on pp. 1906-1907).
 
 The warping is derived for the **ideal isovelocity** waveguide. On a real
 profile the warped modes are, in that paper's words, "not the theoretically
@@ -1081,48 +1187,43 @@ which is why the figure uses a rigid bottom and isovelocity water.
 
 | Call | Returns | Notes |
 |---|---|---|
-| `synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *, n_fft=65536, sample_rate=None, interp='linear', rng=None)` | `(t, x, sample_rate)` | realise a time series matching a target one-sided PSD |
-| `make_bandlimited_noise(fc, bandwidth, duration, sample_rate, *, rng=None)` | `(t, noise)` | **unit-RMS** band-limited Gaussian noise |
-| `make_noise_waveform(fc, bandwidth, duration, sample_rate, *, rng=None)` | `(time, nts)` | heterodyned band-limited noise probe |
-| `add_noise(timeseries, sample_rate, source_level, noise_level, fc, bandwidth, *, rng=None)` | ndarray | scale a 0 dB-source record by `source_level` and add noise at `noise_level` |
-| `fourier_synthesis(pressure_freq, frequencies, source_spectrum=None, Tstart=0.0)` | `(time, rmod)` | AT `stack.m` — raw-DFT synthesis on the input frequency grid |
+| `synthesize_noise_from_psd(psd, frequencies, duration=1, amplitude_factor=1, *, nfft=65536, sample_rate=None, interp='linear', rng=None)` | `(t, x, sample_rate)` | realise a time series matching a target one-sided PSD, at that PSD's absolute level |
+| `make_bandlimited_noise(fc, bandwidth, duration, *, sample_rate, *, psd_level_dB=None, ref=1e-6, n_channels=1, rng=None)` | `(t, noise)` | band-limited Gaussian noise: **unit-RMS**, or in **Pa** at an in-band density `psd_level_dB` re `ref²`/Hz |
+| `uacpy.comms.awgn(signal, snr_dB, *, rng=None)` | ndarray | white noise set **relative** to the signal's own power |
+
+**Three questions, three functions.** Noise at a stated SNR relative to a
+signal is `awgn` — no units ever enter. Noise at an *absolute* level is one of
+the other two: `make_bandlimited_noise` for a flat band, and
+`synthesize_noise_from_psd` for any spectrum (a Wenz curve, a measured PSD).
+Both absolute doors return pressure in the units of their level, Pa for a
+level in dB re 1 µPa²/Hz, which is what every level helper in the package
+reads.
+
+`make_bandlimited_noise` passes white noise through a zero-phase 4th-order
+Butterworth band and scales it. With `psd_level_dB` the scale uses the
+filter's *noise-equivalent* bandwidth (about 0.90 × `bandwidth`), not the
+nominal one, so the in-band density lands where you asked rather than half a
+decibel off: `psd_level_dB=60` over 8-12 kHz at 48 kHz reads 59.995 dB re
+1 µPa²/Hz on a Welch estimate over the middle of the band. `n_channels` draws
+independent columns, `(n_samples, n_channels)`, so cross-channel noise
+correlation is zero — which is what array-gain claims in
+[`arrays.md`](arrays.md) depend on.
+
+Putting a received signal at a source level is a separate multiply, not a job
+of the noise function. A record `rx` computed for a 0 dB source (pressure re
+1 m, what a model's arrivals give) becomes pressure in Pa at source level `SL`
+(dB re 1 µPa at 1 m) as `rx * 1e-6 * 10**(SL/20)`; add the noise to that.
 
 `synthesize_noise_from_psd` resamples the target onto the FFT-native grid, so
-`Fxx` may be uniform, log-spaced or coarse — Wenz curves drop straight in. Use
+`frequencies` may be uniform, log-spaced or coarse — Wenz curves drop straight in. Use
 `interp='log'` for anything spanning decades; linear interpolation of a
 steep PSD in linear frequency will not track it. Frequencies outside
-`[Fxx[0], Fxx[-1]]` are zero. `n_fft` must be an even power of two in
+`[frequencies[0], frequencies[-1]]` are zero. `nfft` must be an even power of two in
 `[16, 262144]`; anything else is clamped or rounded **with a warning** rather
 than silently accepted.
 
-`add_noise` takes `source_level` as a total-power dB figure and `noise_level`
-as a **power spectral density**, and the two are not interchangeable. It scales
-the input by `10^(SL/20)` — so the input is expected to be a 0 dB-source record
-— and adds noise whose in-band density is exactly `noise_level`. Getting that
-exact is why `make_bandlimited_noise` returns unit-RMS noise: the scaling uses
-the zero-phase filter's *noise-equivalent* bandwidth, which is narrower than
-the nominal −3 dB `bandwidth`, so the density lands where you asked rather than
-a decibel or two under. Both levels are dB on whatever reference *you* are
-working in: `add_noise` only ever forms `10^(SL/20)` and `10^(NL/10)`, with no
-reference constant anywhere in it, so it is reference-free like the rest of the
-package. The one rule is that the two share a reference — read them as dB re
-1 µPa and dB re 1 µPa²/Hz and the output is in µPa, which is why the
-pulse-compression figure above divides by 10⁶ to label its axis in Pa. For a
-multi-channel input (`(n_samples, n_receivers)`) each column gets an independent
-realisation, so cross-channel noise correlation is zero — which is what
-array-gain claims in [`arrays.md`](arrays.md) depend on.
-
 Pass `rng=np.random.default_rng(seed)` to every one of these for a reproducible
 realisation.
-
-`fourier_synthesis` is a direct translation of AT's `stack.m` and exists for
-externally produced spectra: raw-DFT scaling, output grid fixed by the input
-frequency grid. It warns if `frequencies[0] > 0`, because bin 0 is placed at
-DC: the trace is the complex envelope demodulated by `frequencies[0]`, at a
-sample rate of `n_freq * df`. That is deliberate — it is what `stack.m` does —
-but it is not a passband trace, and `Tstart` only moves the time origin, so it
-does not put the carrier back. For a uacpy `Field`, use
-[`synthesize_time_series`](results.md#6-from-hf-to-pt) instead.
 
 Physical noise *models* — Wenz curves, wind, shipping, rain, thermal — are in
 [`noise.md`](noise.md). This section is only the synthesis machinery that turns
@@ -1130,64 +1231,79 @@ a spectrum into samples.
 
 ---
 
-## 10. System identification — `FRF`
+## 10. System identification — `frf_welch`, `etfe`, `periodic_etfe`, `lsfir`
 
-`FRF` is the one class in the package, because it holds a fitted model.
+Four functions estimate a transfer function from one input/output record pair
+and return an `FRFResult`, whose fields are the response and whose attributes
+carry what else the method produced:
 
 ```python
-from uacpy.acoustic_signal import FRF
+from uacpy.acoustic_signal import frf_welch, lsfir
 
-frf = FRF(method='ls_fir')
-frequencies, tf = frf.compute(x, y, sample_rate, m='CP')
+result = frf_welch(x, y, sample_rate)            # H1, with coherence
+frequencies, transfer_function = result
+result.coherence
+
+fit = lsfir(x, y, sample_rate, order='CP')       # the order Mallows' Cp selects
+fit.order, fit.impulse_response
+fit.plot()                                       # plot_frf: magnitude over phase
 ```
+
+| Function | Estimate | Attributes beyond the response |
+|---|---|---|
+| `frf_welch(x, y, sample_rate, *, estimator='H1', nperseg=8192, noverlap=None, **welch_options)` | `'H1'` = `Sxy/Sxx`, minimises output-noise bias; `'H2'` = `Syy/Syx`, minimises input-noise bias. For stationary signals | `estimator`, `coherence` |
+| `etfe(x, y, sample_rate)` | `rfft(y) / rfft(x)` over the whole record: unbiased, not consistent | — |
+| `periodic_etfe(x, y, sample_rate, *, period)` | the ETFE of the records averaged over whole periods | — |
+| `lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096, stop_count=50, nperseg=8192)` | a least-squares FIR fit; `order` is the FIR order or a criterion, `'AIC'`, `'BIC'`, `'FPE'` or `'CP'` | `impulse_response`, `order`, `criterion`, `rcond`, `information_matrix`, `information_vector` |
+
+Every attribute a method does not produce is `None`, and `method` names the
+estimator that ran. Given a criterion, `lsfir` searches FIR orders up to
+`max_order`, stopping early after `stop_count` consecutive non-improvements;
+`order` is the one it settled on and `criterion` the criterion, which is `None`
+when the order was given. Draw a result with `.plot()`, the coherence with
+`plot_coherence(result.frequencies, result.coherence)`, and a fit's normal
+equations with `plot_lsfir_diagnostics(fit.information_matrix,
+fit.information_vector, fit.impulse_response)`.
+
+`FRF` holds one of them as a configuration, set once and run on each record
+pair or 2-D block of measurements it is given:
 
 | Constructor | Default | Meaning |
 |---|---|---|
-| `method` | `'welch'` | `'welch'` (stationary, gives coherence), `'etfe'` (whole-record ratio), `'p_etfe'` (period-averaged ETFE), `'ls_fir'` (least-squares impulse response) |
-| `estimator` | `'H1'` | `'H1'` = `Sxy/Sxx`, minimises output-noise bias; `'H2'` = `Syy/Syx`, minimises input-noise bias |
-| `m` | `512` | FIR length for `'ls_fir'` — **or** an order-selection criterion |
+| `method` | `'welch'` | `'welch'` (`frf_welch`), `'etfe'`, `'p_etfe'` (`periodic_etfe` over `nperseg`-sample periods), `'ls_fir'` (`lsfir`) |
+| `estimator` | `'H1'` | the `frf_welch` estimator |
+| `order` | `512` | the `lsfir` order — **or** an order-selection criterion |
 
-`compute(x, y, sample_rate, m=…, method=…, estimator=…, nperseg=…, noverlap=…, m_max=4096, stop_count=None)`
-returns `(frequencies, tf)` and accepts 1-D inputs or 2-D blocks of rows, in
-which case the transfer functions are averaged over measurements.
+`compute(x, y, sample_rate, order=…, method=…, estimator=…, nperseg=…, noverlap=…, max_order=4096, stop_count=50)`
+returns an `FRFResult`. Given a 2-D block of rows, its transfer function (and
+coherence) is the mean over the measurements, and each `'ls_fir'` attribute is
+a tuple with one entry per measurement: fits of different orders have no mean.
 
-**Every `compute` argument applies to that call alone.** `m`, `method`,
+**Every `compute` argument applies to that call alone.** `order`, `method`,
 `estimator`, `nperseg` and `noverlap` override the constructor for the run and
 leave the object's own settings as the constructor set them, so two results
 from one `FRF` are comparable unless you say otherwise on each call. Read the
-settings back off the constructor, not off the last call:
+settings back off the constructor, and what the run found off its result:
 
 ```python
->>> frf = FRF(method='ls_fir')          # m defaults to 512
->>> frequencies, tf = frf.compute(u, y, 1000.0, m='CP')
->>> frf.selected_order                  # what this run's search settled on
+>>> frf = FRF(method='ls_fir')          # order defaults to 512
+>>> result = frf.compute(u, y, 1000.0, order='CP')
+>>> result.order                        # what this run's search settled on
 6
->>> frf.m                               # unchanged: the constructor's value
+>>> frf.order                           # unchanged: the constructor's value
 512
->>> frf.compute(u, y, 1000.0)           # no m= : the search does not repeat
+>>> frf.compute(u, y, 1000.0)           # no order= : the search does not repeat
 ```
 
-Pass `m='AIC'`, `'BIC'`, `'FPE'` or `'CP'` and `FRF` searches FIR orders up to
-`m_max`, stopping early after `stop_count` consecutive non-improvements. The
-order the search settled on is published on `selected_order`, which is `None`
-when `m` was an explicit order and for every method other than `'ls_fir'`.
-
-The *result* attributes are the ones a run does rewrite: `frequencies`, `tf`,
-`selected_order`, `g` (the impulse response, `'ls_fir'` only), `info_rcond`
-(the conditioning of the fit, `'ls_fir'` only) and `coh` (coherence,
-`'welch'` only). Every call rewrites all of them, so a reused `FRF` cannot
-report a previous method's result. Draw them with `plot_frf`,
-`plot_coherence` and `plot_lsfir_diagnostics`.
-
-**Match the FIR order to the band you excite.** `'ls_fir'` fits through the
+**Match the FIR order to the band you excite.** `lsfir` fits through the
 normal equations `X.T @ X`, whose condition number is the square of the design
 matrix's, so an order longer than the excited band can support makes the system
 numerically singular: a 100 Hz - 20 kHz sweep at `sample_rate=48000` does it at
-the default `m=512`. `FRF` solves such a system for its minimum-norm impulse
-response and warns, naming the order; `info_rcond` carries the reciprocal
-condition number the fit came out of, and a value at or below `2.2e-16` means
-the frequency response is undetermined wherever the input carries no energy.
-Lower `m`, or excite the whole band up to Nyquist.
+order 512, `FRF`'s default `order`. `lsfir` solves such a system for its
+minimum-norm impulse response and warns, naming the order; the result's `rcond`
+carries the reciprocal condition number the fit came out of, and a value at or
+below `2.2e-16` means the frequency response is undetermined wherever the input
+carries no energy. Lower the order, or excite the whole band up to Nyquist.
 
 ---
 
@@ -1200,8 +1316,8 @@ the constant component of every segment under `scaling='density'`, so a
 density's
 DC bin is suppressed. An exposure turns detrending and overlap off and takes a
 boxcar window, because that is the only way the summed bins equal the record's
-energy exactly (Parseval) — which is why `scaling='exposure'` **refuses** a
-tapering window rather than quietly returning a number a window factor below
+energy exactly (Parseval) — which is why `sound_exposure` has no `window=`
+argument at all, rather than quietly returning a number a window factor below
 the energy that passed the sensor.
 
 **A band level is not a density level.** They differ by `10·log10(bandwidth)`,
@@ -1217,7 +1333,7 @@ the function will not guess its way past. Same for `cepstrum` and
 right for a long
 soundscape record and far too long for a transient. Scipy clamps `nperseg` to
 the input length rather than raising, so a short signal comes back as a single
-frame with a `UserWarning` — which you will miss if your warning filters are
+frame with scipy's own `UserWarning` — which you will miss if your warning filters are
 turned down. Set `nperseg` deliberately.
 
 **An f-k panel is invertible only when it came from one segment.** Setting
@@ -1241,8 +1357,8 @@ tolerance off it.
 time axis it returns is not sampled at the input rate. Take `fs_warp` from
 `t_warp`.
 
-**Seed your generators.** `add_noise`, `make_bandlimited_noise`,
-`make_noise_waveform` and `synthesize_noise_from_psd` all take `rng=`. Without
+**Seed your generators.** `make_bandlimited_noise`, `synthesize_noise_from_psd`
+and `uacpy.comms.awgn` all take `rng=`. Without
 it a figure or a test is irreproducible.
 
 ---

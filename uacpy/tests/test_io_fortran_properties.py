@@ -22,6 +22,9 @@ import numpy as np
 import pytest
 
 from uacpy.core.exceptions import UACPYError
+from uacpy.core.exceptions import FileFormatError
+import io as _io
+from uacpy.models.ram import grid as ram_grid
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +169,8 @@ class TestFortranFloatSpellings:
         """The letterless branch is a last resort, not a loosening: anything
         gfortran itself rejects still raises."""
         from uacpy.io._fortran_helpers import fortran_float
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError,
+                           match='could not convert string to float'):
             fortran_float(text)
 
     def test_an_rts_with_a_letterless_exponent_reads(self, tmp_path):
@@ -182,8 +186,8 @@ class TestFortranFloatSpellings:
                      "   0.500000       0.100000E-02\n"
                      "   0.100000E-01   0.123457-118\n")
         out = read_ts(p)
-        assert out['tout'].tolist() == [0.5, 0.01]
-        assert out['RTS'].ravel().tolist() == [1.0e-3, 1.23457e-119]
+        assert out.times.tolist() == [0.5, 0.01]
+        assert out.pressure.ravel().tolist() == [1.0e-3, 1.23457e-119]
 
 
 class TestListDirectedRecovery:
@@ -279,12 +283,12 @@ class TestWriterReaderRoundTrips:
             for writer, reader, tag in pairs:
                 p = tmp_path / f'c{case}.{tag}'
                 writer(p, np.column_stack([r_m, z]), interp_type=interp)
-                back, btype = reader(p)
-                assert btype == interp
+                back = reader(p)
+                assert back.interpolation == interp
                 # %.6f on a km axis: half-ulp = 5e-7 km = 5e-4 m.
-                assert np.max(np.abs(back[0, 1:-1] - r_m)) <= 5.1e-4
+                assert np.max(np.abs(back.ranges - r_m)) <= 5.1e-4
                 # %.6f on the metre column: half-ulp = 5e-7 m.
-                assert np.max(np.abs(back[1, 1:-1] - z)) <= 5.1e-7
+                assert np.max(np.abs(back.depths - z)) <= 5.1e-7
 
     def test_sbp_round_trip(self, tmp_path):
         from uacpy.io.refl_io import (
@@ -329,10 +333,10 @@ class TestWriterReaderRoundTrips:
                 p = tmp_path / f'c{case}_{j}.brc'
                 p.write_text(f"{n}\n" + body)
                 d = read_reflection_coefficient(p)
-                assert d['n_pts'] == n
-                assert np.array_equal(d['theta'], denoted[:, 0])
-                assert np.array_equal(d['R'], denoted[:, 1])
-                assert np.array_equal(d['phi'], deg_to_rad(denoted[:, 2]))
+                assert len(d.angles) == n
+                assert np.array_equal(d.angles, denoted[:, 0])
+                assert np.array_equal(d.magnitude, denoted[:, 1])
+                assert np.array_equal(d.phase, deg_to_rad(denoted[:, 2]))
 
     def test_ssp_round_trip(self, tmp_path):
         from uacpy.io.oalib_writer import write_ssp
@@ -346,19 +350,19 @@ class TestWriterReaderRoundTrips:
             p = tmp_path / f'c{case}.ssp'
             write_ssp(p, r_m, c)
             d = read_ssp_2d(p)
-            assert d['n_prof'] == nr and d['c_mat'].shape == (nd, nr)
-            assert np.max(np.abs(d['r_prof'] - r_m)) <= 5.1e-4   # %.6f km
-            assert np.max(np.abs(d['c_mat'] - c)) <= 5.1e-5      # %8.4f
+            assert d.ranges.size == nr and d.sound_speed.shape == (nd, nr)
+            assert np.max(np.abs(d.ranges - r_m)) <= 5.1e-4      # %.6f km
+            assert np.max(np.abs(d.sound_speed - c)) <= 5.1e-5   # %8.4f
 
     def test_ramin_seafloor_node_survives_the_deck(self, tmp_path):
         """The invariant the dz bug violated: with ``dz`` from
-        ``RAM._snap_dz_to_seafloor(h, n)`` and both ``h`` and ``dz``
+        ``ram.grid.snap_dz_to_seafloor(h, n)`` and both ``h`` and ``dz``
         round-tripped through write_ramin's %.12g deck, the binaries'
-        seafloor node ``iz = int(1 + zb/dz)`` (ramgeo1.5.f:133,
-        ramsurf1.5.f:118, rams0.5.f:135) must land at ``1 + n`` exactly,
+        seafloor node (``iz = int(1 + zb/dz)`` at ramgeo1.5.f:133 and
+        ramsurf1.5.f:118, ``iz = z/dz`` at rams0.5.f:135) must land at
+        ``1 + n`` (``n`` for rams) exactly,
         with ``zb/dz`` never below ``n``."""
         from uacpy.io.ramsurf_writer import write_ramin
-        from uacpy.models.ram import RAM
         rng = np.random.default_rng(0x5EED08)
         for case in range(24):
             n = int(rng.integers(5, 2000))
@@ -366,7 +370,7 @@ class TestWriterReaderRoundTrips:
             # %.6f-quantised bathymetry carries. Full-precision doubles
             # break this identity — see the skipped repro below.
             h = float(f"{rng.uniform(10.0, 5000.0):.6f}")
-            dz = RAM._snap_dz_to_seafloor(h, n)
+            dz = ram_grid.snap_dz_to_seafloor(h, n)
             kind = str(rng.choice(['ramgeo', 'ramsurf', 'rams']))
             seg = {'range': 0.0,
                    'water_ssp': [(0.0, 1500.0), (h, 1520.0)],
@@ -376,10 +380,10 @@ class TestWriterReaderRoundTrips:
                 seg['bottom_cs'] = [(h, 400.0)]
                 seg['bottom_attns'] = [(h, 1.0)]
             p = tmp_path / f'c{case}.in'
-            write_ramin(p, kind=kind, fc=100.0, zs=h / 3, zr_line=h / 2,
-                        rmax=5000.0, dr=10.0, ndr=1,
-                        zmax=h * float(rng.uniform(1.2, 2.0)), dz=dz, ndz=1,
-                        zmplt=h, c0=1500.0, np_pade=6,
+            write_ramin(p, kind=kind, frequency=100.0, zs=h / 3, zr_line=h / 2,
+                        rmax_march=5000.0, dr=10.0, ndr=1,
+                        zmax=h * float(rng.uniform(1.2, 2.0)), dz=dz, depth_decimation=1,
+                        zmplt=h, c0=1500.0, n_pade=6,
                         bathymetry=[(0.0, h), (5000.0, h)],
                         range_segments=[seg],
                         surface=[(0.0, 0.0)] if kind == 'ramsurf' else None)
@@ -400,13 +404,12 @@ class TestWriterReaderRoundTrips:
         quantised bathymetry carries. A depth straight out of a computation
         does not round-trip so kindly: the deck writes ``%.12g`` and the
         binaries divide the *read-back* depth by the *read-back* ``dz``, so
-        both spellings of each have to clear ``n``. ``_snap_dz_to_seafloor``
-        is what guarantees it, by lowering ``dz`` until every spelling pair
-        does.
+        both spellings of each have to clear ``n``.
+        ``ram.grid.snap_dz_to_seafloor`` is what guarantees it, by lowering
+        ``dz`` until every spelling pair does.
         """
-        from uacpy.models.ram import RAM
         h, n = 36.56550087062047, 2000
-        dz = RAM._snap_dz_to_seafloor(h, n)
+        dz = ram_grid.snap_dz_to_seafloor(h, n)
         for hs in (h, float(f"{h:.12g}")):
             for dzs in (dz, float(f"{dz:.12g}")):
                 ratio = hs / dzs
@@ -420,12 +423,11 @@ class TestWriterReaderRoundTrips:
         random ``(h, n)`` pairs and checks all four spelling combinations,
         which is the shape of the guarantee ``iz = int(1 + zb/dz)`` needs.
         """
-        from uacpy.models.ram import RAM
         rng = np.random.default_rng(0x5EED0B)
         for _ in range(2000):
             h = float(rng.uniform(5.0, 6000.0))
             n = int(rng.integers(2, 4000))
-            dz = RAM._snap_dz_to_seafloor(h, n)
+            dz = ram_grid.snap_dz_to_seafloor(h, n)
             for hs in (h, float(f"{h:.12g}")):
                 for dzs in (dz, float(f"{dz:.12g}")):
                     assert int(1.0 + hs / dzs) == 1 + n, (h, n, hs, dzs)
@@ -615,7 +617,7 @@ class TestTypedFormatErrorWrapsParseErrorsOnly:
             path.read_text()
             raise ValueError('invalid literal')
 
-        with pytest.raises(FileFormatError) as ei:
+        with pytest.raises(FileFormatError, match='could not parse') as ei:
             read_with_parse_error(p)
         assert isinstance(ei.value.__cause__, ValueError)
 
@@ -655,13 +657,13 @@ class TestBinaryReaderTotality:
     @staticmethod
     def _calls():
         from uacpy.io.grn_reader import read_grn_file
-        from uacpy.io.modes_reader import read_modes_bin
+        from uacpy.io.modes_reader import _read_modes_payload
         from uacpy.io.oalib_reader import read_shd_bin
         from uacpy.io.ramsurf_reader import read_pcomplex_grid, read_tl_grid
         ram_kw = dict(dr=25.0, ndr=1, dz=1.0, ndz=2)
         return {
             'shd': lambda p: read_shd_bin(str(p)),
-            'mod': lambda p: read_modes_bin(str(p), frequency=100.0),
+            'mod': lambda p: _read_modes_payload(str(p), frequency=100.0),
             'grn': read_grn_file,
             'tlgrid': lambda p: read_tl_grid(p, **ram_kw),
             'pcomplex': lambda p: read_pcomplex_grid(p, **ram_kw),
@@ -698,3 +700,393 @@ class TestBinaryReaderTotality:
                 b = bytearray(data)
                 b[pos:pos + 4] = int(val).to_bytes(4, 'little', signed=True)
                 _assert_total(call, p, bytes(b))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# io/_fortran_helpers.py — record framing and list-directed parsing boundaries
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestBoundCountsBoundary:
+    """``_bound_counts`` rejects header counts whose *product* exceeds
+    ``file_size // min_item_bytes`` — a product exactly equal to it is the
+    densest legal file and must pass."""
+
+    def test_product_exactly_at_capacity_is_accepted(self):
+        from uacpy.io._fortran_helpers import _bound_counts
+        # 64 bytes at 8 bytes/item -> at most 8 items; 2 x 4 = 8 exactly.
+        _bound_counts('f.bin', 64, 8, n_rcv=2, n_freq=4)
+
+    def test_product_one_past_capacity_is_rejected(self):
+        from uacpy.io._fortran_helpers import _bound_counts
+        with pytest.raises(FileFormatError, match="implausible"):
+            _bound_counts('f.bin', 64, 8, n_rcv=3, n_freq=3)
+
+
+class TestTakeTokensExhaustsTheStream:
+    """A read of exactly the remaining tokens is satisfiable; only asking
+    for one more is a truncation."""
+
+    def test_consuming_the_whole_stream_succeeds(self):
+        from uacpy.io._fortran_helpers import take_tokens
+        vals, cursor = take_tokens(['1.0', '2.0'], 0, 2, 'amps', 'x.rts')
+        assert vals == ['1.0', '2.0'] and cursor == 2
+
+    def test_one_past_the_stream_raises(self):
+        from uacpy.io._fortran_helpers import take_tokens
+        with pytest.raises(FileFormatError, match="token stream ended"):
+            take_tokens(['1.0', '2.0'], 0, 3, 'amps', 'x.rts')
+
+
+class TestStripFortranQuotes:
+    """AT writes titles as ``'…'`` character literals, often with trailing
+    annotation; the quoted content — including an empty title — comes back
+    bare."""
+
+    def test_quoted_title_with_trailing_comment(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'PEKERIS' ! title\n") == 'PEKERIS'
+
+    def test_empty_quoted_string_is_empty(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("''\n") == ''
+
+
+class TestFortranRecordFraming:
+    """Record-marker edge cases of ``read_fortran_record``: the zero-length
+    record a Fortran WRITE with an empty I/O list produces, and both sides
+    of the 2**28-byte sanity cap."""
+
+    def test_zero_length_record_is_valid(self):
+        import struct
+        from uacpy.io._fortran_helpers import read_fortran_record
+        f = _io.BytesIO(struct.pack('<i', 0) + struct.pack('<i', 0))
+        assert read_fortran_record(f, raw=True) == b''
+
+    def test_length_at_the_cap_reads_rather_than_rejects(self):
+        import struct
+        from uacpy.io._fortran_helpers import read_fortran_record
+        # A marker of exactly 2**28 is within the cap: the reader proceeds
+        # and then reports the truncated payload, not an unreasonable length.
+        f = _io.BytesIO(struct.pack('<i', 1 << 28) + b'xyz')
+        with pytest.raises(FileFormatError, match="Short read"):
+            read_fortran_record(f, raw=True)
+
+    def test_length_past_the_cap_is_rejected_before_reading(self):
+        import struct
+        from uacpy.io._fortran_helpers import read_fortran_record
+        f = _io.BytesIO(struct.pack('<i', (1 << 28) + 1) + b'xyz')
+        with pytest.raises(FileFormatError, match="Unreasonable"):
+            read_fortran_record(f, raw=True)
+
+
+class TestDetectEndianResolution:
+    """``detect_endian`` picks the byte order whose record marker is a
+    plausible length, preferring little-endian on a tie (the CI-validated
+    order), rejecting markers implausible both ways at the 2**28 cap, and
+    warning only for big-endian files."""
+
+    def test_marker_implausible_both_ways_raises(self):
+        from uacpy.io._fortran_helpers import detect_endian
+        # little: 0x10000080 >= 2**28; big: 0x80000010 < 0 — no valid order.
+        with pytest.raises(FileFormatError, match="cannot resolve"):
+            detect_endian(b'\x80\x00\x00\x10')
+
+    def test_a_probe_shorter_than_one_marker_is_refused(self):
+        from uacpy.io._fortran_helpers import detect_endian
+        with pytest.raises(FileFormatError, match='need 4 bytes'):
+            detect_endian(b'\x00\x01\x02')
+
+    def test_palindromic_marker_prefers_little_endian(self):
+        from uacpy.io._fortran_helpers import detect_endian
+        # Reads as 65792 in both orders; the documented tie-break is '<'.
+        assert detect_endian(b'\x00\x01\x01\x00') == '<'
+
+    def test_warns_for_big_endian_only(self):
+        import struct
+        import warnings as _w
+        import uacpy.io._fortran_helpers as fh
+        emitted = fh._ENDIAN_WARN_EMITTED
+        try:
+            fh._ENDIAN_WARN_EMITTED = False
+            with _w.catch_warnings():
+                _w.simplefilter('error', UserWarning)
+                assert fh.detect_endian(struct.pack('<i', 128)) == '<'
+            fh._ENDIAN_WARN_EMITTED = False
+            with pytest.warns(UserWarning, match="big-endian"):
+                assert fh.detect_endian(struct.pack('>i', 128)) == '>'
+        finally:
+            fh._ENDIAN_WARN_EMITTED = emitted
+
+
+class TestReadVectorGeneratesAtMinimumLength:
+    """SubTab's two-value (equally spaced) branch generates for every
+    Nx >= 3 — including Nx = 3 itself, the shortest generatable vector."""
+
+    def test_two_value_shorthand_at_nx_3(self):
+        from uacpy.io._fortran_helpers import read_vector
+        x, nx = read_vector(_io.StringIO("3\n0 100 /\n"))
+        assert nx == 3
+        np.testing.assert_allclose(x, [0.0, 50.0, 100.0])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# io/_fortran_helpers.py — endian probe values, raw records, SubTab replicate
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestBoundCountsUnitItemBytes:
+    """``min_item_bytes=1`` means one byte per item — the capacity is the
+    file size itself, not half of it."""
+
+    def test_byte_sized_items_fill_the_file(self):
+        from uacpy.io._fortran_helpers import _bound_counts
+        _bound_counts('f.bin', 64, 1, n=64)
+
+
+class TestDetectEndianUnitMarkers:
+    """A record marker of exactly 1 is a plausible length on the side that
+    reads it as 1 — not on the side that reads it as 16777216-and-warns."""
+
+    def test_little_endian_one_is_little(self):
+        import struct
+        from uacpy.io._fortran_helpers import detect_endian
+        assert detect_endian(struct.pack('<i', 1)) == '<'
+
+    def test_big_endian_one_is_big(self):
+        import struct
+        import uacpy.io._fortran_helpers as fh
+        emitted = fh._ENDIAN_WARN_EMITTED
+        try:
+            fh._ENDIAN_WARN_EMITTED = False
+            with pytest.warns(UserWarning, match="big-endian"):
+                assert fh.detect_endian(struct.pack('>i', 1)) == '>'
+        finally:
+            fh._ENDIAN_WARN_EMITTED = emitted
+
+
+class TestEndianWarningFiresOnce:
+    """The big-endian warning is emitted once per process, then latched."""
+
+    def test_second_detect_is_silent(self):
+        import struct
+        import warnings as _w
+        import uacpy.io._fortran_helpers as fh
+        emitted = fh._ENDIAN_WARN_EMITTED
+        try:
+            fh._ENDIAN_WARN_EMITTED = False
+            with pytest.warns(UserWarning, match="big-endian"):
+                fh.detect_endian(struct.pack('>i', 128))
+            with _w.catch_warnings():
+                _w.simplefilter('error', UserWarning)
+                fh.detect_endian(struct.pack('>i', 128))
+        finally:
+            fh._ENDIAN_WARN_EMITTED = emitted
+
+
+class TestRawRecordIgnoresFmt:
+    """``raw=True`` returns the payload bytes even when a ``fmt`` is also
+    given."""
+
+    def test_raw_with_fmt_returns_bytes(self):
+        import struct
+        from uacpy.io._fortran_helpers import read_fortran_record
+        payload = struct.pack('<i', 7)
+        f = _io.BytesIO(struct.pack('<i', 4) + payload + struct.pack('<i', 4))
+        assert read_fortran_record(f, fmt='i', raw=True) == payload
+
+
+class TestReadVectorReplicateBranch:
+    """SubTab's replicate branch: one value with ``/`` at Nx >= 3 fills
+    the vector with that value — including at Nx = 3 exactly."""
+
+    def test_single_value_replicates_at_nx_3(self):
+        from uacpy.io._fortran_helpers import read_vector
+        x, nx = read_vector(_io.StringIO("3\n5.0 /\n"))
+        assert nx == 3
+        np.testing.assert_allclose(x, [5.0, 5.0, 5.0])
+
+
+class TestReadVectorEmptyCount:
+    """``Nx <= 0`` returns immediately without consuming further records."""
+
+    def test_stream_position_is_preserved(self):
+        from uacpy.io._fortran_helpers import read_vector
+        f = _io.StringIO("0\nNEXT RECORD\n")
+        x, nx = read_vector(f)
+        assert nx == 0 and len(x) == 0
+        assert f.readline().strip() == "NEXT RECORD"
+
+
+class TestReadVectorFortranSemantics:
+    """``read_vector`` mirrors AT's ``ReadVector`` + ``SubTab``
+    (SourceReceiverPositions.f90:221, subtabulate.f90)."""
+
+    @staticmethod
+    def _read(text):
+        import io as _io
+        from uacpy.io._fortran_helpers import read_vector
+        return read_vector(_io.StringIO(text))
+
+    def test_explicit_vector_wrapped_across_records(self):
+        """A list-directed READ continues across records until Nx values are
+        consumed; Fortran-written files wrap at the runtime column width."""
+        x, nx = self._read("5\n10.0 20.0 30.0\n40.0 50.0\n")
+        assert nx == 5
+        assert np.allclose(x, [10.0, 20.0, 30.0, 40.0, 50.0])
+
+    def test_replicate_idiom_does_not_warn(self):
+        """``write_fieldflp`` emits ``N`` / ``0.0 /`` for the Rro block."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            x, nx = self._read("9\n0.0 /\n")
+        assert nx == 9 and np.allclose(x, np.zeros(9))
+
+    def test_two_value_shorthand_is_equally_spaced(self):
+        x, _ = self._read("5\n0 1000 /\n")
+        assert np.allclose(x, [0.0, 250.0, 500.0, 750.0, 1000.0])
+
+    def test_truncated_record_raises_fileformaterror(self):
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(
+                FileFormatError,
+                match='expected 5 values but the file ended after 2'):
+            self._read("5\n10 20\n")
+
+    def test_ungeneratable_slash_record_raises_fileformaterror(self):
+        """3 values before the '/' — SubTab does not generate for this, and AT
+        leaves x(4:Nx) uninitialised."""
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(FileFormatError,
+                           match="record was terminated by '/'"):
+            self._read("5\n10 20 30 /\n")
+
+    @pytest.mark.parametrize('text', [
+        "1\n/\n",        # Nx=1, no value: AT leaves x(1) uninitialised
+        "2\n10 /\n",     # Nx=2, one value: x(2) stays at the -999.9 pre-fill
+        "2\n/\n",        # Nx=2, no values
+        "5\n/\n",        # Nx>=3, no values: x(1) uninitialised, no SubTab
+    ])
+    def test_underfull_slash_record_raises_fileformaterror(self, text):
+        """SubTab generates only for Nx >= 3 with 1 or 2 values given
+        (subtabulate.f90:3-5,24-28); every other slash-terminated shortfall
+        leaves AT slots at the -999.9 pre-fill or uninitialised, so no value
+        may be fabricated for it."""
+        from uacpy.core.exceptions import FileFormatError
+        with pytest.raises(FileFormatError,
+                           match="record was terminated by '/'"):
+            self._read(text)
+
+
+class TestReadVectorRepeatCounts:
+    """``r*c`` is ``r`` copies of the constant ``c`` to a list-directed
+    READ, so an AT vector record may carry it; the expansion is bounded
+    by its own ceiling, since a repeat count breaks the
+    file-size-to-item-count relation the way SubTab's generated vectors
+    do."""
+
+    @staticmethod
+    def _read(text):
+        import io as _io
+        from uacpy.io._fortran_helpers import read_vector
+        return read_vector(_io.StringIO(text))
+
+    def test_repeat_counts_expand_in_a_vector_record(self):
+        x, nx = self._read("5\n2*0.0 3*1.5\n")
+        assert nx == 5
+        assert np.allclose(x, [0.0, 0.0, 1.5, 1.5, 1.5])
+
+    def test_a_repeat_count_at_the_ceiling_expands_lazily(self):
+        from uacpy.io._fortran_helpers import (
+            _MAX_REPEAT_EXPANSION, expand_repeat_counts)
+        first = next(expand_repeat_counts([f"{_MAX_REPEAT_EXPANSION}*0.25"]))
+        assert first == "0.25"
+
+    def test_a_repeat_count_over_the_ceiling_is_a_typed_error(self):
+        from uacpy.core.exceptions import FileFormatError
+        from uacpy.io._fortran_helpers import (
+            _MAX_REPEAT_EXPANSION, expand_repeat_counts)
+        with pytest.raises(FileFormatError,
+                           match="ceiling on one record's repeat groups"):
+            next(expand_repeat_counts(
+                [f"{_MAX_REPEAT_EXPANSION + 1}*0.25"]))
+
+
+class TestSplitFortranTokensKeepsLiteralsWhole:
+    """``split_fortran_tokens`` is ``str.split`` for a list-directed record.
+
+    A list-directed READ takes a whole delimited literal as ONE value, so a
+    CHARACTER item may hold blanks. ``field3d.f90:192`` reads a mode-file
+    name that way. Whitespace splitting truncated such a name to its first
+    word and silently discarded the tail.
+    """
+
+    @staticmethod
+    def _split(line):
+        from uacpy.io._fortran_helpers import split_fortran_tokens
+        return split_fortran_tokens(line)
+
+    def test_a_quoted_item_holding_blanks_is_one_token(self):
+        assert self._split("0.0 1.0 'my modes'") == ["0.0", "1.0",
+                                                     "'my modes'"]
+
+    def test_a_doubled_delimiter_does_not_end_the_literal(self):
+        assert self._split("1.0 'a''b' z") == ["1.0", "'a''b'", "z"]
+
+    def test_double_quotes_delimit_too(self):
+        assert self._split('1.0 "d q" 2.0') == ["1.0", '"d q"', "2.0"]
+
+    def test_commas_and_tabs_separate_items(self):
+        assert self._split("1.0,\t2.0 ,3.0") == ["1.0", "2.0", "3.0"]
+
+    def test_delimiters_are_kept_so_numeric_items_are_unchanged(self):
+        """Items keep their quotes: that is what lets a caller tell a
+        literal from a bare word, and what keeps ``expand_repeat_counts``
+        and ``fortran_float`` seeing exactly what ``str.split`` gave
+        them for every non-CHARACTER item."""
+        assert self._split("3*1.0 2.0") == ["3*1.0", "2.0"]
+
+    def test_an_unterminated_literal_runs_to_the_end_of_the_record(self):
+        assert self._split("0.0 'unterminated") == ["0.0", "'unterminated"]
+
+    def test_a_blank_record_yields_no_tokens(self):
+        assert self._split("   \n") == []
+
+    def test_the_result_undelimits_through_strip_fortran_quotes(self):
+        """The two helpers compose: split into items, then undelimit the
+        CHARACTER one, honouring the doubled-quote escape."""
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        tokens = self._split("0.0 1.0 'It''s a mode file'")
+        assert strip_fortran_quotes(tokens[2]) == "It's a mode file"
+
+
+class TestStripFortranQuotesDecodesDoubledApostrophes:
+
+    def test_doubled_apostrophe_reads_as_one_apostrophe(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'It''s a title'") == "It's a title"
+
+    def test_doubled_apostrophe_does_not_end_the_literal(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'a''b' ! comment") == "a'b"
+
+    def test_literal_holding_only_an_escaped_apostrophe(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("''''") == "'"
+
+    def test_empty_literal_returns_empty_string(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("''") == ''
+
+    def test_plain_literal_returns_its_contents(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'CVW'  ! options") == 'CVW'
+
+    def test_unquoted_line_falls_back_to_comment_stripping(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes('CVW ! options') == 'CVW'
+
+    def test_unclosed_literal_falls_back_to_comment_stripping(self):
+        from uacpy.io._fortran_helpers import strip_fortran_quotes
+        assert strip_fortran_quotes("'unclosed") == "'unclosed"

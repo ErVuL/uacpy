@@ -3,20 +3,35 @@ and noise realisations.
 
 One question — *give me a signal* — answered three ways: parametric waveforms
 (:func:`lfm_chirp`, :func:`tone_burst`, :func:`ricker_wavelet`, …), coded
-sequences (:func:`mseq`, :func:`bpsk_modulate`), and noise built to a target
-spectrum (:func:`synthesize_noise_from_psd`, :func:`add_noise`). Every one is
+sequences (:func:`m_sequence`, :func:`bpsk_modulate`), and noise built to a target
+spectrum (:func:`synthesize_noise_from_psd`, :func:`make_bandlimited_noise`). Every one is
 a pure function returning arrays; pass ``rng=`` for a reproducible draw.
 """
 
 from typing import Optional, Tuple, Literal
 import numpy as np
-from uacpy.core.exceptions import ConfigurationError
-from uacpy.acoustic_signal._signal_validate import (
-    require_below_nyquist,
-    require_positive_finite_scalar,
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, NumericsWarning,
+)
+from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+from uacpy.core._validate import (
+    require_below_nyquist, require_positive_finite_scalar,
 )
 import math
 import warnings
+
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.acoustic_signal.windows import _taper
+
+#: s — the silent lead-in :func:`make_mseq_probe` puts before the
+#: first m-sequence period.
+MSEQ_PROBE_LEAD_TIME_S = 0.2
+
+#: :func:`synthesize_noise_from_psd`'s IFFT chunk: its default and
+#: the bounds a requested ``nfft`` is reset or clamped to.
+NOISE_SYNTH_DEFAULT_NFFT = 2 ** 16
+NOISE_SYNTH_MIN_NFFT = 16
+NOISE_SYNTH_MAX_NFFT = 2 ** 18
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -27,8 +42,8 @@ import warnings
 # ──────────────────────────────────────────────────────────────────────
 
 def sparc_pulse(
-    t: np.ndarray,
-    omega: float,
+    times: np.ndarray,
+    frequency: float,
     pulse_type: Literal["P", "R", "A", "S", "H", "N", "M", "G", "T", "C", "E"],
 ) -> Tuple[np.ndarray, str]:
     """
@@ -39,11 +54,11 @@ def sparc_pulse(
 
     Parameters
     ----------
-    t : ndarray
+    times : ndarray
         Time vector (can be scalar or array)
-    omega : float
-        Angular frequency characterizing the pulse (rad/s)
-        F = omega / (2*pi) is the characteristic frequency
+    frequency : float
+        The pulse's characteristic frequency ``F`` (Hz); the shapes are
+        written in ``omega = 2*pi*F``
     pulse_type : str
         Single letter code indicating pulse type. Each entry gives AT's own
         **spectral** label — the frequency of the spectral peak and the band
@@ -82,15 +97,13 @@ def sparc_pulse(
     Examples
     --------
     >>> # Generate a Ricker wavelet at 100 Hz
-    >>> t = np.linspace(-0.1, 0.1, 1000)
-    >>> f = 100.0  # Hz
-    >>> omega = 2 * np.pi * f
-    >>> s, title = sparc_pulse(t, omega, 'R')
+    >>> times = np.linspace(-0.1, 0.1, 1000)
+    >>> s, title = sparc_pulse(times, 100.0, 'R')
     >>> print(title)
     Ricker wavelet
 
     >>> # Generate pseudo-Gaussian pulse
-    >>> s_gauss, _ = sparc_pulse(t, omega, 'P')
+    >>> s_gauss, _ = sparc_pulse(times, 100.0, 'P')
 
     References
     ----------
@@ -107,23 +120,28 @@ def sparc_pulse(
     Both AT copies gate every pulse to ``T > 0``; the sinc here is evaluated at
     negative time too, so it is the full two-sided sinc.
     """
-    omega = require_positive_finite_scalar(omega, "sparc_pulse", "omega",
-                                           " rad/s")
-    t = np.asarray(t, dtype=float)
-    s = np.zeros(t.shape)
-    F = omega / (2.0 * np.pi)
+    F = require_positive_finite_scalar(frequency, "sparc_pulse", "frequency",
+                                       " Hz")
+    omega = 2.0 * np.pi * F
+    times = np.asarray(times, dtype=float)
+    s = np.zeros(times.shape)
 
+    if not isinstance(pulse_type, str) or not pulse_type:
+        raise ConfigurationError(
+            f"sparc_pulse: pulse_type must be a non-empty string whose first "
+            f"letter names the pulse (one of P, R, A, S, H, N, M, G, T, C, E); "
+            f"got {pulse_type!r}.")
     pulse_key = pulse_type[0].upper()
 
     if pulse_key == "P":  # Pseudo gaussian
-        ii = (t > 0) & (t <= 1 / F)
-        T = t[ii]
+        ii = (times > 0) & (times <= 1 / F)
+        T = times[ii]
         s[ii] = 0.75 - np.cos(omega * T) + 0.25 * np.cos(2.0 * omega * T)
         pulse_title = "Pseudo gaussian"
 
     elif pulse_key == "R":  # Ricker wavelet
-        ii = t > 0
-        T = t[ii]
+        ii = times > 0
+        T = times[ii]
         U = omega * T - 5.0
         s[ii] = 0.5 * (0.25 * U * U - 0.5) * np.sqrt(np.pi) * np.exp(-0.25 * U * U)
         pulse_title = "Ricker wavelet"
@@ -135,8 +153,8 @@ def sparc_pulse(
         # from differentiating cos(2*pi*n*T/TC) twice. The true Ricker is the
         # second derivative of a Gaussian; this is its compact-support analogue.
         TC = 1.55 / F
-        ii = (t > 0) & (t <= TC)
-        T = t[ii]
+        ii = (times > 0) & (times <= TC)
+        T = times[ii]
         s[ii] = (
             +0.48829 * np.cos(2.0 * np.pi * T / TC)
             - 0.14128 * 4 * np.cos(4.0 * np.pi * T / TC)
@@ -145,26 +163,26 @@ def sparc_pulse(
         pulse_title = "Approximate Ricker wavelet"
 
     elif pulse_key == "S":  # Single sine
-        ii = (t > 0) & (t <= 1 / F)
-        T = t[ii]
+        ii = (times > 0) & (times <= 1 / F)
+        T = times[ii]
         s[ii] = np.sin(omega * T)
         pulse_title = "Single sine"
 
     elif pulse_key == "H":  # Hanning weighted four sine
-        ii = (t > 0) & (t <= 4 / F)
-        T = t[ii]
+        ii = (times > 0) & (times <= 4 / F)
+        T = times[ii]
         s[ii] = 0.5 * np.sin(omega * T) * (1 - np.cos(omega * T / 4.0))
         pulse_title = "Hanning weighted four sine"
 
     elif pulse_key == "N":  # N-wave
-        ii = (t > 0) & (t <= 1 / F)
-        T = t[ii]
+        ii = (times > 0) & (times <= 1 / F)
+        T = times[ii]
         s[ii] = np.sin(omega * T) - 0.5 * np.sin(2.0 * omega * T)
         pulse_title = "N-wave"
 
     elif pulse_key == "M":  # Miracle wave
-        ii = t > 0
-        T = t[ii]
+        ii = times > 0
+        T = times[ii]
         A = 1.0 / (6.0 * F)
         T0 = 6.0 * A
         TS = (T - T0) / A
@@ -172,8 +190,8 @@ def sparc_pulse(
         pulse_title = "Miracle wave"
 
     elif pulse_key == "G":  # Gaussian
-        ii = t > 0
-        T = t[ii]
+        ii = times > 0
+        T = times[ii]
         NSIG = 3
         A = 1.0 / F / (2.0 * NSIG)
         T0 = NSIG * A
@@ -181,34 +199,34 @@ def sparc_pulse(
         pulse_title = "Gaussian"
 
     elif pulse_key == "T":  # Tone burst
-        ii = (t > 0) & (t <= 0.4)
-        T = t[ii]
+        ii = (times > 0) & (times <= 0.4)
+        T = times[ii]
         s[ii] = np.sin(omega * T)
         pulse_title = "Tone"
 
     elif pulse_key == "C":  # Sinc
-        ii = t != 0  # Avoid division by zero
-        T = t[ii]
+        ii = times != 0  # Avoid division by zero
+        T = times[ii]
         s[ii] = np.sin(omega * T) / (omega * T)
-        s[t == 0] = 1.0  # Limit as t->0
+        s[times == 0] = 1.0  # Limit as t->0
         pulse_title = "Sinc"
 
     elif pulse_key == "E":  # One-sided exponential
-        ii = t > 0
-        T = t[ii]
+        ii = times > 0
+        T = times[ii]
         s[ii] = np.exp(-omega * T)
         pulse_title = "One-sided exponential"
 
     else:
         raise ConfigurationError(
             f"Unknown pulse type: '{pulse_type}'. "
-            "Valid types: P, R, A, S, H, N, M, G, T, C, E"
+            "Valid types: P, R, A, S, H, N, M, G, T, C, E."
         )
 
     return s, pulse_title
 
 
-def ricker_wavelet(time: np.ndarray, frequency: float,
+def ricker_wavelet(times: np.ndarray, frequency: float,
                    delay: Optional[float] = None) -> np.ndarray:
     """
     Generate a Ricker wavelet (Mexican hat wavelet).
@@ -216,35 +234,35 @@ def ricker_wavelet(time: np.ndarray, frequency: float,
     The Ricker wavelet is the second derivative of a Gaussian and is
     commonly used in seismic and acoustic applications. Uses the AT
     ``Ricker.m`` centring ``u = 2πFt − 8``; SPARC's internal Ricker
-    (``cans.f90``, documented in ``models/sparc.py``) centres at
-    ``ωT − 5`` — the two "Ricker" pulses are offset in time.
+    (``cans.f90``, documented in ``models/sparc/_pulse.py``) centres at
+    ``ωT − 5`` — the two "Ricker" pulses are offset in times.
 
     ``delay`` overrides that fixed centring and places the wavelet's centre at
-    a time you choose, which is what a gather needs: one pulse per trace at a
-    moveout-dependent time. It broadcasts against ``time``, so a whole gather
+    a times you choose, which is what a gather needs: one pulse per trace at a
+    moveout-dependent times. It broadcasts against ``times``, so a whole gather
     is one call. Omitting it keeps AT's centring exactly, and
     ``delay=4/(pi*frequency)`` reproduces that same wavelet to within
     floating-point round-off (~1e-15 of the lobe amplitude: the two
-    dimensionless-time expressions are algebraically equal but not
+    dimensionless-times expressions are algebraically equal but not
     bit-identical).
 
     Parameters
     ----------
-    time : ndarray
+    times : ndarray
         Time vector
     frequency : float
         Nominal source frequency in Hz
     delay : float or ndarray, optional
         Centre the wavelet here instead of at AT's ``4/(pi*frequency)``.
-        Broadcast against ``time``. Note that AT's offset exists to make
-        truncation at ``time = 0`` free (``s(0)`` is 3e-6 of the lobe
+        Broadcast against ``times``. Note that AT's offset exists to make
+        truncation at ``times = 0`` free (``s(0)`` is 3e-6 of the lobe
         amplitude); a delay smaller than that truncates the leading flank,
         which is the caller's call to make.
 
     Returns
     -------
     s : ndarray
-        Ricker wavelet time series
+        Ricker wavelet times series
 
     Notes
     -----
@@ -253,19 +271,19 @@ def ricker_wavelet(time: np.ndarray, frequency: float,
     single sine "support [0, infinity], nulls at nF"): the amplitude spectrum
     peaks at ``frequency`` and is ~14 dB down by twice it.
 
-    Substituting ``tau = time - 4/(pi*frequency)`` turns the expression into
+    Substituting ``tau = times - 4/(pi*frequency)`` turns the expression into
     ``0.25*sqrt(pi) * (2*pi^2*f^2*tau^2 - 1) * exp(-pi^2*f^2*tau^2)``, i.e. the
     standard Ricker parameterised by *peak* frequency, scaled by
     ``0.25*sqrt(pi)`` and **negated** — the central lobe at
-    ``time = 4/(pi*frequency)`` is a trough of -0.443, not a peak. The ``-8``
+    ``times = 4/(pi*frequency)`` is a trough of -0.443, not a peak. The ``-8``
     offset places that centre far enough from the origin that truncating at
-    ``time = 0`` costs nothing: ``s(0)`` is 3e-6 of the lobe amplitude, against
+    ``times = 0`` costs nothing: ``s(0)`` is 3e-6 of the lobe amplitude, against
     2e-2 for SPARC's ``omega*T - 5`` centring.
 
     Examples
     --------
-    >>> time = np.linspace(0, 0.1, 1000)
-    >>> s = ricker_wavelet(time, 50.0)
+    >>> times = np.linspace(0, 0.1, 1000)
+    >>> s = ricker_wavelet(times, 50.0)
 
     References
     ----------
@@ -273,9 +291,9 @@ def ricker_wavelet(time: np.ndarray, frequency: float,
     """
     frequency = require_positive_finite_scalar(frequency, "ricker_wavelet",
                                                "frequency", " Hz")
-    time = np.asarray(time, dtype=float)
+    times = np.asarray(times, dtype=float)
     if delay is None:
-        u = 2 * np.pi * frequency * time - 8  # Dimensionless time
+        u = 2 * np.pi * frequency * times - 8  # Dimensionless times
     else:
         centre = np.asarray(delay, dtype=float)
         if not np.isfinite(centre).all():
@@ -284,20 +302,20 @@ def ricker_wavelet(time: np.ndarray, frequency: float,
                 remediation="A non-finite centre puts the whole wavelet at "
                             "NaN. Omit delay for the Acoustics-Toolbox "
                             "centring at 4/(pi*frequency).")
-        # Same dimensionless time, centred where the caller asked: at
+        # Same dimensionless times, centred where the caller asked: at
         # delay = 4/(pi*frequency) this is identical to the branch above.
-        u = 2 * np.pi * frequency * (time - centre)
+        u = 2 * np.pi * frequency * (times - centre)
     s = 0.5 * (0.25 * u**2 - 0.5) * np.sqrt(np.pi) * np.exp(-0.25 * u**2)
     return s
 
 
-def gaussian_pulse(time: np.ndarray, delay: float, duration: float) -> np.ndarray:
+def gaussian_pulse(times: np.ndarray, delay: float, duration: float) -> np.ndarray:
     """
     Generate a Gaussian pulse.
 
     Parameters
     ----------
-    time : ndarray
+    times : ndarray
         Vector of sample times
     delay : float
         Time of the pulse peak location
@@ -317,8 +335,8 @@ def gaussian_pulse(time: np.ndarray, delay: float, duration: float) -> np.ndarra
 
     Examples
     --------
-    >>> time = np.linspace(0, 1, 1000)
-    >>> pulse = gaussian_pulse(time, delay=0.5, duration=0.1)
+    >>> times = np.linspace(0, 1, 1000)
+    >>> pulse = gaussian_pulse(times, delay=0.5, duration=0.1)
 
     References
     ----------
@@ -326,25 +344,25 @@ def gaussian_pulse(time: np.ndarray, delay: float, duration: float) -> np.ndarra
     """
     duration = require_positive_finite_scalar(duration, "gaussian_pulse",
                                               "duration", " s")
-    time = np.asarray(time, dtype=float)
-    y = np.exp(-(((time - delay) / duration) ** 2))
+    times = np.asarray(times, dtype=float)
+    y = np.exp(-(((times - delay) / duration) ** 2))
     return y
 
 
 def lfm_chirp(
-    fmin: float, fmax: float, duration: float, sample_rate: float
+    freq_start: float, freq_end: float, duration: float, *, sample_rate: float
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate a Linear Frequency Modulated (LFM) pulse (chirp).
 
-    Creates a signal that sweeps linearly from fmin to fmax over ``duration``.
+    Creates a signal that sweeps linearly from freq_start to freq_end over ``duration``.
 
     Parameters
     ----------
-    fmin : float
+    freq_start : float
         Sweep start frequency in Hz, ``>= 0``
-    fmax : float
-        Sweep end frequency in Hz, ``>= 0`` (may be below ``fmin`` for a
+    freq_end : float
+        Sweep end frequency in Hz, ``>= 0`` (may be below ``freq_start`` for a
         downsweep)
     duration : float
         Duration of time-series in seconds
@@ -361,13 +379,13 @@ def lfm_chirp(
     Notes
     -----
     The signal is the conventional linear sweep ``s(t) = sin(2π φ(t))``
-    with quadratic phase ``φ(t) = fmin·t + (fmax - fmin)·t² / (2·T)``;
-    the instantaneous frequency ``dφ/dt = fmin + (fmax - fmin)·t / T``
-    therefore ramps linearly from ``fmin`` at ``t = 0`` to ``fmax`` at
+    with quadratic phase ``φ(t) = freq_start·t + (freq_end - freq_start)·t² / (2·T)``;
+    the instantaneous frequency ``dφ/dt = freq_start + (freq_end - freq_start)·t / T``
+    therefore ramps linearly from ``freq_start`` at ``t = 0`` to ``freq_end`` at
     ``t = T``. This is a standard chirp used in sonar and radar
     applications.
 
-    ``fmin == fmax`` is accepted and yields a constant-frequency tone (the
+    ``freq_start == freq_end`` is accepted and yields a constant-frequency tone (the
     sweep rate is simply zero); ``duration`` and ``sample_rate`` must be
     positive and long enough for at least one sample, and the sweep must stay
     below the Nyquist frequency ``sample_rate/2``, otherwise a
@@ -376,7 +394,7 @@ def lfm_chirp(
     Examples
     --------
     >>> # Generate 1-second chirp from 100 to 1000 Hz
-    >>> t, s = lfm_chirp(100, 1000, 1.0, 10000)
+    >>> t, s = lfm_chirp(100, 1000, 1.0, sample_rate=10000)
 
     >>> # Can also use scipy.signal.chirp for similar functionality
     >>> from scipy.signal import chirp
@@ -391,18 +409,18 @@ def lfm_chirp(
                                               "duration", " s")
     sample_rate = require_positive_finite_scalar(sample_rate, "lfm_chirp",
                                                  "sample_rate", " Hz")
-    # >= 0 rather than > 0: fmin == fmax == 0 is a DC "sweep", degenerate but
+    # >= 0 rather than > 0: freq_start == freq_end == 0 is a DC "sweep", degenerate but
     # harmless. A negative bound is not — the sweep crosses DC and folds about
     # it, returning a waveform whose instantaneous frequency never matches what
     # was asked for. hfm_chirp and tone_burst already refuse it via
     # require_positive_finite_scalar; written as the negated condition so NaN
     # is refused here too.
-    for _name, _value in (("fmin", fmin), ("fmax", fmax)):
+    for _name, _value in (("freq_start", freq_start), ("freq_end", freq_end)):
         if not (_value >= 0.0):
             raise ConfigurationError(
                 f"lfm_chirp: {_name} must be a finite frequency >= 0 Hz; got "
                 f"{_value}. A negative bound folds the sweep about DC.")
-    f_top = max(fmin, fmax)
+    f_top = max(freq_start, freq_end)
     require_below_nyquist(f_top, sample_rate, "lfm_chirp",
                           "the top of the sweep",
                           "the sampled waveform aliases")
@@ -415,15 +433,16 @@ def lfm_chirp(
     time = np.arange(N) / sample_rate
 
     # Time-averaged frequency over [0, t]; 2*pi*f_avg*t is the chirp phase
-    # (instantaneous frequency is fmin + (fmax-fmin)*t/T, twice the slope).
-    f_avg = fmin + (fmax - fmin) * time / (2 * T)
+    # (instantaneous frequency is freq_start + (freq_end-freq_start)*t/T, twice the slope).
+    f_avg = freq_start + (freq_end - freq_start) * time / (2 * T)
     s = np.sin(2.0 * np.pi * f_avg * time)
 
     return time, s
 
 
 def tone_burst(
-    frequency: float, n_cycles: int, sample_rate: float, window: bool = True
+    frequency: float, n_cycles: int, *, sample_rate: float,
+    window: Optional[str] = 'hann',
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate a tone burst (windowed sinusoid).
@@ -436,8 +455,10 @@ def tone_burst(
         Number of cycles
     sample_rate : float
         Sample rate in Hz
-    window : bool, optional
-        If True, apply Hanning window (default: True)
+    window : str or None, optional
+        The window across the burst (default ``'hann'``); ``None`` gates it
+        rectangularly. Any name :func:`~uacpy.acoustic_signal.windows._taper`
+        takes.
 
     Returns
     -------
@@ -456,12 +477,11 @@ def tone_burst(
     Examples
     --------
     >>> # Generate 5-cycle 1000 Hz tone burst
-    >>> t, s = tone_burst(1000.0, 5, 48000)
+    >>> t, s = tone_burst(1000.0, 5, sample_rate=48000)
 
     >>> # Without windowing
-    >>> t, s_rect = tone_burst(1000.0, 5, 48000, window=False)
+    >>> t, s_rect = tone_burst(1000.0, 5, sample_rate=48000, window=None)
     """
-    from scipy.signal.windows import hann
 
     # ``T`` is the requested burst duration in seconds; the sample count
     # ``N`` is the *nearest* integer that keeps ``n_cycles`` faithful at
@@ -486,14 +506,13 @@ def tone_burst(
 
     s = np.sin(2 * np.pi * frequency * time)
 
-    if window:
-        s = s * hann(N)
+    s = s * _taper(window, N, who='tone_burst')
 
     return time, s
 
 
 def hfm_chirp(
-    fmin: float, fmax: float, duration: float, sample_rate: float
+    freq_start: float, freq_end: float, duration: float, *, sample_rate: float
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Generate a Hyperbolic Frequency Modulated (HFM) pulse.
@@ -503,9 +522,9 @@ def hfm_chirp(
 
     Parameters
     ----------
-    fmin : float
+    freq_start : float
         Minimum frequency in Hz
-    fmax : float
+    freq_end : float
         Maximum frequency in Hz
     duration : float
         Duration in seconds
@@ -524,17 +543,17 @@ def hfm_chirp(
     HFM chirps have constant period change rate rather than constant
     frequency change rate (like LFM). This makes them more Doppler-tolerant.
 
-    ``fmin`` and ``fmax`` must both be positive and distinct (the phase law
-    divides by ``fmin - fmax`` and by ``fmin``), and the sweep must stay below
-    the Nyquist frequency ``sample_rate/2``; ``fmin > fmax`` is accepted
+    ``freq_start`` and ``freq_end`` must both be positive and distinct (the phase law
+    divides by ``freq_start - freq_end`` and by ``freq_start``), and the sweep must stay below
+    the Nyquist frequency ``sample_rate/2``; ``freq_start > freq_end`` is accepted
     and gives a down-sweep. Degenerate parameters raise
     :class:`~uacpy.core.exceptions.ConfigurationError`.
 
     The phase is: φ(t) = (2π/b) * log(1 + b*t/P1)
-    where b = (fmin - fmax)/(fmin*fmax*T) and P1 = 1/fmin
+    where b = (freq_start - freq_end)/(freq_start*freq_end*T) and P1 = 1/freq_start
 
     Sign convention: ``b`` here is the slope of the period, ``Period(t) =
-    1/fmin + b*t``, running from ``1/fmin`` at ``t = 0`` to ``1/fmax`` at
+    1/freq_start + b*t``, running from ``1/freq_start`` at ``t = 0`` to ``1/freq_end`` at
     ``t = T`` — so ``b`` is **negative** for an up-sweep. Abraham,
     *Underwater Acoustic Signal Processing*, §8.3.6 defines the opposite sign,
     ``b_A = (f1 - f0)/(f0*f1*Tp)`` with ``φ = -(2π/b_A)·log(1 - b_A*f0*t)``.
@@ -543,25 +562,25 @@ def hfm_chirp(
 
     Examples
     --------
-    >>> t, s = hfm_chirp(1000, 5000, 0.1, 48000)
+    >>> t, s = hfm_chirp(1000, 5000, 0.1, sample_rate=48000)
 
     References
     ----------
     Original MATLAB: ``third_party/Acoustics-Toolbox/Matlab/waveforms/hfm.m``
     """
-    fmin = require_positive_finite_scalar(fmin, "hfm_chirp", "fmin", " Hz")
-    fmax = require_positive_finite_scalar(fmax, "hfm_chirp", "fmax", " Hz")
+    freq_start = require_positive_finite_scalar(freq_start, "hfm_chirp", "freq_start", " Hz")
+    freq_end = require_positive_finite_scalar(freq_end, "hfm_chirp", "freq_end", " Hz")
     duration = require_positive_finite_scalar(duration, "hfm_chirp",
                                               "duration", " s")
     sample_rate = require_positive_finite_scalar(sample_rate, "hfm_chirp",
                                                  "sample_rate", " Hz")
-    if fmin == fmax:
+    if freq_start == freq_end:
         raise ConfigurationError(
-            "hfm_chirp: fmin and fmax must differ (the hyperbolic phase law "
-            f"divides by fmin - fmax); got fmin == fmax == {fmin}. For a "
+            "hfm_chirp: freq_start and freq_end must differ (the hyperbolic phase law "
+            f"divides by freq_start - freq_end); got freq_start == freq_end == {freq_start}. For a "
             "constant-frequency signal use tone_burst or lfm_chirp with "
-            "fmin == fmax.")
-    f_top = max(fmin, fmax)
+            "freq_start == freq_end.")
+    f_top = max(freq_start, freq_end)
     require_below_nyquist(f_top, sample_rate, "hfm_chirp",
                           "the top of the sweep",
                           "the sampled waveform aliases")
@@ -574,14 +593,14 @@ def hfm_chirp(
     time = np.arange(N) / sample_rate
 
     # b < 0 for an up-sweep; see the sign convention in the docstring.
-    b = (fmin - fmax) / (fmin * fmax * T)
-    P1 = 1 / fmin
+    b = (freq_start - freq_end) / (freq_start * freq_end * T)
+    P1 = 1 / freq_start
     s = np.sin((2 * np.pi / b) * np.log(1 + b * time / P1))
 
     return time, s
 
 
-def nwave(time: np.ndarray, frequency: float) -> np.ndarray:
+def nwave(times: np.ndarray, frequency: float) -> np.ndarray:
     """
     Generate an N-wave pulse.
 
@@ -590,7 +609,7 @@ def nwave(time: np.ndarray, frequency: float) -> np.ndarray:
 
     Parameters
     ----------
-    time : ndarray
+    times : ndarray
         Time vector
     frequency : float
         Nominal source frequency in Hz
@@ -608,7 +627,7 @@ def nwave(time: np.ndarray, frequency: float) -> np.ndarray:
 
     ``Nwave.m``'s own label "peak at F, support [0, 4F], [0,3F] also OK" is
     spectral (see :func:`ricker_wavelet`): the spectrum peaks near ``frequency``
-    and is essentially spent by 3-4 times it. The *time* extent is the gate
+    and is essentially spent by 3-4 times it. The *times* extent is the gate
     below, ``[0, 1/frequency]``.
 
     Translated from ``third_party/Acoustics-Toolbox/Matlab/waveforms/Nwave.m``
@@ -623,14 +642,14 @@ def nwave(time: np.ndarray, frequency: float) -> np.ndarray:
     """
     frequency = require_positive_finite_scalar(frequency, "nwave",
                                                "frequency", " Hz")
-    time = np.asarray(time, dtype=float)
+    times = np.asarray(times, dtype=float)
     omega = 2 * np.pi * frequency
-    s = np.sin(omega * time) - 0.5 * np.sin(2 * omega * time)
+    s = np.sin(omega * times) - 0.5 * np.sin(2 * omega * times)
 
     # Zero outside [0, 1/frequency]. np.where rather than mask assignment: a
-    # scalar `time` makes `s` 0-d, which does not support item assignment, and
+    # scalar `times` makes `s` 0-d, which does not support item assignment, and
     # ricker_wavelet/sparc_pulse both take scalars.
-    return np.where((time > 1 / frequency) | (time < 0), 0.0, s)
+    return np.where((times > 1 / frequency) | (times < 0), 0.0, s)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -640,15 +659,30 @@ def nwave(time: np.ndarray, frequency: float) -> np.ndarray:
 # m-sequence channel probe.
 # ──────────────────────────────────────────────────────────────────────
 
+#: Relative tolerance within which ``sample_rate / chips_per_sec`` counts as
+#: a whole number of samples per chip: a chip rate computed as
+#: ``sample_rate / m`` divides back to within a few ULP of ``m``, not onto it.
+_WHOLE_CHIP_RTOL = 1e-9
+
+
+def _samples_per_chip(sample_rate: float, chips_per_sec: float):
+    """The whole number of samples in one chip, ``round(sample_rate /
+    chips_per_sec)``, or ``None`` when the ratio is not within
+    ``_WHOLE_CHIP_RTOL`` of a whole number."""
+    ratio = sample_rate / chips_per_sec
+    m = round(ratio)
+    return m if m >= 1 and abs(ratio - m) <= _WHOLE_CHIP_RTOL * m else None
+
+
 def bpsk_modulate(
-    s_bipolar: np.ndarray, fc: float, sample_rate: float, chips_per_sec: float
+    chips: np.ndarray, fc: float, *, sample_rate: float, chips_per_sec: float
 ) -> np.ndarray:
     """
     Encode binary sequence as Binary Phase Shift Keying (BPSK) signal.
 
     Parameters
     ----------
-    s_bipolar : ndarray
+    chips : ndarray
         Binary source sequence (+1/-1 values)
     fc : float
         Carrier frequency in Hz
@@ -686,7 +720,7 @@ def bpsk_modulate(
     >>> fc = 12000  # 12 kHz carrier
     >>> sample_rate = 48000  # 48 kHz sample rate
     >>> chips_per_sec = 3000  # 3k chips/sec
-    >>> s = bpsk_modulate(bits, fc, sample_rate, chips_per_sec)
+    >>> s = bpsk_modulate(bits, fc, *, sample_rate, chips_per_sec)
 
     References
     ----------
@@ -696,22 +730,22 @@ def bpsk_modulate(
         sample_rate, "bpsk_modulate", "sample_rate", " Hz")
     chips_per_sec = require_positive_finite_scalar(
         chips_per_sec, "bpsk_modulate", "chips_per_sec", " chips/s")
-    samples_per_chip = int(sample_rate / chips_per_sec)
+    samples_per_chip = _samples_per_chip(sample_rate, chips_per_sec)
 
-    if sample_rate / chips_per_sec != samples_per_chip:
+    if samples_per_chip is None:
         raise ConfigurationError(
             "bpsk_modulate: samples_per_chip must be an integer; got "
             f"sample_rate/chips_per_sec = {sample_rate:g}/{chips_per_sec:g} "
-            f"= {sample_rate / chips_per_sec:g}")
+            f"= {sample_rate / chips_per_sec:g}.")
 
     require_below_nyquist(fc, sample_rate, "bpsk_modulate", "fc",
                           "the sampled carrier aliases")
 
-    chips = np.asarray(s_bipolar)
+    chips = np.asarray(chips)
     invalid = chips[~np.isin(chips, (-1, 1))]
     if invalid.size:
         raise ConfigurationError(
-            f"bpsk_modulate: s_bipolar must contain only +1/-1 chips; got "
+            f"bpsk_modulate: chips must contain only +1/-1 chips; got "
             f"{np.unique(invalid)[:5]}. A 0-valued chip emits silence, "
             f"turning BPSK into on-off keying — map bits first with "
             f"s = 1 - 2*bits.")
@@ -722,116 +756,146 @@ def bpsk_modulate(
 
     # Outer product: each column is one chip, so a column-major (Fortran-order)
     # flatten concatenates the chips in sequence order.
-    s_matrix = np.outer(sinwave, s_bipolar)
+    s_matrix = np.outer(sinwave, chips)
     s = s_matrix.flatten(order="F")
 
     return s
 
 
-def mseq(m: int) -> np.ndarray:
-    """
-    Generate an m-sequence (maximum-length sequence).
+# Feedback coefficients of primitive polynomials, one per register length:
+# the table of Acoustics-Toolbox ``Matlab/waveforms/mseq.m`` (Michael B.
+# Porter, April 2000), which credits Proakis, *Digital Communications*,
+# p. 433. Entry ``c[j] = 1`` feeds register stage ``j`` back, so a sequence
+# obeys ``a[n + m] = XOR_j c[j] a[n + j]``, i.e. feedback tap positions
+# ``m - j`` in the ``a[n] = XOR_t a[n - t]`` form ``m_sequence`` takes.
+_MSEQ_FEEDBACK = {
+    2: [1, 1],
+    3: [1, 0, 1],
+    4: [1, 0, 0, 1],
+    5: [1, 0, 0, 1, 0],
+    6: [1, 0, 0, 0, 0, 1],
+    7: [1, 0, 0, 0, 0, 0, 1],
+    8: [1, 0, 0, 0, 1, 1, 1, 0],
+    9: [1, 0, 0, 0, 0, 1, 0, 0, 0],
+    10: [1, 0, 0, 0, 0, 0, 0, 1, 0, 0],
+    11: [1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+    12: [1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1],
+    13: [1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1],
+    14: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+    15: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+}
 
-    M-sequences are pseudorandom binary sequences with excellent
-    autocorrelation properties, useful for coded waveforms in sonar.
+
+def m_sequence(n_register: int, taps=None) -> np.ndarray:
+    """
+    Maximal-length sequence (m-sequence) of ``2**n_register - 1`` chips ±1.
+
+    M-sequences are pseudorandom binary sequences with a two-valued periodic
+    autocorrelation, used as coded sonar probes and as spreading codes.
 
     Parameters
     ----------
-    m : int
-        Sequence order (2 ≤ m ≤ 15).
-        Generates sequence of length 2^m - 1.
+    n_register : int
+        Number of shift-register stages ``n``; the sequence has ``2**n - 1``
+        chips. With ``taps=None``, ``2 <= n <= 15``.
+    taps : sequence of int, optional
+        1-based feedback tap positions of the register, the recursion
+        ``a[k] = XOR over t in taps of a[k - t]`` — e.g. ``[5, 2]`` for
+        ``x**5 + x**3 + 1``. It must include ``n_register`` and describe a
+        primitive polynomial; a tap set whose period falls short of
+        ``2**n - 1`` is refused. ``None`` takes the primitive polynomial of
+        the Acoustics-Toolbox ``mseq.m`` table for that length.
 
     Returns
     -------
-    s : ndarray
-        M-sequence as +1/-1 values. Length = 2^m - 1
+    ndarray
+        ``2**n_register - 1`` chips of ±1 (float).
 
     Notes
     -----
-    Uses shift register with feedback based on primitive polynomials.
-    The resulting sequence has:
-    - Length N = 2^m - 1
+    The register starts from the one seed every call uses — ``a[0] = 1``,
+    ``a[1..n-1] = 0`` — and the chips are ``a[1..2**n - 1]``, so the same
+    ``(n_register, taps)`` always gives the same sequence, and a spread and a
+    despread built from one call pair line up. The resulting sequence has:
+
+    - Length N = 2^n - 1
     - Two-valued periodic autocorrelation (N at zero lag, -1 at every other
       lag) — ideal for matched filtering
-    - Balanced to within one symbol: 2^(m-1) chips of -1 and 2^(m-1)-1 of +1,
+    - Balanced to within one symbol: 2^(n-1) chips of -1 and 2^(n-1)-1 of +1,
       so the sequence sums to -1 rather than 0
 
     Chips use the standard BPSK mapping ``s = 1 - 2*bit`` (bit 0 → +1,
-    bit 1 → -1), the same polarity as :func:`uacpy.comms.modulate.m_sequence`.
-    The two are **not interchangeable across a spread/despread pair**: they
-    start from different register seeds (``[1, 0, 0, 0, 0]`` here,
-    ``(1,) * n`` there), so even the tap sets that generate the same cycle
-    produce a shift of it. Despreading one function's output with the other's
-    sequence lands on the m-sequence's off-peak correlation ``-1/N`` — sign
-    inverted and collapsed by a factor of ``N`` (measured ``-0.032`` against
-    ``1.0`` at ``n = 5``). Use the same generator at both ends.
-
-    Translated from ``third_party/Acoustics-Toolbox/Matlab/waveforms/mseq.m``
-    (Michael B. Porter, April 2000); the feedback-coefficient table and the
-    shift recursion below are that file's, which credits Proakis, *Digital
-    Communications*, p. 433. The MATLAB original maps the opposite way
-    (``s(s == 0) = -1``, i.e. bit 1 → +1), so this sequence is the negative
-    of ``mseq.m``'s — the autocorrelation is unaffected.
+    bit 1 → -1). The MATLAB ``mseq.m`` maps the opposite way
+    (``s(s == 0) = -1``, i.e. bit 1 → +1), so this sequence is the negative of
+    ``mseq.m``'s — the autocorrelation is unaffected.
 
     Examples
     --------
-    >>> # Generate m-sequence of order 5
-    >>> s = mseq(5)
+    >>> s = m_sequence(5)
     >>> print(f"Length: {len(s)} (should be 2^5-1 = 31)")
     Length: 31 (should be 2^5-1 = 31)
-
-    >>> # Check autocorrelation
-    >>> shat = np.fft.fft(s)
-    >>> scorr = np.real(np.fft.ifft(shat * np.conj(shat)))
+    >>> code = m_sequence(5, [5, 2])      # the same polynomial, explicit taps
     """
-    if m < 2 or m > 15 or m != int(m):
+    try:
+        n = int(n_register)
+    except (TypeError, ValueError):
+        n = None
+    if n is None or n != n_register or n < 2:
         raise ConfigurationError(
-            f"mseq: m must be an integer between 2 and 15; got {m!r}")
-
-    m = int(m)
-
-    # Feedback coefficients for primitive polynomials
-    coefficients = {
-        2: [1, 1],
-        3: [1, 0, 1],
-        4: [1, 0, 0, 1],
-        5: [1, 0, 0, 1, 0],
-        6: [1, 0, 0, 0, 0, 1],
-        7: [1, 0, 0, 0, 0, 0, 1],
-        8: [1, 0, 0, 0, 1, 1, 1, 0],
-        9: [1, 0, 0, 0, 0, 1, 0, 0, 0],
-        10: [1, 0, 0, 0, 0, 0, 0, 1, 0, 0],
-        11: [1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0],
-        12: [1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1],
-        13: [1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1],
-        14: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1],
-        15: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-    }
-
-    c = np.array(coefficients[m])
-    length = 2**m - 1
-
-    # Successive shifts with feedback. Any non-zero seed traverses the same
-    # cycle (differing only by a shift); all-zero is the LFSR's absorbing state
-    # and would emit zeros forever, so it is the one seed that is excluded.
-    seed = np.zeros(m)
-    seed[0] = 1
-    s = np.zeros(length)
-
-    for ii in range(length):
-        out = np.zeros(m)
-        out[: m - 1] = seed[1:m]
-        out[m - 1] = np.mod(np.dot(c, seed), 2)  # Addition mod 2
-        seed = out
-        s[ii] = out[0]
-
+            f"m_sequence: n_register must be an integer >= 2; got "
+            f"{n_register!r}.")
+    if taps is None:
+        if n > 15:
+            raise ConfigurationError(
+                f"m_sequence: the preset table covers n_register 2..15; got "
+                f"{n_register!r}. Pass taps= for a longer register.")
+        tap_list = [n - j for j, c in enumerate(_MSEQ_FEEDBACK[n]) if c]
+    else:
+        tap_list = [int(t) for t in taps]
+        if not tap_list or any(t < 1 or t > n for t in tap_list):
+            raise ConfigurationError(
+                f"m_sequence: taps must be 1-based positions in 1..{n}; "
+                f"got {taps!r}.")
+        if len(set(tap_list)) != len(tap_list):
+            raise ConfigurationError(
+                f"m_sequence: repeated tap position in {taps!r}; a tap XORed "
+                "with itself cancels, leaving the register with no feedback.")
+    length = (1 << n) - 1
+    bits = np.zeros(length + 1, dtype=np.int8)
+    bits[0] = 1
+    for k in range(n, length + 1):
+        fb = 0
+        for t in tap_list:
+            fb ^= bits[k - t]
+        bits[k] = fb
+    # The state (a[k-n+1..k]) returns to the seed state after one period
+    # only for a primitive polynomial. A non-primitive one cycles through a
+    # subset of the states: the output still has the right length and
+    # alphabet, and nothing looks wrong until a correlation is far off.
+    ext = np.concatenate([bits, np.zeros(n, dtype=np.int8)])
+    for k in range(length + 1, length + 1 + n):
+        fb = 0
+        for t in tap_list:
+            fb ^= ext[k - t]
+        ext[k] = fb
+    windows = np.lib.stride_tricks.sliding_window_view(ext[1:], n)
+    recur = np.flatnonzero(np.all(windows == ext[:n], axis=1))
+    period = int(recur[0]) + 1 if recur.size else None
+    if period != length:
+        raise ConfigurationError(
+            f"m_sequence: taps {taps!r} on a {n}-stage register give a "
+            f"period of {period if period is not None else '>' + str(length)}, "
+            f"not the maximal {length} — the feedback polynomial is not "
+            f"primitive, so the output is not an m-sequence and its off-peak "
+            f"autocorrelation is far above 1.",
+            remediation=f"Pass taps=None for the preset primitive polynomial "
+                        f"(n_register <= 15), or a known primitive tap set "
+                        f"(e.g. [5,2], [5,3], [6,1], [6,5], [7,6]).")
     # Standard BPSK mapping: bit 0 -> +1, bit 1 -> -1.
-    s = 1.0 - 2.0 * s
-
-    return s
+    return 1.0 - 2.0 * bits[1:].astype(float)
 
 
-def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) -> np.ndarray:
+def make_mseq_probe(freq_min: float, freq_max: float, *, sample_rate: float, duration: float) -> np.ndarray:
     """
     Generate an m-sequence probe signal with BPSK modulation.
 
@@ -840,13 +904,13 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
 
     Parameters
     ----------
-    fmin : float
+    freq_min : float
         Minimum frequency in Hz
-    fmax : float
+    freq_max : float
         Maximum frequency in Hz
     sample_rate : float
         Sampling rate in Hz
-    T_tot : float
+    duration : float
         Total duration in seconds
 
     Returns
@@ -859,64 +923,91 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
     The probe consists of:
 
     1. Leader (0.2 s of zeros)
-    2. Repeated m-sequence (order 10, length 1023)
-    3. BPSK modulation at center frequency fc = (fmin + fmax) / 2
-    4. Zero-padding to T_tot
+    2. Repeated m-sequence (``m_sequence(10)``, length 1023)
+    3. BPSK modulation at center frequency fc = (freq_min + freq_max) / 2
+    4. Zero-padding to duration
 
-    Chip rate is (fmax - fmin) / 2: a rectangular chip of duration ``T_chip``
+    Chip rate is (freq_max - freq_min) / 2: a rectangular chip of duration ``T_chip``
     has a sinc spectrum whose first nulls sit at ``+/- 1/T_chip``, so a chip
-    rate of half the requested width fills ``[fmin, fmax]`` between those
+    rate of half the requested width fills ``[freq_min, freq_max]`` between those
     nulls. Output is normalized to 0.95 of full scale and is exactly
-    ``round(T_tot * sample_rate)`` samples long.
+    ``round(duration * sample_rate)`` samples long.
 
-    Raises :class:`~uacpy.core.exceptions.ConfigurationError` if ``T_tot`` is
+    Raises :class:`~uacpy.core.exceptions.ConfigurationError` if ``duration`` is
     too short to hold the leader plus one full m-sequence period — a partial
     period would lose the two-valued autocorrelation the probe exists for, so
-    increase ``T_tot`` or widen ``fmax - fmin`` to raise the chip rate.
+    increase ``duration`` or widen ``freq_max - freq_min`` to raise the chip rate.
 
     Translated from OALIB makemseq.m by mbp.
 
     Examples
     --------
     >>> # Generate 10-second probe, 1-2 kHz
-    >>> probe = make_mseq_probe(1000, 2000, 10000, 10.0)
+    >>> probe = make_mseq_probe(1000, 2000, sample_rate=10000, duration=10.0)
     >>> print(f"Probe length: {len(probe)} samples")
     Probe length: 100000 samples
     """
-    lead_time = 0.2  # seconds
+    lead_time = MSEQ_PROBE_LEAD_TIME_S
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "make_mseq_probe", "sample_rate", " Hz")
+    duration = require_positive_finite_scalar(
+        duration, "make_mseq_probe", "duration", " s")
+    if not (np.isfinite(freq_min) and np.isfinite(freq_max) and 0 <= freq_min < freq_max):
+        raise ConfigurationError(
+            f"make_mseq_probe: require 0 <= freq_min < freq_max (Hz); got "
+            f"freq_min={freq_min!r}, freq_max={freq_max!r}.")
 
     # M-sequence parameters
-    fc = 0.5 * (fmin + fmax)  # center frequency
-    chips_per_sec = 0.5 * (fmax - fmin)
+    fc = 0.5 * (freq_min + freq_max)  # center frequency
+    chips_per_sec = 0.5 * (freq_max - freq_min)
 
     # The BPSK main lobe spans fc +/- chips_per_sec, i.e. exactly
-    # [fmin, fmax], so its upper edge fc + chips_per_sec = fmax must sit
+    # [freq_min, freq_max], so its upper edge fc + chips_per_sec = freq_max must sit
     # below Nyquist.
     if fc + chips_per_sec >= sample_rate / 2:
         raise ConfigurationError(
-            f"make_mseq_probe: the carrier (fmin + fmax)/2 = {fc:g} Hz plus "
-            f"the chip-rate bandwidth (fmax - fmin)/2 = {chips_per_sec:g} Hz "
-            f"reaches {fc + chips_per_sec:g} Hz (= fmax), at or above the "
+            f"make_mseq_probe: the carrier (freq_min + freq_max)/2 = {fc:g} Hz plus "
+            f"the chip-rate bandwidth (freq_max - freq_min)/2 = {chips_per_sec:g} Hz "
+            f"reaches {fc + chips_per_sec:g} Hz (= freq_max), at or above the "
             f"Nyquist frequency sample_rate/2 = {sample_rate / 2:g} Hz, so "
             f"the sampled probe aliases.")
+    # A chip is a whole number of samples (as in bpsk.m), so the band width
+    # 2*chips_per_sec has to be 2*sample_rate/m for a whole m.
+    m = _samples_per_chip(sample_rate, chips_per_sec)
+    if m is None:
+        samples_per_chip = sample_rate / chips_per_sec
+        narrower = 2 * sample_rate / math.ceil(samples_per_chip)
+        wider = 2 * sample_rate / math.floor(samples_per_chip)
+        raise ConfigurationError(
+            f"make_mseq_probe: the band width freq_max - freq_min = "
+            f"{freq_max - freq_min:g} Hz sets a chip rate of {chips_per_sec:g} "
+            f"chips/s, which is {samples_per_chip:g} samples per chip at "
+            f"sample_rate = {sample_rate:g} Hz; a chip must be a whole number "
+            f"of samples.",
+            remediation=f"Choose freq_max - freq_min = 2*sample_rate/m for a whole m; "
+                        f"the nearest widths at this rate are {narrower:g} Hz "
+                        f"and {wider:g} Hz.")
+    # The chip rate of that whole m, which a width given as 2*sample_rate/m
+    # reaches only to within rounding.
+    chips_per_sec = sample_rate / m
 
     # Generate base m-sequence (order 10 → length 1023)
-    s_m = mseq(10)
-    s = bpsk_modulate(s_m, fc, sample_rate, chips_per_sec)
+    s_m = m_sequence(10)
+    s = bpsk_modulate(s_m, fc, sample_rate=sample_rate, chips_per_sec=chips_per_sec)
 
     # Whole m-sequence periods that fit after the leader, counted in samples so
     # the probe lands at exactly target_n. Counting the leader is what keeps the
-    # probe inside T_tot; a period is never truncated, since a partial
+    # probe inside duration; a period is never truncated, since a partial
     # m-sequence loses the two-valued autocorrelation the probe exists for.
     leader = np.zeros(int(lead_time * sample_rate))
-    target_n = int(round(T_tot * sample_rate))
+    target_n = int(round(duration * sample_rate))
     Nreps = (target_n - leader.size) // len(s)
     if Nreps < 1:
         raise ConfigurationError(
-            f"make_mseq_probe: T_tot={T_tot:g} s is too short for the "
+            f"make_mseq_probe: duration={duration:g} s is too short for the "
             f"{lead_time:g} s leader plus one m-sequence period "
             f"({len(s) / sample_rate:.3f} s at chip rate {chips_per_sec:g} chips/s). "
-            f"Increase T_tot, or widen (fmax - fmin) to raise the chip rate."
+            f"Increase duration, or widen (freq_max - freq_min) to raise the chip rate."
         )
     probe = np.tile(s, Nreps)
     probe_max = np.max(np.abs(probe))
@@ -935,44 +1026,46 @@ def make_mseq_probe(fmin: float, fmax: float, sample_rate: float, T_tot: float) 
 # ──────────────────────────────────────────────────────────────────────
 # Noise synthesis
 #
-# A realisation matching a target spectrum,
-# band-limited noise, and mixing a signal with noise at a stated SNR.
+# A realisation matching a target spectrum, and band-limited noise.
 # ──────────────────────────────────────────────────────────────────────
 
-def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
-                              n_fft=65536, sample_rate=None, interp='linear',
+def synthesize_noise_from_psd(psd, frequencies, duration=1, amplitude_factor=1, *,
+                              nfft=NOISE_SYNTH_DEFAULT_NFFT, sample_rate=None, interp='linear',
                               rng=None):
     """
     Spectral Synthesis of Random Processes.
 
     Generate a time-domain noise realisation whose one-sided PSD matches a
-    user-supplied target ``Pxx(Fxx)``. The target is resampled onto the
-    FFT-native frequency grid ``f_k = k * sample_rate / n_fft`` before synthesis,
-    so ``Fxx`` may be uniform, log-spaced, or coarse (e.g. Wenz curves).
+    user-supplied target ``psd(frequencies)``. The target is resampled onto the
+    FFT-native frequency grid ``f_k = k * sample_rate / nfft`` before synthesis,
+    so ``frequencies`` may be uniform, log-spaced, or coarse (e.g. Wenz curves).
 
     Parameters
     ----------
-    Pxx : array_like
-        One-sided power spectral density in (U/scale)**2/Hz. Length ≥ 2.
-    Fxx : array_like
+    psd : array_like
+        One-sided power spectral density in (U/amplitude_factor)**2/Hz. Length ≥ 2.
+    frequencies : array_like
         Frequency array in Hz, strictly increasing. Need not be uniform.
     duration : float
         Duration of the generated signal in seconds.
-    scale : float
+    amplitude_factor : float
         Scale factor applied to the output signal.
-    n_fft : int, optional
+    nfft : int, optional
         IFFT chunk size. Defaults to 65536; must be a power of two in
         [16, 262144] — values below 16 are reset to 65536, values above
         262144 are clamped, and non-powers of two are rounded to the
         geometrically closest power of two (nearest in log2), each with a
         warning.
     sample_rate : float, optional
-        Output sample rate in Hz. Defaults to 2*Fxx[-1].
+        Output sample rate in Hz. Defaults to 2*frequencies[-1]. Target power above
+        ``sample_rate/2`` cannot be synthesised: it is dropped with a warning
+        naming the fraction of band power lost, and a target lying entirely
+        above it raises.
     interp : {'linear', 'log', 'pchip', 'nearest'}, optional
-        How to resample ``Pxx(Fxx)`` onto the FFT-native grid. ``'log'``
-        interpolates ``log10(Pxx)`` vs ``log10(f)`` — recommended for
+        How to resample ``psd(frequencies)`` onto the FFT-native grid. ``'log'``
+        interpolates ``log10(psd)`` vs ``log10(f)`` — recommended for
         broadband PSDs spanning many decades. Frequencies outside
-        ``[Fxx[0], Fxx[-1]]`` are set to zero.
+        ``[frequencies[0], frequencies[-1]]`` are set to zero.
     rng : numpy.random.Generator, optional
         Random generator for the spectral draw. Pass a seeded generator for a
         reproducible realisation.
@@ -982,85 +1075,111 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
     t : ndarray
         Time array in seconds.
     x : ndarray
-        Generated signal array.
+        Generated signal array of ``round(duration*sample_rate)`` samples.
     sample_rate : float
         Sampling frequency in Hz — the rate the time axis is built from
-        (equal to the ``sample_rate`` argument, or ``2*Fxx[-1]`` when that
+        (equal to the ``sample_rate`` argument, or ``2*frequencies[-1]`` when that
         was omitted).
 
     Examples
     --------
     >>> import numpy as np
     >>> f = np.logspace(0, 4, 64)
-    >>> Pxx = 1e-6 / (1 + (f / 100) ** 2)
-    >>> t, x, sample_rate = synthesize_noise_from_psd(Pxx, f, duration=10,
-    ...                 n_fft=2**16, sample_rate=40_000, interp='log')
+    >>> psd = 1e-6 / (1 + (f / 100) ** 2)
+    >>> t, x, sample_rate = synthesize_noise_from_psd(psd, f, duration=10,
+    ...                 nfft=2**16, sample_rate=40_000, interp='log')
     """
-    MAX_NFFT = 262144
-
-    Pxx = np.asarray(Pxx, dtype=float)
-    Fxx = np.asarray(Fxx, dtype=float)
-    if Pxx.ndim != 1 or Fxx.shape != Pxx.shape:
+    psd = np.asarray(psd, dtype=float)
+    frequencies = np.asarray(frequencies, dtype=float)
+    if psd.ndim != 1 or frequencies.shape != psd.shape:
         raise ConfigurationError(
-            f"synthesize_noise_from_psd: Pxx and Fxx must be 1-D arrays of equal length; "
-            f"got Pxx.shape={Pxx.shape} and Fxx.shape={Fxx.shape}"
+            f"synthesize_noise_from_psd: psd and frequencies must be 1-D arrays of equal length; "
+            f"got psd.shape={psd.shape} and frequencies.shape={frequencies.shape}."
         )
-    if Pxx.size < 2:
+    if psd.size < 2:
         raise ConfigurationError(
-            f"synthesize_noise_from_psd: Pxx must have at least 2 points (got {Pxx.size})"
+            f"synthesize_noise_from_psd: psd must have at least 2 points (got {psd.size})"
         )
-    if not np.all(np.diff(Fxx) > 0):
+    if not np.all(np.diff(frequencies) > 0):
         raise ConfigurationError(
-            "synthesize_noise_from_psd: Fxx must be strictly increasing; got "
-            f"{int(np.count_nonzero(np.diff(Fxx) <= 0))} non-increasing "
-            f"step(s), first at index {int(np.argmax(np.diff(Fxx) <= 0))}")
+            "synthesize_noise_from_psd: frequencies must be strictly increasing; got "
+            f"{int(np.count_nonzero(np.diff(frequencies) <= 0))} non-increasing "
+            f"step(s), first at index {int(np.argmax(np.diff(frequencies) <= 0))}.")
 
     if sample_rate is None:
-        sample_rate = 2 * Fxx[-1]
+        sample_rate = 2 * frequencies[-1]
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "synthesize_noise_from_psd", "sample_rate", " Hz")
+    # The synthesis grid stops at sample_rate/2, so target power above it
+    # cannot be drawn: all of it is a refusal, part of it a warning naming
+    # the fraction lost.
+    nyquist = sample_rate / 2.0
+    if frequencies[0] >= nyquist:
+        raise ConfigurationError(
+            f"synthesize_noise_from_psd: frequencies spans {frequencies[0]:g}-{frequencies[-1]:g} Hz, "
+            f"entirely at or above the Nyquist frequency sample_rate/2 = "
+            f"{nyquist:g} Hz, so the realisation would be all zeros.",
+            remediation=f"Raise sample_rate above {2 * frequencies[-1]:g} Hz, or leave "
+                        f"it unset (2*frequencies[-1]).")
+    if frequencies[-1] > nyquist:
+        total = np.trapezoid(psd, frequencies)
+        above = frequencies > nyquist
+        f_above = np.concatenate(([nyquist], frequencies[above]))
+        p_above = np.concatenate(([np.interp(nyquist, frequencies, psd)], psd[above]))
+        dropped = np.trapezoid(p_above, f_above)
+        if dropped > 0:
+            warnings.warn(
+                f"synthesize_noise_from_psd: frequencies reaches {frequencies[-1]:g} Hz, above "
+                f"the Nyquist frequency sample_rate/2 = {nyquist:g} Hz; the "
+                f"target power above it ({100 * dropped / total:.3g} % of the "
+                f"band power) is dropped from the realisation. Raise "
+                f"sample_rate above {2 * frequencies[-1]:g} Hz to keep the whole band.",
+                NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
-    if n_fft is None:
-        n_fft = 65536
-    elif n_fft < 16:
+    if nfft is None:
+        nfft = NOISE_SYNTH_DEFAULT_NFFT
+    elif nfft < NOISE_SYNTH_MIN_NFFT:
         warnings.warn(
-            f"synthesize_noise_from_psd: n_fft={n_fft} is below the minimum "
-            f"16; using the default 65536 instead.",
-            UserWarning, stacklevel=2,
+            f"synthesize_noise_from_psd: nfft={nfft} is below the minimum "
+            f"{NOISE_SYNTH_MIN_NFFT}; using the default "
+            f"{NOISE_SYNTH_DEFAULT_NFFT} instead.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
-        n_fft = 65536
-    elif n_fft > MAX_NFFT:
+        nfft = NOISE_SYNTH_DEFAULT_NFFT
+    elif nfft > NOISE_SYNTH_MAX_NFFT:
         warnings.warn(
-            f"synthesize_noise_from_psd: n_fft={n_fft} above MAX_NFFT={MAX_NFFT}; "
-            f"clamping to {MAX_NFFT}.",
-            UserWarning, stacklevel=2,
+            f"synthesize_noise_from_psd: nfft={nfft} above the maximum "
+            f"{NOISE_SYNTH_MAX_NFFT}; clamping to {NOISE_SYNTH_MAX_NFFT}.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
-        n_fft = MAX_NFFT
-    if not _is_power_of_two(n_fft):
-        rounded = _closest_power_of_two(n_fft)
+        nfft = NOISE_SYNTH_MAX_NFFT
+    if not _is_power_of_two(nfft):
+        rounded = _closest_power_of_two(nfft)
         warnings.warn(
-            f"synthesize_noise_from_psd: n_fft={n_fft} is not a power of two; "
+            f"synthesize_noise_from_psd: nfft={nfft} is not a power of two; "
             f"rounding to {rounded}.",
-            UserWarning, stacklevel=2,
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
-        n_fft = rounded
+        nfft = rounded
 
-    # Interior bins of the one-sided grid: an even n_fft has n_fft//2 + 1 rfft
+    # Interior bins of the one-sided grid: an even nfft has nfft//2 + 1 rfft
     # bins, of which DC and Nyquist must be real for a real signal. Drawing a
     # complex value there would be wrong, so both are pinned to zero below and
-    # only the N = n_fft//2 - 1 interior bins are synthesised.
-    N = n_fft // 2 - 1
-    dF = sample_rate / n_fft
+    # only the N = nfft//2 - 1 interior bins are synthesised.
+    N = nfft // 2 - 1
+    dF = sample_rate / nfft
     f_grid = np.arange(1, N + 1) * dF
-    Pxx_grid = _resample_psd(Pxx, Fxx, f_grid, interp)
+    Pxx_grid = _resample_psd(psd, frequencies, f_grid, interp)
     # Per-bin variance of each complex draw below. The band power of a
-    # one-sided PSD is Pxx*dF, split evenly between +f and -f of the real
+    # one-sided PSD is psd*dF, split evenly between +f and -f of the real
     # signal, and w = (vi + i*vq)*sqrt(v) carries E|w|^2 = 2v — hence v =
-    # Pxx*dF/4. Synthesising a flat PSD and re-estimating it round-trips to
+    # psd*dF/4. Synthesising a flat PSD and re-estimating it round-trips to
     # within 0.3 %.
     v = Pxx_grid * dF / 4
 
-    chunk_size = n_fft
+    chunk_size = nfft
     overlap_size = chunk_size // 4
-    samples_needed = int(duration * sample_rate)
+    samples_needed = int(round(duration * sample_rate))
     if samples_needed < 1:
         raise ConfigurationError(
             "synthesize_noise_from_psd: duration * sample_rate must cover at "
@@ -1077,8 +1196,8 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
         vq = rng.standard_normal(N)
         w = (vi + 1j * vq) * np.sqrt(v)
         spectrum = np.concatenate(([0.0], w, [0.0]))   # DC, interior, Nyquist
-        # numpy's irfft carries a 1/n_fft; the *chunk_size undoes it, giving
-        # the unnormalised inverse DFT the v = Pxx*dF/4 calibration assumes.
+        # numpy's irfft carries a 1/nfft; the *chunk_size undoes it, giving
+        # the unnormalised inverse DFT the v = psd*dF/4 calibration assumes.
         chunk = np.fft.irfft(spectrum, chunk_size) * chunk_size
 
         # Sine/cosine crossfade rather than linear: the fade-in sin(pi/2 * u)
@@ -1100,7 +1219,7 @@ def synthesize_noise_from_psd(Pxx, Fxx, duration=1, scale=1, *,
             chunk = chunk[: samples_needed - start_idx]
             end_idx = samples_needed
 
-        x_total[start_idx:end_idx] += chunk[: end_idx - start_idx] * scale
+        x_total[start_idx:end_idx] += chunk[: end_idx - start_idx] * amplitude_factor
 
     return t_total, x_total, float(sample_rate)
 
@@ -1161,115 +1280,11 @@ def _closest_power_of_two(x):
     return 2 ** n
 
 
-def make_noise_waveform(
-    fc: float,
-    bandwidth: float,
-    duration: float,
-    sample_rate: float,
-    *,
-    rng=None
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generate bandpass-filtered Gaussian random noise waveform.
-
-    Creates a noise time series centered at a specified frequency with
-    a given bandwidth, useful for noise probes or testing.
-
-    Parameters
-    ----------
-    fc : float
-        Center frequency in Hz
-    bandwidth : float
-        Bandwidth in Hz
-    duration : float
-        Duration in seconds
-    sample_rate : float
-        Sample rate in Hz
-    rng : numpy.random.Generator, optional
-        Random generator for the white-noise draw. Pass a seeded generator for
-        a reproducible realisation.
-
-    Returns
-    -------
-    time : ndarray
-        Sample times (s), ``np.arange(N)/sample_rate``.
-    nts : ndarray
-        Noise time series, 1-D of length ``int(duration*sample_rate)``.
-
-    The ``(time, signal)`` order is the package-wide convention, shared with
-    the tonal generators (``tone_burst``, ``lfm_chirp``, ``hfm_chirp``) and
-    the channel/synthesis helpers.
-
-    Notes
-    -----
-    The algorithm:
-    1. Generate Gaussian white noise at bandwidth rate
-    2. Resample to sampling rate sample_rate
-    3. Heterodyne with carrier frequency fc
-
-    This creates bandpass noise centered at fc with the given bandwidth.
-
-    Translated from OALIB makenoise.m by mbp (27 Sept 2007)
-
-    Examples
-    --------
-    >>> # Generate 1 kHz noise, 200 Hz bandwidth, 1 second
-    >>> t, nts = make_noise_waveform(1000, 200, 1.0, 10000)
-    >>> print(f"Noise signal: {len(nts)} samples")
-    Noise signal: 10000 samples
-    """
-    bandwidth = require_positive_finite_scalar(
-        bandwidth, "make_noise_waveform", "bandwidth", " Hz")
-    duration = require_positive_finite_scalar(
-        duration, "make_noise_waveform", "duration", " s")
-    sample_rate = require_positive_finite_scalar(
-        sample_rate, "make_noise_waveform", "sample_rate", " Hz")
-    N = int(duration * sample_rate)  # number of samples
-    # Build the time axis from the same N used for resample so the carrier
-    # and the resampled noise always have matching length (np.arange(0,
-    # duration, 1/sample_rate) can yield N±1 samples from float accumulation).
-    time = np.arange(N) / sample_rate
-    N2 = int(duration * bandwidth)
-    if N < 1 or N2 < 1:
-        raise ConfigurationError(
-            f"make_noise_waveform: duration*sample_rate ({N}) and "
-            f"duration*bandwidth ({N2}) must each resolve to at least one "
-            f"sample; got duration={duration}, sample_rate={sample_rate}, "
-            f"bandwidth={bandwidth}")
-
-    # The generator side of the Nyquist split: the heterodyne below places
-    # the band at fc +/- bandwidth/2, and an edge at or above fs/2 folds
-    # back to fs - f, which returns a plausible-looking waveform centred
-    # somewhere else entirely. ``make_bandlimited_noise`` in this file refuses
-    # the same band through ``_bandpass_design``.
-    require_below_nyquist(fc + bandwidth / 2.0, sample_rate,
-                          "make_noise_waveform",
-                          "the upper band edge fc + bandwidth/2",
-                          "the band folds back to sample_rate - f and the "
-                          "noise comes out centred somewhere else")
-    if not (fc - bandwidth / 2.0 > 0.0):
-        raise ConfigurationError(
-            f"make_noise_waveform: the lower band edge fc - bandwidth/2 "
-            f"({fc - bandwidth / 2.0:g} Hz) must be > 0 Hz; a band "
-            f"straddling DC is the mirror of the same fold. Got fc={fc!r}, "
-            f"bandwidth={bandwidth!r}.")
-
-    rng = np.random.default_rng() if rng is None else rng
-    nts = rng.standard_normal(N2)  # Gaussian white noise
-
-    # Resample to sample_rate rate
-    from scipy.signal import resample
-
-    nts = resample(nts, N)
-
-    # Heterodyne with carrier
-    nts = np.sin(2 * np.pi * fc * time) * nts
-    return time, nts
-
-
-def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
+def _bandpass_design(fc: float, bandwidth: float, sample_rate: float, *,
+                     who: str):
     """4th-order Butterworth bandpass, as second-order sections, for
-    ``fc +/- bandwidth/2``.
+    ``fc +/- bandwidth/2``. ``who`` names the public function in the
+    refusal message.
 
     ``scipy.signal.butter`` requires only ``0 < Wn < 1``, so that is the sole
     constraint applied. A band whose edges fall outside the sample rate is
@@ -1285,7 +1300,7 @@ def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
     fhigh = fc + bandwidth / 2.0
     if not (0.0 < flow < fhigh < nyquist):
         raise ConfigurationError(
-            f"band {flow:g}-{fhigh:g} Hz (fc={fc:g}, bandwidth={bandwidth:g}) "
+            f"{who}: band {flow:g}-{fhigh:g} Hz (fc={fc:g}, bandwidth={bandwidth:g}) "
             f"is not realisable at sample_rate={sample_rate:g} Hz; it must sit "
             f"strictly inside 0-{nyquist:g} Hz.",
             remediation="Raise sample_rate, or move fc / narrow bandwidth so "
@@ -1293,10 +1308,9 @@ def _bandpass_design(fc: float, bandwidth: float, sample_rate: float):
         )
     # Second-order sections, not transfer-function coefficients: a narrow band
     # at a high sample rate sits at a normalised frequency of order 1e-3, where
-    # the (b, a) form loses so much precision that the response collapses. That
-    # numerical failure is what the old 0.01/0.02 normalised-frequency clamps
-    # were hiding — they kept the design away from the unstable region by
-    # silently moving the band.
+    # the (b, a) form loses so much precision that the response collapses. The
+    # sections keep that band stable where it was asked; a normalised-frequency
+    # clamp would avoid the unstable region only by silently moving the band.
     return butter(4, [flow / nyquist, fhigh / nyquist], btype='band',
                   output='sos')
 
@@ -1327,7 +1341,7 @@ def _noise_equivalent_bandwidth(sos, sample_rate: float, fc: float,
     from scipy.signal import sosfreqz
     nyquist = float(sample_rate) / 2.0
     # Ten bandwidths of skirt on each side, clipped to the real axis: for a
-    # wide band this reduces to the full [0, Nyquist] the old grid used.
+    # wide band this is the full [0, Nyquist].
     worN = np.linspace(max(0.0, fc - bandwidth / 2.0 - 10.0 * bandwidth),
                        min(nyquist, fc + bandwidth / 2.0 + 10.0 * bandwidth),
                        int(n_freq))
@@ -1336,125 +1350,19 @@ def _noise_equivalent_bandwidth(sos, sample_rate: float, fc: float,
     return float(np.trapezoid(p, f) / p.max())
 
 
-def add_noise(
-    timeseries: np.ndarray,
-    sample_rate: float,
-    source_level: float,
-    noise_level: float,
-    fc: float,
-    bandwidth: float,
-    *,
-    rng=None
-) -> np.ndarray:
-    """
-    Incorporate source level and noise into existing time series.
-
-    The receiver timeseries is assumed to be based on a 0 dB source.
-    This function scales it by the source level and adds band-limited noise.
-
-    Parameters
-    ----------
-    timeseries : ndarray
-        Clean receiver time series (normalized to 0 dB source)
-        Shape: (n_samples,) or (n_samples, n_receivers)
-    sample_rate : float
-        Sample rate in Hz
-    source_level : float
-        Source level in dB (total power)
-    noise_level : float
-        Noise amplitude in dB (power spectral density, not total power)
-    fc : float
-        Center frequency for band-limited noise in Hz
-    bandwidth : float
-        Bandwidth for band-limited noise in Hz
-    rng : numpy.random.Generator, optional
-        Random generator for the noise realisation(s). Pass a seeded generator
-        for a reproducible result.
-
-    Returns
-    -------
-    ndarray
-        Time series with source level and noise incorporated
-        Same shape as input timeseries
-
-    Notes
-    -----
-    The noise is generated as filtered Gaussian random noise with:
-    - Center frequency fc
-    - Bandwidth BW
-    - Power spectral density specified by noise_level
-
-    Total noise power = PSD + 10*log10(BW)
-
-    Examples
-    --------
-    >>> # Clean signal (0 dB reference); seeded so the example repeats
-    >>> rng = np.random.default_rng(0)
-    >>> clean_signal = rng.standard_normal(48000)
-    >>> clean_signal = clean_signal / np.max(np.abs(clean_signal))
-    >>>
-    >>> # Add 185 dB source level and 40 dB noise
-    >>> noisy = add_noise(clean_signal, 48000, 185.0, 40.0, 10000.0, 10000.0)
-
-    References
-    ----------
-    Original MATLAB code by mbp, 4/09
-    """
-    timeseries = np.asarray(timeseries, dtype=float)
-    SL = 10.0 ** (source_level / 20.0)
-
-    # Target noise RMS for a one-sided in-band PSD level ``noise_level`` (dB
-    # re Pa²/Hz):
-    #     P_total = S_target · NEB = 10^(L/10) · NEB   (Pa²)
-    #     RMS     = √P_total                            (Pa)
-    # ``make_bandlimited_noise`` returns unit-RMS noise spread over the
-    # zero-phase filter's noise-equivalent bandwidth NEB (not the nominal -3 dB
-    # ``bandwidth``), so multiplying by ``A = RMS`` puts the in-band density at
-    # exactly the requested level.
-    neb = _noise_equivalent_bandwidth(
-        _bandpass_design(fc, bandwidth, sample_rate), sample_rate,
-        fc, bandwidth)
-    A = np.sqrt(neb * 10.0 ** (noise_level / 10.0))
-
-    # Generate band-limited noise — independent realisation per receiver
-    # so cross-channel correlation is zero (required for beamforming and
-    # array-gain assertions).
-    # The noise is drawn by sample count, not by a duration: routing through
-    # seconds and back (`int((n/fs)*fs)`) returns n-1 samples for 4-7 % of
-    # lengths at every rate that is not a power of two, and the sum below
-    # would then raise a raw numpy broadcast error naming neither argument.
-    rng = np.random.default_rng() if rng is None else rng
-    n_samples = timeseries.shape[0]
-
-    if timeseries.ndim == 1:
-        noise_ts = _bandlimited_noise_samples(
-            fc, bandwidth, n_samples, sample_rate, rng=rng,
-            caller="add_noise")[1] * A
-        rts = timeseries * SL + noise_ts
-    else:
-        n_rcv = timeseries.shape[1]
-        noise_block = np.column_stack([
-            _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate,
-                                       rng=rng, caller="add_noise")[1]
-            for _ in range(n_rcv)
-        ]) * A
-        rts = timeseries * SL + noise_block
-
-    return rts
-
-
 def make_bandlimited_noise(
     fc: float,
     bandwidth: float,
     duration: float,
-    sample_rate: float,
     *,
+    sample_rate: float,
+    psd_level_dB: Optional[float] = None,
+    ref: float = REFERENCE_PRESSURE_WATER,
+    n_channels: int = 1,
     rng=None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Generate band-limited Gaussian noise.
-
-    Creates filtered Gaussian random noise centered at fc with specified bandwidth.
+    Generate band-limited Gaussian noise, unit-RMS or at an absolute level.
 
     Parameters
     ----------
@@ -1466,6 +1374,19 @@ def make_bandlimited_noise(
         Duration in seconds
     sample_rate : float
         Sample rate in Hz
+    psd_level_dB : float, optional
+        In-band one-sided power spectral density, in dB re ``ref**2``/Hz
+        (dB re 1 µPa²/Hz at the default ``ref``). ``None`` returns unit-RMS
+        noise instead.
+    ref : float, optional
+        Reference pressure (Pa) that ``psd_level_dB`` is stated against;
+        1 µPa by default, the underwater convention.
+    n_channels : int, optional
+        Number of independent realisations. ``1`` returns a 1-D record;
+        more returns ``(n_samples, n_channels)`` — the layout
+        :func:`uacpy.io.read_wav` returns — with zero expected
+        cross-correlation between columns, which is what array-gain and
+        beamforming checks need.
     rng : numpy.random.Generator, optional
         Random generator for the white-noise draw. Pass a seeded generator for
         a reproducible realisation.
@@ -1475,27 +1396,90 @@ def make_bandlimited_noise(
     time : ndarray
         Sample times (s), ``np.arange(N)/sample_rate``.
     noise : ndarray
-        Band-limited, unit-RMS noise time series, 1-D of length
-        ``int(duration*sample_rate)``.
+        ``round(duration*sample_rate)`` samples (the same count
+        ``lfm_chirp``, ``hfm_chirp`` and ``tone_burst`` return for the same
+        duration): unit RMS per channel when ``psd_level_dB`` is ``None``,
+        otherwise pressure in **Pa** whose in-band density is
+        ``psd_level_dB``.
 
     Notes
     -----
-    The noise is generated in the frequency domain and transformed to time domain.
-    This ensures precise control over the frequency content.
+    White Gaussian noise is passed through a zero-phase (forward-backward,
+    ``sosfiltfilt``) 4th-order Butterworth bandpass whose single-pass -3 dB
+    edges are ``fc ± bandwidth/2``, then scaled to unit RMS. The double pass
+    squares the power response, so ``fc ± bandwidth/2`` are the -6 dB points
+    of the result and its noise-equivalent bandwidth is about 0.90 ×
+    ``bandwidth`` (0.898 at ``fc=10`` kHz, ``bandwidth=2`` kHz,
+    ``sample_rate=48`` kHz).
+
+    With ``psd_level_dB`` the unit-RMS record is scaled by
+    ``ref * sqrt(NEB * 10**(psd_level_dB/10))``, with NEB that
+    noise-equivalent bandwidth rather than the nominal ``bandwidth`` — a
+    level computed from ``bandwidth`` would sit about 0.5 dB off. Measured:
+    ``psd_level_dB=60`` at ``fc=10`` kHz, ``bandwidth=4`` kHz, 48 kHz, 4 s
+    reads 59.995 dB re 1 µPa²/Hz on a Welch estimate over the middle of the
+    band.
+
+    Placing a received signal at a source level is a separate multiply,
+    not a job of this function: a record ``x`` computed for a 0 dB source
+    (pressure re 1 m) becomes pressure in Pa at source level ``SL`` (dB re
+    1 µPa at 1 m) as ``x * REFERENCE_PRESSURE_WATER * 10**(SL/20)``, and the
+    noise adds to that. For noise set RELATIVE to a signal's own power, use
+    :func:`uacpy.comms.awgn`; for an arbitrary spectrum at an absolute
+    level, :func:`synthesize_noise_from_psd`.
 
     Examples
     --------
-    >>> t, noise = make_bandlimited_noise(10000.0, 5000.0, 1.0, 48000.0)
+    >>> t, noise = make_bandlimited_noise(10000.0, 5000.0, 1.0, sample_rate=48000.0)
     >>> print(f"Generated {len(noise)} samples")
     Generated 48000 samples
+
+    Received chirp plus noise at 60 dB re 1 µPa²/Hz, both in Pa:
+
+    >>> rng = np.random.default_rng(0)
+    >>> _, rx = lfm_chirp(8000.0, 12000.0, 1.0, sample_rate=48000.0)
+    >>> _, n = make_bandlimited_noise(10000.0, 4000.0, 1.0, sample_rate=48000.0,
+    ...                               psd_level_dB=60.0, rng=rng)
+    >>> noisy = rx * 1e-6 * 10 ** (150.0 / 20) + n
     """
-    return _bandlimited_noise_samples(
-        fc, bandwidth, int(duration * sample_rate), sample_rate,
-        rng=rng, caller="make_bandlimited_noise")
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "make_bandlimited_noise", "sample_rate", " Hz")
+    duration = require_positive_finite_scalar(
+        duration, "make_bandlimited_noise", "duration", " s")
+    n_samples = int(round(duration * sample_rate))
+    channels = int(n_channels)
+    if channels != n_channels or channels < 1:
+        raise ConfigurationError(
+            f"make_bandlimited_noise: n_channels must be a positive integer; "
+            f"got {n_channels!r}.")
+    if psd_level_dB is None:
+        scale = 1.0
+    else:
+        if not np.isfinite(psd_level_dB):
+            raise ConfigurationError(
+                f"make_bandlimited_noise: psd_level_dB must be finite; got "
+                f"{psd_level_dB!r}.")
+        ref = require_positive_finite_scalar(
+            ref, "make_bandlimited_noise", "ref", " Pa")
+        neb = _noise_equivalent_bandwidth(
+            _bandpass_design(fc, bandwidth, sample_rate,
+                             who="make_bandlimited_noise"),
+            sample_rate, fc, bandwidth)
+        scale = ref * np.sqrt(neb * 10.0 ** (psd_level_dB / 10.0))
+    rng = np.random.default_rng() if rng is None else rng
+    # One independent unit-RMS draw per channel, in column order, so a
+    # seeded multichannel record is reproducible column by column.
+    draws = [_bandlimited_noise_samples(
+        fc, bandwidth, n_samples, sample_rate, rng=rng,
+        who="make_bandlimited_noise") for _ in range(channels)]
+    time = draws[0][0]
+    if channels == 1:
+        return time, draws[0][1] * scale
+    return time, np.column_stack([d[1] for d in draws]) * scale
 
 
 def _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate, *,
-                               rng=None, caller):
+                               rng=None, who):
     """``(time, noise)`` of exactly ``n_samples`` band-limited unit-RMS samples.
 
     The sample count is the argument rather than a duration because
@@ -1505,13 +1489,13 @@ def _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate, *,
     of its own then hits a raw numpy broadcast error.
     """
     from scipy.signal import sosfiltfilt
-    sos = _bandpass_design(fc, bandwidth, sample_rate)
+    sos = _bandpass_design(fc, bandwidth, sample_rate, who=who)
     # sosfiltfilt pads by 3*(2*n_sections+1) - 1 and refuses a shorter signal
     # with a bare ValueError naming only `padlen`.
     padlen = 3 * (2 * len(sos) + 1) - 1
     if n_samples <= padlen:
         raise ConfigurationError(
-            f"{caller}: {n_samples} sample(s) is too short for the "
+            f"{who}: {n_samples} sample(s) is too short for the "
             f"zero-phase bandpass, which pads by {padlen} samples on each "
             f"end; it needs more than {padlen}. Lengthen the record or "
             f"raise the sample rate.")
@@ -1521,154 +1505,11 @@ def _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate, *,
     filtered_noise = sosfiltfilt(sos, noise)
 
     # Normalise to unit RMS so callers can scale by the target RMS
-    # directly (e.g. RMS = √(BW · 10^(PSD_dB/10)) for a target one-sided
-    # PSD level). Filtfilt's double-pass + Butterworth rolloff make the
+    # directly (make_bandlimited_noise uses RMS = √(NEB · 10^(PSD_dB/10)) for
+    # a target one-sided PSD level). Filtfilt's double-pass + Butterworth rolloff make the
     # post-filter variance filter-shape-dependent; unit-RMS removes that.
     rms = float(np.std(filtered_noise))
     if rms > 0:
         filtered_noise = filtered_noise / rms
 
     return time, filtered_noise
-
-
-def fourier_synthesis(
-    pressure_freq: np.ndarray,
-    frequencies: np.ndarray,
-    source_spectrum: Optional[np.ndarray] = None,
-    Tstart: float = 0.0
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Fourier synthesis to make time series from frequency-domain transfer function.
-
-    Converts frequency-domain pressure field to time domain using inverse FFT,
-    optionally weighted by a source spectrum. Direct translation of AT's
-    ``stack.m`` (raw-DFT scaling, output grid = the input frequency grid)
-    for working with externally produced spectra; model results should use
-    ``Field.synthesize_time_series`` / ``Field.to_time_trace``, which
-    handle bin placement, windowing and grid-independent amplitude.
-
-    Parameters
-    ----------
-    pressure_freq : ndarray
-        Frequency-domain pressure field
-        Shape: (n_freq, n_depths, n_ranges) or (n_freq, n_receivers)
-    frequencies : ndarray
-        Frequency vector in Hz
-    source_spectrum : ndarray, optional
-        Source spectrum (complex) at frequencies in frequencies
-        If None, assumes unit spectrum (impulse response)
-    Tstart : float, optional
-        Starting time offset in seconds (default: 0.0)
-
-    Returns
-    -------
-    time : ndarray
-        Time vector in seconds
-    rmod : ndarray
-        Time-domain received signal
-        Shape matches input pressure_freq with frequency dim converted to time
-
-    Notes
-    -----
-    The process:
-    1. Apply time-shift via phase rotation: exp(i * 2*pi * Tstart * f)
-    2. Weight by source spectrum if provided
-    3. Inverse FFT to convert to time domain
-    4. Scale by 2 and take real part (conjugate symmetry)
-
-    The time sampling is determined by the frequency spacing:
-    - deltaf = frequencies[1] - frequencies[0]
-    - Tmax = 1 / deltaf
-    - deltat = Tmax / Nfreq
-
-    The output is a *baseband* trace when the grid starts above DC. The IFFT
-    runs over the supplied bins with bin 0 at DC, so a band starting at
-    ``frequencies[0]`` comes back demodulated by ``frequencies[0]`` at a rate
-    of ``Nfreq * deltaf``: a Gaussian centred at 150 Hz on a 100-200 Hz grid
-    peaks at 50 Hz in the output spectrum. ``stack.m`` leaves its heterodyne
-    back to the base frequency commented out, and this translation follows it.
-    ``Tstart`` is a time-origin shift only — it rotates the phase and relabels
-    the axis, and does not move the spectrum — so for a passband waveform use
-    ``Field.synthesize_time_series`` / ``Field.to_time_trace`` instead.
-
-    Examples
-    --------
-    >>> # Generate frequency-domain transfer function
-    >>> freqs = np.linspace(10, 1000, 100)
-    >>> rng = np.random.default_rng(0)
-    >>> H_freq = (rng.standard_normal((100, 50, 20))
-    ...           + 1j * rng.standard_normal((100, 50, 20)))
-    >>>
-    >>> # Convert to time domain (impulse response)
-    >>> t, h_time = fourier_synthesis(H_freq, freqs)
-    >>>
-    >>> # With source spectrum
-    >>> s_hat = np.exp(-(freqs - 500)**2 / (2*100**2))  # Gaussian spectrum
-    >>> t, r_time = fourier_synthesis(H_freq, freqs, source_spectrum=s_hat)
-
-    References
-    ----------
-    Original MATLAB code: stack.m by mbp, 9/96
-    Updated 2014 for compatibility with current file formats
-    """
-    Nfreq = len(frequencies)
-    original_shape = pressure_freq.shape
-
-    # Reshape to (Nfreq, -1) for processing. ``.copy()`` so the in-place
-    # multiplications below do not mutate the caller's input through the
-    # reshape view.
-    # astype(complex) rather than .copy(): the in-place phase rotations
-    # below assign complex values, and on a real-dtype array numpy keeps
-    # only the real part (a ComplexWarning, not an error), silently
-    # discarding the rotation.
-    if pressure_freq.ndim == 1:
-        pressure_work = pressure_freq.reshape(-1, 1).astype(complex)
-    else:
-        n_receivers = np.prod(original_shape[1:])
-        pressure_work = pressure_freq.reshape(
-            Nfreq, n_receivers).astype(complex)
-    if Tstart != 0.0:
-        for irec in range(pressure_work.shape[1]):
-            pressure_work[:, irec] = (pressure_work[:, irec] *
-                                      np.exp(1j * 2 * np.pi * Tstart * frequencies))
-    if len(frequencies) > 0 and frequencies[0] > 0:
-        warnings.warn(
-            f"fourier_synthesis: frequencies[0]={frequencies[0]:.3g} Hz > 0. "
-            "The IFFT places bin 0 at DC, so the returned trace is the "
-            "complex envelope demodulated by frequencies[0] — a "
-            f"{frequencies[0]:.3g} Hz band start puts a component at f back "
-            f"at f-{frequencies[0]:.3g} Hz — sampled at Nfreq*df, not the "
-            "passband waveform. This is stack.m's behaviour (its heterodyne "
-            "back to the base frequency is commented out) and is what the "
-            "raw-DFT route returns; Tstart only moves the time origin and "
-            "does not re-modulate. For a passband trace use "
-            "Field.synthesize_time_series / Field.to_time_trace.",
-            UserWarning, stacklevel=2,
-        )
-
-    if source_spectrum is not None:
-        for irec in range(pressure_work.shape[1]):
-            pressure_work[:, irec] = pressure_work[:, irec] * source_spectrum
-
-    rmod_work = np.fft.ifft(pressure_work, n=Nfreq, axis=0)
-
-    # stack.m zeroes the negative half of the spectrum before this transform,
-    # so the conjugate-symmetric partner of every bin is missing: doubling the
-    # real part restores the full real signal.
-    rmod_work = 2 * np.real(rmod_work)
-
-    if pressure_freq.ndim == 1:
-        rmod = rmod_work.flatten()
-    else:
-        new_shape = (Nfreq,) + original_shape[1:]
-        rmod = rmod_work.reshape(new_shape)
-    deltaf = frequencies[1] - frequencies[0] if len(frequencies) > 1 else 1.0
-    Tmax = 1 / deltaf
-    deltat = Tmax / Nfreq
-    # Anchor the output time axis at ``Tstart`` so the IFFT trace lines
-    # up with absolute travel time when the caller passes r/c0 (or any
-    # other origin). Tstart=0.0 (default) reproduces the original
-    # source-local axis.
-    time = Tstart + np.linspace(0.0, Tmax - deltat, Nfreq)
-
-    return time, rmod

@@ -3,161 +3,118 @@ Green's function reader for SCOOTER (and SPARC snapshot mode).
 
 The wavenumber-domain Green's function file is the SHD-format binary written
 by SCOOTER (``scooter.f90``) or SPARC in snapshot mode (``sparc.f90``).
-The Hankel/Fourier transform here mirrors ``Acoustics-Toolbox/Matlab/Scooter/
-fieldsco.m`` — the canonical reference implementation maintained by Porter.
+:func:`read_grn_file` parses it into a
+:class:`~uacpy.core.results.GreensFunction`, whose methods do the
+Hankel/Fourier transform that ``Acoustics-Toolbox/Matlab/Scooter/fieldsco.m``
+does.
 
 Convention summary
 ------------------
-* SCOOTER — phase speed vector ``cVec`` is stored at the highest frequency
-  (``scooter.f90:79``); per-frequency wavenumbers are recovered as
-  ``k(f) = 2π·f/cVec``.
-* SPARC snapshot — the wavenumber grid is **frequency-independent** so
-  ``cVec`` is mapped using the source frequency ``freq0`` from the GRN
-  header (``fieldsco.m:100-102``); ``freqVec`` actually stores the output
-  *time* vector (``sparc.f90:320``), not frequencies.
+* SCOOTER — the record-4 vector holds the frequencies, and per-frequency
+  wavenumbers are recovered from the stored phase-speed grid as
+  ``k(f) = 2π·f/c``.
+* SPARC snapshot — the record-4 vector holds the output *times*
+  (``sparc.f90:320``), not frequencies, and the wavenumber grid is
+  **frequency-independent**: it maps through the source frequency ``freq0``
+  of the header (``fieldsco.m:100-102``).
 
-We detect SPARC by the ``'SPARC'`` prefix in the title (set at
+A file is a SPARC snapshot when its title starts with ``'SPARC'`` (set at
 ``sparc.f90:84``).
 """
 
-import os
-import warnings
-
 import numpy as np
 from pathlib import Path
-from typing import Union, Dict, Any, Optional
+from typing import Union
 
-from uacpy.core.results import Field
-# The wavenumber transform, its phase-speed taper and the two range guards
-# live in core.acoustics.wavenumber, where a user can reach them; these
-# names keep this module's own call sites unchanged.
-from uacpy.core.acoustics.wavenumber import (  # noqa: F401
-    _hankel_transform, _hanning_taper, _warn_zero_ranges, _zero_range_mask)
+from uacpy.core.results import GreensFunction
 from uacpy.io._fortran_helpers import (
-    detect_endian, require_model_output, typed_format_error,
+    DirectAccessFile, _bound_counts, require_model_output, typed_format_error,
 )
-from uacpy.core.exceptions import ConfigurationError, FileFormatError
+from uacpy.io.oalib_reader import read_shd_header
+from uacpy.core.exceptions import FileFormatError
 
 
 @typed_format_error
-def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
+def read_grn_file(filepath: Union[str, Path]) -> GreensFunction:
     """
     Read a SCOOTER / SPARC Green's function file (``.grn``).
 
     The format is the same Fortran direct-access binary as ``.shd`` (record
     length stored in 4-byte words; see ``misc/RWSHDFile.f90``).
 
+    Parameters
+    ----------
+    filepath : str or Path
+        The file to read.
+
     Returns
     -------
-    grn_data : dict
-        ``freq``         : float — source frequency (Hz; from REC=3 ``freq0``).
-        ``freqVec``      : ndarray — for SCOOTER, vector of frequencies; for
-                           SPARC snapshot, vector of *output times* (s).
-        ``nfreq``        : int — length of ``freqVec``.
-        ``nsd``, ``nrd`` : int — number of source / receiver depths.
-        ``nk``           : int — number of wavenumber samples.
-        ``sd``, ``rd``   : ndarray — source / receiver depths (m).
-        ``cVec``         : ndarray — phase-speed grid stored in REC=10
-                           (``Pos%Rr`` slot), monotonically decreasing.
-        ``atten``        : float — stabilising attenuation written by the
-                           solver (REC=3). For SCOOTER this equals
-                           ``Δk`` unless TopOpt(7)='0' (then 0). For SPARC
-                           snapshot this is 0 (``sparc.f90:313``).
-        ``G``            : complex64 ndarray, shape ``(nfreq, nsd, nrd, nk)``.
-        ``title``        : str — title line (used to distinguish SCOOTER vs
-                           SPARC).
-        ``PlotType``     : str — ``'Green'`` for these files.
-        ``is_sparc``     : bool — True iff ``title`` starts with ``'SPARC'``.
+    GreensFunction
+        ``data`` is the complex64 ``G`` of shape ``(nfreq, nsd, nrd, nk)``
+        as stored; ``phase_speeds`` the grid in REC=10 (the ``Pos%Rr``
+        slot), monotonically decreasing; ``source_depths`` and
+        ``receiver_depths`` in metres; ``stabilizing_attenuation`` the REC=3
+        ``atten`` (for SCOOTER ``Δk`` unless TopOpt(7)='0', then 0; for a
+        SPARC snapshot 0, ``sparc.f90:313``); ``title`` the title line.
+        A SCOOTER file carries the record-4 vector as ``frequencies``; a
+        SPARC snapshot carries it as ``times`` and its REC=3 source
+        frequency ``freq0`` as ``frequencies``. ``model`` is ``'SPARC'``,
+        ``'Scooter'`` or ``''`` by the title's prefix.
     """
     filepath = Path(filepath)
     require_model_output(filepath, 'read_grn_file')
 
     with open(filepath, "rb") as f:
-        head = f.read(4)
-        f.seek(0)
-        endian = detect_endian(head, source=f'read_grn_file:{filepath.name}')
-        i4 = np.dtype(endian + 'i4')
-        f4 = np.dtype(endian + 'f4')
-        f8 = np.dtype(endian + 'f8')
+        daf = DirectAccessFile(f, source=f'read_grn_file:{filepath.name}')
+        f4, f8 = daf.f4, daf.f8
 
-        # Record 1: recl (int32, in 4-byte words) + title (80 chars)
-        recl = int(np.fromfile(f, dtype=i4, count=1)[0])
-        title = f.read(80).decode("ascii", errors="ignore").strip()
-
-        f.seek(4 * recl, 0)
-
-        # Record 2: PlotType (10 chars)
-        PlotType = f.read(10).decode("ascii", errors="ignore").strip()
-
-        f.seek(2 * 4 * recl, 0)
-
-        # Record 3: 7 int32 + freq0 (float64) + atten (float64)
-        nfreq = int(np.fromfile(f, dtype=i4, count=1)[0])
-        np.fromfile(f, dtype=i4, count=3)       # Ntheta, NSx, NSy — unused
-        nsd = int(np.fromfile(f, dtype=i4, count=1)[0])   # NSz
-        nrd = int(np.fromfile(f, dtype=i4, count=1)[0])   # NRz
-        nk = int(np.fromfile(f, dtype=i4, count=1)[0])    # NRr — number of k samples
-        freq0 = float(np.fromfile(f, dtype=f8, count=1)[0])
-        atten = float(np.fromfile(f, dtype=f8, count=1)[0])
+        # Records 1-3: title, PlotType, then Nfreq Ntheta NSx NSy NSz NRz NRr
+        # with freq0 and atten; Ntheta, NSx and NSy are unused here.
+        header = read_shd_header(daf)
+        title = header.title
+        nfreq, _ntheta, _nsx, _nsy, nsd, nrd, nk = header.counts
+        freq0, atten = header.freq0, header.atten
 
         # File-size-aware sanity bound on the header counts before any
         # vector or the (nfreq, nsd, nrd, nk) cube is sized off them. A
         # corrupt/hostile header (e.g. nk=0x3ffffff0, or all counts = 1000)
         # would otherwise drive a multi-GB/TB allocation before a single
         # data record is validated. The G cube holds nfreq*nsd*nrd*nk
-        # complex samples, each stored on disk as 2 float32 (8 bytes), so
-        # the element count cannot exceed file_size // 8.
-        f.seek(0, 2)
-        file_size = f.tell()
-        for _name, _val in (("nfreq", nfreq), ("nsd", nsd),
-                            ("nrd", nrd), ("nk", nk)):
-            if _val < 0:
-                raise FileFormatError(
-                    f"read_grn_file: negative header count {_name}={_val}."
-                )
-        if nfreq * nsd * nrd * nk > file_size // 8:
-            raise FileFormatError(
-                f"read_grn_file: header counts "
-                f"(nfreq={nfreq}, nsd={nsd}, nrd={nrd}, nk={nk}) imply "
-                f"{nfreq * nsd * nrd * nk} complex samples, implausible for "
-                f"a {file_size}-byte file."
-            )
-
-        f.seek(3 * 4 * recl, 0)
+        # complex samples, each stored on disk as 2 float32 (8 bytes).
+        _bound_counts(str(filepath), daf.file_size, 8,
+                      nfreq=nfreq, nsd=nsd, nrd=nrd, nk=nk)
 
         # Record 4: frequency vector (or time vector for SPARC snapshot)
-        freqVec = np.fromfile(f, dtype=f8, count=nfreq)
+        freqVec = daf.vector(3, f8, nfreq)
 
-        # Records 5-7: theta / sx / sy — skipped
-        f.seek(7 * 4 * recl, 0)
-
+        # Records 5-7: theta / sx / sy — skipped.
         # Records 8-10 hold Pos%Sz, Pos%Rz and Pos%Rr (RWSHDFile.f90:111-114).
         # The depth vectors are REAL(KIND=4) and the range vector — whose slot
         # the phase speeds occupy — is REAL(KIND=8)
         # (SourceReceiverPositions.f90:23-25); the record-length formula counts
         # them the same way, ``Pos%NSz, Pos%NRz, 2 * Pos%NRr`` words
         # (RWSHDFile.f90:100).
-
-        # Record 8: Source depths
-        sd = np.fromfile(f, dtype=f4, count=nsd)
-
-        f.seek(8 * 4 * recl, 0)
-
-        # Record 9: Receiver depths
-        rd = np.fromfile(f, dtype=f4, count=nrd)
-
-        f.seek(9 * 4 * recl, 0)
-
-        # Record 10: phase-speed vector, Nk entries
-        cVec = np.fromfile(f, dtype=f8, count=nk)
+        sd = daf.vector(7, f4, nsd)          # Record 8: source depths
+        rd = daf.vector(8, f4, nrd)          # Record 9: receiver depths
+        cVec = daf.vector(9, f8, nk)         # Record 10: phase speeds, Nk
+        # A vector cut short by the end of the file would otherwise reach
+        # the GreensFunction as axes that disagree with the header counts.
+        for what, record, got, want in (
+                ('frequency/time', 4, freqVec, nfreq),
+                ('source-depth', 8, sd, nsd),
+                ('receiver-depth', 9, rd, nrd),
+                ('phase-speed', 10, cVec, nk)):
+            if got.size < want:
+                raise FileFormatError(
+                    f"read_grn_file: truncated {what} record {record} "
+                    f"(expected {want} values, got {got.size})")
 
         # Records 11+: complex Green's function, one record per
         # (freq, source_depth, receiver_depth) tuple, receiver depth fastest —
         # ``REC = 10 + (ifreq-1)*NSz*NRz + (iS-1)*NRz + iR`` (scooter.f90:588).
-        # ``irec`` is the 0-based record index used by every seek above
-        # (``irec * 4 * recl`` is the head of record ``irec + 1``), so starting
-        # at 9 and incrementing before the first seek lands the first slab on
-        # record 11.
+        # ``irec`` is the 0-based record index (record ``irec + 1`` in the
+        # Fortran count), so starting at 9 and incrementing before the first
+        # read lands the first slab on record 11.
         #
         # SPARC's snapshot indexes ``iG = (Itout-1)*Pos%NRz + ir``
         # (sparc.f90:286-287) — output time stands in for the frequency axis
@@ -184,8 +141,7 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
             for isd in range(nsd):
                 for ird in range(nrd):
                     irec += 1
-                    f.seek(irec * 4 * recl, 0)
-                    data = np.fromfile(f, dtype=f4, count=2 * nk)
+                    data = daf.vector(irec, f4, 2 * nk)
                     if data.size < 2 * nk:
                         raise FileFormatError(
                             f"read_grn_file: truncated Green's-function record "
@@ -195,558 +151,16 @@ def read_grn_file(filepath: Union[str, Path]) -> Dict[str, Any]:
                     G[ifreq, isd, ird, :] = data[0::2] + 1j * data[1::2]
 
     is_sparc = title.upper().startswith('SPARC')
-
-    return {
-        "freq": float(freq0),
-        "freqVec": freqVec,
-        "nfreq": nfreq,
-        "nsd": nsd,
-        "nrd": nrd,
-        "nk": nk,
-        "sd": sd,
-        "rd": rd,
-        "cVec": cVec,
-        "atten": float(atten),
-        "G": G,
-        "title": title,
-        "PlotType": PlotType,
-        "is_sparc": is_sparc,
-    }
-
-
-def _wavenumbers_for_frequency(grn_data: Dict[str, Any], freq: float) -> np.ndarray:
-    """Recover the wavenumber grid the solver used at frequency ``freq``.
-
-    SCOOTER recomputes ``k`` per frequency from the same phase-speed grid
-    (``scooter.f90:127``); SPARC's wavenumber grid is constant across the
-    output-time axis so we always use the source frequency from the GRN
-    header.
-    """
-    if grn_data["is_sparc"]:
-        f_for_k = grn_data["freq"]   # source frequency
-    else:
-        f_for_k = float(freq)
-    cVec = grn_data["cVec"]
-    return 2.0 * np.pi * f_for_k / cVec
-
-
-def _stab_attenuation(grn_data: Dict[str, Any], k: np.ndarray) -> float:
-    """Stabilising attenuation to use in the integrand.
-
-    SCOOTER evaluates the FE solve on the contour ``k + i*Atten``
-    (``scooter.f90:581``), so the inverse transform has to undo that offset with
-    ``exp(+Atten*r)`` — which means using the ``Atten`` the solver actually used.
-
-    ``scooter.f90:122-125`` recomputes ``Deltak = (kMax - kMin)/(Nk - 1)`` inside
-    the frequency loop from ``kMin = omega/cHigh``, so ``Deltak`` — and hence
-    ``Atten`` — scales with frequency, while ``scooter.f90:133`` writes the header
-    only for ``ifreq == 1``. That is why ``fieldsco.m:113-115`` re-derives
-    ``Atten`` from the file's own per-frequency ``k`` vector instead of reading
-    the header, and it is right to for a broadband run.
-
-    But ``scooter.f90:130`` zeroes ``Atten`` for every frequency when
-    ``TopOpt(7:7) == '0'``, and a zero header is therefore valid at every
-    frequency. Re-deriving ``Δk`` there multiplies a Green's function computed on
-    the real axis by ``exp(+Δk*r)``, biasing TL by ``8.686*Δk*r`` dB — 6.8 dB at
-    the far receiver on the default ``rmax_multiplier = 2.0``. ``fieldsco.m`` has
-    no way to know the flag was set; uacpy wrote it, and the value the solver used
-    is in the header, so use it.
-
-    For SPARC this is 0.  For other titles the header is taken as given.
-    """
-    if grn_data["is_sparc"]:
-        return 0.0
-    title = grn_data["title"].upper()
-    header_atten = float(grn_data["atten"])
-    if title.startswith('SCOOTER') and header_atten != 0.0 and len(k) > 1:
-        return float(k[1] - k[0])
-    return header_atten
-
-
-def available_memory_bytes():
-    """Memory the host says it can still hand out, or ``None`` if unreadable.
-
-    ``MemAvailable`` first: it counts reclaimable page cache, which
-    ``SC_AVPHYS_PAGES`` does not and which is most of what reading a large
-    ``.grn`` has just consumed. Callers size their allocations against this
-    rather than a fixed constant — the same cube is nothing on a workstation
-    and fatal on a laptop.
-    """
-    try:
-        with open('/proc/meminfo', 'r') as fh:
-            for line in fh:
-                if line.startswith('MemAvailable:'):
-                    return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    try:
-        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_AVPHYS_PAGES')
-    except (ValueError, OSError, AttributeError):
-        return None
-
-
-def _grn_pressure_slice(
-    grn_data: Dict[str, Any],
-    ranges: np.ndarray,
-    ifreq: int,
-    isd: int,
-    *,
-    source_type: str,
-    spectrum: str,
-    cmin: Optional[float],
-    cmax: Optional[float],
-) -> np.ndarray:
-    """Transform one (frequency, source_depth) slab to the range domain."""
-    G_src = grn_data["G"][ifreq, isd, :, :]                    # (nrd, nk)
-    freq_i = float(grn_data["freqVec"][ifreq]) if grn_data["nfreq"] > 0 else grn_data["freq"]
-    k = _wavenumbers_for_frequency(grn_data, freq_i)
-    atten = _stab_attenuation(grn_data, k)
-
-    if cmin is not None or cmax is not None:
-        # Use the source frequency for SPARC (k grid is freq-independent),
-        # otherwise the per-frequency value.
-        f_for_taper = grn_data["freq"] if grn_data["is_sparc"] else freq_i
-        win = _hanning_taper(k, f_for_taper, cmin, cmax)
-        G_src = G_src * win[np.newaxis, :]
-
-    return _hankel_transform(
-        G_src, k, ranges,
-        atten=atten,
-        source_type=source_type,
-        spectrum=spectrum,
-    )
-
-
-def grn_to_field(
-    grn_data: Dict[str, Any],
-    ranges: np.ndarray,
-    *,
-    method: str = "direct_dft",
-    source_type: str = 'R',
-    spectrum: str = 'P',
-    source_depth_idx: int = 0,
-    cmin: Optional[float] = None,
-    cmax: Optional[float] = None,
-) -> Field:
-    """Transform a single-frequency Green's function to a complex narrowband Field.
-
-    The reader returns a 4-D ``G`` regardless of ``nfreq``; this picks the
-    first frequency slice (use :func:`grn_to_transfer_function` for the
-    multi-frequency case).
-
-    Parameters
-    ----------
-    method : str
-        Only ``'direct_dft'`` — the trapezoidal-rule matrix-product DFT of
-        :func:`_hankel_transform`.
-    source_depth_idx : int
-        Index into the source-depth axis when ``nsd > 1``. Defaults to the
-        first source.
-    source_type, spectrum : see :func:`_hankel_transform`.
-    cmin, cmax : optional phase-speed taper bounds (m/s).
-    """
-    if method != "direct_dft":
-        raise ConfigurationError(f"Unknown method: {method!r}. Use 'direct_dft'.")
-
-    nsd = grn_data["nsd"]
-    if not (0 <= source_depth_idx < nsd):
-        raise ConfigurationError(
-            f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
-        )
-    _warn_zero_ranges(ranges, source_type,
-                      context=grn_data.get('title', ''))
-
-    p_out = _grn_pressure_slice(
-        grn_data, ranges, ifreq=0, isd=source_depth_idx,
-        source_type=source_type, spectrum=spectrum, cmin=cmin, cmax=cmax,
-    )
-
-    return Field(
-        data=p_out,
-        coords={'depth': grn_data["rd"], 'range': ranges},
-        model='', backend='',
-        # The slab holds one source depth — the one ``source_depth_idx``
-        # selected — so it carries that depth alone.
-        source_depths=np.atleast_1d(
-            np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
-        # Label with the frequency of the slab actually transformed (this
-        # function always takes slice 0), not the header's nominal freq0 —
-        # they differ for multi-frequency SCOOTER runs (RWSHDFile.f90:105-106
-        # keeps them independent). SPARC keeps freq: its freqVec holds the
-        # OUTPUT TIMES (sparc.f90:320), not frequencies.
-        frequencies=(float(grn_data["freqVec"][0])
-                     if grn_data["nfreq"] > 0 and not grn_data["is_sparc"]
-                     else float(grn_data["freq"])),
-        phase_reference='travelling_wave',
-        metadata={
-            "transform_method": method,
-            "source_type": source_type,
-            "spectrum": spectrum,
-        },
-    )
-
-
-def _dft_row(G: np.ndarray, f_idx: int,
-             win: Optional[np.ndarray] = None) -> np.ndarray:
-    """Row ``f_idx`` of ``np.fft.fft(G, axis=0)``, without the other rows.
-
-    ``np.fft.fft(cube, axis=0)[f_idx]`` transforms all ``nt`` frequencies and
-    keeps one — measured 5.1x the cube in peak RSS, which is ~17 GB on a
-    512 x 200 x 4096 snapshot, to produce an (nrd, nk) slab. That row is a
-    contraction of ``G`` against ``exp(-2i pi f_idx n / nt)``, so it costs the
-    slab plus one pass over the cube instead.
-
-    ``win`` (a real per-sample taper) folds into the kernel. Mind what numpy
-    does with it today: ``G * win[:, None, None]`` promotes a complex64 cube
-    to complex128, so that FFT runs in DOUBLE precision and the windowed
-    branch is accurate to ~1e-16 rather than the ~1e-7 of a single-precision
-    transform. Contracting a complex128 kernel against the whole cube would
-    promote it the same way and hand most of the memory back (3.2x the cube
-    against 1.6x), so the windowed path casts and accumulates in complex128
-    over chunks of the last axis: same accuracy, bounded scratch.
-    """
-    nt = G.shape[0]
-    phase = np.exp(-2j * np.pi * float(f_idx) * np.arange(nt) / nt)
-    if win is None:
-        # Mirror numpy's own FFT precision rule so the row keeps the dtype the
-        # full transform gave it: single in, single out; anything else double.
-        single = np.result_type(G.dtype, np.complex64) == np.complex64
-        return np.tensordot(
-            phase.astype(np.complex64 if single else np.complex128), G, axes=1)
-    kernel = phase * np.asarray(win, dtype=np.float64)
-    out = np.empty(G.shape[1:], dtype=np.complex128)
-    # ~4e6 complex128 elements (64 MB) of cast cube per block — the scratch
-    # budget the synthesis chunking in core/results/field.py works to.
-    per_column = max(int(np.prod(G.shape[:-1])), 1)
-    step = max(1, 4_000_000 // per_column)
-    for a in range(0, G.shape[-1], step):
-        out[..., a:a + step] = np.tensordot(
-            kernel, G[..., a:a + step].astype(np.complex128), axes=1)
-    return out
-
-
-def sparc_snapshot_to_field(
-    grn_data: Dict[str, Any],
-    ranges: np.ndarray,
-    frequency: float,
-    *,
-    source_type: str = 'R',
-    spectrum: str = 'P',
-    source_depth_idx: int = 0,
-    cmin: Optional[float] = None,
-    cmax: Optional[float] = None,
-    pulse_type: Optional[str] = None,
-    normalize: str = 'source',
-) -> Field:
-    """Extract steady-state complex pressure at ``frequency`` from a SPARC snapshot.
-
-    ``normalize`` (default ``'source'``): SPARC propagates the *actual* pulse, so
-    the snapshot is ``S(omega)*g`` — the source spectrum times the transfer
-    function — not the bare ``g`` that Kraken/Scooter report (Jensen,
-    *Computational Ocean Acoustics*, Eq. 8.1). ``'source'`` deconvolves the known
-    source spectrum: it runs the *same* steady-tone estimator on the pulse
-    ``sparc_pulse(tout, 2*pi*frequency, pulse_type)`` to get ``S(omega0)`` and
-    divides it out, recovering ``g`` — i.e. **absolute TL re 1 m**, directly
-    comparable to Kraken/Scooter. Requires ``pulse_type`` (the SPARC pulse
-    alphabet; the ``SPARC`` wrapper passes it). The window and ``2/Σwin`` factor
-    cancel exactly; a residual remains only from the source high cut
-    ``fHiCut`` (``sparc.f90:397-401``), which ``sparc_pulse`` does not
-    replicate — ``rkT·cHigh/2π`` for ``Pulse(4:4)`` in ``'HB'`` and ``10·fMax``
-    otherwise. ``fMin``/``fMax`` themselves are **not** a band-pass on the
-    output: they set the wavenumber integration limits
-    ``kMin = 2π·fMin/cHigh`` and ``kMax = 2π·fMax/cLow`` (``sparc.f90:111-112``).
-    ``'none'`` returns the raw (uncalibrated) field and warns.
-
-    SPARC's snapshot mode (``output_mode='S'``) writes the *time evolution*
-    of the wavenumber-domain Green's function (``Green(itout, irz, ik)``,
-    ``sparc.f90:283-289``). To recover the steady-state pressure at the
-    source frequency we:
-
-    1. FFT along the snapshot-time axis to obtain :math:`G(f, k, z)`.
-    2. Pick the bin closest to the source ``frequency``.
-    3. Hankel-transform :math:`G(k, z)` to range.
-
-    Returns a complex narrowband :class:`Field` (``coords={'depth',
-    'range'}``); use ``.dB`` or ``.to_dB()`` for transmission loss in dB.
-    """
-    if not grn_data["is_sparc"]:
-        raise ConfigurationError(
-            "sparc_snapshot_to_field expects a SPARC GRN; got title "
-            f"{grn_data['title']!r} (no 'SPARC' prefix)."
-        )
-
-    if normalize not in ('source', 'none'):
-        raise ConfigurationError(
-            "sparc_snapshot_to_field: normalize must be 'source' or 'none'; "
-            f"got {normalize!r}")
-    if normalize == 'source' and not pulse_type:
-        raise ConfigurationError(
-            "sparc_snapshot_to_field: normalize='source' needs pulse_type (the "
-            "SPARC pulse alphabet) to deconvolve the source spectrum. Pass it, "
-            "or use normalize='none' for the raw (uncalibrated) field.")
-    if normalize == 'none':
-        warnings.warn(
-            "sparc_snapshot_to_field: normalize='none' returns the RAW field "
-            "(S(omega)*g), whose absolute level is uncalibrated — a "
-            "pulse-dependent offset (tens of dB) above calibrated TL (Jensen, "
-            "Computational Ocean Acoustics, Eq. 8.1). Use normalize='source' "
-            "(with pulse_type) for calibrated absolute TL re 1 m, or treat only "
-            "the field SHAPE as indicative.",
-            UserWarning, stacklevel=2)
-
-    nsd = grn_data["nsd"]
-    if not (0 <= source_depth_idx < nsd):
-        raise ConfigurationError(
-            f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
-        )
-
-    _warn_zero_ranges(ranges, source_type,
-                      context=grn_data.get('title', ''))
-    G = grn_data["G"][:, source_depth_idx, :, :]   # (nt, nrd, nk)
-    tout = grn_data["freqVec"]                      # actually the time vector
-    nt = len(tout)
-    if nt < 2:
-        raise ConfigurationError(
-            "SPARC snapshot has nt<2 — cannot extract a frequency component "
-            "via time-FFT. Use a larger n_t_out."
-        )
-    dt = float(tout[1] - tout[0])
-
-    fft_freqs = np.fft.fftfreq(nt, dt)
-    nyquist = 0.5 / dt
-    if frequency > nyquist:
-        raise ConfigurationError(
-            f"Source frequency {frequency:.3f} Hz exceeds the snapshot's "
-            f"Nyquist {nyquist:.3f} Hz; reduce dt by raising n_t_out or "
-            "shortening t_max."
-        )
-    f_idx = int(np.argmin(np.abs(fft_freqs - frequency)))
-
-    if normalize == 'source':
-        # Convolution theorem: the snapshot G(t) = s(t) ⊛ h(t) (source pulse
-        # convolved with the medium response), so DFT(G)/DFT(s) = h(w0) — the
-        # unit-source wavenumber Green's function Scooter computes, absolute-
-        # calibrated (Jensen COA Eq. 8.1). Use the RECTANGULAR full DFT for
-        # both: a taper would break the convolution theorem and would null the
-        # transient source pulse (which lives in the first few samples, where a
-        # Hann window is ~0). uacpy generated the pulse, so s(t) is known.
-        # Imported here rather than at module level: sparc_pulse pulls scipy
-        # in, and only this deconvolution path needs it.
-        from uacpy.acoustic_signal.generate import sparc_pulse
-        s_t, _ = sparc_pulse(tout, 2.0 * np.pi * frequency, pulse_type[0])
-        S_at_f0 = np.fft.fft(s_t)[f_idx]
-        if S_at_f0 == 0:
-            raise ConfigurationError(
-                "sparc_snapshot_to_field: source spectrum is zero at "
-                f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
-                "deconvolve (check pulse / frequency).")
-        G_at_f0 = _dft_row(G, f_idx) / S_at_f0
-    else:
-        # Steady-tone amplitude estimator 2·X_k/Σwin (mirrors rts_to_pressure
-        # for the 'R'/'D' modes). This yields S(w0)·g — the raw, uncalibrated
-        # field this branch returns.
-        win = np.hanning(nt)
-        G_at_f0 = 2.0 * _dft_row(G, f_idx, win) / np.sum(win)  # (nrd,nk) = S·g
-
-    # Wavenumber grid — SPARC's k vector is independent of frequency.
-    k = _wavenumbers_for_frequency(grn_data, frequency)
-    atten = _stab_attenuation(grn_data, k)          # 0 for SPARC
-
-    if cmin is not None or cmax is not None:
-        taper = _hanning_taper(k, frequency, cmin, cmax)
-        G_at_f0 = G_at_f0 * taper[np.newaxis, :]
-
-    p_out = _hankel_transform(
-        G_at_f0, k, ranges,
-        atten=atten, source_type=source_type, spectrum=spectrum,
-    )
-    if normalize == 'none':
-        # Put the RAW field on the full inverse-Hankel weight
-        # Δk·√(2k/(πr)) that sparc.f90's 'D' branch carries (:595 kernel with
-        # the 1/√(π·Rr) write scale at :292) — the fieldsco-style Hankel above
-        # carries 1/√(2πr) and the Scooter −1 prefactor instead, a constant −2
-        # between the two. The calibrated path SKIPS this: after deconvolution
-        # G_at_f0 is the Scooter unit-source Green's function, so the bare
-        # Hankel (as in _grn_pressure_slice) already matches Scooter/Kraken.
-        p_out = p_out * (-2.0)
-
-    return Field(
-        data=p_out,
-        coords={'depth': grn_data["rd"], 'range': ranges},
-        model='', backend='',
-        # The slab holds one source depth — the one ``source_depth_idx``
-        # selected — so it carries that depth alone.
-        source_depths=np.atleast_1d(
-            np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
-        frequencies=float(frequency),
-        phase_reference='travelling_wave',
-        metadata={
-            "transform_method": "time_fft+hankel",
-            "normalize": normalize,
-            "absolute_tl_calibrated": normalize == 'source',
-            "snapshot_freq_bin": float(fft_freqs[f_idx]),
-            "snapshot_dt": dt,
-            "snapshot_nt": nt,
-            "source_type": source_type,
-            "spectrum": spectrum,
-        },
-    )
-
-
-def sparc_snapshot_to_time_field(
-    grn_data: Dict[str, Any],
-    ranges: np.ndarray,
-    frequency: float,
-    *,
-    source_type: str = 'R',
-    spectrum: str = 'P',
-    source_depth_idx: int = 0,
-) -> Field:
-    """Range-domain time evolution of a SPARC snapshot (``output_mode='S'``).
-
-    ``sparc.f90:580-591`` writes ``Green(Itout, irz, ik)`` — the
-    *wavenumber-domain* field at each output time — and ``WriteHeaderSparc``
-    (``:317-327``) stores the time vector in the ``.grn``'s frequency slot and
-    the phase-speed vector ``sqrt(omega2)/k`` in its range slot.
-    ``doc/sparc.htm`` prescribes running FIELDS afterwards "to convert the
-    '.GRN' file to a '.SHD' file containing the pressure field"; this is that
-    step done in-tree.
-
-    Simpler than :func:`sparc_snapshot_to_field`, which recovers a *CW*
-    component: the snapshot already is the propagated pulse, so one inverse
-    Hankel transform per output time gives ``p(z, r, t)`` directly — no
-    time-FFT, no frequency selection, and no source deconvolution (exactly as
-    the ``'R'``/``'D'`` modes return their raw received time series).
-
-    The wavenumber grid is taken at the source frequency and is **constant
-    across the time axis** — SPARC's ``k`` does not scale with the ``.grn``'s
-    nominal frequency axis, because that axis holds times.
-
-    Returns a real :class:`Field` with ``coords={'depth', 'range', 'time'}``.
-    """
-    if not grn_data["is_sparc"]:
-        raise ConfigurationError(
-            "sparc_snapshot_to_time_field expects a SPARC GRN; got title "
-            f"{grn_data['title']!r} (no 'SPARC' prefix)."
-        )
-    nsd = grn_data["nsd"]
-    if not (0 <= source_depth_idx < nsd):
-        raise ConfigurationError(
-            f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
-        )
-
-    _warn_zero_ranges(ranges, source_type,
-                      context=grn_data.get('title', ''))
-    G = grn_data["G"][:, source_depth_idx, :, :]   # (nt, nrd, nk)
-    tout = np.asarray(grn_data["freqVec"], dtype=float)   # times, not freqs
-    k = _wavenumbers_for_frequency(grn_data, frequency)
-    atten = _stab_attenuation(grn_data, k)                # 0 for SPARC
-    ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
-
-    # (nrd, n_ranges) per output time -> (nrd, n_ranges, nt).
-    p_t = np.stack(
-        [_hankel_transform(G[it], k, ranges, atten=atten,
-                           source_type=source_type, spectrum=spectrum)
-         for it in range(G.shape[0])],
-        axis=-1,
-    )
-    # Put the snapshot on the same inverse-Hankel weight the 'D' branch uses,
-    # dk*sqrt(2k/(pi*r)) (sparc.f90:595 with the 1/sqrt(pi*Rr) write scale at
-    # :292). The fieldsco-style Hankel above carries 1/sqrt(2*pi*r) and the
-    # Scooter -1 prefactor instead; the constant between the two is -2.
-    p_t = p_t * (-2.0)
-
-    # The snapshot is a real transient field; the Hankel transform carries the
-    # analytic-signal convention, so the physical pressure is its real part.
-    dt = float(tout[1] - tout[0]) if tout.size > 1 else float('nan')
-
-    return Field(
-        data=np.real(p_t),
-        coords={'depth': grn_data["rd"], 'range': ranges, 'time': tout},
-        model='', backend='',
-        # The slab holds one source depth — the one ``source_depth_idx``
-        # selected — so it carries that depth alone.
-        source_depths=np.atleast_1d(
-            np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
-        frequencies=float(frequency),
-        phase_reference='time_domain_native',
-        metadata={
-            "transform_method": "hankel_per_snapshot_time",
-            "dt": dt,
-            "fs": (1.0 / dt) if dt == dt and dt else float('nan'),
-            "nt": int(tout.size),
-            "t_start": float(tout[0]) if tout.size else 0.0,
-            "source_type": source_type,
-            "spectrum": spectrum,
-        },
-    )
-
-
-def grn_to_transfer_function(
-    grn_data: Dict[str, Any],
-    ranges: np.ndarray,
-    *,
-    source_type: str = 'R',
-    spectrum: str = 'P',
-    source_depth_idx: int = 0,
-    cmin: Optional[float] = None,
-    cmax: Optional[float] = None,
-) -> Field:
-    """Transform a multi-frequency Green's function to a broadband Field.
-
-    Output: complex ``Field`` with ``coords={'depth', 'range',
-    'frequency'}``, shape ``(n_d, n_r, n_f)``.
-
-    Rejects a SPARC snapshot: its frequency slot holds output *times*.
-    """
-    if grn_data["is_sparc"]:
-        raise ConfigurationError(
-            "grn_to_transfer_function expects a multi-frequency Green's "
-            f"function; got a SPARC snapshot (title {grn_data['title']!r}). "
-            "SPARC stores its output TIME vector in the .grn's frequency slot "
-            "(sparc.f90:317-319), so the returned Field would carry seconds "
-            "on a 'frequency' axis and a center_frequency that is a time.",
-            remediation="Use sparc_snapshot_to_field for the steady-state "
-                        "field at one frequency, or "
-                        "sparc_snapshot_to_time_field for p(z, r, t).",
-        )
-
-    nfreq = grn_data["nfreq"]
-    nrd = grn_data["nrd"]
-    nsd = grn_data["nsd"]
-    if not (0 <= source_depth_idx < nsd):
-        raise ConfigurationError(
-            f"source_depth_idx={source_depth_idx} out of range for nsd={nsd}"
-        )
-
-    _warn_zero_ranges(ranges, source_type,
-                      context=grn_data.get('title', ''))
-    pressure = np.zeros((nrd, len(ranges), nfreq), dtype=np.complex128)
-    for ifreq in range(nfreq):
-        pressure[:, :, ifreq] = _grn_pressure_slice(
-            grn_data, ranges, ifreq=ifreq, isd=source_depth_idx,
-            source_type=source_type, spectrum=spectrum, cmin=cmin, cmax=cmax,
-        )
-
-    freqVec = np.asarray(grn_data["freqVec"], dtype=float)
-    return Field(
-        data=pressure,
-        coords={
-            'depth': grn_data["rd"],
-            'range': ranges,
-            'frequency': freqVec,
-        },
-        phase_reference='travelling_wave',
-        model='', backend='',
-        # The slab holds one source depth — the one ``source_depth_idx``
-        # selected — so it carries that depth alone.
-        source_depths=np.atleast_1d(
-            np.asarray(grn_data['sd'], dtype=float)[source_depth_idx]),
-        frequencies=freqVec,
-        metadata={
-            'center_frequency': float(freqVec[len(freqVec) // 2]),
-            'nfreq': nfreq,
-            'source_type': source_type,
-            'spectrum': spectrum,
-        },
+    model = ('SPARC' if is_sparc
+             else 'Scooter' if title.upper().startswith('SCOOTER') else '')
+    return GreensFunction(
+        data=G,
+        phase_speeds=cVec,
+        receiver_depths=rd,
+        source_depths=sd,
+        frequencies=float(freq0) if is_sparc else freqVec,
+        times=freqVec if is_sparc else None,
+        stabilizing_attenuation=float(atten),
+        title=title,
+        model=model,
     )

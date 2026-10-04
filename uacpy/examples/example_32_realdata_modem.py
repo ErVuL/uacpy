@@ -8,8 +8,9 @@ downconvert, recover timing, sync on the preamble, equalise with a DFE and
 carrier PLL, Viterbi-decode, and check the CRC.
 
 Uses: comms.pack_frame/unpack_frame · Transmitter.transmit_passband ·
-CommsReceiver.from_passband/receive · comms.DFE · uacpy.io.write_wav ·
-plot_scatter · plot_sync_metric · plot_convergence
+CommsReceiver.from_passband/receive(return_diagnostics=) · comms.DFE ·
+comms.awgn · uacpy.io.write_wav · plot_scatter · plot_sync_metric ·
+plot_convergence
 """
 
 import os
@@ -52,50 +53,42 @@ received = np.convolve(waveform, impulse_response)
 received = resample_poly(received, 100020, 100000)
 received = np.concatenate([np.zeros(11), received])
 snr_dB = 22.0
-received = received + np.sqrt(
-    np.mean(received ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(
-        received.size)
+received = comms.awgn(received, snr_dB, rng=rng)
 
 # Receive: downconvert + matched filter + Gardner timing recovery, then frame
 # sync on the preamble, adaptive DFE with carrier PLL, Viterbi decode.
-dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_bandwidth=0.04)
+dfe = comms.DFE(n_ff=16, n_fb=6, forget=0.997, pll_gain=0.04)
 receiver = comms.CommsReceiver("qpsk", code=code, equalizer=dfe, preamble=256)
 symbols = receiver.from_passband(received, fs, fc, sps=sps)
-start, sync_metric = comms.detect_preamble(symbols, receiver.preamble,
-                                           threshold=0.4)
-payload, crc_ok = comms.unpack_frame(receiver.receive(symbols))
+# return_diagnostics keeps what the receiver computed on the way to the bits:
+# the preamble sync metric and start, the equalised payload symbols and the
+# DFE's squared-error curve.
+diag = receiver.receive(symbols, return_diagnostics=True)
+payload, crc_ok = comms.unpack_frame(diag.bits)
 print(f"  channel  : 3-path multipath, 200 ppm Doppler, {snr_dB:.0f} dB SNR")
-print(f"  preamble : found at symbol {start}")
+print(f"  preamble : found at symbol {diag.start}")
 print(f"  CRC      : {'OK' if crc_ok else 'FAIL'}, "
       f"payload match {payload == message}")
 print(f"  recovered: {payload[:60]!r}{'...' if len(payload) > 60 else ''}")
 
-# Re-run the equaliser to keep the symbols and the error curve for the figure;
-# receive() returns decoded bits, not these.
-aligned = symbols[start:]
-delay = dfe.n_ff // 2
-reference = np.concatenate([np.zeros(delay, dtype=complex), receiver.preamble])
-equalized, mse = comms.DFE(n_ff=16, n_fb=6, forget=0.997,
-                           pll_bandwidth=0.04).equalize(
-    aligned, receiver.modulator.constellation, train=reference)
-payload_symbols = equalized[delay + receiver.preamble.size:]
-
 fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
 axes[0, 0].specgram(received, NFFT=256, Fs=fs, noverlap=200, cmap='jet')
 axes[0, 0].axhline(fc, color='w', ls='--', lw=1)
-axes[0, 0].set_title('received passband spectrogram', loc='left')
+axes[0, 0].set_title('received passband spectrogram')
 axes[0, 0].set_xlabel('Time [s]')
 axes[0, 0].set_ylabel('Frequency [Hz]')
 axes[0, 0].set_ylim(0, fs / 2)
 
-uacpy.plot.plot_scatter(payload_symbols[200:], ax=axes[0, 1],
+# The first 200 payload symbols are left out: the DFE is still settling there.
+uacpy.plot.plot_scatter(diag.symbols[200:], ax=axes[0, 1],
                         title=f"recovered QPSK "
                               f"(CRC {'OK' if crc_ok else 'FAIL'})")
 axes[0, 1].scatter(receiver.modulator.constellation.real,
                    receiver.modulator.constellation.imag,
                    marker='x', s=80, color='k', zorder=5)
-uacpy.plot.plot_sync_metric(sync_metric, threshold=0.4, ax=axes[1, 0])
-uacpy.plot.plot_convergence(mse, ax=axes[1, 1], title='(DFE + carrier PLL)')
+uacpy.plot.plot_sync_metric(diag.sync_metric, threshold=0.4, ax=axes[1, 0])
+uacpy.plot.plot_convergence(diag.mse, ax=axes[1, 1],
+                            title='(DFE + carrier PLL)')
 
 fig.savefig(OUT / 'example_32_realdata_modem.png', dpi=120)
 plt.close(fig)

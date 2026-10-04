@@ -14,9 +14,8 @@ Endpoints (no auth):
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data._geo import (
-    as_coordinate, depth_from_elevation, nearest_indices, normalize_lon,
-)
+from uacpy.core.geo import as_coordinate, normalize_lon
+from uacpy.data._geo import depth_from_elevation, nearest_indices
 from uacpy.data._http import http_get
 
 __all__ = ['point_depth', 'depths_along', 'region_grid',
@@ -39,7 +38,8 @@ def _elevation(lat, lon, *, timeout, verbose):
         raise DataFetchError(
             f"GMRT returned an unparseable elevation at ({lat:.4f}, {lon:.4f}): "
             f"{body[:80]!r}.",
-            remediation="Retry, or use source='api' (OpenTopoData).",
+            remediation="Retry, or use source='gebco' (the installed grid, else "
+                        "OpenTopoData).",
         )
 
 

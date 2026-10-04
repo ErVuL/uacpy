@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from uacpy import comms
-from uacpy.acoustic_signal.system import _MAX_DEFAULT_IR_SAMPLES
+from uacpy.acoustic_signal.channel import _MAX_DEFAULT_IR_SAMPLES
 from uacpy.acoustic_signal import (
     channel_response,
     impulse_response,
@@ -30,6 +30,7 @@ from uacpy.acoustic_signal import (
     transfer_function_from_impulse_response,
 )
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.tests.conftest import recorded_warnings
 
 FS = 10000.0
 
@@ -39,19 +40,19 @@ BAD_SCALARS = [0.0, -100.0, np.nan, np.inf]
 
 class TestChannel:
     def test_integer_delays_place_taps(self):
-        t, h = impulse_response([1.0, 0.5], [0.01, 0.02], FS, fractional=False)
+        t, h = impulse_response([1.0, 0.5], [0.01, 0.02], sample_rate=FS, fractional=False)
         assert h[100] == pytest.approx(1.0)
         assert h[200] == pytest.approx(0.5)
 
     def test_fractional_splits_energy(self):
         # Delay 0.0105 s = sample 105.0 exactly -> single tap even when fractional.
-        _, h = impulse_response([1.0], [0.0105], FS, fractional=True)
+        _, h = impulse_response([1.0], [0.0105], sample_rate=FS, fractional=True)
         assert h[105] == pytest.approx(1.0)
         # A genuinely fractional delay is placed with a windowed-sinc kernel,
         # normalised to unit DC gain. It is deliberately NOT two taps: a
         # two-tap linear split is a frac-dependent lowpass (-3.0 dB at
         # f/fs = 0.25 for frac = 0.5), not a fractional delay.
-        _, h2 = impulse_response([1.0], [0.01005], FS, fractional=True)
+        _, h2 = impulse_response([1.0], [0.01005], sample_rate=FS, fractional=True)
         assert h2.sum() == pytest.approx(1.0)
         assert np.count_nonzero(h2) > 2
 
@@ -60,10 +61,30 @@ class TestChannel:
         t, rx = simulate_reception(tx, [1.0], [0.01], FS)
         assert np.allclose(rx[100:103], tx)
 
+    def test_simulate_reception_refuses_complex_taps_on_a_real_transmit(self):
+        """A real waveform times ``e^{i pi/2}`` is not a rotated waveform:
+        its real part is zero where the reception is the quadrature copy.
+        The analytic route rotates it, and agrees with
+        simulate_arrival_reception's ``Re{A e^{i phi} hilbert(s)}``."""
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.acoustic_signal import (analytic_signal,
+                                           simulate_arrival_reception)
+        n = 192
+        tx = np.sin(2 * np.pi * 2000.0 * np.arange(n) / FS) * np.hanning(n)
+        with pytest.raises(ConfigurationError, match="source_waveform is real"):
+            simulate_reception(tx, [1j], [0.01], FS)
+        _, rx = simulate_reception(analytic_signal(tx), [1j], [0.01], FS)
+        _, ref = simulate_arrival_reception(tx, [1.0], [0.01], FS, 2000.0,
+                                            phases_rad=[np.pi / 2],
+                                            t_start=0.0)
+        i0 = int(round(0.01 * FS))
+        assert np.allclose(np.real(rx)[i0:i0 + n], ref[i0:i0 + n],
+                           atol=1e-6 * np.abs(ref).max())
+
     def test_ir_from_flat_transfer_function_is_delta(self):
         f = np.linspace(0, FS / 2, 65)
         H = np.ones_like(f, dtype=complex)
-        _, h = impulse_response_from_transfer_function(H, f, FS, n_samples=128)
+        _, h = impulse_response_from_transfer_function(H, frequencies=f, sample_rate=FS, n_samples=128)
         assert np.argmax(np.abs(h)) == 0
 
     def test_ir_from_bandlimited_tf_has_no_out_of_band_energy(self):
@@ -73,7 +94,7 @@ class TestChannel:
         f = np.linspace(1000.0, 2000.0, 41)
         H = np.ones_like(f, dtype=complex)
         n = 256
-        _, h = impulse_response_from_transfer_function(H, f, FS, n_samples=n)
+        _, h = impulse_response_from_transfer_function(H, frequencies=f, sample_rate=FS, n_samples=n)
         spec = np.fft.rfft(h, n=n)
         grid = np.fft.rfftfreq(n, 1.0 / FS)
         out_band = (grid < 900.0) | (grid > 2100.0)
@@ -82,8 +103,8 @@ class TestChannel:
         assert np.min(np.abs(spec[in_band])) > 0.5
 
     def test_negative_delay_raises(self):
-        with pytest.raises(ConfigurationError):
-            impulse_response([1.0], [-0.01], FS)
+        with pytest.raises(ConfigurationError, match='delays_s must be >= 0'):
+            impulse_response([1.0], [-0.01], sample_rate=FS)
 
 
 class TestFractionalDelayIsFlat:
@@ -103,7 +124,7 @@ class TestFractionalDelayIsFlat:
 
     def _kernel_response(self, frac, n=256):
         from uacpy.acoustic_signal import impulse_response
-        _, h = impulse_response([1.0], [(100 + frac) / self.FS], self.FS,
+        _, h = impulse_response([1.0], [(100 + frac) / self.FS], sample_rate=self.FS,
                                 n_samples=n)
         return np.fft.rfftfreq(n), np.fft.rfft(h)
 
@@ -128,7 +149,7 @@ class TestFractionalDelayIsFlat:
         # full amplitude, 0.9 samples early and silently.
         from uacpy.acoustic_signal import impulse_response
         with pytest.warns(UserWarning, match='truncated'):
-            _, h = impulse_response([1.0], [10.9 / self.FS], self.FS,
+            _, h = impulse_response([1.0], [10.9 / self.FS], sample_rate=self.FS,
                                     n_samples=11)
         assert h[10] < 0.2
 
@@ -138,7 +159,7 @@ class TestFractionalDelayIsFlat:
         from uacpy.acoustic_signal import impulse_response
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            _, h = impulse_response([1.0], [100.0 / self.FS], self.FS,
+            _, h = impulse_response([1.0], [100.0 / self.FS], sample_rate=self.FS,
                                     n_samples=256)
         assert h[100] == pytest.approx(1.0)
         assert np.max(np.abs(np.delete(h, 100))) < 1e-12
@@ -149,13 +170,13 @@ def test_nearest_sample_placement_rounds():
     placement puts a 0.7-sample arrival one tap early."""
     from uacpy.acoustic_signal import impulse_response
     fs = 8000.0
-    _, h = impulse_response([1.0], [0.7 / fs], fs, fractional=False)
+    _, h = impulse_response([1.0], [0.7 / fs], sample_rate=fs, fractional=False)
     assert np.argmax(np.abs(h)) == 1
     # fractional=True uses a windowed-sinc kernel, not a two-tap linear
     # split: the latter is a frac-dependent lowpass (-3.0 dB at
     # f/fs = 0.25 for frac = 0.5), so equal arrivals came back unequal.
     # Placed clear of the array ends, where the kernel is not truncated.
-    _, hf = impulse_response([1.0], [100.7 / fs], fs, fractional=True,
+    _, hf = impulse_response([1.0], [100.7 / fs], sample_rate=fs, fractional=True,
                              n_samples=256)
     assert hf.sum() == pytest.approx(1.0)
     centroid = float(np.sum(np.arange(hf.size) * hf) / hf.sum())
@@ -175,13 +196,11 @@ class TestTruncatedArrivalWarningNamesBothDirections:
     FS, N = 20000.0, 128
 
     def _run(self, position_samples):
-        import warnings as _w
-        from uacpy.acoustic_signal.system import impulse_response
-        with _w.catch_warnings(record=True) as caught:
-            _w.simplefilter('always')
+        from uacpy.acoustic_signal.channel import impulse_response
+        with recorded_warnings() as caught:
             _t, h = impulse_response(np.array([1.0]),
                                      np.array([position_samples / self.FS]),
-                                     self.FS, n_samples=self.N)
+                                     sample_rate=self.FS, n_samples=self.N)
         return h, [str(x.message) for x in caught
                    if 'interpolation kernel' in str(x.message)]
 
@@ -207,30 +226,30 @@ class TestImpulseResponseTapBound:
         # 3600 s * 96 kHz = 3.456e8 taps (5.5 GB complex128); the bound
         # raises on the arithmetic, before np.zeros runs.
         with pytest.raises(ConfigurationError, match="3600.*96000"):
-            impulse_response([1.0], [3600.0], 96000.0)
+            impulse_response([1.0], [3600.0], sample_rate=96000.0)
 
     @pytest.mark.parametrize("delay", [np.inf, np.nan])
     def test_nonfinite_delay_raises_typed(self, delay):
         with pytest.raises(ConfigurationError, match="default limit"):
-            impulse_response([1.0], [delay], 8000.0)
+            impulse_response([1.0], [delay], sample_rate=8000.0)
 
     @pytest.mark.parametrize("bad", BAD_SCALARS)
     def test_nonpositive_or_nonfinite_sample_rate_raises(self, bad):
         with pytest.raises(ConfigurationError,
                            match="sample_rate must be > 0 Hz and finite"):
-            impulse_response([1.0], [0.1], bad)
+            impulse_response([1.0], [0.1], sample_rate=bad)
 
     def test_explicit_n_samples_is_used_as_given(self):
-        t, h = impulse_response([1.0], [0.004], 8000.0, n_samples=64)
+        t, h = impulse_response([1.0], [0.004], sample_rate=8000.0, n_samples=64)
         assert t.size == 64 and h.size == 64
 
     def test_short_delay_places_the_arrival(self):
-        _, h = impulse_response([1.0], [0.01], 1000.0)
+        _, h = impulse_response([1.0], [0.01], sample_rate=1000.0)
         assert int(np.argmax(np.abs(h))) == 10
 
     def test_multipath_channel_inherits_the_tap_bound(self):
         with pytest.raises(ConfigurationError, match="default limit"):
-            comms.multipath_channel([1.0], [3600.0], 96000.0)
+            comms.multipath_channel([1.0], [3600.0], sample_rate=96000.0)
 
 
 class TestImpulseResponseReportsBandsOutsideNyquist:
@@ -243,14 +262,14 @@ class TestImpulseResponseReportsBandsOutsideNyquist:
     def test_band_entirely_above_nyquist_raises_instead_of_returning_zeros(self):
         f, H = self._flat(6000.0, 6100.0)
         with pytest.raises(ConfigurationError, match="entirely above the Nyquist"):
-            impulse_response_from_transfer_function(H, f, self.FS)
+            impulse_response_from_transfer_function(H, frequencies=f, sample_rate=self.FS)
 
     def test_band_straddling_nyquist_warns_and_keeps_the_part_below(self):
         f, H = self._flat(4950.0, 5050.0)
         with pytest.warns(UserWarning, match="dropped from h"):
-            _t, h = impulse_response_from_transfer_function(H, f, self.FS)
+            _t, h = impulse_response_from_transfer_function(H, frequencies=f, sample_rate=self.FS)
         f_in, H_in = self._flat(1000.0, 1100.0)
-        _t, h_in = impulse_response_from_transfer_function(H_in, f_in, self.FS)
+        _t, h_in = impulse_response_from_transfer_function(H_in, frequencies=f_in, sample_rate=self.FS)
         # Half the band is lost, so the peak is about half the in-band one.
         assert np.max(np.abs(h)) == pytest.approx(0.5 * np.max(np.abs(h_in)),
                                                   rel=0.05)
@@ -260,7 +279,7 @@ class TestImpulseResponseReportsBandsOutsideNyquist:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             _t, h = impulse_response_from_transfer_function(
-                np.ones(f.size, dtype=complex), f, self.FS, n_samples=128)
+                np.ones(f.size, dtype=complex), frequencies=f, sample_rate=self.FS, n_samples=128)
         assert np.argmax(np.abs(h)) == 0
 
 
@@ -277,7 +296,7 @@ class TestTransferFunctionIRGridSpacing:
 
     def _delay_peak_ms(self, tau_s, frequencies):
         H = np.exp(-2j * np.pi * frequencies * tau_s)
-        t, h = impulse_response_from_transfer_function(H, frequencies, self.FS)
+        t, h = impulse_response_from_transfer_function(H, frequencies=frequencies, sample_rate=self.FS)
         return t[int(np.argmax(np.abs(h)))] * 1e3
 
     @pytest.mark.parametrize("tau_ms", [5.0, 30.0, 55.0])
@@ -290,7 +309,7 @@ class TestTransferFunctionIRGridSpacing:
     def test_default_grid_is_sample_rate_over_spacing(self):
         f = np.arange(100.0, 201.0, 1.0)
         _, h = impulse_response_from_transfer_function(
-            np.ones(f.size, dtype=complex), f, self.FS)
+            np.ones(f.size, dtype=complex), frequencies=f, sample_rate=self.FS)
         assert h.size == int(round(self.FS / 1.0))
 
     def test_full_band_input_recovers_its_own_length(self):
@@ -298,17 +317,17 @@ class TestTransferFunctionIRGridSpacing:
         for n in (128, 129, 256):
             grid = np.fft.rfftfreq(n, 1.0 / self.FS)
             _, h = impulse_response_from_transfer_function(
-                np.ones(grid.size, dtype=complex), grid, self.FS)
+                np.ones(grid.size, dtype=complex), frequencies=grid, sample_rate=self.FS)
             assert h.size == n
 
     def test_absurdly_fine_spacing_raises_instead_of_allocating(self):
         f = np.array([0.0, 1e-4, 2e-4])
         with pytest.raises(ConfigurationError, match="n_samples"):
             impulse_response_from_transfer_function(
-                np.ones(3, dtype=complex), f, 1e6)
+                np.ones(3, dtype=complex), frequencies=f, sample_rate=1e6)
         # The limit is a default-only guard: an explicit n_samples is obeyed.
         _, h = impulse_response_from_transfer_function(
-            np.ones(3, dtype=complex), f, 1e6, n_samples=64)
+            np.ones(3, dtype=complex), frequencies=f, sample_rate=1e6, n_samples=64)
         assert h.size == 64
         assert _MAX_DEFAULT_IR_SAMPLES > 0
 
@@ -322,10 +341,9 @@ class TestImpulseResponseDropWarnings:
     FS, N = 1000.0, 10
 
     def _run(self, delay_samples, fractional):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             _t, h = impulse_response([1.0], [delay_samples / self.FS],
-                                     self.FS, n_samples=self.N,
+                                     sample_rate=self.FS, n_samples=self.N,
                                      fractional=fractional)
         return h, [str(w.message) for w in caught]
 
@@ -348,7 +366,7 @@ class TestImpulseResponseDropWarnings:
     def test_in_window_arrivals_are_silent(self, fractional):
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            _t, h = impulse_response([1.0], [5.0 / self.FS], self.FS,
+            _t, h = impulse_response([1.0], [5.0 / self.FS], sample_rate=self.FS,
                                      n_samples=self.N,
                                      fractional=fractional)
         assert float(np.sum(np.abs(h))) == pytest.approx(1.0, rel=1e-9)
@@ -475,7 +493,7 @@ class TestTheTwoDirectionsShareOneConvention:
          + 0.6 * np.exp(-2j * np.pi * F * 0.030))
 
     def test_the_round_trip_returns_the_same_amplitudes(self):
-        _t, h = impulse_response_from_transfer_function(self.H, self.F, FS)
+        _t, h = impulse_response_from_transfer_function(self.H, frequencies=self.F, sample_rate=FS)
         f_back, H_back = transfer_function_from_impulse_response(
             h, FS, band=(self.F[0], self.F[-1]))
         ref = (np.interp(f_back, self.F, self.H.real)
@@ -486,7 +504,7 @@ class TestTheTwoDirectionsShareOneConvention:
             1.0, abs=1e-9)
         assert np.abs(H_back - ref).max() < 1e-12
 
-    def test_a_started_record_carries_its_offset_out_again(self):
+    def test_a_started_record_carries_its_offset_out(self):
         """``t0`` rotates the phase back; without it the modulus is right
         and the angle is not, which nothing but an interference notices."""
         fs, n = 2000.0, 512
@@ -530,13 +548,17 @@ class TestABlockOfResponsesTransformsInOneCall:
 
     @pytest.mark.parametrize('axis', [3, -4, 't', None])
     def test_an_axis_the_array_does_not_have_is_refused(self, axis):
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(
+                ConfigurationError,
+                match='axis must be an integer|is not an axis of an array') as exc:
             transfer_function_from_impulse_response(
                 self._block(), FS, axis=axis)
         assert 'axis' in str(exc.value)
 
     def test_one_sample_along_the_named_axis_is_refused(self):
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(
+                ConfigurationError,
+                match='needs at least two samples along axis') as exc:
             transfer_function_from_impulse_response(
                 np.zeros((2, 3, 1)), FS)
         assert 'two samples' in str(exc.value)
@@ -548,7 +570,7 @@ class TestTheBandEdgeSurvivesFloatingPointDust:
     re-inverting a sample rate moved a 995 Hz edge by 1e-13 Hz and cost a
     bin, which is a silent off-by-one in the returned spectrum."""
 
-    def test_an_edge_bin_displaced_by_rounding_is_still_kept(self):
+    def test_an_edge_bin_displaced_by_rounding_is_kept(self):
         fs, n = 5120.0, 1024
         h = np.zeros(n)
         h[3] = 1.0
@@ -560,7 +582,7 @@ class TestTheBandEdgeSurvivesFloatingPointDust:
         assert kept.size == 180
         assert kept[-1] == high
 
-    def test_an_edge_genuinely_below_a_bin_still_excludes_it(self):
+    def test_an_edge_genuinely_below_a_bin_excludes_it(self):
         """The other side of the same threshold. Asking for one bin less
         is not a boundary test — it lands half a bin from the tolerance
         and passes however wide the tolerance is. This asks for an edge
@@ -600,7 +622,8 @@ class TestFieldToTransferFunctionDelegates:
         field = Field(data=np.zeros((1, 1, t.size)),
                       coords={'depth': np.array([10.0]),
                               'range': np.array([1000.0]), 'time': t})
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match=r'Field\.to_transfer_function: ') as exc:
             field.to_transfer_function(band=(9e3, 1e4))
         assert str(exc.value).startswith('Field.to_transfer_function:')
 
@@ -620,3 +643,91 @@ class TestFieldToTransferFunctionDelegates:
                     data[i, j], FS)
                 # dt is the one thing the method adds to the transform.
                 assert np.abs(H.data[i, j] - ref / FS).max() < 1e-18
+
+
+class TestAnOffsetFrequencyGridIsNotInterpolated:
+    """A uniform band whose first sample is not a multiple of its spacing
+    sat between the DFT bins and was interpolated there, which attenuates an
+    arrival at delay tau by |cos(pi tau df)|: -10.3 dB at 0.4 s on a 1 Hz
+    grid starting at 100.5 Hz."""
+
+    @pytest.mark.parametrize('f0', [100.0, 100.25, 100.5])
+    def test_a_late_arrival_keeps_its_level_at_any_offset(self, f0):
+        from uacpy.acoustic_signal.channel import (
+            impulse_response_from_transfer_function,
+        )
+        f = f0 + np.arange(100) * 1.0
+        H = np.exp(-2j * np.pi * f * 0.4)
+        t, h = impulse_response_from_transfer_function(H, frequencies=f, sample_rate=1000.0)
+        assert np.max(np.abs(h)) == pytest.approx(0.2, rel=1e-6)
+        assert t[np.argmax(np.abs(h))] == pytest.approx(0.4)
+
+    def test_an_interpolated_grid_says_so(self):
+        from uacpy.acoustic_signal.channel import (
+            impulse_response_from_transfer_function,
+        )
+        f = 100.0 + np.arange(100) * 1.0
+        with pytest.warns(UserWarning, match="interpolated"):
+            impulse_response_from_transfer_function(
+                np.ones(100, complex), frequencies=f, sample_rate=1000.0, n_samples=1500)
+
+
+class TestAnArrivalGridSharesOneClock:
+    """``simulate_arrival_grid`` synthesises every receiver of a grid from its
+    own arrival list on ONE window spanning every cell's arrivals."""
+
+    FS = 8000.0
+    FC = 1000.0
+
+    def _pulse(self):
+        t = np.arange(64) / self.FS
+        return np.sin(2 * np.pi * self.FC * t) * np.hanning(t.size)
+
+    @staticmethod
+    def _cell(delays, amplitudes=None):
+        delays = np.asarray(delays, dtype=float)
+        amps = (np.ones_like(delays) if amplitudes is None
+                else np.asarray(amplitudes, dtype=float))
+        return {'n_arrivals': delays.size, 'amplitudes': amps,
+                'delays': delays, 'delays_imag': np.zeros_like(delays),
+                'phases': np.zeros_like(delays)}
+
+    def test_every_cell_is_its_own_reception_on_the_shared_window(self):
+        from uacpy.acoustic_signal import (simulate_arrival_grid,
+                                           simulate_arrival_reception)
+        cells = [[self._cell([0.10]), self._cell([0.30, 0.31], [1.0, 0.5])]]
+        t, traces = simulate_arrival_grid(self._pulse(), cells, self.FS,
+                                          self.FC)
+        assert traces.shape == (1, 2, t.size)
+        for j, cell in enumerate(cells[0]):
+            _, ref = simulate_arrival_reception(
+                self._pulse(), cell['amplitudes'], cell['delays'], self.FS,
+                self.FC, output_duration=t[-1] - t[0] + 1.0 / self.FS,
+                t_start=t[0], report={})
+            np.testing.assert_array_equal(traces[0, j], ref[:t.size])
+
+    def test_the_window_spans_the_earliest_and_latest_arrival_of_the_grid(
+            self):
+        from uacpy.acoustic_signal import simulate_arrival_grid
+        cells = [[self._cell([0.10])], [self._cell([0.50])]]
+        t, traces = simulate_arrival_grid(self._pulse(), cells, self.FS,
+                                          self.FC)
+        assert t[0] <= 0.10 and t[-1] >= 0.50
+        assert np.max(np.abs(traces[1, 0])) > 0.0
+
+    def test_a_cell_no_arrival_reached_is_no_data(self):
+        from uacpy.acoustic_signal import simulate_arrival_grid
+        cells = [[self._cell([0.10]), self._cell([])]]
+        _, traces = simulate_arrival_grid(self._pulse(), cells, self.FS,
+                                          self.FC)
+        assert np.all(np.isnan(traces[0, 1]))
+        assert np.all(np.isfinite(traces[0, 0]))
+
+    def test_echoes_outside_a_pinned_window_are_named_once(self):
+        from uacpy.acoustic_signal.channel import _simulate_arrival_grid
+        cells = [[self._cell([0.10, 0.90]), self._cell([0.12, 0.95])]]
+        with recorded_warnings() as rec:
+            _simulate_arrival_grid(self._pulse(), cells, self.FS, self.FC,
+                                  t_start=0.0, time_window=0.5, who='probe')
+        named = [w for w in rec if str(w.message).startswith('probe')]
+        assert len(named) == 1

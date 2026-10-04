@@ -55,11 +55,14 @@ def field_kinds():
         env=env, ax=axes[0][1], value='phase', show_colorbar=False,
         title="complex + {depth, range}  →  .kind = 'pressure'")
     spectrum.plot(
-        ax=axes[1][0], value='mag_dB',
+        ax=axes[1][0], value='level',
         title="complex + {frequency}  →  H(f), unit='Pa'")
+    # No source spectrum or waveform, so the trace is the band-limited
+    # impulse response; the title reads kind and unit off the Field itself.
     trace.plot(
         ax=axes[1][1],
-        title="real + {time}  →  p(t), unit='Pa'")
+        title=f"real + {{time}}  →  h(t), .kind='{trace.kind}', "
+              f"unit='{trace.unit}'")
     for ax in axes.ravel():
         ax.title.set_fontsize(10)
     fig.suptitle('One Field class — the kind is derived, never declared',
@@ -121,12 +124,15 @@ def stack_panels():
 def time_synthesis():
     """``synthesize_time_series`` — H(f) convolved with a source chirp.
 
-    The frequency grid sets the record length (1/Δf), so it is chosen fine
-    enough to hold the travel-time spread across the receiver ranges.
+    The frequency grid sets the record length: Δf = 0.5 Hz gives 1/Δf = 2 s.
+    The arrivals span 0.67 s (1 km) to 2.29 s (the 3 km tail), more than a 2 s
+    record opened at t = 0 holds, so ``t_start=0.5`` places it at [0.5, 2.5] s.
+    The chirp is Hann-shaded, as a projector transmits it; its spectrum is
+    then 40 dB down outside 87-511 Hz, inside the 80-520 Hz band of H.
     """
     env, _, _ = shallow_water()
     source = uacpy.Source(depths=25.0,
-                          frequencies=np.arange(150.0, 450.1, 0.5))
+                          frequencies=np.arange(80.0, 520.1, 0.5))
     receiver = uacpy.Receiver(depths=CUT_DEPTH,
                               ranges=np.linspace(1000.0, 3000.0, 9))
     with warnings.catch_warnings():
@@ -135,15 +141,17 @@ def time_synthesis():
                                       run_mode=RunMode.BROADBAND)
 
     sample_rate = 4000.0
-    t_src, waveform = lfm_chirp(150.0, 450.0, 0.04, sample_rate)
-    series = H.synthesize_time_series(waveform, sample_rate)
+    t_src, chirp = lfm_chirp(150.0, 450.0, 0.04, sample_rate=sample_rate)
+    waveform = chirp * np.hanning(chirp.size)
+    series = H.synthesize_time_series(waveform, sample_rate, t_start=0.5)
 
     fig, (ax_src, ax_rx) = plt.subplots(
         1, 2, figsize=(11.0, 4.2), gridspec_kw={'width_ratios': [1.0, 2.0]})
     ax_src.plot(t_src * 1000.0, waveform, lw=0.8, color='C1')
     ax_src.set_xlabel('Time (ms)')
     ax_src.set_ylabel('Amplitude')
-    ax_src.set_title('source: 150→450 Hz LFM chirp, 40 ms', fontsize=10)
+    ax_src.set_title('source: 150→450 Hz LFM chirp, 40 ms, Hann-shaded',
+                     fontsize=10)
     ax_src.grid(True, alpha=0.3)
 
     series.isel(depth=0).plot(ax=ax_rx, stacked=True)
@@ -159,7 +167,7 @@ def rays_and_arrivals():
     """The two sparse result types: the geometry, and what it delivers."""
     env, source, _ = shallow_water()
     point = uacpy.Receiver(depths=CUT_DEPTH, ranges=CUT_RANGE)
-    model = Bellhop(n_beams=4000, alpha=(-45.0, 45.0))
+    model = Bellhop(n_beams=4000, launch_angles=(-45.0, 45.0))
     eig = model.run(env, source, point, run_mode=RunMode.EIGENRAYS)
     arr = model.run(env, source, point, run_mode=RunMode.ARRIVALS)
 

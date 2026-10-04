@@ -14,14 +14,22 @@ References
 ----------
 Southall, B. L., Finneran, J. J., Reichmuth, C., et al. (2019). "Marine Mammal
     Noise Exposure Criteria: Updated Scientific Recommendations for Residual
-    Hearing Effects." *Aquatic Mammals* 45(2), 125-232 — Table 5. Consistent
-    with NMFS (2018) Technical Guidance (NMFS-OPR-59).
+    Hearing Effects." *Aquatic Mammals* 45(2), 125-232 — Table 5. The
+    parameters agree with NMFS (2018) Technical Guidance (NMFS-OPR-59) where
+    the two overlap, but Southall renamed the cetacean groups, so the labels
+    move one step: NMFS LF / MF / HF / PW / OW are Southall LF / HF / VHF /
+    PCW / OCW here. NMFS "HF" (harbour porpoise) is this module's ``"VHF"``;
+    this module's ``"HF"`` is NMFS "MF" (most dolphins): Southall et al.
+    (2019) draw "the distinction between HF and VHF cetacean groups (as
+    opposed to mid- and high-frequency)", and their HF group "represents
+    most of the same species identified as MF cetaceans by ... NMFS".
 """
 
 from __future__ import annotations
 
 import numpy as np
 
+from uacpy.core.acoustics import band_level
 from uacpy.core.exceptions import ConfigurationError
 
 # Southall et al. (2019) Table 5: a, b, f1 [kHz], f2 [kHz], C [dB] (weighting)
@@ -48,6 +56,9 @@ WEIGHTING_PARAMS = {
     "OCA": {"a": 1.4, "b": 2, "f1": 2.0,  "f2": 20.0,  "C": 1.39, "K": 156},
 }
 
+#: Southall et al. (2019) hearing groups. The cetacean labels are NOT NMFS
+#: (2018)'s: NMFS MF is ``"HF"`` here and NMFS HF is ``"VHF"`` (see the module
+#: docstring); NMFS PW / OW are ``"PCW"`` / ``"OCW"``.
 HEARING_GROUPS = {
     "LF": "Low-frequency cetaceans",
     "HF": "High-frequency cetaceans",
@@ -60,17 +71,37 @@ HEARING_GROUPS = {
 }
 
 
+#: NMFS (2018) group names with no Southall (2019) group of the same name,
+#: and the Southall group each one is.
+_NMFS_ONLY_GROUPS = {"MF": "HF", "PW": "PCW", "OW": "OCW"}
+
+
 def auditory_weighting(frequency, group):
     """Auditory weighting ``W(f)`` [dB] at ``frequency`` [Hz] for a hearing group.
 
     ``group`` is one of :data:`HEARING_GROUPS` (e.g. ``"LF"``, ``"VHF"``,
-    ``"PCW"``). The peak of the function is 0 dB; all other values are negative.
+    ``"PCW"``), in Southall et al. (2019)'s naming: a harbour porpoise, NMFS
+    (2018) "HF", is ``"VHF"`` here. The peak of the function is 0 dB; all
+    other values are negative.
+
+    Parameters
+    ----------
+    frequency : float or array_like
+        Frequency (Hz).
+    group : str
+        A hearing group of :data:`HEARING_GROUPS`.
     """
     g = str(group).upper()
+    if g in _NMFS_ONLY_GROUPS:
+        raise ConfigurationError(
+            f"auditory_weighting: {group!r} is an NMFS (2018) group name; "
+            f"this module uses Southall et al. (2019)'s, where NMFS "
+            f"{g} is {_NMFS_ONLY_GROUPS[g]!r}. Note that NMFS 'HF' is "
+            f"Southall 'VHF', and Southall 'HF' is NMFS 'MF'.")
     if g not in WEIGHTING_PARAMS:
         raise ConfigurationError(
             f"auditory_weighting: unknown group {group!r}; choose from "
-            f"{sorted(WEIGHTING_PARAMS)}")
+            f"{sorted(WEIGHTING_PARAMS)}.")
     p = WEIGHTING_PARAMS[g]
     f = np.asarray(frequency, dtype=float) / 1000.0        # Hz -> kHz
     # Eq. (2) is even in f, so a negative frequency squares away and comes back
@@ -90,12 +121,22 @@ def auditory_weighting(frequency, group):
         r1 ** p["a"] / ((1 + r1) ** p["a"] * (1 + r2) ** p["b"]))
 
 
-def apply_weighting(level_dB, frequency, group):
-    """Apply the group weighting to a per-frequency level spectrum: ``L + W(f)`` [dB]."""
+def apply_weighting(level_dB, *, frequency, group):
+    """Apply the group weighting to a per-frequency level spectrum: ``L + W(f)`` [dB].
+
+    Parameters
+    ----------
+    level_dB : float or array_like
+        Level per frequency (dB).
+    frequency : float or array_like
+        Frequency (Hz).
+    group : str
+        A hearing group of :data:`HEARING_GROUPS`.
+    """
     return np.asarray(level_dB, dtype=float) + auditory_weighting(frequency, group)
 
 
-def weighted_level(psd_dB, frequency, group):
+def weighted_level(psd_dB, *, frequency, group):
     """Broadband group-weighted level [dB] from a level-*density* spectrum.
 
     Integrates the weighted spectral density over frequency::
@@ -105,15 +146,26 @@ def weighted_level(psd_dB, frequency, group):
     where ``psd_dB`` is a level density (dB re ref²/Hz) at ``frequency`` [Hz].
     Integrating — rather than summing the samples — makes the result
     **independent of the frequency-grid spacing** (a bare sum is not: it scales
-    with the number of bins). Mirrors how :func:`uacpy.acoustic_signal.estimate`
+    with the number of bins). Mirrors how :func:`uacpy.acoustic_signal.welch`
     and SEL integrate a PSD. ``frequency`` need not be pre-sorted, but it needs
     at least two entries to span a bandwidth; the level of a single frequency
-    is :func:`apply_weighting`.
+    is :func:`apply_weighting`. The integral is
+    :func:`uacpy.core.acoustics.band_level`'s, so a spectrum that carries no
+    power reads ``-inf``, the level of an empty band throughout uacpy.
+
+    Parameters
+    ----------
+    psd_dB : array_like
+        Level density (dB re ref²/Hz) at each frequency.
+    frequency : array_like
+        Frequencies (Hz), at least two.
+    group : str
+        A hearing group of :data:`HEARING_GROUPS`.
     """
     f = np.atleast_1d(np.asarray(frequency, dtype=float))
     # Fewer than two samples span zero bandwidth, so the trapezoid integral is
     # 0 and the returned level would be the 10·log10(float-tiny) floor
-    # (-3076.5 dB) — refused the way compute_windnoise(band_integrate=True)
+    # (-3076.5 dB) — refused the way wind_noise_level(band_integrate=True)
     # refuses a single frequency. A scalar is normalised to shape (1,) first,
     # so it is refused with the same message rather than crashing on indexing.
     if f.size < 2:
@@ -123,7 +175,6 @@ def weighted_level(psd_dB, frequency, group):
             f"{f.size}. For the weighted level at a single frequency use "
             f"apply_weighting(psd_dB, frequency, group).")
     w = np.atleast_1d(
-        np.asarray(apply_weighting(psd_dB, frequency, group), dtype=float))
+        np.asarray(apply_weighting(psd_dB, frequency=frequency, group=group), dtype=float))
     order = np.argsort(f)
-    integral = np.trapezoid(10.0 ** (w[order] / 10.0), f[order])
-    return float(10.0 * np.log10(max(float(integral), np.finfo(float).tiny)))
+    return band_level(w[order], f[order])

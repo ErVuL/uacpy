@@ -36,7 +36,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.grn_reader import read_grn_file
 from uacpy.models import SPARC
-from uacpy.models.base import RunMode
+from uacpy.core.run_settings import RunMode
 
 
 @pytest.fixture
@@ -71,6 +71,7 @@ class TestSPARCRunModeSurface:
     def test_time_series_is_the_only_supported_mode(self):
         assert SPARC.spec.modes == (RunMode.TIME_SERIES,)
 
+    @pytest.mark.requires_binary
     def test_time_series_is_the_default(self, sparc_simple_env, source_50hz,
                                         receiver_grid):
         m = SPARC(verbose=False)
@@ -79,18 +80,22 @@ class TestSPARCRunModeSurface:
     @pytest.mark.requires_binary
     def test_coherent_tl_is_refused_with_a_usable_alternative(
             self, sparc_simple_env, source_50hz, receiver_grid):
-        with pytest.raises(UnsupportedFeatureError) as ei:
-            SPARC(verbose=False).run(sparc_simple_env, source_50hz,
-                                     receiver_grid,
-                                     run_mode=RunMode.COHERENT_TL)
-        assert 'Scooter' in str(ei.value) or 'Kraken' in str(ei.value)
+        model = SPARC(verbose=False)
+        for call in (model.run, model.run_settings, model.validate_inputs):
+            with pytest.raises(UnsupportedFeatureError,
+                               match='does not support: RunMode.COHERENT_TL'
+                               ) as ei:
+                call(sparc_simple_env, source_50hz, receiver_grid,
+                     run_mode=RunMode.COHERENT_TL)
+            assert 'Scooter' in str(ei.value) and 'Kraken' in str(ei.value)
 
 
 class TestSPARCOutputMode:
     """'R' and 'D' are both received time series; only 'S' is unavailable."""
 
     def test_unknown_output_mode_is_rejected(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match="Invalid output_mode 'Z'"):
             SPARC(verbose=False, output_mode='Z')
 
     @pytest.mark.requires_binary
@@ -150,36 +155,40 @@ class TestSPARCOutputMode:
         assert np.any(res.data != 0)
 
 
+@pytest.mark.requires_binary
 class TestSPARCEnvironmentHandling:
     """Behaviour that is independent of the withdrawn CW path."""
 
-    @pytest.mark.requires_binary
-    def test_halfspace_bottom_is_rigidified_with_a_warning(
-            self, source_50hz, receiver_grid):
-        """SPARC's writer supports only vacuum / rigid, so a half-space must be
-        force-rigidified loudly rather than silently reinterpreted."""
+    def test_halfspace_bottom_is_refused_before_any_launch(
+            self, source_50hz, monkeypatch):
+        """SPARC's deck supports only vacuum / rigid floors, so a half-space
+        raises ConfigurationError instead of being replaced by a rigid one,
+        and no binary is launched."""
         env = Environment(
             name='hs', bathymetry=100.0, ssp=1500.0,
             bottom=BoundaryProperties(acoustic_type='half-space',
                                       sound_speed=1800.0, density=1.8,
                                       attenuation=0.5))
-        with pytest.warns(UserWarning, match="rigid"):
-            SPARC(verbose=False).run(
-                env, source_50hz,
-                Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
+        m = SPARC(verbose=False)
+        monkeypatch.setattr(
+            m, "_run_sparc",
+            lambda *a, **k: pytest.fail("binary launched for a half-space"))
+        with pytest.raises(ConfigurationError, match="half-space"):
+            m.run(env, source_50hz,
+                  Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
 
     def test_oversized_depth_axis_raises_before_any_launch(
             self, sparc_simple_env, source_50hz, monkeypatch):
         """``output_mode='R'`` runs one subprocess per receiver depth, so a
-        depth axis past ``max_depths`` (default 20) raises
+        depth axis past ``max_launches`` (default 20) raises
         ``UnsupportedFeatureError`` rather than queueing hours of solves —
         and it raises before any binary is launched."""
         m = SPARC(verbose=False, output_mode='R')
         monkeypatch.setattr(
             m, "_run_sparc",
             lambda *a, **k: pytest.fail("binary launched before the "
-                                        "max_depths cap fired"))
-        with pytest.raises(UnsupportedFeatureError, match='max_depths'):
+                                        "max_launches cap fired"))
+        with pytest.raises(UnsupportedFeatureError, match='max_launches'):
             m.run(sparc_simple_env, source_50hz,
                   Receiver(depths=np.linspace(10.0, 90.0, 21),
                            ranges=np.array([1000.0])))
@@ -192,8 +201,8 @@ class TestSPARCEnvironmentHandling:
         monkeypatch.setattr(
             m, "_run_sparc",
             lambda *a, **k: pytest.fail("binary launched before the "
-                                        "max_depths cap fired"))
-        with pytest.raises(UnsupportedFeatureError, match='max_depths'):
+                                        "max_launches cap fired"))
+        with pytest.raises(UnsupportedFeatureError, match='max_launches'):
             m.run(sparc_simple_env, source_50hz,
                   Receiver(depths=np.array([50.0]),
                            ranges=np.linspace(100.0, 2100.0, 21)))
@@ -224,7 +233,7 @@ class TestSPARCEnvironmentHandling:
     @pytest.mark.requires_binary
     def test_one_binary_run_per_receiver_depth(self, sparc_simple_env,
                                                source_50hz, monkeypatch):
-        """The horizontal path loops the binary once per depth; the max_depths
+        """The horizontal path loops the binary once per depth; the max_launches
         cap exists because of it."""
         import warnings as _w
         m = SPARC(verbose=False)
@@ -299,14 +308,15 @@ class TestSPARCSnapshot:
 
 # ── the snapshot's one DFT row ──────────────────────────────────────────────
 #
-# `sparc_snapshot_to_field` keeps one DFT row without transforming the rest.
+# `GreensFunction.snapshot_to_field` keeps one DFT row without transforming
+# the rest.
 # `np.fft.fft(cube, axis=0)[f_idx]` transforms every one of the `nt`
 # frequencies and keeps one — 5.1x the cube in peak RSS, ~17 GB on a
 # 512 x 200 x 4096 snapshot, for an (nrd, nk) slab. The row is a contraction
 # against `exp(-2i pi f_idx n / nt)`, so what is pinned below is the equality,
 # not the saving.
 #
-# The two branches of the reader are NOT entitled to the same precision, and
+# The two branches of the row are NOT entitled to the same precision, and
 # that is the trap here. `np.fft.fft` on a complex64 cube is a
 # single-precision transform, so the rectangular branch trades round-off for
 # round-off; but `G * win[:, None, None]` with a float64 window promotes the
@@ -344,7 +354,7 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
         return (0, nt // 4, nt // 2, nt - 1)
 
     def test_the_rectangular_row_matches_the_full_single_precision_fft(self):
-        from uacpy.io.grn_reader import _dft_row
+        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._cube()
         for f_idx in self._bins(G.shape[0]):
             ref = _full_fft_row(G, f_idx)
@@ -355,7 +365,7 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
 
     def test_the_windowed_row_holds_the_double_precision_the_upcast_gives_it(
             self):
-        from uacpy.io.grn_reader import _dft_row
+        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._cube()
         win = np.hanning(G.shape[0])
         for f_idx in self._bins(G.shape[0]):
@@ -379,7 +389,7 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
     def test_chunking_the_wavenumber_axis_leaves_the_row_unchanged(self):
         # nk past the internal 4e6-element block, so the windowed path takes
         # more than one chunk and the block arithmetic is exercised.
-        from uacpy.io.grn_reader import _dft_row
+        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._cube(nt=64, nrd=8, nk=9000, seed=1)
         assert G.shape[0] * G.shape[1] * G.shape[2] > 4_000_000
         win = np.hanning(G.shape[0])
@@ -389,7 +399,7 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
             rtol=1e-12, atol=1e-12)
 
     def test_a_double_precision_cube_stays_in_double_precision(self):
-        from uacpy.io.grn_reader import _dft_row
+        from uacpy.core.acoustics.wavenumber import _dft_row
         G = self._cube().astype(np.complex128)
         ref = _full_fft_row(G, 9)
         got = _dft_row(G, 9)
@@ -397,55 +407,112 @@ class TestSparcSnapshotKeepsOneDftRowWithoutTheOthers:
         assert _rel(ref, got) < 1e-13
 
 
+def _direct_dtft_row(G, f_idx, win=None):
+    """The transform at (possibly fractional) bin ``f_idx`` as a plain sum
+    over the time axis — the reference for an off-bin row."""
+    G = np.asarray(G)
+    nt = G.shape[0]
+    kernel = np.exp(-2j * np.pi * float(f_idx) * np.arange(nt) / nt)
+    if win is not None:
+        kernel = kernel * win
+    kernel = kernel.reshape((nt,) + (1,) * (G.ndim - 1))
+    return np.sum(G.astype(np.complex128) * kernel, axis=0)
+
+
 class TestSparcSnapshotFieldIsUnchangedByTheRowContraction:
-    """End to end: the same snapshot through ``sparc_snapshot_to_field`` with
-    the row contraction and with the full transform it replaced, including the
-    ``/S(f0)`` deconvolution, the ``2/sum(win)`` estimator scale and the
-    Hankel transform that follow it.
+    """End to end: the same snapshot through ``snapshot_to_field`` with
+    the row contraction and with a plain summed transform at the same
+    (off-bin) position, including the ``/S(f0)`` deconvolution, the
+    ``2/sum(win)`` estimator scale and the Hankel transform that follow it.
     """
 
     @staticmethod
     def _grn(nt=64, nrd=6, nk=48, freq=25.0, seed=3):
+        from uacpy.core.results import GreensFunction
         rng = np.random.default_rng(seed)
-        return {
-            'is_sparc': True,
-            'title': 'SPARC-  synthetic snapshot',
-            'nfreq': nt, 'nsd': 1, 'nrd': nrd, 'nk': nk,
-            'freq': freq,
-            'freqVec': np.arange(nt) / (200.0 * freq),   # output TIMES
-            'sd': np.array([20.0]),
-            'rd': np.linspace(10.0, 200.0, nrd),
-            'cVec': np.linspace(2500.0, 1400.0, nk),
-            'atten': 0.0,
-            'G': (rng.standard_normal((nt, 1, nrd, nk)) +
-                  1j * rng.standard_normal((nt, 1, nrd, nk))
-                  ).astype(np.complex64),
-        }
+        return GreensFunction(
+            data=(rng.standard_normal((nt, 1, nrd, nk)) +
+                    1j * rng.standard_normal((nt, 1, nrd, nk))
+                    ).astype(np.complex64),
+            phase_speeds=np.linspace(2500.0, 1400.0, nk),
+            receiver_depths=np.linspace(10.0, 200.0, nrd),
+            source_depths=[20.0], frequencies=freq,
+            times=np.arange(nt) / (200.0 * freq),       # output TIMES
+            title='SPARC-  synthetic snapshot', model='SPARC')
 
     @staticmethod
     def _field(grn, ranges, normalize, pulse_type):
-        from uacpy.io.grn_reader import sparc_snapshot_to_field
-        # normalize='none' always announces its uncalibrated level.
+        from uacpy.acoustic_signal.generate import sparc_pulse
+        waveform = (None if pulse_type is None else
+                    sparc_pulse(grn.times, 25.0, pulse_type)[0])
+        # normalize=None always announces its uncalibrated level.
         ctx = (pytest.warns(UserWarning, match='RAW field')
-               if normalize == 'none' else contextlib.nullcontext())
+               if normalize is None else contextlib.nullcontext())
         with ctx:
-            return sparc_snapshot_to_field(
-                grn, ranges, 25.0, normalize=normalize, pulse_type=pulse_type)
+            return grn.snapshot_to_field(
+                ranges, 25.0, normalize=normalize, source_waveform=waveform)
 
     @pytest.mark.parametrize('normalize,pulse_type', [('source', 'R'),
-                                                      ('none', None)])
+                                                      (None, None)])
     def test_the_field_matches_the_full_fft_route(self, monkeypatch,
                                                   normalize, pulse_type):
-        import uacpy.io.grn_reader as gr
+        import uacpy.core.acoustics.wavenumber as wn
         grn = self._grn()
         ranges = np.linspace(200.0, 5000.0, 12)
         new = self._field(grn, ranges, normalize, pulse_type)
-        monkeypatch.setattr(gr, '_dft_row', _full_fft_row)
+        monkeypatch.setattr(wn, '_dft_row', _direct_dtft_row)
         ref = self._field(grn, ranges, normalize, pulse_type)
         # Single precision on the rectangular branch, double on the windowed
         # one — the same split the row helper is pinned to above.
         tol = 1e-6 if normalize == 'source' else 1e-12
         assert _rel(ref.data, new.data) < tol
+
+    def test_a_fractional_row_is_the_transform_between_the_bins(self):
+        from uacpy.core.acoustics.wavenumber import _dft_row
+        G = self._grn().data[:, 0].astype(np.complex128)
+        win = np.hanning(G.shape[0])
+        for f_idx in (0.32, 7.5, 31.9):
+            assert _rel(_direct_dtft_row(G, f_idx), _dft_row(G, f_idx)) < 1e-12
+            assert _rel(_direct_dtft_row(G, f_idx, win),
+                        _dft_row(G, f_idx, win)) < 1e-12
+
+
+class TestSparcSnapshotIsEvaluatedAtTheSourceFrequency:
+    """The calibrated snapshot field is the transfer function AT
+    ``frequency``, not at the nearest DFT bin. A two-path channel
+    ``h(f) = a + b·e^{-2πifτ}`` separates the two: a constant channel is
+    exact at any bin by construction, so it cannot show the difference."""
+
+    DT, NT, F0, DELAY = 1.0 / 5000.0, 510, 250.0, 40   # f0 at bin 25.5
+
+    def _grn(self, G):
+        from uacpy.core.results import GreensFunction
+        nrd, nk = G.shape[1], G.shape[2]
+        return GreensFunction(
+            data=G[:, None].astype(np.complex128),
+            phase_speeds=np.linspace(2500.0, 1400.0, nk),
+            receiver_depths=np.linspace(10.0, 100.0, nrd),
+            source_depths=[20.0], frequencies=self.F0,
+            times=np.arange(self.NT) * self.DT,
+            title='SPARC-  two-path snapshot', model='SPARC')
+
+    def test_the_two_path_field_is_the_transfer_function_at_f0(self):
+        from uacpy.acoustic_signal.generate import sparc_pulse
+        t = np.arange(self.NT) * self.DT
+        s, _ = sparc_pulse(t, self.F0, 'H')
+        a, b = 1.0, 0.6 - 0.3j
+        delayed = np.concatenate([np.zeros(self.DELAY), s[:-self.DELAY]])
+        rng = np.random.default_rng(5)
+        c = rng.standard_normal((3, 16)) + 1j * rng.standard_normal((3, 16))
+        two_path = (a * s + b * delayed)[:, None, None] * c
+        h_f0 = a + b * np.exp(-2j * np.pi * self.F0 * self.DELAY * self.DT)
+        one_path = (h_f0 * s)[:, None, None] * c
+        ranges = np.array([100.0, 200.0, 300.0])
+        got = self._grn(two_path).snapshot_to_field(ranges, self.F0,
+                                                    source_waveform=s)
+        ref = self._grn(one_path).snapshot_to_field(ranges, self.F0,
+                                                    source_waveform=s)
+        assert _rel(ref.data, got.data) < 1e-9
 
 
 def _write_grn(path, *, title, nsd, nfreq=2, nrd=1, nk=4):
@@ -502,8 +569,8 @@ class TestSparcSnapshotTakesOneSourceDepth:
         path = tmp_path / 'ok.grn'
         _write_grn(path, title='SPARC-   snapshot', nsd=1)
         out = read_grn_file(str(path))
-        assert out['is_sparc'] is True
-        assert out['G'].shape == (2, 1, 1, 4)
+        assert out.is_snapshot is True
+        assert out.data.shape == (2, 1, 1, 4)
 
     def test_a_multi_source_depth_snapshot_is_refused(self, tmp_path):
         path = tmp_path / 'bad.grn'
@@ -517,8 +584,8 @@ class TestSparcSnapshotTakesOneSourceDepth:
         path = tmp_path / 'scooter.grn'
         _write_grn(path, title='SCOOTER- test', nsd=2)
         out = read_grn_file(str(path))
-        assert out['is_sparc'] is False
-        assert out['G'].shape == (2, 2, 1, 4)
+        assert out.is_snapshot is False
+        assert out.data.shape == (2, 2, 1, 4)
 
 
 def _write_sparc_grn(path, *, title, nfreq=3, nsd=1, nrd=1, nk=4):
@@ -558,23 +625,34 @@ class TestBroadbandTransformRefusesASparcSnapshot:
     """``WriteHeaderSparc`` puts the output TIME vector in the ``.grn``'s
     frequency slot (``sparc.f90:317-319``), so transforming a snapshot as a
     multi-frequency Green's function labels seconds as hertz and reports a
-    ``center_frequency`` that is a time. The two snapshot readers already
+    ``center_frequency`` that is a time. The two snapshot transforms already
     refuse a non-SPARC ``.grn``; this is the same guard the other way round."""
 
-    def test_a_sparc_grn_names_the_two_snapshot_readers(self, tmp_path):
-        from uacpy.io.grn_reader import read_grn_file, grn_to_transfer_function
+    def test_a_sparc_grn_names_the_two_snapshot_transforms(self, tmp_path):
         path = tmp_path / 'snap.grn'
         _write_sparc_grn(path, title='SPARC-   snapshot')
         grn = read_grn_file(str(path))
-        assert grn['is_sparc'] is True
+        assert grn.is_snapshot is True
         with pytest.raises(ConfigurationError,
-                           match='sparc_snapshot_to_time_field'):
-            grn_to_transfer_function(grn, np.array([1000.0]))
+                           match='snapshot_to_time_field'):
+            grn.to_transfer_function(np.array([1000.0]))
 
     def test_a_scooter_grn_transforms_onto_its_frequency_axis(self, tmp_path):
-        from uacpy.io.grn_reader import read_grn_file, grn_to_transfer_function
         path = tmp_path / 'broad.grn'
         _write_sparc_grn(path, title='SCOOTER- broadband')
         grn = read_grn_file(str(path))
-        field = grn_to_transfer_function(grn, np.array([1000.0]))
-        assert np.array_equal(field.coords['frequency'], grn['freqVec'])
+        field = grn.to_transfer_function(np.array([1000.0]))
+        assert np.array_equal(field.coords['frequency'], [1.0, 2.0, 3.0])
+        assert np.array_equal(grn.frequencies, [1.0, 2.0, 3.0])
+        assert grn.times is None
+
+    def test_a_sparc_grn_carries_its_times_and_its_source_frequency(
+            self, tmp_path):
+        # A snapshot's record-4 vector holds output times (sparc.f90:320);
+        # the header's freq0 is its one frequency.
+        path = tmp_path / 'snap.grn'
+        _write_sparc_grn(path, title='SPARC-   snapshot')
+        grn = read_grn_file(str(path))
+        assert np.array_equal(grn.times, [1.0, 2.0, 3.0])
+        assert np.array_equal(grn.frequencies, [100.0])
+        assert grn.model == 'SPARC'

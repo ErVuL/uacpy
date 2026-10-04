@@ -8,99 +8,61 @@ every *unsupported* mode keeps being refused.
 
 import pytest
 
-from uacpy.models.base import RunMode
-from uacpy.models.bellhop import Bellhop
-from uacpy.models.kraken import Kraken
-from uacpy.models.scooter import Scooter
-from uacpy.models.sparc import SPARC
-from uacpy.models.bounce import Bounce
-from uacpy.models.oases import OAST, OASN, OASR, OASP, OASS, OASSP
-from uacpy.models.ram import RAM
+from uacpy.core.run_settings import RunMode
 from uacpy.core.exceptions import ExecutableNotFoundError
+from uacpy.tests.conftest import build_engine, engine_names, engine_params
 
 
-# (model factory, expected supported RunModes). Lambdas because constructors
-# resolve their binary eagerly.
+# Expected supported RunModes, per engine. Each test builds its engine with
+# ``build_engine`` behind the markers ``engine_params`` attaches, because
+# every constructor resolves its binary.
 _EXPECTED = {
-    'Bellhop': (
-        lambda: Bellhop(),
+    'Bellhop':
         {RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
          RunMode.RAYS, RunMode.EIGENRAYS, RunMode.ARRIVALS,
          RunMode.BROADBAND, RunMode.TIME_SERIES},
-    ),
-    'Kraken': (
-        lambda: Kraken(),
+    'Kraken':
         {RunMode.MODES, RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
          RunMode.BROADBAND, RunMode.TIME_SERIES},
-    ),
-    'Scooter': (
-        lambda: Scooter(),
+    'Scooter':
         {RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES},
-    ),
-    'SPARC': (
-        lambda: SPARC(),
+    'SPARC':
         # CW transmission loss withdrawn: the pulse-to-CW extraction is not
         # quantitative. SPARC's product is its native time series.
         {RunMode.TIME_SERIES},
-    ),
-    'Bounce': (
-        lambda: Bounce(),
+    'Bounce':
         {RunMode.REFLECTION},
-    ),
-    'OAST': (
-        lambda: OAST(),
+    'OAST':
         {RunMode.COHERENT_TL},
-    ),
-    'OASN': (
-        lambda: OASN(),
+    'OASN':
         {RunMode.COVARIANCE, RunMode.REPLICA},
-    ),
-    'OASR': (
-        lambda: OASR(),
+    'OASR':
         {RunMode.REFLECTION},
-    ),
-    'OASP': (
-        lambda: OASP(),
+    'OASP':
         {RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES},
-    ),
-    'OASS': (
-        lambda: OASS(correlation_length=10.0),
+    'OASS':
         {RunMode.REVERBERATION, RunMode.COVARIANCE},
-    ),
-    'OASSP': (
-        lambda: OASSP(correlation_length=10.0),
+    'OASSP':
         {RunMode.BROADBAND, RunMode.TIME_SERIES},
-    ),
-    'RAM': (
-        lambda: RAM(),
+    'RAM':
         {RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES},
-    ),
 }
 
 
-_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP', 'OASS', 'OASSP'}
+_MODEL_PARAMS = engine_params(value='name')
 
 
-def _model_param(name):
-    """Wrap parametrize values with the binary markers each model needs
-    (every constructor existence-checks its binary), plus ``requires_oases``
-    for the separately-licensed OASES family."""
-    marks = [pytest.mark.requires_binary]
-    if name in _OASES_MODELS:
-        marks.append(pytest.mark.requires_oases)
-    return pytest.param(name, marks=marks, id=name)
-
-
-_MODEL_PARAMS = [_model_param(n) for n in _EXPECTED.keys()]
+def test_the_expected_table_covers_the_registered_engines():
+    assert set(_EXPECTED) == engine_names()
 
 
 @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
 def test_supported_modes(model_name):
     """``_supported_modes`` matches exactly; ``supports_mode`` agrees on the
     full RunMode enum (every unsupported mode refused)."""
-    factory, expected = _EXPECTED[model_name]
+    expected = _EXPECTED[model_name]
     try:
-        m = factory()
+        m = build_engine(model_name)
     except ExecutableNotFoundError:
         pytest.skip(f"{model_name} binary not available")
 
@@ -118,12 +80,10 @@ def test_supported_modes(model_name):
 # ── the reverse map: which models each ``compute_*`` names ─────────────────
 
 #: ``PropagationModel.compute_*`` -> the ``RunMode`` it gates on. The
-#: ``alternatives=[...]`` list each one raises with is the only guidance a
-#: user gets when their model cannot answer, and it is written by hand
-#: because the mapping mode -> models cannot be derived inside ``base.py``
-#: (it would need every wrapper imported, and ``base.py`` is what they
-#: import). That makes it a hand-maintained copy of ``spec.modes``, which is
-#: what the test below compares it against.
+#: ``alternatives`` list each one raises with is the only guidance a user
+#: gets when their model cannot answer; it is read from the engine registry
+#: (``uacpy.models._registry.engines_running``) when the refusal is raised,
+#: and the tests below compare it with every wrapper's ``spec.modes``.
 _COMPUTE_METHOD_MODES = {
     'compute_tl': RunMode.COHERENT_TL,
     'compute_rays': RunMode.RAYS,
@@ -135,26 +95,38 @@ _COMPUTE_METHOD_MODES = {
     'compute_transfer_function': RunMode.BROADBAND,
     'compute_covariance': RunMode.COVARIANCE,
     'compute_replicas': RunMode.REPLICA,
+    'compute_reverberation': RunMode.REVERBERATION,
 }
 
 
-def _hardcoded_alternatives(method_name):
-    """The ``alternatives=[...]`` literal in ``base.py``'s ``method_name``."""
-    import ast
-    import inspect
-    from uacpy.models import base as base_mod
+def _refusal_alternatives(method_name):
+    """The ``alternatives`` a model lacking the method's mode is refused
+    with: a stand-in model that runs only some other mode calls it."""
+    import uacpy
+    from uacpy.models.base import PropagationModel
+    from uacpy.models._spec import ModelSpec
 
-    tree = ast.parse(inspect.getsource(base_mod))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == method_name:
-            for call in ast.walk(node):
-                if (isinstance(call, ast.Call)
-                        and getattr(call.func, 'id', '')
-                        == 'UnsupportedFeatureError'):
-                    for kw in call.keywords:
-                        if kw.arg == 'alternatives':
-                            return [e.value for e in kw.value.elts]
-    raise AssertionError(f"no alternatives=[...] found in {method_name}")
+    mode = _COMPUTE_METHOD_MODES[method_name]
+    other = (RunMode.REVERBERATION if mode != RunMode.REVERBERATION
+             else RunMode.COHERENT_TL)
+
+    def _never_launched(self, *args):
+        raise AssertionError('the refusal comes before any run')
+
+    class _OtherModeOnly(PropagationModel):
+        spec = ModelSpec(modes=(other,))
+        provenance_id = 'acoustics_toolbox'
+        _write_input = _launch = _read_output = _to_result = _never_launched
+
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+    src = uacpy.Source(depths=50.0, frequencies=100.0)
+    rcv = uacpy.Receiver(depths=[20.0], ranges=[1000.0])
+    method = getattr(_OtherModeOnly(), method_name)
+    args = (env, src) if method_name == 'compute_modes' else (env, src, rcv)
+    with pytest.raises(uacpy.UnsupportedFeatureError,
+                       match='_OtherModeOnly does not support: ') as info:
+        method(*args)
+    return info.value.alternatives
 
 
 def _models_declaring(mode):
@@ -177,14 +149,13 @@ def _models_declaring(mode):
 
 @pytest.mark.parametrize('method_name', sorted(_COMPUTE_METHOD_MODES))
 def test_compute_method_names_every_model_declaring_its_mode(method_name):
-    """The hand-written advice equals the declared truth.
-
-    Without this, a model that gains a mode never appears in the message that
-    sends users to it, and one that loses a mode keeps being recommended —
-    both silent, because the list is a string literal nothing reads back.
-    """
+    """The advice a refusal gives equals the declared truth: every wrapper
+    whose ``spec.modes`` carries the mode, sorted, and nothing else. A model
+    that gains a mode appears in the message that sends users to it, and one
+    that loses a mode stops being recommended."""
     mode = _COMPUTE_METHOD_MODES[method_name]
-    assert sorted(_hardcoded_alternatives(method_name)) == _models_declaring(mode)
+    assert _refusal_alternatives(method_name) == _models_declaring(mode)
+    assert _models_declaring(mode), f"no engine runs {mode.name}"
 
 
 def test_every_compute_method_is_covered_by_the_reverse_map():
@@ -251,9 +222,7 @@ def test_the_constructor_documentation_sweep_reads_every_wrapper():
         and getattr(models_pkg, name) is not PropagationModel
         and getattr(getattr(models_pkg, name), 'spec', None) is not None
     ]
-    assert set(found) == {
-        'Bellhop', 'Bounce', 'Kraken', 'OASN', 'OASP', 'OASR', 'OASS',
-        'OASSP', 'OAST', 'RAM', 'SPARC', 'Scooter'}
+    assert set(found) == engine_names()
 
 
 # ── what a concrete subclass has to declare ───────────────────────────────
@@ -268,37 +237,37 @@ def _concrete_double(**namespace):
     return type('Double', (PropagationModel,), body)
 
 
-class TestAConcreteWrapperMustDeclareSpecAndSource:
+class TestAConcreteWrapperMustDeclareSpecAndProvenanceId:
     """A subclass that defines ``run()`` is one a user can hold, so both
     declarations are required at class-definition time.
 
     Without ``spec`` the class silently takes the base defaults — COHERENT_TL
     only, no env-shape support, point sources — which is nobody's real
-    answer. Without ``source`` the licence and citation path is skipped
-    outright: ``_warn_restricted_source`` returns immediately on
-    ``source is None``, so a restricted engine would be wrapped with no
+    answer. Without ``provenance_id`` the licence and citation path is skipped
+    outright: ``_warn_restricted_provenance`` returns immediately on
+    ``provenance_id is None``, so a restricted engine would be wrapped with no
     warning.
     """
 
     def test_a_subclass_with_both_is_accepted(self):
-        from uacpy.models.base import ModelSpec
+        from uacpy.models._spec import ModelSpec
         cls = _concrete_double(spec=ModelSpec(modes=(RunMode.COHERENT_TL,)),
-                               source='acoustics_toolbox')
-        assert cls.source == 'acoustics_toolbox'
+                               provenance_id='acoustics_toolbox')
+        assert cls.provenance_id == 'acoustics_toolbox'
 
     def test_neither_is_refused_and_both_are_named(self):
-        with pytest.raises(TypeError, match='declares no spec or source'):
+        with pytest.raises(TypeError, match='declares no spec or provenance_id'):
             _concrete_double()
 
-    def test_a_missing_source_alone_is_refused(self):
+    def test_a_missing_provenance_id_alone_is_refused(self):
         """The licence leg on its own — the half with real weight."""
-        from uacpy.models.base import ModelSpec
-        with pytest.raises(TypeError, match='declares no source'):
+        from uacpy.models._spec import ModelSpec
+        with pytest.raises(TypeError, match='declares no provenance_id'):
             _concrete_double(spec=ModelSpec(modes=(RunMode.COHERENT_TL,)))
 
     def test_a_missing_spec_alone_is_refused(self):
         with pytest.raises(TypeError, match='declares no spec'):
-            _concrete_double(source='acoustics_toolbox')
+            _concrete_double(provenance_id='acoustics_toolbox')
 
     def test_an_intermediate_base_that_defines_no_run_is_left_alone(self):
         """``OASES`` declares neither and must stay legal: it leaves ``run``
@@ -306,16 +275,70 @@ class TestAConcreteWrapperMustDeclareSpecAndSource:
         from uacpy.models.base import PropagationModel
         from uacpy.models.oases import OASES
         assert 'spec' not in OASES.__dict__
-        assert 'source' not in OASES.__dict__
+        assert 'provenance_id' not in OASES.__dict__
         assert OASES.run is PropagationModel.run
         type('Intermediate', (PropagationModel,), {})
 
     @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
     def test_every_shipped_wrapper_already_declares_both(self, model_name):
-        factory = _EXPECTED[model_name][0]
         try:
-            model = factory()
+            model = build_engine(model_name)
         except ExecutableNotFoundError:
             pytest.skip(f"{model_name} binary not available")
         assert model.spec is not None
-        assert model.source is not None
+        assert model.provenance_id is not None
+
+
+class TestTheTraitsAreCheckedWhenTheClassIsDefined:
+    """``spec.traits`` is read on every call (the stacking rule, the band
+    notices, the keyword rule), so a malformed one fails on import, where
+    the spec itself is checked, rather than deep inside a run."""
+
+    @staticmethod
+    def _spec(**traits):
+        from uacpy.models._spec import EngineTraits, ModelSpec
+        return ModelSpec(modes=(RunMode.COHERENT_TL,),
+                         traits=EngineTraits(**traits))
+
+    def test_a_mode_set_of_run_modes_is_accepted(self):
+        cls = _concrete_double(
+            spec=self._spec(native_multi_depth_modes=frozenset(
+                {RunMode.COHERENT_TL})),
+            provenance_id='acoustics_toolbox')
+        assert cls.spec.traits.native_multi_depth_modes == {
+            RunMode.COHERENT_TL}
+
+    def test_a_mode_set_holding_a_string_is_refused(self):
+        with pytest.raises(TypeError,
+                           match='traits.native_multi_depth_modes must be a '
+                                 'frozenset of RunMode'):
+            _concrete_double(
+                spec=self._spec(native_multi_depth_modes=frozenset(
+                    {'coherent_tl'})),
+                provenance_id='acoustics_toolbox')
+
+    def test_a_mode_set_that_is_not_a_frozenset_is_refused(self):
+        with pytest.raises(TypeError,
+                           match='traits.announced_band_modes must be a '
+                                 'frozenset of RunMode'):
+            _concrete_double(
+                spec=self._spec(announced_band_modes={RunMode.BROADBAND}),
+                provenance_id='acoustics_toolbox')
+
+    def test_the_benign_fatals_are_a_tuple_of_strings(self):
+        _concrete_double(spec=self._spec(benign_fortran_fatals=('No modes',)),
+                         provenance_id='acoustics_toolbox')
+        with pytest.raises(TypeError, match='benign_fortran_fatals must be '
+                                            'a tuple of strings'):
+            _concrete_double(
+                spec=self._spec(benign_fortran_fatals=['No modes']),
+                provenance_id='acoustics_toolbox')
+
+    def test_traits_of_another_type_are_refused(self):
+        from uacpy.models._spec import ModelSpec
+        with pytest.raises(TypeError, match='spec.traits must be an '
+                                            'EngineTraits, got dict'):
+            _concrete_double(
+                spec=ModelSpec(modes=(RunMode.COHERENT_TL,),
+                               traits={'consumes_run_t_start': True}),
+                provenance_id='acoustics_toolbox')

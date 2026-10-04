@@ -18,7 +18,26 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
               ymax=146, figsize=(8, 5), **mpl_kw):
     """Plot a Wenz ambient-noise spectrum. Consumes a :class:`WenzNoise`
     result object (reads ``frequencies``/``total``/component arrays).
-    ``**mpl_kw`` styles the total-noise line."""
+    ``**mpl_kw`` styles the total-noise line.
+
+    Parameters
+    ----------
+    wenz : WenzNoise
+        The spectrum to draw.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    show_components : bool, optional
+        Draw each noise mechanism beside the total. Default True.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    ymin, ymax : float, optional
+        Level-axis limits (dB). Default 6 and 146.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(8, 5)`` by default; unused when
+        ``ax`` is given.
+    **mpl_kw
+        Matplotlib keywords for the total-noise line.
+    """
     if not hasattr(wenz, 'frequencies') or not hasattr(wenz, 'total'):
         raise ConfigurationError(
             f"plot_wenz: expected a WenzNoise result (with .frequencies and "
@@ -31,7 +50,7 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
     total_label = (f'Total noise ({wenz.water_depth} water)' if show_components
                    else (f'Total noise ({wenz.water_depth} water, '
                          f'{wenz.shipping_level} traffic, '
-                         f'{wenz.wind_speed_kn:g} kn, {wenz.rain_rate} rain)'))
+                         f'{wenz.wind_speed_kn:.3g} kn, {wenz.rain_rate} rain)'))
     # setdefault, not hardcoded styles: **mpl_kw styles this line, and a caller
     # restyling it would otherwise collide and raise a raw TypeError.
     mpl_kw.setdefault('color', 'black')
@@ -42,7 +61,7 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
         ax.semilogx(f, wenz.shipping, color='blue', linestyle='dashed',
                     label=f'Shipping noise ({wenz.shipping_level} traffic)')
         ax.semilogx(f, wenz.wind, color='green', linestyle='dashed',
-                    label=f'Wind noise ({wenz.wind_speed_kn:g} kn)')
+                    label=f'Wind noise ({wenz.wind_speed_kn:.3g} kn)')
         ax.semilogx(f, wenz.rain, color='orange', linestyle='dashed',
                     label=f'Rain noise ({wenz.rain_rate} rain)')
         ax.semilogx(f, wenz.thermal, color='red', linestyle='dashed',
@@ -51,7 +70,7 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
                     label='Turbulence noise')
     ax.set_xlabel('Frequency (Hz)')
     ax.set_ylabel(r'Noise Level (dB re 1$\mu$Pa$^2$/Hz)')
-    ax.set_title(_title_or(title, 'WENZ noise level estimate'), loc='left')
+    ax.set_title(_title_or(title, 'WENZ noise level estimate'))
     ax.set_xlim((f[0], f[-1]))
     ax.set_ylim((ymin, ymax))
     ax.legend()
@@ -63,7 +82,24 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
 def plot_weighting(group, ax=None, *, frequency=None, title=None,
                    figsize=(8, 4), **mpl_kw):
     """Plot marine-mammal auditory weighting curve(s). ``group`` is a name or a
-    list of names."""
+    list of names.
+
+    Parameters
+    ----------
+    group : str or sequence of str
+        Marine-mammal hearing group(s).
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    frequency : array_like, optional
+        Frequencies (Hz); ``None`` is 400 points from 10 Hz to 316 kHz.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(8, 4)`` by default; unused when
+        ``ax`` is given.
+    **mpl_kw
+        Matplotlib keywords for every curve.
+    """
     from uacpy.noise.marine_mammal import auditory_weighting
     groups = [group] if isinstance(group, str) else list(group)
     f = (np.logspace(1, 5.5, 400) if frequency is None
@@ -73,8 +109,7 @@ def plot_weighting(group, ax=None, *, frequency=None, title=None,
         ax.semilogx(f, auditory_weighting(f, g), label=f"{g.upper()}", **mpl_kw)
     ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("Weighting W(f) (dB)")
-    ax.set_title(_title_or(title, "Marine-mammal auditory weighting"),
-                 loc="left")
+    ax.set_title(_title_or(title, "Marine-mammal auditory weighting"))
     ax.set_ylim(-40, 5)
     ax.grid(which="both", alpha=0.3)
     ax.legend()
@@ -84,7 +119,26 @@ def plot_weighting(group, ax=None, *, frequency=None, title=None,
 @typed_plot_error
 def plot_source_level(frequency, level_dB, ax=None, *, label=None, title=None,
                       figsize=(8, 4), **mpl_kw):
-    """Plot a ship source-level spectrum (dB re 1 µPa·m vs band centre)."""
+    """Plot a ship source-level spectrum (dB re 1 µPa·m vs band centre).
+
+    Parameters
+    ----------
+    frequency : array_like
+        Band centre frequencies (Hz).
+    level_dB : array_like
+        Source level per band (dB re 1 µPa·m).
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    label : str, optional
+        Legend label of the line.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(8, 4)`` by default; unused when
+        ``ax`` is given.
+    **mpl_kw
+        Matplotlib keywords for the line.
+    """
     _require_nonempty('plot_source_level', frequency=frequency, level_dB=level_dB)
     f = np.asarray(frequency, dtype=float)
     lv = np.asarray(level_dB, dtype=float)
@@ -95,7 +149,7 @@ def plot_source_level(frequency, level_dB, ax=None, *, label=None, title=None,
     ax.semilogx(f, lv, label=label, **mpl_kw)
     ax.set_xlabel("Decidecade band centre (Hz)")
     ax.set_ylabel("Source level (dB re 1 µPa·m)")
-    ax.set_title(_title_or(title, "Ship radiated noise"), loc="left")
+    ax.set_title(_title_or(title, "Ship radiated noise"))
     ax.grid(which="both", alpha=0.3)
     if label:
         ax.legend()
@@ -112,7 +166,28 @@ def plot_roc(deflection=None, ax=None, *, pfa=None, pd=None, n_points=200,
     ROC curve per value computed via :func:`uacpy.sonar.roc_curve` (the detection
     index is ``d = d'^2``) — or pre-computed ``pfa``/``pd`` arrays. Consumes the
     ``uacpy.sonar`` detection theory; returns ``(fig, ax)`` like the other
-    plotters."""
+    plotters.
+
+    Parameters
+    ----------
+    deflection : float or sequence, optional
+        Detector deflection ``d'``, one curve per value.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    pfa, pd : array_like, optional
+        A precomputed curve, in place of ``deflection``.
+    n_points : int, optional
+        Points per computed curve. Default 200.
+    label : str, optional
+        Legend label of the line.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(6.5, 5)`` by default; unused when
+        ``ax`` is given.
+    **mpl_kw
+        Matplotlib keywords for every curve.
+    """
     fig, ax = fig_ax(ax, figsize)
     if pfa is not None and pd is not None:
         ax.semilogx(np.asarray(pfa, float), np.asarray(pd, float),
@@ -132,8 +207,7 @@ def plot_roc(deflection=None, ax=None, *, pfa=None, pd=None, n_points=200,
     ax.set_xlabel("Probability of false alarm  $P_F$")
     ax.set_ylabel("Probability of detection  $P_D$")
     ax.set_ylim(0.0, 1.0)
-    ax.set_title(_title_or(title, "Receiver operating characteristic"),
-                 loc="left")
+    ax.set_title(_title_or(title, "Receiver operating characteristic"))
     ax.grid(which="both", alpha=0.3)
     if ax.get_legend_handles_labels()[0]:
         ax.legend(loc="lower right", fontsize='small')

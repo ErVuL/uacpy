@@ -49,13 +49,13 @@ def fetch_env():
 
 def bathymetry_map():
     """A regional GEBCO grid with the transect drawn on it."""
-    lats, lons, depth = uacpy.data.fetch_bathy_grid(
+    grid = uacpy.data.fetch_bathy_grid(
         REGION_LAT, REGION_LON, n_lat=420, n_lon=420, source='local')
 
     fig, _ = uacpy.plot.plot_bathymetry_map(
-        lats, lons, depth, transect=(A, B), source=A,
+        grid.lats, grid.lons, grid.depths, transect=(A, B), source=A,
         contours=[200.0, 1000.0, 2000.0, 3000.0, 4000.0],
-        figsize=(8.0, 7.0), data_source=[SOURCES['gebco']],
+        figsize=(8.0, 7.0), show_data_credit=[SOURCES['gebco']],
         title='GEBCO 2025 — Celtic shelf break to the Biscay abyssal plain')
     return fig
 
@@ -79,7 +79,7 @@ def seasonal_ssp():
     styles = (('C0', '-'), ('C2', '--'), ('C3', '-.'), ('C1', ':'))
     for (label, ssp), (colour, dash) in zip(profiles, styles):
         for ax in (ax_full, ax_top):
-            ax.plot(ssp.data[:, 0], ssp.depths, color=colour, linestyle=dash,
+            ax.plot(ssp.sound_speed[:, 0], ssp.depths, color=colour, linestyle=dash,
                     linewidth=1.6, label=label)
     # WOA23's monthly fields stop at 1500 m; the annual mean is spliced on below,
     # so all four profiles are identical there (the dashes overlap).
@@ -110,7 +110,7 @@ def grain_size_conversion():
 
     fig, axes = plt.subplots(1, 3, figsize=(11.0, 4.0))
     for model, colour in (('hamilton', 'C0'), ('apl-uw', 'C3')):
-        rows = [uacpy.data.grain_size_to_geoacoustics(
+        rows = [uacpy.core.sediment.grain_size_to_geoacoustics(
             p, model=model, water_sound_speed=water_c, water_density=water_rho)
             for p in phi]
         for ax, key in zip(axes, ('sound_speed', 'density', 'attenuation')):
@@ -140,17 +140,9 @@ def grain_size_conversion():
 
 def seabed_sources():
     """Five surficial seabed sources, sampled along the same transect."""
-    from uacpy.data import (
-        diesing_local, emodnet_local, graw_local, pelagic, sediment_db,
-    )
-
     sources = [
-        ('emodnet', emodnet_local.fetch_bottom_local_transect(A, B, n_points=14)),
-        ('grainsize', sediment_db.fetch_bottom_local_transect(A, B, n_points=14)),
-        ('diesing', diesing_local.fetch_bottom_diesing_transect(A, B, n_points=14)),
-        ('graw', graw_local.fetch_bottom_graw_transect(A, B, n_points=14)),
-        ('pelagic', pelagic.fetch_bottom_pelagic_transect(
-            A, B, n_points=14, cache_only=True)),
+        (name, uacpy.data.fetch_bottom_transect(A, B, source=name, n_points=14))
+        for name in ('emodnet', 'grainsize', 'diesing', 'graw', 'pelagic')
     ]
 
     fig, (ax_c, ax_r) = plt.subplots(1, 2, figsize=(10.0, 4.2))
@@ -175,9 +167,7 @@ def seabed_sources():
 
 def crust1_column():
     """The CRUST1.0 + GlobSed layered elastic column under the deep end."""
-    from uacpy.data import crust1_local
-
-    column = crust1_local.fetch_bottom_crust1(B)
+    column = uacpy.data.fetch_bottom(B, source='crust1')
     z = np.linspace(0.0, column.total_thickness() * 1.4, 800)
     edges = np.cumsum([layer.thickness for layer in column.layers])
 

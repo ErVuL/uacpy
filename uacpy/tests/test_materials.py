@@ -9,6 +9,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.environment import (
     BoundaryProperties, SedimentLayer, SeabedColumn,
 )
+from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
 from uacpy.core.materials import MATERIALS, list_materials, get_material
 
 
@@ -17,7 +18,8 @@ class TestMaterialsCatalog:
         # Spot-check a few entries against the canonical class-typical values.
         sand = get_material('sand')
         assert sand['sound_speed'] == 1650.0
-        assert sand['density'] == 1.9
+        # Table 1.3's ratio 1.9 against the package's one water density.
+        assert sand['density'] / DEFAULT_WATER_DENSITY_G_CM3 == pytest.approx(1.9)
         assert sand['attenuation'] == 0.8
         assert sand['shear_speed'] == 110.0
         assert sand['porosity'] == 45.0
@@ -57,7 +59,10 @@ class TestMaterialsCatalog:
         cp, rho, ap, cs, a_s, poro, phi, rough = self._FULL_TABLE[name]
         m = get_material(name)
         assert m['sound_speed'] == cp
-        assert m['density'] == rho
+        # Table 1.3 rows tabulate rho_b/rho_w; they are stored against the
+        # package's one water density. Granite (Ainslie) is absolute.
+        want = rho if name == 'granite' else rho * DEFAULT_WATER_DENSITY_G_CM3
+        assert m['density'] == pytest.approx(want, rel=1e-12)
         assert m['attenuation'] == ap
         assert m['shear_speed'] == cs
         assert m['shear_attenuation'] == a_s
@@ -75,6 +80,48 @@ class TestMaterialsCatalog:
     def test_get_material_unknown_lists_options(self):
         with pytest.raises(ConfigurationError, match="Available"):
             get_material('not_a_real_material')
+
+    def test_the_catalogue_cannot_be_changed_in_place(self):
+        """A write into the shared catalogue raises instead of changing every
+        later preset; an edited copy leaves it as it was."""
+        with pytest.raises(TypeError, match='does not support item'):
+            uacpy.MATERIALS['sand']['density'] = 3.0
+        with pytest.raises(TypeError, match='does not support item'):
+            uacpy.MATERIALS['mud'] = {'sound_speed': 1500.0}
+        copy = get_material('sand')
+        copy['density'] = 3.0
+        assert MATERIALS['sand']['density'] == pytest.approx(
+            1.9 * DEFAULT_WATER_DENSITY_G_CM3)
+        assert BoundaryProperties.from_preset('sand').density == \
+            pytest.approx(1.9 * DEFAULT_WATER_DENSITY_G_CM3)
+
+    def test_materials_table_is_the_catalogue_row_by_row(self):
+        pytest.importorskip('pandas')
+        table = uacpy.materials_table()
+        assert list(table.index) == list_materials()
+        assert table.index.name == 'material'
+        for name in list_materials():
+            row = table.loc[name].to_dict()
+            assert set(row) == set(MATERIALS[name])
+            for key, value in MATERIALS[name].items():
+                if value is None:
+                    assert row[key] is None or row[key] != row[key]
+                else:
+                    assert row[key] == value
+        table.loc['sand', 'density'] = 3.0
+        assert MATERIALS['sand']['density'] != 3.0
+
+    def test_materials_table_without_pandas_names_the_xarray_extra(
+            self, monkeypatch):
+        """Without pandas the call refuses with a ConfigurationError whose
+        remedy is the ``xarray`` extra (xarray requires pandas), so the
+        install it names is one the package declares."""
+        import sys
+        monkeypatch.setitem(sys.modules, 'pandas', None)
+        with pytest.raises(ConfigurationError,
+                           match='pandas is not installed') as info:
+            uacpy.materials_table()
+        assert "pip install 'uacpy[xarray]'" in info.value.remediation
 
     def test_list_materials_sorted(self):
         names = list_materials()
@@ -151,7 +198,7 @@ class TestBoundaryPropertiesFromPreset:
         bp = BoundaryProperties.from_preset('sand')
         assert bp.acoustic_type == 'half-space'
         assert bp.sound_speed == 1650.0
-        assert bp.density == 1.9
+        assert bp.density == pytest.approx(1.9 * DEFAULT_WATER_DENSITY_G_CM3)
         assert bp.attenuation == 0.8
         assert bp.shear_speed == 0.0
         assert bp.shear_attenuation == 0.0
@@ -170,7 +217,7 @@ class TestBoundaryPropertiesFromPreset:
         bp = BoundaryProperties.from_preset('sand', sound_speed=1700.0, roughness=0.05)
         assert bp.sound_speed == 1700.0
         assert bp.roughness == 0.05
-        assert bp.density == 1.9
+        assert bp.density == pytest.approx(1.9 * DEFAULT_WATER_DENSITY_G_CM3)
 
 
 class TestSedimentLayerFromPreset:
@@ -178,10 +225,12 @@ class TestSedimentLayerFromPreset:
         layer = SedimentLayer.from_preset('silt', thickness=15.0)
         assert layer.thickness == 15.0
         assert layer.sound_speed == 1575.0
-        assert layer.density == 1.7
+        assert layer.density == pytest.approx(1.7 * DEFAULT_WATER_DENSITY_G_CM3)
 
     def test_thickness_kwarg_only(self):
-        with pytest.raises(TypeError):
+        with pytest.raises(
+                TypeError,
+                match="required keyword-only argument: 'thickness'"):
             SedimentLayer.from_preset('silt')
 
     def test_overrides(self):
@@ -194,7 +243,8 @@ class TestSedimentLayerFromPreset:
 
 class TestPublicReexports:
     def test_top_level(self):
-        assert uacpy.materials is uacpy.core.materials
+        assert uacpy.materials.__name__ == 'uacpy.materials'
+        assert uacpy.materials.get_material is uacpy.core.materials.get_material
         assert 'sand' in uacpy.materials.list_materials()
 
 
@@ -246,28 +296,28 @@ class TestHamiltonAttenuationFollowsThe1972GrainSizeRegressions:
         (8.80, 0.9431 - 0.2041 * 8.80 + 0.0117 * 8.80 ** 2),
     ])
     def test_each_branch_reproduces_the_printed_regression(self, phi, expected):
-        from uacpy.core.sediment import _hamilton_kp
-        assert _hamilton_kp(phi) == pytest.approx(expected, abs=1e-12)
+        from uacpy.core.sediment import hamilton_attenuation
+        assert hamilton_attenuation(phi) == pytest.approx(expected, abs=1e-12)
 
     @pytest.mark.parametrize('join', [2.6, 4.5, 6.0])
     def test_the_branches_meet_at_their_joins(self, join):
-        from uacpy.core.sediment import _hamilton_kp
-        assert abs(_hamilton_kp(join - 1e-9) - _hamilton_kp(join + 1e-9)) < 0.005
+        from uacpy.core.sediment import hamilton_attenuation
+        assert abs(hamilton_attenuation(join - 1e-9) - hamilton_attenuation(join + 1e-9)) < 0.005
 
     def test_grain_sizes_outside_the_recommended_limits_hold_the_end_values(self):
-        from uacpy.core.sediment import _hamilton_kp
-        assert _hamilton_kp(-1.0) == _hamilton_kp(0.0)
-        assert _hamilton_kp(12.0) == _hamilton_kp(9.5)
+        from uacpy.core.sediment import hamilton_attenuation
+        assert hamilton_attenuation(-1.0) == hamilton_attenuation(0.0)
+        assert hamilton_attenuation(12.0) == hamilton_attenuation(9.5)
 
     def test_the_peak_sits_at_four_and_a_half_phi(self):
         import numpy as np
-        from uacpy.core.sediment import _hamilton_kp
+        from uacpy.core.sediment import hamilton_attenuation
         phi = np.linspace(0.0, 9.5, 951)
-        k = np.array([_hamilton_kp(p) for p in phi])
+        k = np.array([hamilton_attenuation(p) for p in phi])
         assert phi[int(np.argmax(k))] == pytest.approx(4.5, abs=0.02)
         assert k.max() == pytest.approx(0.758, abs=0.002)
 
     def test_attenuation_in_dB_per_wavelength_is_k_p_times_c_over_1000(self):
-        from uacpy.core.sediment import _hamilton_kp, grain_size_to_geoacoustics
+        from uacpy.core.sediment import hamilton_attenuation, grain_size_to_geoacoustics
         props = grain_size_to_geoacoustics(5.4, model='hamilton')
-        assert props['attenuation'] == pytest.approx(_hamilton_kp(5.4) * props['sound_speed'] / 1000.0, rel=1e-9)
+        assert props['attenuation'] == pytest.approx(hamilton_attenuation(5.4) * props['sound_speed'] / 1000.0, rel=1e-9)

@@ -4,7 +4,8 @@ and matched-field localization.
 Builds on uacpy's propagation outputs (TL fields, normal modes) and noise
 spectra to assemble active/passive sonar performance: scattering-strength laws,
 cell-scattering reverberation, the sonar equation (signal excess, figure of
-merit, detection range), and detection-theory thresholds. The ``*_field``
+merit, detection range, with :class:`SonarBudget` holding one budget's
+terms), and detection-theory thresholds. The ``*_field``
 helpers map the sonar equation over a model TL
 :class:`~uacpy.core.results.Field` — signal-excess and detection-probability
 maps over ``(depth, range)``, plus the per-depth detection-range profile.
@@ -15,8 +16,9 @@ replica vectors synthesized directly from a KRAKEN
 :func:`replica_bank`) or assembled from the coherent pressure of *any* model
 run (:func:`replica_bank_from_field`), a cross-spectral density matrix from
 array snapshots (:func:`csdm`), and the Bartlett / MVDR ambiguity-surface
-processors (:func:`bartlett`, :func:`mvdr`). Self-contained — KRAKEN modes or a
-``Field``/``ResultStack`` plus numpy, no OASES dependency.
+processors (:func:`bartlett`, :func:`mvdr`), which return the surface as an
+ambiguity :class:`~uacpy.core.results.Field`. Self-contained — KRAKEN modes
+or a ``Field``/``ResultStack`` plus numpy, no OASES dependency.
 """
 
 from .bottom_scattering import (
@@ -41,16 +43,21 @@ from .reverberation import (
     volume_reverberation,
 )
 from .sonar_equation import (
+    SonarBudget,
     active_signal_excess,
     active_signal_excess_field,
+    detection_annuli,
     detection_range,
-    detection_range_by_depth,
+    detection_ranges_by_depth,
+    detection_range_from_field,
+    detection_ranges,
     echo_level,
     figure_of_merit,
     noise_background,
     passive_signal_excess,
     passive_signal_excess_field,
-    probability_of_detection_field,
+    transition_probability_field,
+    transition_probability,
 )
 from .detection import (
     albersheim_snr,
@@ -78,9 +85,10 @@ from .matched_field import (
     mvdr,
 )
 
-from . import (
-    scattering, reverberation, sonar_equation, detection, target_strength,
-    matched_field,
+# Imported so each submodule is reachable as an attribute; not in __all__.
+from . import (  # noqa: F401
+    scattering, bottom_scattering, reverberation, sonar_equation, detection,
+    target_strength, matched_field,
 )
 
 __all__ = [
@@ -99,6 +107,7 @@ __all__ = [
     "boundary_reverberation",
     "volume_reverberation",
     "total_reverberation",
+    "SonarBudget",
     "echo_level",
     "noise_background",
     "passive_signal_excess",
@@ -106,9 +115,13 @@ __all__ = [
     "passive_signal_excess_field",
     "active_signal_excess_field",
     "figure_of_merit",
+    "detection_annuli",
     "detection_range",
-    "detection_range_by_depth",
-    "probability_of_detection_field",
+    "detection_ranges_by_depth",
+    "detection_range_from_field",
+    "detection_ranges",
+    "transition_probability_field",
+    "transition_probability",
     "deflection_coefficient",
     "detection_index",
     "probability_of_detection",
@@ -128,10 +141,4 @@ __all__ = [
     "csdm",
     "bartlett",
     "mvdr",
-    "scattering",
-    "reverberation",
-    "sonar_equation",
-    "detection",
-    "target_strength",
-    "matched_field",
 ]

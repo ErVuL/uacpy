@@ -1,5 +1,5 @@
 """Tests for :meth:`Modes.with_attenuation` perturbation +
-:meth:`Modes.modal_propagation_loss` synthesis."""
+:meth:`Modes.modal_pressure_field` synthesis."""
 
 import warnings
 
@@ -7,12 +7,14 @@ import numpy as np
 import pytest
 
 from uacpy import BoundaryProperties
-from uacpy.core.results import Modes, Field
+from uacpy.core.results import Modes, Field, PhaseReference
 from uacpy.core.exceptions import ConfigurationError
 
 
-def _pekeris_modes(n_modes=3, water_depth=100.0, c0=1500.0, freq=50.0):
-    """Synthetic Pekeris-fluid modes — sinusoidal eigenfunctions."""
+def _rigid_guide_modes(n_modes=3, water_depth=100.0, c0=1500.0, freq=50.0):
+    """Synthetic modes of a guide with a pressure-release surface and a rigid
+    bottom: psi_m = sin((m+1/2)pi z/D), so psi'(D) = 0 and psi(D) is at a
+    maximum."""
     depths = np.linspace(0.0, water_depth, 51)
     phi = np.zeros((depths.size, n_modes))
     k = np.empty(n_modes, dtype=complex)
@@ -29,14 +31,14 @@ def _pekeris_modes(n_modes=3, water_depth=100.0, c0=1500.0, freq=50.0):
 
 class TestWithAttenuation:
     def test_zero_attenuation_keeps_real_k(self):
-        modes = _pekeris_modes()
+        modes = _rigid_guide_modes()
         out = modes.with_attenuation(0.0)
         assert np.allclose(out.k.imag, 0.0)
 
     def test_uniform_attenuation_recovers_kratio_scaling(self):
         # For uniform c, ρ, the perturbation reduces to
         # α_m = (ω/(c·k_rm)) · α  =  (k₀/k_rm) · α    (in Np/m)
-        modes = _pekeris_modes()
+        modes = _rigid_guide_modes()
         alpha_dB_m = 0.01
         alpha_np_m = alpha_dB_m * np.log(10.0) / 20.0
         out = modes.with_attenuation(
@@ -45,23 +47,21 @@ class TestWithAttenuation:
         omega = 2.0 * np.pi * float(modes.f0)
         k0 = omega / 1500.0
         expected = (k0 / modes.k.real) * alpha_np_m
-        assert np.allclose(out.k.imag, expected, rtol=1e-6)
+        assert np.allclose(-out.k.imag, expected, rtol=1e-6)
 
     def test_thorp_absorption(self):
         from uacpy.core.absorption import Thorp
-        modes = _pekeris_modes(freq=1000.0)
+        modes = _rigid_guide_modes(freq=1000.0)
         alpha = Thorp().alpha_dB_per_m(modes.f0, modes.depths)
         out = modes.with_attenuation(alpha)
-        assert np.all(out.k.imag > 0)
+        assert np.all(out.k.imag < 0)
 
     def test_francois_garrison_absorption(self):
         from uacpy.core.absorption import FrancoisGarrison
-        modes = _pekeris_modes(freq=1000.0)
-        fg = FrancoisGarrison(
-            temperature_c=15.0, salinity_psu=35.0, pH=8.1, z_bar_m=50.0,
-        )
+        modes = _rigid_guide_modes(freq=1000.0)
+        fg = FrancoisGarrison(temperature=15.0, salinity=35.0, pH=8.1)
         out = modes.with_attenuation(fg.alpha_dB_per_m(modes.f0, modes.depths))
-        assert np.all(out.k.imag > 0)
+        assert np.all(out.k.imag < 0)
 
     def test_depth_dependent_alpha_weighted_by_phi_square(self):
         """The stated formula, reimplemented independently on the same grid:
@@ -71,7 +71,7 @@ class TestWithAttenuation:
         column; exactly 1/2 as (m+½)π zeroes the sin(2·kz·D) terms) sits
         1-3 % away — the quadrature's half-cell smear of the step — so the
         theory anchor is a 5 % band on top of the exact-quadrature pin."""
-        modes = _pekeris_modes()
+        modes = _rigid_guide_modes()
         a = np.where(modes.depths < 50.0, 0.0, 2.0)
         out = modes.with_attenuation(a)
 
@@ -81,7 +81,7 @@ class TestWithAttenuation:
                   / np.trapezoid(phi2, modes.depths, axis=0))
         omega = 2.0 * np.pi * float(modes.f0)
         expected = (omega / (1500.0 * modes.k.real)) * weight
-        np.testing.assert_allclose(out.k.imag, expected, rtol=1e-6)
+        np.testing.assert_allclose(-out.k.imag, expected, rtol=1e-6)
 
         D, z0 = 100.0, 50.0
         max_np_m = 2.0 * np.log(10.0) / 20.0
@@ -90,16 +90,16 @@ class TestWithAttenuation:
             frac = (0.5 * (D - z0)
                     + np.sin(2.0 * kz * z0) / (4.0 * kz)) / (D / 2.0)
             analytic = (omega / (1500.0 * modes.k[m].real)) * max_np_m * frac
-            assert out.k[m].imag == pytest.approx(analytic, rel=0.05)
+            assert -out.k[m].imag == pytest.approx(analytic, rel=0.05)
 
     def test_shape_mismatch_raises(self):
-        modes = _pekeris_modes()
+        modes = _rigid_guide_modes()
         with pytest.raises(ConfigurationError, match="must match depths"):
             modes.with_attenuation(np.array([0.001, 0.002]))
 
 
 class TestComputeGroupVelocity:
-    """``Modes.compute_group_velocity`` is the finite difference dω/dk from
+    """``Modes.group_velocity_between`` is the finite difference dω/dk from
     two solves at nearby frequencies (kraken.md §4). The synthetic modes
     carry the exact ideal-waveguide dispersion k(ω) = sqrt((ω/c)² − kz²),
     whose group velocity is v_g = c²k/ω; the 1 Hz difference at 50 Hz
@@ -107,9 +107,9 @@ class TestComputeGroupVelocity:
 
     def test_matches_the_analytic_pekeris_group_velocity(self):
         f1, f2 = 50.0, 51.0
-        m1 = _pekeris_modes(freq=f1)
-        m2 = _pekeris_modes(freq=f2)
-        vg = m1.compute_group_velocity(m2)
+        m1 = _rigid_guide_modes(freq=f1)
+        m2 = _rigid_guide_modes(freq=f2)
+        vg = m1.group_velocity_between(m2)
         assert vg.shape == (3,)
 
         c0, D = 1500.0, 100.0
@@ -125,23 +125,23 @@ class TestComputeGroupVelocity:
         assert np.all(np.diff(vg) < 0)
 
     def test_same_frequency_pair_is_refused(self):
-        m1 = _pekeris_modes(freq=50.0)
+        m1 = _rigid_guide_modes(freq=50.0)
         with pytest.raises(ConfigurationError, match='distinct'):
-            m1.compute_group_velocity(_pekeris_modes(freq=50.0))
+            m1.group_velocity_between(_rigid_guide_modes(freq=50.0))
 
     def test_mismatched_mode_counts_truncate_to_the_shared_set(self):
-        vg = _pekeris_modes(n_modes=3, freq=50.0).compute_group_velocity(
-            _pekeris_modes(n_modes=2, freq=51.0))
+        vg = _rigid_guide_modes(n_modes=3, freq=50.0).group_velocity_between(
+            _rigid_guide_modes(n_modes=2, freq=51.0))
         assert vg.shape == (2,)
 
 
 class TestModalPropagationLoss:
     def test_returns_complex_pressure_field(self):
-        modes = _pekeris_modes()
+        modes = _rigid_guide_modes()
         ranges = np.linspace(100.0, 5000.0, 10)
         depths = np.linspace(10.0, 90.0, 5)
-        pf = modes.modal_propagation_loss(
-            source_depth=20.0, receiver_depths=depths, ranges_m=ranges,
+        pf = modes.modal_pressure_field(
+            source_depth=20.0, receiver_depths=depths, ranges=ranges,
         )
         assert isinstance(pf, Field)
         assert pf.is_complex
@@ -151,10 +151,10 @@ class TestModalPropagationLoss:
     def test_cylindrical_spreading_envelope(self):
         # With zero damping the envelope should fall like 1/sqrt(r);
         # check |P|·sqrt(r) is roughly constant after a few wavelengths.
-        modes = _pekeris_modes()
+        modes = _rigid_guide_modes()
         ranges = np.linspace(2000.0, 8000.0, 25)
-        pf = modes.modal_propagation_loss(
-            source_depth=50.0, receiver_depths=np.array([50.0]), ranges_m=ranges,
+        pf = modes.modal_pressure_field(
+            source_depth=50.0, receiver_depths=np.array([50.0]), ranges=ranges,
         )
         envelope = np.abs(pf.data[0]) * np.sqrt(ranges)
         # Tolerate modal interference — fluctuations of ~a factor of 5
@@ -165,50 +165,50 @@ class TestModalPropagationLoss:
 
     def test_attenuation_decays_field(self):
         # Attenuated modes give smaller |P| than lossless at the same range.
-        m_loss = _pekeris_modes()
+        m_loss = _rigid_guide_modes()
         m_at = m_loss.with_attenuation(0.005)  # 0.005 dB/m
-        pf_loss = m_loss.modal_propagation_loss(
+        pf_loss = m_loss.modal_pressure_field(
             source_depth=50.0,
             receiver_depths=np.array([50.0]),
-            ranges_m=np.array([10000.0]),
+            ranges=np.array([10000.0]),
         )
-        pf_at = m_at.modal_propagation_loss(
+        pf_at = m_at.modal_pressure_field(
             source_depth=50.0,
             receiver_depths=np.array([50.0]),
-            ranges_m=np.array([10000.0]),
+            ranges=np.array([10000.0]),
         )
         assert abs(pf_at.data[0, 0]) < abs(pf_loss.data[0, 0])
 
     def test_decays_under_raw_kraken_imag_sign(self):
-        # Raw kraken/krakenc eigenvalues encode decay as k.imag < 0, while
-        # with_attenuation builds k.imag > 0. modal_propagation_loss must be
+        # Kraken and with_attenuation both write decay as k.imag < 0; a Modes
+        # built by hand may carry either sign. modal_pressure_field must be
         # convention-agnostic: a passive medium can only attenuate, so the
         # field has to DECAY with range under either sign. Taking the sign at
         # face value makes one of the two branches grow without bound.
-        base = _pekeris_modes()
+        base = _rigid_guide_modes()
         ranges = np.array([500.0, 8000.0])
         for sign in (+1.0, -1.0):
             k = base.k.real + sign * 1j * 3e-4   # ±imag, same |attenuation|
             modes = Modes(k=k, phi=base.phi, depths=base.depths,
                           model='Test', frequencies=base.f0)
-            pf = modes.modal_propagation_loss(
+            pf = modes.modal_pressure_field(
                 source_depth=50.0, receiver_depths=np.array([50.0]),
-                ranges_m=ranges,
+                ranges=ranges,
             )
             envelope = np.abs(pf.data[0]) * np.sqrt(ranges)  # remove geometric 1/√r
             assert envelope[-1] < envelope[0], (
                 f"field grew with range for k.imag sign {sign:+.0f}")
 
 
-def test_modal_propagation_loss_zero_modes_raises():
+def test_modal_pressure_field_zero_modes_raises():
     # 0 trapped modes (below cutoff) -> no propagating field; a clear error,
     # not a raw column_stack ValueError.
     m0 = Modes(k=np.zeros(0, complex), phi=np.zeros((10, 0)),
                depths=np.linspace(0, 100, 10), model="T", frequencies=100.0)
     with pytest.raises(ConfigurationError, match="0 trapped modes"):
-        m0.modal_propagation_loss(source_depth=50.0,
+        m0.modal_pressure_field(source_depth=50.0,
                                   receiver_depths=np.array([50.0]),
-                                  ranges_m=np.array([1000.0]))
+                                  ranges=np.array([1000.0]))
 
 
 def test_phase_advances_negatively_with_range():
@@ -216,10 +216,10 @@ def test_phase_advances_negatively_with_range():
     unwrapped phase must DECREASE with range at the rate of the first mode.
     Conjugating the field leaves |P| bit-identical, so only a phase test can
     see it."""
-    modes = _pekeris_modes(n_modes=1)
+    modes = _rigid_guide_modes(n_modes=1)
     r = np.linspace(2000.0, 2040.0, 401)
-    pf = modes.modal_propagation_loss(
-        source_depth=50.0, receiver_depths=np.array([50.0]), ranges_m=r)
+    pf = modes.modal_pressure_field(
+        source_depth=50.0, receiver_depths=np.array([50.0]), ranges=r)
     ph = np.unwrap(np.angle(np.asarray(pf.data)[0]))
     slope = np.polyfit(r, ph, 1)[0]
     assert slope == pytest.approx(-float(modes.k[0].real), rel=1e-3)
@@ -244,10 +244,10 @@ class TestDepthsOutsideTheTabulatedModes:
 
     def test_a_receiver_below_the_mesh_is_no_data_not_a_clamp(self):
         with pytest.warns(UserWarning, match='outside the tabulated'):
-            field = self._modes().modal_propagation_loss(
+            field = self._modes().modal_pressure_field(
                 source_depth=25.0,
                 receiver_depths=np.array([10.0, 50.0, 150.0]),
-                ranges_m=np.array([1000.0, 2000.0]))
+                ranges=np.array([1000.0, 2000.0]))
         data = np.asarray(field.data)
         assert np.all(np.isfinite(data[:2]))
         assert np.all(np.isnan(data[2]))
@@ -256,9 +256,9 @@ class TestDepthsOutsideTheTabulatedModes:
         """The source defines the excitation, so a guess there is not a
         no-data cell — it silently rescales the whole field."""
         with pytest.raises(ConfigurationError, match='source_depth'):
-            self._modes().modal_propagation_loss(
+            self._modes().modal_pressure_field(
                 source_depth=150.0, receiver_depths=np.array([10.0]),
-                ranges_m=np.array([1000.0]))
+                ranges=np.array([1000.0]))
 
 
 class TestLeakyModesGetNoBottomTerm:
@@ -293,7 +293,7 @@ class TestLeakyModesGetNoBottomTerm:
         with pytest.warns(UserWarning, match='leaky'):
             out = self._modes([1.05, 0.95]).with_attenuation(0.0, bottom=self.BOT)
         assert out.k[1].imag == 0.0        # leaky: exactly zero, not 1/gamma
-        assert out.k[0].imag > 0.0         # trapped: still gets its term
+        assert out.k[0].imag < 0.0         # trapped: still gets its term
 
     def test_all_trapped_set_is_silent_and_keeps_its_attenuation(self):
         # The counterpart that stops the fix reaching the branch that works.
@@ -301,7 +301,7 @@ class TestLeakyModesGetNoBottomTerm:
             warnings.simplefilter('error')
             out = self._modes([1.05, 1.20]).with_attenuation(
                 0.0, bottom=self.BOT, seafloor_depth=100.0)
-        assert np.all(out.k.imag > 0.0)
+        assert np.all(out.k.imag < 0.0)
 
     def test_the_result_is_independent_of_the_length_unit(self):
         # Re-express the same physics in km: depths /1000, wavenumbers *1000.
@@ -401,7 +401,7 @@ class TestDepthAxisSamplingGuard:
                   / np.trapezoid(phi2, modes.depths, axis=0))
         omega = 2.0 * np.pi * float(modes.f0)
         expected = (omega / (1500.0 * modes.k.real)) * weight
-        np.testing.assert_allclose(out.k.imag, expected, rtol=1e-12)
+        np.testing.assert_allclose(-out.k.imag, expected, rtol=1e-12)
 
 
 def _exact_pekeris(water_depth=100.0, c1=1500.0, c2=1800.0, rho1=1.0,
@@ -488,7 +488,7 @@ class TestNormalisationRunsIntoTheHalfSpace:
         ratio = self._exact_alpha(phi, z, gamma, c, alpha_water_dB,
                                   alpha_bottom_dB)
         expected = (c['omega'] / modes.k.real) * ratio
-        np.testing.assert_allclose(out.k.imag, expected, rtol=1e-9)
+        np.testing.assert_allclose(-out.k.imag, expected, rtol=1e-9)
 
     def test_the_tail_is_what_the_water_only_denominator_was_missing(self):
         """The pre-fix value divided by the corrected one is exactly
@@ -518,7 +518,7 @@ class TestNormalisationRunsIntoTheHalfSpace:
                 bottom=self._bottom(c, 0.0), seafloor_depth=c['D']).k.imag
             water_only = modes.with_attenuation(
                 0.02, sound_speed_z=c['c1'], density_z=c['rho1']).k.imag
-        assert np.all(corrected < water_only)
+        assert np.all(-corrected < -water_only)
 
     def test_a_leaky_mode_keeps_the_water_column_normalisation(self):
         """A radiating mode has no convergent tail on either side of the
@@ -539,7 +539,7 @@ class TestNormalisationRunsIntoTheHalfSpace:
                                          seafloor_depth=100.0)
             plain = modes.with_attenuation(0.01)
         assert out.k[1].imag == pytest.approx(plain.k[1].imag, rel=1e-12)
-        assert out.k[0].imag < plain.k[0].imag
+        assert -out.k[0].imag < -plain.k[0].imag
 
 
 class TestWaterOnlyNormalisationIsAnnounced:
@@ -551,12 +551,12 @@ class TestWaterOnlyNormalisationIsAnnounced:
     left silent."""
 
     def test_a_penetrable_seabed_shape_warns(self):
-        modes = _pekeris_modes()          # sin((m+½)πz/D): ψ(D) = ±1
+        modes = _rigid_guide_modes()          # sin((m+½)πz/D): ψ(D) = ±1
         with pytest.warns(UserWarning, match='UPPER BOUND'):
             modes.with_attenuation(0.01)
 
     def test_the_warning_names_the_depth_it_stopped_at(self):
-        modes = _pekeris_modes(water_depth=100.0)
+        modes = _rigid_guide_modes(water_depth=100.0)
         with pytest.warns(UserWarning) as rec:
             modes.with_attenuation(0.01)
         assert any('100 m' in str(w.message) for w in rec)
@@ -572,7 +572,7 @@ class TestWaterOnlyNormalisationIsAnnounced:
             modes.with_attenuation(0.01)
 
     def test_passing_bottom_silences_it(self):
-        modes = _pekeris_modes()
+        modes = _rigid_guide_modes()
         bot = BoundaryProperties(acoustic_type='half-space',
                                  sound_speed=1800.0, density=1.8,
                                  attenuation=0.1)
@@ -582,7 +582,7 @@ class TestWaterOnlyNormalisationIsAnnounced:
 
 
 class TestModalSumContraction:
-    """``modal_propagation_loss`` contracts the mode axis directly.
+    """``modal_pressure_field`` contracts the mode axis directly.
 
     Building the whole ``(depth, mode, range)`` product first and summing it
     afterwards asks for one complex128 temporary of n_depth·n_mode·n_range —
@@ -596,8 +596,9 @@ class TestModalSumContraction:
         modes = self._modes()
         z_r = np.linspace(1.0, 99.0, 13)
         r = np.linspace(100.0, 5000.0, 17)
-        got = np.asarray(modes.modal_propagation_loss(
-            source_depth=25.0, receiver_depths=z_r, ranges_m=r).data)
+        got = np.asarray(modes.modal_pressure_field(
+            source_depth=25.0, receiver_depths=z_r, ranges=r,
+            source_density=1.0).data)
 
         phi = np.asarray(modes.phi)
         k = modes.k.real - 1j * np.abs(modes.k.imag)
@@ -615,8 +616,8 @@ class TestModalSumContraction:
         modes = self._modes()
         z_r = np.linspace(1.0, 99.0, 13)
         r = np.linspace(100.0, 5000.0, 17)
-        field = modes.modal_propagation_loss(
-            source_depth=25.0, receiver_depths=z_r, ranges_m=r)
+        field = modes.modal_pressure_field(
+            source_depth=25.0, receiver_depths=z_r, ranges=r)
         assert field.data.shape == (13, 17)
         assert np.isfinite(field.data).all()
 
@@ -649,7 +650,7 @@ class TestModalAttenuationBottomGuard:
             rigid = self._pekeris_rigid_mode().with_attenuation(
                 1e-4, bottom=BoundaryProperties(acoustic_type='rigid'))
         assert np.allclose(rigid.k, water_only.k)
-        assert np.all(rigid.k.imag > 0)
+        assert np.all(rigid.k.imag < 0)
 
 
 class TestBarelyTrappedModeIsNamed:
@@ -744,7 +745,7 @@ class TestBarelyTrappedModeIsNamed:
                             model='Test', frequencies=self.FREQ)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                return float(np.asarray(self._attenuate(shifted).k).imag[0])
+                return -float(np.asarray(self._attenuate(shifted).k).imag[0])
 
         for gamma_factor, lo, hi in ((0.5, 0.02, 0.05), (4.0, 0.0, 0.001)):
             gamma = gamma_factor * self.gamma_equal
@@ -800,18 +801,18 @@ class TestGroupVelocityReportsWhatTheStoredWavenumbersResolve:
         lo, hi = self._pair(2e5)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert np.isfinite(lo.compute_group_velocity(hi)).all()
+            assert np.isfinite(lo.group_velocity_between(hi)).all()
 
     def test_a_step_spanning_exactly_the_floor_s_steps_is_silent(self):
         lo, hi = self._pair(1e5)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert np.isfinite(lo.compute_group_velocity(hi)).all()
+            assert np.isfinite(lo.group_velocity_between(hi)).all()
 
     def test_a_step_spanning_half_the_floor_s_steps_is_named(self):
         lo, hi = self._pair(5e4)
         with pytest.warns(UserWarning, match="wavenumber difference spans"):
-            lo.compute_group_velocity(hi)
+            lo.group_velocity_between(hi)
 
     def test_the_message_names_the_steps_the_floor_and_the_test_to_run(self):
         """Two frequencies fix the floor but not the truncation error, so the
@@ -821,7 +822,7 @@ class TestGroupVelocityReportsWhatTheStoredWavenumbersResolve:
         five ideal waveguides, by up to 16x."""
         lo, hi = self._pair(5e4)
         with pytest.warns(UserWarning) as record:
-            v_g = lo.compute_group_velocity(hi)
+            v_g = lo.group_velocity_between(hi)
         message = str(record[0].message)
         assert "50000 steps" in message
         assert "2.0e-05 relative" in message
@@ -837,10 +838,10 @@ class TestGroupVelocityReportsWhatTheStoredWavenumbersResolve:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             lo, hi = self._pair(2e5, k0=k0)
-            lo.compute_group_velocity(hi)
+            lo.group_velocity_between(hi)
         lo, hi = self._pair(5e4, k0=k0)
         with pytest.warns(UserWarning, match="wavenumber difference spans"):
-            lo.compute_group_velocity(hi)
+            lo.group_velocity_between(hi)
 
     def test_a_float32_valued_complex128_array_is_measured_against_float32(self):
         """A caller who promotes the ``.mod`` wavenumbers to complex128 has
@@ -849,7 +850,7 @@ class TestGroupVelocityReportsWhatTheStoredWavenumbersResolve:
         lo, hi = self._pair(5e4, dtype=np.complex128)
         assert lo.k.dtype == np.complex128
         with pytest.warns(UserWarning, match="wavenumber difference spans"):
-            lo.compute_group_velocity(hi)
+            lo.group_velocity_between(hi)
 
     def test_a_wavenumber_carrying_float64_bits_is_measured_against_float64(self):
         """The same step, on values that do not survive a float32 round trip,
@@ -859,22 +860,7 @@ class TestGroupVelocityReportsWhatTheStoredWavenumbersResolve:
             np.real(lo.k).astype(np.float32).astype(float), np.real(lo.k))
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert np.isfinite(lo.compute_group_velocity(hi)).all()
-
-
-def _rigid_guide_modes(n_modes=3, water_depth=100.0, c0=1500.0, freq=50.0):
-    """Pressure-release surface, rigid bottom: psi_m = sin((m+1/2)pi z/D),
-    so psi'(D) = 0 and psi(D) is at a maximum."""
-    depths = np.linspace(0.0, water_depth, 51)
-    phi = np.zeros((depths.size, n_modes))
-    k = np.empty(n_modes, dtype=complex)
-    omega = 2.0 * np.pi * freq
-    for m in range(n_modes):
-        kz = (m + 0.5) * np.pi / water_depth
-        phi[:, m] = np.sin(kz * depths)
-        k[m] = np.sqrt((omega / c0) ** 2 - kz ** 2 + 0j)
-    return Modes(k=k, phi=phi, depths=depths, model='Test',
-                 frequencies=freq)
+            assert np.isfinite(lo.group_velocity_between(hi)).all()
 
 
 class TestUpperBoundWarningStatesRigidExactness:
@@ -910,15 +896,16 @@ class TestModalSumMarksTheSingularRangeNoData:
     source range, so there is no field to report there. Substituting
     sqrt(r) = 1 returns a level a few dB from the 1 m answer — close enough
     to read as physics — where every sibling path (``base.py``,
-    ``oases.py``, ``ram.py``, ``grn_reader.py``, ``reverberation.py``)
+    ``oases/``, ``ram/``, ``core/acoustics/wavenumber.py``,
+    ``reverberation.py``)
     returns NaN for r <= 0."""
 
     @staticmethod
     def _loss_at(ranges):
-        return _pekeris_modes().modal_propagation_loss(
+        return _rigid_guide_modes().modal_pressure_field(
             source_depth=25.0,
             receiver_depths=np.array([25.0, 50.0]),
-            ranges_m=np.asarray(ranges, dtype=float),
+            ranges=np.asarray(ranges, dtype=float),
         )
 
     def test_the_source_range_comes_back_as_no_data(self):
@@ -948,7 +935,7 @@ class TestUnsolvableModesGetNoAttenuation:
     no-data instead of quietly wrong."""
 
     def test_a_non_positive_wavenumber_gives_nan_attenuation(self):
-        modes = _pekeris_modes(n_modes=3)
+        modes = _rigid_guide_modes(n_modes=3)
         k = np.array(modes.k, dtype=complex)
         k[1] = -0.5 + 0j                      # the solver returned Re(k) <= 0
         broken = Modes(k=k, phi=modes.phi, depths=modes.depths,
@@ -960,7 +947,7 @@ class TestUnsolvableModesGetNoAttenuation:
         assert np.isfinite(out.k.imag[[0, 2]]).all()
 
     def test_a_non_positive_normalisation_gives_nan_attenuation(self):
-        modes = _pekeris_modes(n_modes=3)
+        modes = _rigid_guide_modes(n_modes=3)
         phi = np.array(modes.phi, dtype=float)
         phi[:, 1] = 0.0                       # shape integrates to zero
         broken = Modes(k=modes.k, phi=phi, depths=modes.depths,
@@ -972,7 +959,7 @@ class TestUnsolvableModesGetNoAttenuation:
         assert np.isfinite(out.k.imag[[0, 2]]).all()
 
     def test_a_healthy_mode_set_carries_no_nan(self):
-        out = _pekeris_modes(n_modes=3).with_attenuation(
+        out = _rigid_guide_modes(n_modes=3).with_attenuation(
             0.01, sound_speed_z=1500.0, density_z=1.0)
         assert np.isfinite(out.k.imag).all()
 
@@ -1002,7 +989,7 @@ class TestTheGrazingAngleHasOneHomeAndOneGuard:
 
     def test_the_angle_is_arccos_of_the_speed_ratio(self):
         m = self._modes()
-        speeds = np.asarray(m.compute_phase_speeds(), dtype=float)
+        speeds = np.asarray(m.phase_speeds, dtype=float)
         a = m.grazing_angles(1500.0)
         np.testing.assert_allclose(
             a[0], np.degrees(np.arccos(1500.0 / speeds[0])), rtol=1e-12)
@@ -1027,7 +1014,7 @@ def test_the_dropped_mode_warning_can_actually_be_emitted():
     import matplotlib.pyplot as plt
     import uacpy
     from uacpy.core.results.modes import Modes
-    from uacpy.visualization import plot_mode_excitation
+    from uacpy.plot import plot_mode_excitation
 
     z = np.linspace(0.0, 100.0, 51)
     # Phase speeds 1600 / 1520 / 1400 m/s: the last is below the reference.
@@ -1040,6 +1027,55 @@ def test_the_dropped_mode_warning_can_actually_be_emitted():
     with pytest.warns(UserWarning, match='have no real grazing angle'):
         fig, ax = plot_mode_excitation(modes, src, sound_speed=1500.0)
     plt.close(fig)
+
+
+def _excitation_modes(**kw):
+    from uacpy.core.results.modes import Modes
+    z = np.linspace(0.0, 100.0, 51)
+    k = 2 * np.pi * 100.0 / np.array([1600.0, 1520.0])
+    phi = np.stack([np.sin((m + 1) * np.pi * z / 100.0) for m in range(2)],
+                   axis=1)
+    return Modes(k=k, phi=phi, depths=z, frequencies=100.0, model='kraken',
+                 **kw)
+
+
+def test_mode_excitation_refuses_a_keyword_it_does_not_use():
+    """A misspelt or styling keyword raises rather than drawing the default
+    figure without a word."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import uacpy
+    from uacpy.plot import plot_mode_excitation
+
+    src = uacpy.Source(depths=50.0, frequencies=100.0)
+    with pytest.raises(TypeError, match='totally_bogus'):
+        plot_mode_excitation(_excitation_modes(), src, sound_speed=1500.0,
+                             totally_bogus=3)
+
+
+def test_mode_excitation_credits_only_a_figure_it_created():
+    """Into a caller's axes it adds no footnote and leaves the caller's
+    margins alone; on its own figure it credits the model."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import uacpy
+    from uacpy.models.provenance import model_provenance
+    from uacpy.plot import plot_mode_excitation
+
+    modes = _excitation_modes(model_source=model_provenance('acoustics_toolbox'))
+    src = uacpy.Source(depths=50.0, frequencies=100.0)
+    fig, axes = plt.subplots(1, 2)
+    bottom = fig.subplotpars.bottom
+    for ax in axes:
+        plot_mode_excitation(modes, src, ax=ax, sound_speed=1500.0)
+    assert fig.texts == []
+    assert fig.subplotpars.bottom == bottom
+    plt.close(fig)
+
+    own, _ = plot_mode_excitation(modes, src, sound_speed=1500.0)
+    assert any('kraken' in t.get_text() for t in own.texts)
+    plt.close(own)
 
 
 def test_a_patterned_source_gets_one_warning_for_the_dropped_modes():
@@ -1058,7 +1094,7 @@ def test_a_patterned_source_gets_one_warning_for_the_dropped_modes():
     import matplotlib.pyplot as plt
     import uacpy
     from uacpy.core.results.modes import Modes
-    from uacpy.visualization import plot_mode_excitation
+    from uacpy.plot import plot_mode_excitation
 
     z = np.linspace(0.0, 100.0, 51)
     k = 2 * np.pi * 100.0 / np.array([1600.0, 1520.0, 1400.0])
@@ -1088,3 +1124,133 @@ def test_a_patterned_source_gets_one_warning_for_the_dropped_modes():
     # carrier, which says what happened to their values.
     assert len(counts['shaded']) == 1, counts['shaded']
     assert 'returned as NaN' in counts['shaded'][0]
+
+
+class TestWithAttenuationTakesTheEnvironmentsBottom:
+    """The documented call, ``modes.with_attenuation(..., bottom=env.bottom)``:
+    ``env.bottom`` is a ``Bottom`` carrier, not a ``BoundaryProperties``, and
+    the call raised for every Environment."""
+
+    def test_a_range_independent_bottom_is_its_half_space(self):
+        from uacpy import Environment
+        env = Environment(bathymetry=100.0, ssp=1500.0, bottom='sand')
+        modes = _pekeris_modes_on(101, n_modes=3)
+        via_env = modes.with_attenuation(0.001, bottom=env.bottom,
+                                         seafloor_depth=100.0)
+        direct = modes.with_attenuation(
+            0.001, bottom=env.bottom.halfspace_at(range=0.0),
+            seafloor_depth=100.0)
+        np.testing.assert_array_equal(via_env.k, direct.k)
+
+    def test_a_range_dependent_bottom_is_refused_with_the_call_to_make(self):
+        from uacpy import Environment, Bottom
+        bottom = Bottom.from_halfspaces(
+            [0.0, 5000.0], sound_speed=[1650.0, 1500.0],
+            density=[1.9, 1.5], attenuation=[0.8, 0.2])
+        env = Environment(bathymetry=100.0, ssp=1500.0, bottom=bottom)
+        modes = _pekeris_modes_on(101, n_modes=3)
+        with pytest.raises(ConfigurationError, match="halfspace_at"):
+            modes.with_attenuation(0.001, bottom=env.bottom,
+                                   seafloor_depth=100.0)
+
+
+class TestEveryModeShapeLookupIsOneInterpolation:
+    """``Modes.shapes_at``, ``Modes.excitation`` and
+    ``Modes.modal_pressure_field`` read their shapes through the one
+    array-level ``mode_shapes_at``: the same depth gives the same numbers on
+    every route, and outside the tabulation each refuses or returns NaN,
+    never a clamped end value."""
+
+    def test_the_method_is_the_function(self):
+        from uacpy.core.acoustics import mode_shapes_at
+        m = _excitation_modes()
+        z = np.array([3.3, 47.1, 99.0])
+        np.testing.assert_array_equal(m.shapes_at(z),
+                                      mode_shapes_at(m.phi, m.depths, z))
+
+    def test_the_modal_functions_spell_their_arguments_like_modes(self):
+        """``k``, ``phi`` and ``depths`` are the ``Modes`` attributes; a
+        keyword call written from the carrier works on every function."""
+        from uacpy.core.acoustics import (modal_attenuation, modal_field,
+                                          mode_shapes_at)
+        m = _excitation_modes()
+        np.testing.assert_array_equal(
+            mode_shapes_at(phi=m.phi, depths=m.depths, at_depths=[50.0]),
+            m.shapes_at([50.0]))
+        np.testing.assert_array_equal(
+            modal_attenuation(k=m.k, phi=m.phi, depths=m.depths,
+                              alpha_dB_per_m=0.01, frequency=m.f0,
+                              bottom=BoundaryProperties(acoustic_type='rigid')),
+            modal_attenuation(m.k, m.phi, m.depths, 0.01, frequency=m.f0,
+                              bottom=BoundaryProperties(acoustic_type='rigid')))
+        phi_zs = m.shapes_at([30.0])[0]
+        phi_zr = m.shapes_at([50.0])
+        np.testing.assert_array_equal(
+            modal_field(k=m.k, phi_zs=phi_zs, phi_zr=phi_zr,
+                        ranges=[1000.0]),
+            modal_field(m.k, phi_zs, phi_zr, [1000.0]))
+
+    def test_complex_shapes_interpolate_both_parts(self):
+        from uacpy.core.acoustics import mode_shapes_at
+        z = np.array([0.0, 10.0])
+        phi = np.array([[1.0 + 2.0j], [3.0 - 4.0j]])
+        np.testing.assert_array_equal(mode_shapes_at(phi, z, [5.0]),
+                                      [[2.0 - 1.0j]])
+
+    def test_outside_the_tabulation_is_refused_or_nan_never_clamped(self):
+        m = _excitation_modes()
+        with pytest.raises(ConfigurationError, match='outside the tabulated'):
+            m.shapes_at([100.5])
+        nan_row = m.shapes_at([50.0, 100.5], outside='nan')
+        assert np.all(np.isfinite(nan_row[0])) and np.all(np.isnan(nan_row[1]))
+        # The end of the tabulation itself is inside.
+        assert np.all(np.isfinite(m.shapes_at([0.0, 100.0])))
+
+    def test_the_excitation_and_the_field_read_the_same_shapes(self):
+        from uacpy import Source
+        m = _excitation_modes()
+        np.testing.assert_array_equal(
+            m.excitation(Source(depths=37.0, frequencies=100.0)),
+            m.shapes_at([37.0])[0].astype(complex))
+        with pytest.warns(UserWarning, match='outside the tabulated'):
+            f = m.modal_pressure_field(source_depth=37.0,
+                                         receiver_depths=[20.0, 120.0],
+                                         ranges=[1000.0])
+        assert np.isfinite(f.data[0, 0]) and np.isnan(f.data[1, 0])
+        with pytest.raises(ConfigurationError, match='outside the tabulated'):
+            m.modal_pressure_field(source_depth=120.0, receiver_depths=[20.0],
+                                     ranges=[1000.0])
+
+
+def test_the_modal_sum_method_is_named_for_the_pressure_it_returns():
+    """It returns complex pressure (unit 'Pa'), not a loss, and its name says
+    so; the loss-named spelling does not exist."""
+    m = _excitation_modes()
+    assert not hasattr(Modes, 'modal_propagation_loss')
+    f = m.modal_pressure_field(source_depth=37.0, receiver_depths=[20.0],
+                               ranges=[1000.0])
+    assert f.is_complex and f.unit == 'Pa'
+
+
+def test_the_modal_sum_carries_the_phase_reference_of_the_kraken_field():
+    """The sum is written in AT's travelling-wave convention, the one
+    Kraken's COHERENT_TL field is stamped with; unstamped, the same numbers
+    read as phase-less to every consumer keyed on the tag (ARCH-5)."""
+    m = _excitation_modes()
+    f = m.modal_pressure_field(source_depth=37.0, receiver_depths=[20.0],
+                               ranges=[1000.0])
+    assert f.phase_reference is PhaseReference.TRAVELLING_WAVE
+    assert f.coherent is True
+
+
+@pytest.mark.parametrize('frequency', [-100.0, float('nan'), 0.0])
+def test_modal_attenuation_refuses_a_frequency_that_is_not_positive(
+        frequency):
+    """A negative frequency gave a negative (amplifying) attenuation and a
+    NaN one a NaN per mode; only zero was refused."""
+    from uacpy.core.acoustics import modal_attenuation
+    z = np.linspace(0.0, 100.0, 51)
+    phi = np.sin(np.pi * z / 200.0)[:, None]
+    with pytest.raises(ConfigurationError, match="positive finite frequency"):
+        modal_attenuation(np.array([0.4 + 0j]), phi, z, 0.01,
+                          frequency=frequency)

@@ -6,9 +6,10 @@ import numpy as np
 from uacpy.models import Bellhop, Kraken, Scooter
 from uacpy import Field
 from uacpy.core.results import Modes
-from uacpy.models.base import RunMode
+from uacpy.core.run_settings import RunMode
 from uacpy.core import Environment, Source, Receiver
 from uacpy.core.absorption import Thorp
+from uacpy.models.ram import collins as ram_collins
 
 pytestmark = pytest.mark.requires_binary
 
@@ -133,24 +134,30 @@ class TestVolumeAttenuation:
             self, shallow_env, shallow_env_thorp):
         """Every RAM backend applies ``env.absorption`` through a water
         block in dB per wavelength (ram.md §3). At 10 kHz Thorp is
-        ``_thorp_dB_per_km(f)/1000 · c/f`` per wavelength, the block sits at
+        ``absorption_thorp(f)/1000 · c/f`` per wavelength, the block sits at
         absolute depths inside the domain, and a lossless env or a zero
         constant writes no block. Deck-level — no binary runs."""
         from uacpy.models import RAM
-        from uacpy.core.absorption import ConstantAbsorption, _thorp_dB_per_km
-        m = RAM(verbose=False, flat_earth=False)
-        seg = m._collins_range_segments(shallow_env_thorp, 'ramgeo', 200.0,
-                                        10000.0, dz=0.05)[0]
+        from uacpy.core.absorption import ConstantAbsorption
+        from uacpy.core.acoustics.attenuation import absorption_thorp
+        m = RAM(verbose=False, earth_curvature=False)
+        seg = ram_collins.collins_range_segments(shallow_env_thorp, 'ramgeo',
+                                                 200.0,
+                                        10000.0, dz=0.05,
+                                        knobs=m._knob_record(),
+                                        speed_bounds=m._speed_bounds)[0]
         block = seg['water_attn']
-        expected = float(_thorp_dB_per_km(10000.0)) / 1000.0 * 1500.0 / 10000.0
+        expected = float(absorption_thorp(10000.0)) / 1000.0 * 1500.0 / 10000.0
         assert block[0][0] == 0.0 and block[-1][0] == 200.0
         assert all(abs(v - expected) < 1e-12 * expected for _, v in block)
-        assert 'water_attn' not in m._collins_range_segments(
-            shallow_env, 'ramgeo', 200.0, 10000.0)[0]
+        assert 'water_attn' not in ram_collins.collins_range_segments(
+            shallow_env, 'ramgeo', 200.0, 10000.0, knobs=m._knob_record(),
+            speed_bounds=m._speed_bounds)[0]
         zero = Environment(name='zero', bathymetry=100.0, ssp=1500.0,
                            absorption=ConstantAbsorption(0.0))
-        assert 'water_attn' not in m._collins_range_segments(
-            zero, 'ramgeo', 200.0, 10000.0)[0]
+        assert 'water_attn' not in ram_collins.collins_range_segments(
+            zero, 'ramgeo', 200.0, 10000.0, knobs=m._knob_record(),
+            speed_bounds=m._speed_bounds)[0]
 
     @pytest.mark.requires_binary
     @pytest.mark.parametrize('law', ['thorp', 'fg'])
@@ -159,13 +166,15 @@ class TestVolumeAttenuation:
         """The C++ / CUDA port carried Francois-Garrison's boric-acid
         relaxation frequency with base 1 instead of 10 (a constant 2.8 kHz),
         1.34 x the Fortran's loss at 5 kHz while its Thorp agreed
-        (third_party/MODIFICATIONS.md, bellhopcuda). The increment
-        TL(law) - TL(lossless) of every available port must match the
-        Fortran binary's to 3 %."""
+        (third_party/MODIFICATIONS.md, bellhopcuda). uacpy now writes
+        Francois-Garrison into the SSP rows' alphaI rather than as 'F', so
+        the case pins that every port applies those rows as the Fortran
+        does. The increment TL(law) - TL(lossless) of every available port
+        must match the Fortran binary's to 3 %."""
         from uacpy.core.absorption import FrancoisGarrison
         from uacpy.models.bellhop import Bellhop as _B
         absorption = (Thorp() if law == 'thorp' else FrancoisGarrison(
-            temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=50.0))
+            temperature=10.0, salinity=35.0, pH=8.0))
         lossy = Environment(name='lossy', bathymetry=100.0, ssp=1500.0,
                             bottom=shallow_env.bottom, absorption=absorption)
         src = Source(depths=30.0, frequencies=5000.0)

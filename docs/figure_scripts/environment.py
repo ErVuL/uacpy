@@ -48,7 +48,8 @@ def shelf_break():
             ranges=[0.0, 20_000.0],
         ),
         altimetry=uacpy.generate_sea_surface(
-            20_000.0, wind_speed_mps=15.0, n_points=1200, seed=0),
+            20_000.0, wind_speed_kn=30.0, n_points=1200,
+            rng=np.random.default_rng(0)),
     )
     source = uacpy.Source(depths=40.0, frequencies=150.0)
     receiver = uacpy.Receiver(depths=np.linspace(40.0, 320.0, 8),
@@ -117,11 +118,11 @@ def ssp_shapes():
 
     fig, (ax_s, ax_d) = plt.subplots(1, 2, figsize=(9.0, 5.0))
     for label, ssp in shallow.items():
-        ax_s.plot(ssp.data[:, 0], ssp.depths, linewidth=1.6, label=label)
+        ax_s.plot(ssp.sound_speed[:, 0], ssp.depths, linewidth=1.6, label=label)
     ax_s.set_title('Shallow water (0–200 m)', fontweight='bold', fontsize=11)
     ax_s.legend(fontsize=8, loc='lower right')
 
-    ax_d.plot(munk.data[:, 0], munk.depths, color='C4', linewidth=1.6,
+    ax_d.plot(munk.sound_speed[:, 0], munk.depths, color='C4', linewidth=1.6,
               label='Munk (axis 1300 m)')
     ax_d.axhline(1300.0, color='gray', linestyle='--', linewidth=0.9)
     ax_d.set_title('Deep water (0–5000 m)', fontweight='bold', fontsize=11)
@@ -156,7 +157,7 @@ def ssp_range_dependent():
     fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(11.0, 4.4))
     ssp.plot(ax=ax_l, title='One cast per range node')
     ax_l.title.set(fontweight='bold', fontsize=12)
-    env.plot(ax=ax_r, bottom_colorbar=False,
+    env.plot(ax=ax_r, show_bottom_colorbar=False,
              title='The same profile in the environment')
     fig.suptitle('SoundSpeedProfile — range-dependent (2-D)',
                  fontweight='bold', fontsize=13)
@@ -168,7 +169,8 @@ def range_profiles():
     """Bathymetry and Altimetry: two 1-D value(range) carriers, opposite signs."""
     env, _, _ = sloping_shelf()
     altimetry = uacpy.Altimetry.coerce(uacpy.generate_sea_surface(
-        2000.0, wind_speed_mps=12.0, n_points=800, seed=7))
+        2000.0, wind_speed_kn=24.0, n_points=800,
+        rng=np.random.default_rng(7)))
 
     fig, (ax_a, ax_b) = plt.subplots(2, 1, figsize=(9.0, 5.2))
     altimetry.plot(
@@ -198,7 +200,7 @@ def bottom_shapes():
     fig, axes = plt.subplots(2, 2, figsize=(11.0, 6.4))
     for ax, (label, bottom) in zip(axes.ravel(), cases):
         _flat_shelf(bottom, label).plot(ax=ax, receiver=_ARRAY,
-                                        bottom_colorbar=False, title=label)
+                                        show_bottom_colorbar=False, title=label)
     fig.suptitle('Bottom — the four shapes', fontweight='bold', fontsize=13)
     fig.tight_layout()
     return fig
@@ -225,21 +227,21 @@ def absorption_models():
     freqs = np.logspace(1, 5.7, 400)
     fig, ax = plt.subplots(figsize=(8.0, 5.0))
 
-    uacpy.absorption_thorp(freqs).plot(ax=ax, label='Thorp')
-    uacpy.absorption_francois_garrison(
-        freqs, temperature_c=20.0, salinity_psu=35.0, pH=8.0, z_bar_m=50.0,
-    ).plot(ax=ax, label='Francois–Garrison, 20 °C / 50 m')
-    uacpy.absorption_francois_garrison(
-        freqs, temperature_c=4.0, salinity_psu=35.0, pH=8.0, z_bar_m=3000.0,
-    ).plot(ax=ax, label='Francois–Garrison, 4 °C / 3000 m')
-    uacpy.absorption_constant(
-        freqs, value_dB_per_wavelength=1.0e-4,
-    ).plot(ax=ax, label='ConstantAbsorption, 1e-4 dB/λ')
-    uacpy.absorption_biological(
-        freqs, layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)], depths=50.0,
-    ).plot(ax=ax, label='Biological, f0 = 1.5 kHz')
+    uacpy.Thorp().table(freqs).plot(ax=ax, label='Thorp')
+    uacpy.FrancoisGarrison(
+        temperature=20.0, salinity=35.0, pH=8.0,
+    ).table(freqs, depths=50.0).plot(
+        ax=ax, label='Francois–Garrison, 20 °C / 50 m')
+    uacpy.FrancoisGarrison(
+        temperature=4.0, salinity=35.0, pH=8.0,
+    ).table(freqs, depths=3000.0).plot(
+        ax=ax, label='Francois–Garrison, 4 °C / 3000 m')
+    uacpy.ConstantAbsorption(value_dB_per_wavelength=1.0e-4).table(
+        freqs).plot(ax=ax, label='ConstantAbsorption, 1e-4 dB/λ')
+    uacpy.Biological(layers=[(20.0, 80.0, 1500.0, 4.0, 0.02)]).table(
+        freqs, depths=50.0).plot(ax=ax, label='Biological, f0 = 1.5 kHz')
 
-    ax.set_title('Absorption — volume attenuation models', loc='left',
+    ax.set_title('Absorption — volume attenuation models',
                  fontweight='bold')
     ax.set_ylim(1e-4, 1e3)
     return fig
@@ -250,7 +252,7 @@ def collapse():
 
     The two reduced panels are built with the public carrier reductions the
     models apply themselves — ``Bottom.collapse(layers=…)``,
-    ``Bottom.select_range(…)`` and ``get_representative_depth(…)`` — at each
+    ``Bottom.collapse_range(…)`` and ``bathymetry.collapse_range(…)`` — at each
     model's documented default method, so each panel reproduces exactly what
     that model's ``_project_environment`` hands its writer.
     """
@@ -260,8 +262,10 @@ def collapse():
     receiver = uacpy.Receiver(depths=np.linspace(40.0, 320.0, 8),
                               ranges=20_000.0)
 
-    # Bellhop takes range dependence and the rough surface natively. It has no
-    # layered bottom, so every column is flattened to its half-space.
+    # Bellhop(auto_bounce=False) takes range dependence and the rough surface
+    # natively. It reads no layered bottom, so every column is flattened to its
+    # half-space. (The default Bellhop() keeps the layers through BOUNCE and
+    # collapses the range axis instead.)
     bellhop_view = env.copy()
     bellhop_view.bottom = env.bottom.collapse(layers='halfspace')
 
@@ -269,19 +273,20 @@ def collapse():
     # and the sea surface all go, but the layer stack survives intact.
     scooter_view = env.copy()
     scooter_view.bathymetry = uacpy.Bathymetry.coerce(
-        env.get_representative_depth('max'))
-    scooter_view.bottom = env.bottom.select_range('median')
+        env.bathymetry.collapse_range('max'))
+    scooter_view.bottom = env.bottom.collapse_range('median')
     scooter_view.altimetry = None
 
     panels = [
         (env, 'As written — range-dependent layered bottom, rough surface'),
-        (bellhop_view, "Bellhop's view — layers flattened, range kept"),
+        (bellhop_view,
+         "Bellhop(auto_bounce=False)'s view — layers flattened, range kept"),
         (scooter_view, "Scooter's view — range and surface gone, layers kept"),
     ]
     fig, axes = plt.subplots(3, 1, figsize=(8.5, 9.0))
     for ax, (e, label) in zip(axes, panels):
         e.plot(ax=ax, source=source, receiver=receiver,
-               bottom_colorbar=False, title=label)
+               show_bottom_colorbar=False, title=label)
         if ax is not axes[-1]:
             ax.set_xlabel('')
     fig.suptitle('Collapse — what a model does with a feature it cannot take',

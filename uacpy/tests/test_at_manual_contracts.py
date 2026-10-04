@@ -37,7 +37,8 @@ import uacpy
 from uacpy.core import Environment, BoundaryProperties
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.constants import BoundaryType
+from uacpy.core.boundary import BoundaryType
+from uacpy.models.kraken import _checks
 
 
 def _measured_env(**overrides):
@@ -63,8 +64,7 @@ def _src_rcv():
 def _write_kraken(path, env, **overrides):
     from uacpy.io.oalib_writer import write_kraken_env_file
     src, rcv = _src_rcv()
-    kwargs = dict(ssp_topopt='C', surface_type=BoundaryType.VACUUM,
-                  bottom_type=BoundaryType.HALF_SPACE, frequencies=None,
+    kwargs = dict(interp_ssp='linear', frequencies=None,
                   n_mesh=0, rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
     kwargs.update(overrides)
     write_kraken_env_file(path, env, src, rcv, **kwargs)
@@ -90,13 +90,18 @@ class TestTopOptInterpolationLetters:
         ('linear', 'C'),
         ('n2linear', 'N'),
         ('pchip', 'P'),
-        ('cubic', 'S'),
         ('spline', 'S'),
         ('quad', 'Q'),
     ])
     def test_each_name_maps_to_its_documented_letter(self, name, letter):
         from uacpy.io.oalib_writer import resolve_ssp_topopt
         assert resolve_ssp_topopt(_measured_env(), name) == letter
+
+    @pytest.mark.parametrize('spelling', ['c-linear', 'clin', 'bilinear', 'cubic'])
+    def test_a_spelling_outside_the_canonical_names_is_refused(self, spelling):
+        from uacpy.io.oalib_writer import resolve_ssp_topopt
+        with pytest.raises(ConfigurationError, match='not recognised'):
+            resolve_ssp_topopt(_measured_env(), spelling)
 
     def test_analytic_is_refused(self):
         # 'A' selects the hard-coded Munk curve in misc/munk.f90, which
@@ -122,11 +127,9 @@ class TestAttenuationUnitLetterIsW:
         src, rcv = _src_rcv()
         out = tmp_path / 's.env'
         write_scooter_env_file(
-            out, _measured_env(), src, rcv, ssp_topopt='C',
-            surface_type=BoundaryType.VACUUM,
-            bottom_type=BoundaryType.HALF_SPACE, frequencies=None,
-            topopt_extra='', n_mesh=0, rmax_m=5000.0, c_low=1400.0,
-            c_high=2000.0)
+            out, _measured_env(), src, rcv, interp_ssp='linear',
+            frequencies=None, topopt_extra='', n_mesh=0, rmax_m=5000.0,
+            c_low=1400.0, c_high=2000.0)
         assert _topopt(out.read_text().splitlines()[3])[2] == 'W'
 
     def test_sparc_deck(self, tmp_path):
@@ -138,9 +141,8 @@ class TestAttenuationUnitLetterIsW:
         src, _ = _src_rcv()
         out = tmp_path / 'b.env'
         write_bounce_input_file(
-            out, _measured_env(), src, ssp_topopt='C',
-            bottom_type=BoundaryType.HALF_SPACE, n_mesh=0,
-            c_low=1400.0, c_high=2000.0, rmax=5000.0)
+            out, _measured_env(), src, interp_ssp='linear', n_mesh=0,
+            c_low=1400.0, c_high=2000.0, rmax_m=5000.0)
         assert _topopt(out.read_text().splitlines()[3])[2] == 'W'
 
     def test_bellhop_deck(self, tmp_path):
@@ -253,11 +255,9 @@ class TestBroadbandFrequencyVectorTail:
         src, rcv = _src_rcv()
         out = tmp_path / 's.env'
         write_scooter_env_file(
-            out, _measured_env(), src, rcv, ssp_topopt='C',
-            surface_type=BoundaryType.VACUUM,
-            bottom_type=BoundaryType.HALF_SPACE, frequencies=self.FREQS,
-            topopt_extra='', n_mesh=0, rmax_m=5000.0, c_low=1400.0,
-            c_high=2000.0)
+            out, _measured_env(), src, rcv, interp_ssp='linear',
+            frequencies=self.FREQS, topopt_extra='', n_mesh=0,
+            rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
         self._assert_tail(out.read_text().splitlines())
 
 
@@ -273,7 +273,7 @@ class TestFieldFlpFirstProfileRangeMustBeZero:
         with pytest.raises(ConfigurationError, match='First profile range'):
             write_fieldflp(tmp_path / 'f.flp', 'RA', pos,
                            n_profiles=2,
-                           profile_ranges_m=np.array([1000.0, 5000.0]))
+                           profile_ranges=np.array([1000.0, 5000.0]))
 
 
 class TestBellhopDeckGrammar:
@@ -321,8 +321,8 @@ class TestBellhopDeckGrammar:
         it.  Writing ' ' says 2-D to both engines with no warning.
         """
         lines = self._write(tmp_path, _measured_env())
-        run_type = next(ln for ln in lines if ln.startswith("'CB"))
-        assert run_type == "'CB RR  '"
+        run_type = next(ln for ln in lines if ln.startswith("'CG"))
+        assert run_type == "'CG RR  '"
         idx = lines.index(run_type)
         assert int(lines[idx + 1]) == 0
         assert _floats(lines[idx + 2]) == [-80.0, 80.0]
@@ -340,11 +340,9 @@ def _write_sparc(path):
         surface=BoundaryProperties(acoustic_type='vacuum'),
         bottom=BoundaryProperties(acoustic_type='rigid'))
     write_sparc_env_file(
-        path, env, src, rcv, ssp_code='C',
-        surface_type=BoundaryType.VACUUM, bottom_type=BoundaryType.RIGID,
-        output_mode='S', n_mesh=0, rmax_m=5000.0, c_low=1400.0,
-        c_high=2000.0, pulse_type='P', f_min=50.0, f_max=400.0,
-        n_t_out=100, t_max=2.0, t_start=-0.1, t_mult=0.9)
+        path, env, src, rcv, interp_ssp='linear', output_mode='S', n_mesh=0, rmax_m=5000.0, c_low=1400.0,
+        c_high=2000.0, pulse_type='P', freq_min=50.0, freq_max=400.0,
+        n_time_samples=100, time_max=2.0, march_start=-0.1, courant_factor=0.9)
     return path
 
 
@@ -386,10 +384,10 @@ class TestReflectionTableDocExample:
                          "45.0  0.95  175.0\n"
                          "90.0  0.90  170.0\n")
         rc = read_reflection_coefficient(table)
-        assert rc['n_pts'] == 3
-        np.testing.assert_allclose(rc['theta'], [0.0, 45.0, 90.0])
-        np.testing.assert_allclose(rc['R'], [1.00, 0.95, 0.90])
-        np.testing.assert_allclose(rc['phi'],
+        assert len(rc.angles) == 3
+        np.testing.assert_allclose(rc.angles, [0.0, 45.0, 90.0])
+        np.testing.assert_allclose(rc.magnitude, [1.00, 0.95, 0.90])
+        np.testing.assert_allclose(rc.phase,
                                    np.deg2rad([180.0, 175.0, 170.0]))
 
 
@@ -427,6 +425,7 @@ class TestAtiFileFollowsTheBtyContract:
                                      [500.0, 1.0]]))
 
 
+@pytest.mark.requires_binary
 class TestElasticSubBottomReceiversArePartitioned:
     """``doc/index.htm`` (vendored AT tree): 'Internally KRAKENC replaces
     elastic layers by an equivalent reflection coefficent. For this
@@ -439,12 +438,12 @@ class TestElasticSubBottomReceiversArePartitioned:
         from uacpy.models import Kraken
         return Kraken(), _measured_env()
 
-    def test_sub_bottom_depths_are_split_out_with_a_warning(self):
+    def test_sub_bottom_depths_are_split_out_with_a_notice(self):
         model, env = self._model_env()
         rcv = uacpy.Receiver(depths=[50.0, 150.0], ranges=[1000.0])
-        with pytest.warns(UserWarning, match='elastic sub-bottom'):
-            compute_rcv, keep = model._partition_elastic_subbottom(
-                env, rcv, True)
+        compute_rcv, keep, notice = _checks.partition_elastic_subbottom(
+            env, rcv, True, model_name=model.model_name)
+        assert 'elastic sub-bottom' in notice[1]
         np.testing.assert_array_equal(keep, [True, False])
         np.testing.assert_allclose(compute_rcv.depths, [50.0])
 
@@ -454,9 +453,9 @@ class TestElasticSubBottomReceiversArePartitioned:
         # mask discards its column afterwards.
         model, env = self._model_env()
         rcv = uacpy.Receiver(depths=[150.0], ranges=[1000.0])
-        with pytest.warns(UserWarning, match='elastic sub-bottom'):
-            compute_rcv, keep = model._partition_elastic_subbottom(
-                env, rcv, True)
+        compute_rcv, keep, notice = _checks.partition_elastic_subbottom(
+            env, rcv, True, model_name=model.model_name)
+        assert 'elastic sub-bottom' in notice[1]
         assert not keep.any()
         assert len(np.atleast_1d(compute_rcv.depths)) == 1
         assert 0.0 < float(np.atleast_1d(compute_rcv.depths)[0]) < env.depth
@@ -464,8 +463,9 @@ class TestElasticSubBottomReceiversArePartitioned:
     def test_water_column_receivers_pass_through_untouched(self):
         model, env = self._model_env()
         rcv = uacpy.Receiver(depths=[50.0], ranges=[1000.0])
-        compute_rcv, keep = model._partition_elastic_subbottom(env, rcv, True)
-        assert compute_rcv is rcv and keep is None
+        compute_rcv, keep, notice = _checks.partition_elastic_subbottom(
+            env, rcv, True, model_name=model.model_name)
+        assert compute_rcv is rcv and keep is None and notice is None
 
 
 class TestFortranTitleQuoting:
@@ -561,7 +561,8 @@ class TestMediaCountBound:
         wrong number.  ``ReadEnvironmentMod.f90:63-66`` is the ERROUT the
         writer is pre-empting.
         """
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='exceeds the compiled bound MaxMedium') as exc:
             self._write(500)
         text = str(exc.value)
         assert 'ReadEnvironmentMod.f90:63-66' in text

@@ -20,7 +20,11 @@ from uacpy.core.environment import (
 from uacpy.core.exceptions import ConfigurationError, ExecutableNotFoundError
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
-from uacpy.models.base import DEFAULT_COLLAPSE, RunMode
+from uacpy.core.run_settings import RunMode
+from uacpy.models._projection import (
+    DEFAULT_COLLAPSE, collapse_elastic_boundary,
+)
+from uacpy.tests.conftest import build_engine, engine_names, engine_params
 
 
 # ---------------------------------------------------------------------
@@ -30,39 +34,47 @@ from uacpy.models.base import DEFAULT_COLLAPSE, RunMode
 # (model class name, expected per-key overrides relative to DEFAULT_COLLAPSE)
 #
 # Two patterns explain the shape of this table. ``bottom_range: 'median'``
-# appears for every model except Bellhop and RAM — the two that declare
-# ``_supports_range_dependent_bottom`` and so never collapse the range axis at
-# all. ``ssp: 'mean'`` is absent wherever ``collapse['ssp']`` cannot reach the
+# appears for every model except Bellhop, Kraken and RAM — the three that
+# declare ``_supports_range_dependent_bottom`` and so never collapse the range
+# axis at all. ``ssp: 'mean'`` is absent wherever ``collapse['ssp']`` cannot reach the
 # answer, so the global ``'r0'`` stands: OASR and Bounce return a reflection
 # coefficient off the bottom stack rather than a field, and Kraken declares
 # ``range_dependent_ssp``, which is exactly the condition under which
 # ``_project_environment``'s SSP-collapse branch does not run.
 _PER_MODEL_DEFAULTS = [
     ('Bellhop',     {}),
-    ('Kraken',      {'bottom_range': 'median'}),
+    ('Kraken',      {}),
     ('Scooter',     {'ssp': 'mean', 'bottom_range': 'median'}),
     ('SPARC',       {'ssp': 'mean', 'bottom_range': 'median'}),
     ('OAST',        {'ssp': 'mean', 'bottom_range': 'median'}),
     ('OASN',        {'ssp': 'mean', 'bottom_range': 'median'}),
     ('OASR',        {'bottom_range': 'median'}),
     ('OASP',        {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('OASSP',       {'ssp': 'mean', 'bottom_range': 'median'}),
+    ('OASS',        {'ssp': 'mean', 'bottom_range': 'median'}),
     ('Bounce',      {'bottom_range': 'median'}),
     ('RAM',         {}),
 ]
 
-_OASES_MODELS = {'OAST', 'OASN', 'OASR', 'OASP'}
-
 # Each model resolves (and existence-checks) its binary in __init__, so the
-# construction below needs that binary — requires_binary for all, plus
-# requires_oases for the separately-licensed OASES family.
+# construction below carries the markers of the installs its registry entry
+# declares.
 _PER_MODEL_PARAMS = [
-    pytest.param(
-        name, overrides, id=name,
-        marks=([pytest.mark.requires_binary]
-               + ([pytest.mark.requires_oases] if name in _OASES_MODELS else [])),
-    )
-    for name, overrides in _PER_MODEL_DEFAULTS
+    pytest.param(param.values[0],
+                 dict(_PER_MODEL_DEFAULTS).get(param.values[0]),
+                 id=param.id, marks=param.marks)
+    for param in engine_params(value='name')
 ]
+
+
+def test_the_defaults_table_covers_the_registered_engines():
+    names = {name for name, _ in _PER_MODEL_DEFAULTS}
+    missing = sorted(engine_names() - names)
+    stale = sorted(names - engine_names())
+    assert not missing and not stale, (
+        f"_PER_MODEL_DEFAULTS in test_collapse_policy.py has no row for "
+        f"{missing} and stale rows for {stale}: every registered engine "
+        f"needs one (docs/DEV.md section 3, step 5)")
 
 
 @pytest.mark.parametrize('cls_name,overrides', _PER_MODEL_PARAMS)
@@ -70,9 +82,10 @@ def test_per_model_collapse_defaults(cls_name, overrides):
     """Each model installs its physics-aware overrides via
     ``_set_collapse_defaults`` and inherits the rest from
     ``DEFAULT_COLLAPSE``."""
-    import uacpy.models as models
-    cls = getattr(models, cls_name)
-    m = cls(verbose=False)
+    if overrides is None:
+        pytest.fail(f"_PER_MODEL_DEFAULTS has no row for {cls_name} "
+                    f"(docs/DEV.md section 3, step 5)")
+    m = build_engine(cls_name, verbose=False)
     for key, expected in DEFAULT_COLLAPSE.items():
         want = overrides.get(key, expected)
         assert m._collapse[key] == want, (
@@ -121,25 +134,28 @@ def _rdlb_env():
 
 def _bare_model_factory(supports_layered: bool):
     """Build a minimal subclass that doesn't spawn any binary."""
+    from uacpy.core.run_settings import RunMode
     from uacpy.models.base import PropagationModel
+    from uacpy.models._spec import ModelSpec
 
-    from uacpy.models.base import ModelSpec, RunMode
+    def _never_launched(self, *args):
+        raise AssertionError('this stand-in launches nothing')
 
     class _Bare(PropagationModel):
-        # ``spec`` and ``source`` are required of any subclass that defines
-        # run(); this double spawns no binary, so the source id only has to
-        # be a real one — 'acoustics_toolbox' is unrestricted, so nothing
-        # here emits a licence warning. ``_supports_layered_bottom`` is set
-        # per-instance below, after the spec has been applied.
+        # ``spec`` and ``provenance_id`` are required of any subclass that defines
+        # the stage hooks; this double spawns no binary, so the source id
+        # only has to be a real one — 'acoustics_toolbox' is unrestricted,
+        # so nothing here emits a licence warning.
+        # ``_supports_layered_bottom`` is set per-instance below, after the
+        # spec has been applied.
         spec = ModelSpec(modes=(RunMode.COHERENT_TL,))
-        source = 'acoustics_toolbox'
+        provenance_id = 'acoustics_toolbox'
 
         def __init__(self, **kw):
             super().__init__(**kw)
             self._supports_layered_bottom = supports_layered
 
-        def _run_single(self, env, source, receiver, run_mode=None):
-            return self._project_environment(env)
+        _write_input = _launch = _read_output = _to_result = _never_launched
 
     return _Bare
 
@@ -159,7 +175,7 @@ def test_bottom_range_picks_right_profile(range_method, expected_c):
     })
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        proj = bare._run_single(_rdlb_env(), None, None)
+        proj = bare._project_environment(_rdlb_env())
     assert not proj.bottom.is_range_dependent
     assert proj.bottom.columns[0].halfspace.sound_speed == pytest.approx(expected_c)
 
@@ -171,9 +187,30 @@ def test_layered_kept_when_model_supports_layers():
     bare = Bare(collapse={'bottom_range': 'median'})
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        proj = bare._run_single(_rdlb_env(), None, None)
+        proj = bare._project_environment(_rdlb_env())
     assert not proj.bottom.is_range_dependent and proj.bottom.is_layered
     assert len(proj.bottom.columns[0].layers) == 1
+
+
+def test_a_collapsed_seafloor_lies_inside_its_profile():
+    """Collapsing a sloping seafloor to its deepest point (``'max'``, the
+    default) assigns the deeper flat seafloor, and that assignment extends
+    a profile ending above it, so the AT writers get a profile that spans
+    the water column."""
+    env = Environment(bathymetry=[(0.0, 100.0), (5000.0, 200.0)],
+                      ssp=1500.0)
+    # A profile ending above the deepest point. No public path leaves one
+    # (construction and assignment both extend it), so it is stored past
+    # them, to reach the projection's own assignment.
+    object.__setattr__(env, 'ssp', SoundSpeedProfile.from_pairs(
+        [(0.0, 1500.0), (100.0, 1490.0)]))
+    bare = _bare_model_factory(supports_layered=False)()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        proj = bare._project_environment(env)
+    assert proj.depth == 200.0
+    assert proj.ssp.depths[-1] == 200.0
+    assert proj.ssp.sound_speed[-1, 0] == 1490.0
 
 
 @pytest.mark.parametrize('bad_key,bad_val', [
@@ -213,11 +250,11 @@ def test_bellhop_rd_ssp_uses_collapse_policy():
     src = Source(frequencies=200.0, depths=25.0)
     rcv = Receiver(depths=np.array([50.0]), ranges=np.array([1500.0]))
 
-    # interp_ssp='c-linear' (≠ 'quad') forces Bellhop's run-path to collapse the
+    # interp_ssp='linear' (≠ 'quad') forces Bellhop's run-path to collapse the
     # 2-D SSP. Drive the actual run (not a hand-rolled collapse) and assert the
     # collapse fired with the user's method — this catches a regression where
     # run() stops honouring collapse['ssp'].
-    bh = Bellhop(verbose=False, interp_ssp='c-linear', collapse={'ssp': 'rmax'})
+    bh = Bellhop(verbose=False, interp_ssp='linear', collapse={'ssp': 'rmax'})
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
         try:
@@ -238,11 +275,11 @@ def test_bellhop_rd_ssp_uses_collapse_policy():
 # ---------------------------------------------------------------------
 
 @pytest.mark.requires_binary  # constructs Bellhop
-def test_has_elastic_bottom_is_true_when_any_range_has_shear():
-    """``env.has_elastic_bottom`` is true when ``shear_speed`` is non-zero at
-    *any* range, not only at r=0. ``Bellhop._maybe_route_through_bounce``
-    gates the auto-route on ``env.bottom.is_layered`` alone and reads
-    ``has_elastic_bottom`` only to name the bottom in the warning it raises,
+def test_a_bottom_is_elastic_when_any_range_has_shear():
+    """``env.bottom.is_elastic`` is true when ``shear_speed`` is non-zero at
+    *any* range, not only at r=0. Bellhop's ``bounce_route`` gates the
+    auto-route on ``env.bottom.is_layered`` alone, and ``is_elastic``
+    only names the bottom in the notice the route gives,
     so a shear speed that appears first at r>0 decides what the user is told
     the route is for. Asserted on the env API rather than through a run, so
     nothing here proves the route fires."""
@@ -254,7 +291,7 @@ def test_has_elastic_bottom_is_true_when_any_range_has_shear():
         shear_speed=np.array([0.0, 400.0, 0.0]),  # elastic in the middle
     )
     env = Environment(name='elastic-RD', bathymetry=100.0, ssp=1500.0, bottom=rd)
-    assert env.has_elastic_bottom is True
+    assert env.bottom.is_elastic is True
 
     # Don't actually run BOUNCE — just confirm the predicate fires.
     bh = Bellhop(verbose=False)
@@ -262,7 +299,7 @@ def test_has_elastic_bottom_is_true_when_any_range_has_shear():
 
 
 # ---------------------------------------------------------------------
-# SeabedColumn.collapse('volume_average') forwards shear_attenuation
+# SeabedColumn.collapse_layers('volume_average') forwards shear_attenuation
 # ---------------------------------------------------------------------
 
 def test_layered_volume_average_forwards_shear_attenuation():
@@ -282,21 +319,20 @@ def test_layered_volume_average_forwards_shear_attenuation():
                       attenuation=0.25, shear_speed=400.0, shear_attenuation=0.6),
     ]
     lb = SeabedColumn(layers=layers, halfspace=hs)
-    flat = lb.collapse('volume_average')
+    flat = lb.collapse_layers('volume_average')
     assert flat.shear_attenuation > 0.0, (
         "volume_average collapse must forward shear_attenuation, not drop it"
     )
 
 
 # ---------------------------------------------------------------------
-# _collapse_elastic_boundary handles Bottom shear ndarrays
+# collapse_elastic_boundary handles Bottom shear ndarrays
 # ---------------------------------------------------------------------
 
 def test_collapse_elastic_rd_bottom_zeros_shear_arrays():
-    """``_collapse_elastic_boundary(rd_bottom, 'fluid')`` zeroes the
+    """``collapse_elastic_boundary(rd_bottom, 'fluid')`` zeroes the
     per-range ``shear_speed`` / ``shear_attenuation`` ndarrays while
     preserving shape and dtype."""
-    from uacpy.models.base import PropagationModel
     rd = Bottom.from_halfspaces(np.array([0.0, 5000.0, 10000.0]),
         sound_speed=np.array([1600.0, 1650.0, 1700.0]),
         density=np.array([1.5, 1.6, 1.7]),
@@ -304,7 +340,7 @@ def test_collapse_elastic_rd_bottom_zeros_shear_arrays():
         shear_speed=np.array([0.0, 400.0, 800.0]),
         shear_attenuation=np.array([0.0, 0.5, 1.0]),
     )
-    collapsed = PropagationModel._collapse_elastic_boundary(rd, 'fluid')
+    collapsed = collapse_elastic_boundary(rd, 'fluid')
     # Must remain a range-dependent half-space Bottom, shear zeroed per column
     assert isinstance(collapsed, Bottom)
     assert collapsed.is_range_dependent and not collapsed.is_layered

@@ -12,14 +12,16 @@ from typing import Optional, Tuple
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.acoustics.boundaries import critical_angle
+from uacpy.core.absorption import Absorption, AbsorptionCoefficient
+from uacpy.core.bottom import Bottom
 from uacpy.core.environment import Environment
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.visualization.style import (
     BOTTOM_FILL_STYLE, BOTTOM_CMAP, BOTTOM_LINE_STYLE, BOTTOM_LINE_STYLE_FLAT,
     hatched_fill,
 )
-from uacpy.visualization.plots._common import _plot_warn, ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once, _title_or
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.visualization.plots._common import _plot_warn, ZORDER_SEDIMENT, _credit_attributions, _draw_credit, _draw_geometry, _draw_sea_ice, _draw_surface_boundary, _draw_altimetry, _fill_margins, fig_ax, typed_plot_error, invert_yaxis_once, _title_or, _grid_figure
+from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.core.units import km_to_m, m_to_km
 
 
@@ -40,6 +42,12 @@ _HALFSPACE_CP_LO, _HALFSPACE_CP_HI = 1450.0, 2300.0
 # margin is dead space that a thin sediment stack has to share the panel with,
 # and at 20 % the layers were too few pixels to read. The 5 m floor keeps a
 # visible band under a shallow seabed, where 10 % is a couple of metres.
+# The sound-speed colourbar labels, on two lines: the stacked water/seabed
+# bars are each under half the panel tall, and a one-line vertical label
+# longer than its bar runs into the bar beside it.
+WATER_C_LABEL = 'Water c\n(m/s)'
+BOTTOM_CP_LABEL = 'Bottom cp\n(m/s)'
+
 _PANEL_MARGIN = 0.10
 _PANEL_MARGIN_MIN_M = 5.0
 
@@ -87,7 +95,7 @@ def _truncated(cmap, lo, hi, n=256):
 def _make_sm(cs_values, cmap):
     """``(cs_min, cs_max, mappable)`` spanning the sound speeds in
     ``cs_values`` — the scale a colorbar for them is drawn on."""
-    pool = list(cs_values) if len(cs_values) else [1500.0]
+    pool = list(cs_values) if len(cs_values) else [DEFAULT_SOUND_SPEED]
     cs_min = float(min(pool))
     cs_max = float(max(pool))
     if cs_max <= cs_min:
@@ -318,15 +326,15 @@ def _draw_halfspace_bottom(ax_bathy, halfspace, r_km, seafloor, z_max_layer):
     return z_max_layer
 
 
-@typed_plot_error
-def _plot_environment(
+@typed_plot_error(who='Environment.plot')
+def plot_environment(
     env: Environment,
     *,
     source=None,
     receiver=None,
     ax=None,
-    bottom_colorbar: bool = True,
-    data_source=True,
+    show_bottom_colorbar: bool = True,
+    show_data_credit=True,
     sea_ice=None,
     title: Optional[str] = None,
     figsize: Tuple[float, float] = (10, 5),
@@ -356,27 +364,58 @@ def _plot_environment(
     scale for a single half-space — so neither is washed out by the other.
 
     Pass ``ax=`` to draw into an existing axis (for composite figures); returns
-    ``(fig, ax)``. ``bottom_colorbar=False`` drops the second (bottom cp)
-    colorbar — useful in narrow/composite panels.
+    ``(fig, ax)``. The two colorbars are insets just right of the panel and
+    take none of its width, so the panel keeps the full width of its slot and
+    lines up with its neighbours; they therefore need the room a layout pass
+    gives them — create the figure with ``layout='constrained'`` or call
+    ``fig.tight_layout()`` — or they print over the panel to the right.
+    ``show_bottom_colorbar=False`` drops the second (bottom cp) colorbar —
+    useful in narrow/composite panels.
 
-    ``data_source`` adds a licence-required data-source credit footnote (for a
+    ``show_data_credit`` adds a licence-required data-source credit footnote (for a
     standalone figure, ``ax=None``): ``True`` (default) uses ``env.data_sources``
     (nothing shown if the env carries none); ``None`` / ``False`` hides it; or
     pass an ``Environment`` / ``Result`` / list of ``DataSource`` / strings.
 
     ``sea_ice`` overlays a (symbolic, not-to-scale) ice cover at the surface — a
-    concentration 0–1 (uniform) or ``(ranges_km, concentration)`` (range-varying,
-    e.g. from ``uacpy.data.fetch_sea_ice_concentration_transect``).
+    concentration 0–1 (uniform), or the ``AlongTrack``
+    ``uacpy.data.fetch_sea_ice_concentration_transect`` returns (range-varying,
+    ranges in metres).
 
-    ``title`` overrides the default ``"Bottom — <shape>"`` panel title.
+    ``title`` overrides the default ``"<env.name> — seabed: <shape>"`` panel
+    title (``"Environment — …"`` for an unnamed environment).
 
     ``x_max_m`` is a further range (m) the panel must reach — the span of a
     TL field it is drawn beside — for an environment that carries no range
     vector of its own.
+
+    Parameters
+    ----------
+    env : Environment
+        The environment to draw.
+    source, receiver : Source / Receiver, optional
+        Draw the run geometry.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes (see above); a new figure is made when omitted.
+    show_bottom_colorbar : bool, optional
+        Draw the seabed ``cp`` colorbar. Default True.
+    show_data_credit : bool, Environment, Result or sequence, optional
+        The data-source credit footnote of a standalone figure (see above).
+    sea_ice : float or AlongTrack, optional
+        Ice cover drawn at the surface (see above).
+    title : str, optional
+        Axes title; ``None`` draws the default (see above).
+    figsize : tuple, optional
+        Size (inches) of the new figure. Default ``(10, 5)``.
+    x_max_m : float, optional
+        A range (m) the panel must reach (see above).
+    source_marker_range_m : float, optional
+        Range (m) the source star is drawn at; a drawing coordinate only.
+        Default 0.
     """
     if not isinstance(env, Environment):
         raise ConfigurationError(
-            f"_plot_environment: expected an Environment, got "
+            f"Environment.plot: expected an Environment, got "
             f"{type(env).__name__}.")
     fig, ax_bathy = fig_ax(ax, figsize)
 
@@ -387,7 +426,7 @@ def _plot_environment(
     # Pull a sensible x-extent from any range-dependent axis available.
     # Falls back to (0, 1) only when nothing carries a range vector.
     candidate_rmaxes_km = []
-    if env.has_range_dependent_bathymetry:
+    if env.bathymetry.varies_with_range:
         candidate_rmaxes_km.append(m_to_km(float(env.bathymetry.ranges[-1])))
     if bottom.is_range_dependent:
         candidate_rmaxes_km.append(
@@ -402,7 +441,7 @@ def _plot_environment(
         candidate_rmaxes_km.append(m_to_km(float(x_max_m)))
     x_max_km = max(candidate_rmaxes_km) if candidate_rmaxes_km else 1.0
 
-    if env.has_range_dependent_bathymetry:
+    if env.bathymetry.varies_with_range:
         r_km = m_to_km(env.bathymetry.ranges)
         seafloor = env.bathymetry.depths
         # Every model holds the last bathymetry value constant out to the
@@ -445,7 +484,7 @@ def _plot_environment(
     water_cmap = _truncated('Blues', 0.25, 0.95)
     bottom_cmap_truncated = _truncated(BOTTOM_CMAP, 0.25, 0.85)
 
-    water_cs_pool = list(np.asarray(ssp.data, dtype=float).ravel())
+    water_cs_pool = list(np.asarray(ssp.sound_speed, dtype=float).ravel())
     bottom_cs_pool: list = []
     for col in bottom.columns:
         bottom_cs_pool.extend(layer.sound_speed for layer in col.layers)
@@ -492,7 +531,7 @@ def _plot_environment(
     # the SSP heatmap.
     if ssp.is_range_dependent:
         ssp_r_km_b = m_to_km(ssp.ranges)
-        ssp_grid = np.asarray(ssp.data, dtype=float)
+        ssp_grid = np.asarray(ssp.sound_speed, dtype=float)
         # Models hold the end profiles constant past their nodes; anchoring
         # the mesh at the painted span's ends keeps the water colormap under
         # the whole panel rather than stopping at the outer SSP ranges.
@@ -512,7 +551,7 @@ def _plot_environment(
             shading='gouraud', zorder=0,
         )
     else:
-        ssp_1d = np.asarray(ssp.data, dtype=float).reshape(-1, 1)
+        ssp_1d = np.asarray(ssp.sound_speed, dtype=float).reshape(-1, 1)
         x_water = np.array([float(r_km.min()),
                             float(r_km.max() if r_km.size > 1 else x_max_km)])
         ax_bathy.pcolormesh(
@@ -545,7 +584,7 @@ def _plot_environment(
     # carries a cp value (half-space, layered, range-dependent — all the same)
     # gets a 'Bottom cp' bar; only vacuum / rigid / file (no cp) show the water
     # bar alone.
-    has_bottom_cbar = bottom_colorbar and bottom_has_cp
+    has_bottom_cbar = show_bottom_colorbar and bottom_has_cp
     if has_bottom_cbar:
         # Stack the two cp colorbars vertically in a single right-margin
         # column so they occupy the width of one bar (keeps narrow composite
@@ -555,9 +594,9 @@ def _plot_environment(
         water_cax = ax_bathy.inset_axes([1.04, 0.54, 0.03, 0.45])
         bottom_cax = ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.45])
         cbar_water = fig.colorbar(water_sm, cax=water_cax,
-                                  label='Water c (m/s)')
+                                  label=WATER_C_LABEL)
         cbar_bottom = fig.colorbar(bottom_sm, cax=bottom_cax,
-                                   label='Bottom cp (m/s)')
+                                   label=BOTTOM_CP_LABEL)
         for cb in (cbar_water, cbar_bottom):
             cb.ax.tick_params(labelsize='xx-small')
             # Relative like the ticks beside it: an absolute 7 pt here left the
@@ -571,10 +610,10 @@ def _plot_environment(
         # full axes width and stays aligned with its neighbours.
         _speeds_read_absolute(fig.colorbar(
             water_sm, cax=ax_bathy.inset_axes([1.04, 0.01, 0.03, 0.98]),
-            label='Water c (m/s)'))
+            label=WATER_C_LABEL))
 
     # Seafloor line on top of the bottom rendering.
-    if env.has_range_dependent_bathymetry:
+    if env.bathymetry.varies_with_range:
         ax_bathy.plot(r_km, seafloor, **BOTTOM_LINE_STYLE, zorder=10)
     else:
         ax_bathy.axhline(env.depth, **BOTTOM_LINE_STYLE_FLAT, zorder=10)
@@ -590,7 +629,7 @@ def _plot_environment(
     # a contradiction in a package where range is measured from the source.
     ax_bathy.set_xlim(*x_range)
     _draw_geometry(ax_bathy, source, receiver, max_markersize=5,
-                   source_range_m=source_marker_range_m)
+                   source_range_m=source_marker_range_m, env=env)
     # Tight ylim — surface to a small margin past the deepest seafloor, but
     # never above what the bottom branch actually painted. Every branch
     # returns ``z_max_layer``, the floor of its own rendering (layer stack +
@@ -610,25 +649,66 @@ def _plot_environment(
     _draw_surface_boundary(ax_bathy, env)
     if sea_ice is not None:
         _draw_sea_ice(ax_bathy, sea_ice)
+    # The panel is the whole cross-section, water column included, so the
+    # default names the environment and then its seabed.
+    name = env.name if env.name and env.name != 'unnamed' else 'Environment'
     ax_bathy.set_title(title if title is not None
-                       else f"Bottom — {_bottom_kind(bottom)}",
+                       else f"{name} — seabed: {_bottom_kind(bottom)}",
                        fontweight='bold', fontsize='large')
 
     if ax is None:
-        credit = _credit_attributions(data_source, carrier=env)
+        credit = _credit_attributions(show_data_credit, carrier=env)
         fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
         _draw_credit(fig, credit, reserve=False)
     return fig, ax_bathy
 
 
-@typed_plot_error
-def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
-              figsize=(5, 6), label: Optional[str] = None, color=None,
-              legend: Optional[bool] = None, **line_kwargs):
+def _ssp_to_draw(env_or_ssp, depths, ranges):
+    """The :class:`~uacpy.core.ssp.SoundSpeedProfile` :func:`plot_ssp`
+    draws: an environment's, the profile itself, or bare sound speeds on
+    ``depths`` (and ``ranges``) with the shapes checked."""
+    if isinstance(env_or_ssp, (Environment, SoundSpeedProfile)):
+        if depths is not None or ranges is not None:
+            raise ConfigurationError(
+                "plot_ssp: a SoundSpeedProfile holds its own depths and "
+                "ranges; depths= and ranges= are the axes of bare sound "
+                "speeds.")
+        return (env_or_ssp.ssp if isinstance(env_or_ssp, Environment)
+                else env_or_ssp)
+    if (isinstance(env_or_ssp, (str, bytes)) or np.ndim(env_or_ssp) == 0
+            or not np.size(env_or_ssp)):
+        raise ConfigurationError(
+            "plot_ssp: pass an Environment or a SoundSpeedProfile, or sound "
+            f"speeds on depths=; got {type(env_or_ssp).__name__}.")
+    c = np.asarray(env_or_ssp, dtype=float)
+    if depths is None:
+        raise ConfigurationError(
+            "plot_ssp: bare sound speeds need depths= (m), their depth axis.")
+    z = np.atleast_1d(np.asarray(depths, dtype=float))
+    want = (z.size,) if ranges is None else (z.size, np.size(ranges))
+    if c.shape != want:
+        raise ConfigurationError(
+            f"plot_ssp: sound speeds of shape {c.shape} on {z.size} depths"
+            + ("" if ranges is None else f" and {np.size(ranges)} ranges")
+            + f" are {want}, depth first"
+            + ("; a 2-D array needs ranges=." if ranges is None and c.ndim == 2
+               else "."))
+    return SoundSpeedProfile(
+        depths=z, sound_speed=c.reshape(z.size, -1),
+        ranges=None if ranges is None else np.asarray(ranges, dtype=float))
+
+
+@typed_plot_error(who='SoundSpeedProfile.plot')
+def plot_ssp(env_or_ssp, *, depths=None, ranges=None, ax=None,
+             title: Optional[str] = None,
+             figsize=(5, 6), label: Optional[str] = None, color=None,
+             show_legend: Optional[bool] = None, **line_kwargs):
     """Plot the sound-speed profile ``c(z)`` as a depth-down line.
 
-    Accepts an :class:`~uacpy.core.environment.Environment` or a bare
-    :class:`~uacpy.core.environment.SoundSpeedProfile`. A range-independent
+    Accepts an :class:`~uacpy.core.environment.Environment`, a
+    :class:`~uacpy.core.environment.SoundSpeedProfile`, or bare sound speeds
+    ``c`` (m/s) on ``depths=``: shaped ``(n_depth,)``, or ``(n_depth,
+    n_range)`` with ``ranges=``. A range-independent
     profile draws a single line; a range-dependent profile draws one line per
     range column, coloured by range with a colorbar. Depth increases downward.
     Pass ``ax=`` to draw into an existing axis; returns ``(fig, ax)``.
@@ -648,22 +728,43 @@ def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
 
     ``label`` names the profile as a whole, so on a range-dependent profile it
     is attached to the first column only — one legend entry per profile rather
-    than one per range column. ``legend`` forces the legend on or off; the
-    default (``None``) draws one exactly when some artist on the axis carries a
-    label. Remaining ``line_kwargs`` (``linestyle``, ``alpha``, ``zorder`` ...)
+    than one per range column. ``show_legend`` forces the legend on or off;
+    the default (``None``) draws one exactly when some artist on the axis
+    carries a label. Remaining ``line_kwargs`` (``linestyle``, ``alpha``, ``zorder`` ...)
     are forwarded to ``ax.plot``.
+
+    Parameters
+    ----------
+    env_or_ssp : Environment, SoundSpeedProfile or array_like
+        The profile, the environment holding it, or bare sound speeds (m/s).
+    depths : array_like, optional
+        The depth axis (m) of bare sound speeds; required for them, refused
+        otherwise.
+    ranges : array_like, optional
+        The range axis (m) of 2-D bare sound speeds.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    title : str, optional
+        Axes title; none is drawn when unset.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(5, 6)`` by default; unused when
+        ``ax`` is given.
+    label : str, optional
+        Legend label of the profile (see above).
+    color : str, optional
+        One colour for every column; selects overlay mode (see above).
+    show_legend : bool, optional
+        Force the legend on or off; ``None`` draws one when an artist is
+        labelled.
+    **line_kwargs
+        Matplotlib keywords for every line.
     """
-    ssp = env_or_ssp.ssp if isinstance(env_or_ssp, Environment) else env_or_ssp
-    if not isinstance(ssp, SoundSpeedProfile):
-        raise ConfigurationError(
-            "_plot_ssp: pass an Environment or a SoundSpeedProfile, got "
-            f"{type(env_or_ssp).__name__}."
-        )
+    ssp = _ssp_to_draw(env_or_ssp, depths, ranges)
 
     fig, ax = fig_ax(ax, figsize)
 
     depths = np.asarray(ssp.depths, dtype=float)
-    data = np.asarray(ssp.data, dtype=float)           # (n_depth, n_range)
+    data = np.asarray(ssp.sound_speed, dtype=float)           # (n_depth, n_range)
 
     if ssp.is_range_dependent:
         line_kwargs.setdefault('linewidth', 1.2)
@@ -702,7 +803,8 @@ def _plot_ssp(env_or_ssp, *, ax=None, title: Optional[str] = None,
         ax.set_title(title)
     # ``get_legend_handles_labels`` already drops matplotlib's '_'-prefixed
     # placeholder labels, so this is empty exactly when nothing was named.
-    if legend or (legend is None and ax.get_legend_handles_labels()[1]):
+    if show_legend or (show_legend is None
+                        and ax.get_legend_handles_labels()[1]):
         ax.legend()
     return fig, ax
 
@@ -758,7 +860,7 @@ def _seabed_property_grid(bottom, prop, r_km, z, seafloor_r):
 
 @typed_plot_error
 def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
-                     water_speed: float = DEFAULT_SOUND_SPEED,
+                     water_sound_speed: float = DEFAULT_SOUND_SPEED,
                      water_density: Optional[float] = None,
                      mark_critical: bool = False,
                      title: Optional[str] = None,
@@ -768,10 +870,12 @@ def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
     Draws what :func:`uacpy.core.acoustics.bottom_loss_curve` computes.
     ``materials`` is anything that function accepts — a preset name
     (``'sand'``), a property dict (``sound_speed``, ``density``,
-    ``attenuation``) — or a sequence of them, or a ``{label: material}``
+    ``attenuation``), a seabed carrier such as ``BoundaryProperties`` — or an
+    unlayered, range-independent ``Bottom`` such as ``env.bottom`` (read at
+    its half-space), or a sequence of them, or a ``{label: material}``
     mapping when the labels should not be the preset names. A fetched
     seabed and the canonical presets therefore go on one axes, computed by
-    one function against one ``water_speed``, which is the only way the
+    one function against one ``water_sound_speed``, which is the only way the
     comparison means anything: the critical angle is the ratio of the two
     speeds, so curves drawn against different water are not comparable.
 
@@ -782,6 +886,30 @@ def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
     marked with an angle it does not have.
 
     Returns ``(fig, ax)``.
+
+    Parameters
+    ----------
+    materials : material, sequence or dict
+        The seabed(s) to draw (see above).
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    grazing_angles_deg : array_like, optional
+        Grazing angles (deg); ``None`` is
+        :func:`~uacpy.core.acoustics.bottom_loss_curve`'s grid.
+    water_sound_speed : float, optional
+        Water sound speed (m/s) above the seabed. Default
+        :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
+    water_density : float, optional
+        Water density (g/cm³); ``None`` is the package default.
+    mark_critical : bool, optional
+        Rule each faster seabed's critical angle. Default False.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(8, 5)`` by default; unused when
+        ``ax`` is given.
+    **mpl_kw
+        Matplotlib keywords for every curve.
     """
     from uacpy.core.acoustics import bottom_loss_curve
     from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
@@ -795,14 +923,53 @@ def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
         return isinstance(m, dict) and bool(
             {'sound_speed', 'density', 'attenuation'} & set(m))
 
-    if isinstance(materials, str) or _is_properties(materials):
+    def _is_carrier(m):
+        return isinstance(m, Bottom) or all(
+            hasattr(m, k) for k in ('sound_speed', 'density', 'attenuation'))
+
+    def _as_material(label, m):
+        # A seabed carrier goes to bottom_loss_curve as-is; a Bottom is read
+        # at its one half-space, which exists only for an unlayered,
+        # range-independent seabed — anything else has no single plane-wave
+        # reflection to draw, and choosing a range or dropping the layers
+        # would draw one the seabed does not have.
+        if not isinstance(m, Bottom):
+            return m
+        if m.is_layered:
+            raise ConfigurationError(
+                f"plot_bottom_loss: {label!r} is a layered Bottom. This plot "
+                f"draws the plane-wave loss of one fluid half-space, and "
+                f"dropping the layers would draw a reflection the seabed does "
+                f"not have.",
+                remediation="Compute the layered seabed's reflection with "
+                            "Bounce().run(env, source, receiver) or "
+                            "OASR(...).run(..., run_mode=RunMode.REFLECTION) "
+                            "and draw it with rc.plot(quantity='loss').")
+        if m.is_range_dependent:
+            raise ConfigurationError(
+                f"plot_bottom_loss: {label!r} is a range-dependent Bottom, "
+                f"so it has one half-space per range and no single "
+                f"reflection to draw.",
+                remediation="Pick the half-space under one range: "
+                            "plot_bottom_loss(bottom.halfspace_at(range=r)).")
+        return m.halfspace_at(range=0.0)
+
+    if (isinstance(materials, str) or _is_properties(materials)
+            or _is_carrier(materials)):
         items = [(materials if isinstance(materials, str) else 'seabed',
                   materials)]
     elif hasattr(materials, 'items'):
         items = list(materials.items())
-    else:
+    elif isinstance(materials, (list, tuple)):
         items = [(m if isinstance(m, str) else f'seabed {i + 1}', m)
                  for i, m in enumerate(materials)]
+    else:
+        raise ConfigurationError(
+            f"plot_bottom_loss: cannot draw a {type(materials).__name__}. "
+            f"Pass a preset name, a property dict, a seabed carrier "
+            f"(BoundaryProperties, SedimentLayer, an unlayered Bottom), a "
+            f"sequence of these, or a {{label: material}} mapping.")
+    items = [(label, _as_material(label, m)) for label, m in items]
     if not items:
         raise ConfigurationError(
             "plot_bottom_loss: no materials to draw. Pass a preset name, a "
@@ -829,16 +996,18 @@ def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
     for label, material in items:
         angles, loss = bottom_loss_curve(
             material, grazing_angles_deg=grazing_angles_deg,
-            water_speed=water_speed, water_density=water_density)
+            water_sound_speed=water_sound_speed, water_density=water_density)
         line, = ax.plot(angles, loss, label=str(label), **mpl_kw)
         if not mark_critical:
             continue
-        c_b = (float(material['sound_speed']) if isinstance(material, dict)
-               else None)
-        if c_b is None:
+        if isinstance(material, dict):
+            c_b = float(material['sound_speed'])
+        elif isinstance(material, str):
             from uacpy.core.materials import get_material
             c_b = float(get_material(material)['sound_speed'])
-        theta_c = critical_angle(c_b, water_speed)
+        else:
+            c_b = float(material.sound_speed)
+        theta_c = critical_angle(c_b, water_sound_speed)
         if np.isfinite(theta_c):        # nan for a seabed slower than water
             ax.axvline(theta_c, color=line.get_color(), ls=':', lw=1.0)
     ax.set_xlabel('Grazing angle (°)')
@@ -853,28 +1022,53 @@ def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
 
 @typed_plot_error
 def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
-                           figsize=None, n_range=240, n_depth=200,
-                           data_source=True):
+                           figsize=None, n_ranges=240, n_depths=200,
+                           show_data_credit=True, fig=None):
     """Small-multiples cross-sections of the **seabed geoacoustic properties**.
 
     One range × sub-bottom-depth heatmap per property present in
     ``env.bottom`` — sound speed ``cp``, shear speed ``cs``, density ``ρ``,
     compressional / shear attenuation ``αp`` / ``αs`` — each with its own
     colorbar. Properties that are uniformly zero or absent (e.g. shear for a
-    fluid seabed) are skipped. Complements :func:`_plot_environment`, which
+    fluid seabed) are skipped. Complements :func:`plot_environment`, which
     colours the seabed by ``cp`` alone; this is where ``cs`` and friends live.
 
     Works for every ``Bottom`` shape (half-space, layered, range-dependent
     half-space, range-dependent layered); for layered
-    seabeds the layers track the bathymetry. Pass ``properties=`` (attribute
-    names or symbols) to restrict the panels, or ``title=`` to override the
-    figure title. Returns ``(fig, axes)``.
+    seabeds the layers track the bathymetry. Pass ``properties=`` to restrict
+    the panels, naming each by its attribute (``'sound_speed'``,
+    ``'shear_speed'``, ``'density'``, ``'attenuation'``,
+    ``'shear_attenuation'``) or its symbol (``'cp'``, ``'cs'``, ``'ρ'``,
+    ``'αp'``, ``'αs'``); any other name is refused with the list. ``title=``
+    overrides the figure title. ``fig=`` draws the panels into an existing
+    ``Figure`` or ``SubFigure`` (a panel of a larger figure) whose size,
+    layout and credit line are then the caller's. Returns ``(fig, axes)``.
+
+    Parameters
+    ----------
+    env : Environment
+        The environment whose seabed is drawn.
+    properties : sequence of str, optional
+        Panels to draw, by attribute or symbol (see above); ``None`` is every
+        property present.
+    title : str, optional
+        Figure title; none is drawn when unset.
+    figsize : tuple, optional
+        Size (inches) of the new figure; ``None`` sizes it from the panel
+        grid.
+    n_ranges, n_depths : int, optional
+        Samples of each heatmap along range and sub-bottom depth. Default
+        240 and 200.
+    show_data_credit : bool, Environment, Result or sequence, optional
+        The data-source credit footnote of a standalone figure (see above).
+    fig : Figure or SubFigure, optional
+        Draw the panels into this (see above).
     """
     # A caller holding the Bottom itself reaches for this first, so the type
     # is checked here and the refusal says why. The seabed has no ``.plot()``
     # of its own because its depth axis is measured DOWN FROM THE SEAFLOOR:
     # placing it needs the water depth, which lives on the Environment
-    # (``env.depth`` and ``env.has_range_dependent_bathymetry`` below).
+    # (``env.depth`` and ``env.bathymetry.varies_with_range`` below).
     if not hasattr(env, 'bottom'):
         raise ConfigurationError(
             f"plot_bottom_properties: expected an Environment, got "
@@ -889,25 +1083,39 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
             "plot_bottom_properties: env.bottom is None. Attach a seabed to "
             "the environment (env.bottom = Bottom(...)) before plotting its "
             "properties.")
+    if properties is not None:
+        if isinstance(properties, str):
+            properties = [properties]
+        known = {name for prop, sym, _u, _c in _BOTTOM_PROPERTIES
+                 for name in (prop, sym)}
+        unknown = [p for p in properties if p not in known]
+        if unknown:
+            valid = ', '.join(f"{prop!r}/{sym!r}"
+                              for prop, sym, _u, _c in _BOTTOM_PROPERTIES)
+            raise ConfigurationError(
+                f"plot_bottom_properties: properties= names "
+                f"{', '.join(repr(u) for u in unknown)}, which is not a seabed "
+                f"property this plot draws. Name each by attribute or "
+                f"symbol: {valid}.")
 
     rmaxes_km = []
-    if env.has_range_dependent_bathymetry:
+    if env.bathymetry.varies_with_range:
         rmaxes_km.append(m_to_km(float(env.bathymetry.ranges[-1])))
     if bottom.is_range_dependent:
         rmaxes_km.append(m_to_km(float(np.max(bottom.ranges))))
     x_max_km = max(rmaxes_km) if rmaxes_km else 1.0
-    r_km = np.linspace(0.0, x_max_km, n_range)
+    r_km = np.linspace(0.0, x_max_km, n_ranges)
 
-    if env.has_range_dependent_bathymetry:
+    if env.bathymetry.varies_with_range:
         b = env.bathymetry
         seafloor_r = np.interp(km_to_m(r_km), b.ranges, b.depths)
     else:
         seafloor_r = np.full(r_km.shape, float(env.depth))
 
-    max_thk = bottom.max_total_thickness()
+    max_thk = bottom.total_thickness_max()
     sf_max = float(np.max(seafloor_r))
     z_floor = sf_max + max_thk + max(20.0, 0.25 * sf_max)
-    z = np.linspace(0.0, z_floor, n_depth)
+    z = np.linspace(0.0, z_floor, n_depths)
 
     panels = []
     for prop, sym, unit, cmap in _BOTTOM_PROPERTIES:
@@ -935,13 +1143,12 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
     n = len(panels)
     ncols = min(n, 3)
     nrows = int(np.ceil(n / ncols))
-    if figsize is None:
-        figsize = (4.4 * ncols, 3.1 * nrows + 0.4)
     # Shared range/depth axes (every panel is the same cross-section) so only
     # the edge axes carry labels — far less clutter than per-panel labels.
-    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False,
-                             sharex=True, sharey=True,
-                             constrained_layout=True)
+    fig, axes, owns_fig = _grid_figure(
+        fig, nrows, ncols, figsize, (4.4 * ncols, 3.1 * nrows + 0.4),
+        who='plot_bottom_properties', sharex=True, sharey=True,
+        **({} if fig is not None else {'constrained_layout': True}))
     axes_flat = axes.ravel()
 
     for idx, (ax_p, (prop, sym, unit, cmap, grid)) in enumerate(
@@ -972,37 +1179,103 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
     fig.suptitle(title if title is not None
                  else f"Seabed properties — {_bottom_kind(bottom)}",
                  fontweight='bold', fontsize='large')
-    _draw_credit(fig, _credit_attributions(data_source, carrier=env),
-                      reserve=False)
+    if owns_fig:
+        _draw_credit(fig, _credit_attributions(show_data_credit, carrier=env),
+                     reserve=False)
     return fig, axes
 
 
+def _absorption_to_draw(coefficient, frequencies, depths):
+    """The :class:`~uacpy.core.absorption.AbsorptionCoefficient`
+    :func:`plot_absorption` draws: the carrier itself, or a bare dB/km array
+    on its ``frequencies`` (and ``depths``) with the shapes checked. A law
+    is refused: the plotter draws data, never evaluates."""
+    if isinstance(coefficient, Absorption):
+        raise ConfigurationError(
+            f"plot_absorption: {type(coefficient).__name__} is a law, and "
+            f"a plotter draws data, it does not evaluate a law.",
+            remediation="Evaluate it first: law.table(frequencies, "
+                        "depths).plot(), or plot_absorption(law.table(f)).")
+    if isinstance(coefficient, AbsorptionCoefficient):
+        if frequencies is not None or depths is not None:
+            raise ConfigurationError(
+                "plot_absorption: an AbsorptionCoefficient holds its own "
+                "frequencies and depths; frequencies= and depths= are the "
+                "axes of a bare array.")
+        return coefficient
+    alpha = np.asarray(coefficient, dtype=float)
+    if frequencies is None:
+        raise ConfigurationError(
+            "plot_absorption: a bare alpha array needs frequencies= (Hz), "
+            "its frequency axis.")
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    if depths is None:
+        if alpha.shape != f.shape:
+            raise ConfigurationError(
+                f"plot_absorption: alpha has shape {alpha.shape} for "
+                f"{f.size} frequencies; a curve is (n_freq,), and a 2-D "
+                f"alpha needs depths=.")
+        return AbsorptionCoefficient(frequencies=f, data=alpha,
+                                     units='dB/km')
+    z = np.atleast_1d(np.asarray(depths, dtype=float))
+    if alpha.shape != (z.size, f.size):
+        raise ConfigurationError(
+            f"plot_absorption: alpha has shape {alpha.shape}; on {z.size} "
+            f"depths and {f.size} frequencies it is ({z.size}, {f.size}), "
+            f"depth first.")
+    return AbsorptionCoefficient(frequencies=f, data=alpha, units='dB/km',
+                                 depths=z)
+
+
 @typed_plot_error
-def plot_absorption(coefficient, ax=None, *, label=None, title=None,
-                    figsize=(7.5, 4.5), **mpl_kw):
-    """Draw an :class:`~uacpy.core.absorption.AbsorptionCoefficient`.
+def plot_absorption(coefficient, ax=None, *, frequencies=None, depths=None,
+                    label=None, title=None, figsize=(7.5, 4.5), **mpl_kw):
+    """Draw an :class:`~uacpy.core.absorption.AbsorptionCoefficient`, or a
+    bare alpha array in dB/km on the ``frequencies`` (and ``depths``) given.
 
     Log-log against frequency for a 1-D carrier: absorption spans four
     decades across the band this package works in, so a linear axis shows one
     end of it or the other and never both. A carrier that carries a depth
     axis draws as a depth-frequency heatmap instead.
 
-    This function draws a carrier it is handed and computes nothing: build
-    one with :func:`~uacpy.core.absorption.absorption_thorp` or
-    :func:`~uacpy.core.absorption.absorption_francois_garrison`, or call
-    ``.plot()`` on it directly. Choosing a formula is the caller's job, which
-    keeps the ocean Francois-Garrison needs — temperature, salinity, pH,
-    depth — visible at the call rather than defaulted out of sight.
+    This function draws data and computes nothing: a law (``Thorp()``,
+    ``FrancoisGarrison(...)``, …) is refused — evaluate it first,
+    ``law.table(f, depths).plot()`` or ``plot_absorption(law.table(f))``.
+    Choosing a formula, and the ocean Francois-Garrison is evaluated in, is
+    the caller's job; the carrier records that ocean in ``parameters``.
 
     Call repeatedly with ``ax=`` to overlay several models.
+
+    Parameters
+    ----------
+    coefficient : AbsorptionCoefficient or array_like
+        The carrier to draw, or alpha in dB/km shaped ``(n_freq,)``, or
+        ``(n_depth, n_freq)`` with ``depths``.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    frequencies : array_like, optional
+        The frequency axis (Hz) of a bare array; required for one, refused
+        for a carrier, which holds its own.
+    depths : array_like, optional
+        The depth axis (m) of a 2-D bare array; refused for a carrier.
+    label : str, optional
+        Legend label of a 1-D curve; ``None`` is the carrier's model name.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(7.5, 4.5)`` by default; unused when
+        ``ax`` is given.
+    **mpl_kw
+        Matplotlib keywords for the curve or the heatmap.
     """
+    coefficient = _absorption_to_draw(coefficient, frequencies, depths)
     freqs = np.asarray(coefficient.frequencies, dtype=float)
-    values = np.asarray(coefficient.values, dtype=float)
+    values = np.asarray(coefficient.data, dtype=float)
     if not np.any(values > 0.0):
         # The depth is named in both shapes. A curve carries the single depth
         # it was evaluated at, so the advice below ("evaluate at a depth
-        # inside one") can be acted on — it used to say nothing at all for a
-        # curve, which is the case a Biological user hits first.
+        # inside one") can be acted on for a curve too, which is the case a
+        # Biological user hits first.
         if coefficient.depths is not None:
             where = (f" over depths {np.min(coefficient.depths):g}"
                      f"..{np.max(coefficient.depths):g} m")
@@ -1014,7 +1287,7 @@ def plot_absorption(coefficient, ax=None, *, label=None, title=None,
             f"plot_absorption: alpha is entirely non-positive{where}, so a "
             f"logarithmic axis draws blank. A layered model such as "
             f"Biological is zero outside its layers — evaluate at a depth "
-            f"inside one.")
+            f"inside one.", FallbackWarning)
     value_label = f"Absorption ({coefficient.units})"
     fig, ax = fig_ax(ax, figsize)
     if coefficient.is_depth_dependent:
@@ -1026,25 +1299,42 @@ def plot_absorption(coefficient, ax=None, *, label=None, title=None,
         ax.set_ylabel("Depth (m)")
         fig.colorbar(mesh, ax=ax, label=value_label)
     else:
-        ax.loglog(freqs, values, label=label or coefficient.model, **mpl_kw)
+        name = label or coefficient.model
+        ax.loglog(freqs, values, label=name, **mpl_kw)
         ax.set_ylabel(value_label)
         ax.grid(which="both", alpha=0.3)
-        ax.legend(fontsize='small')
+        if name or ax.get_legend_handles_labels()[1]:
+            ax.legend(fontsize='small')
     ax.set_xlabel("Frequency (Hz)")
-    ax.set_title(_title_or(title, "Volume absorption"), loc="left")
+    ax.set_title(_title_or(title, "Volume absorption"))
     return fig, ax
 
 
-@typed_plot_error
-def _plot_range_profile(profile, *, ax=None, title=None, figsize=(10, 4),
-                        **mpl_kw):
+@typed_plot_error(who=lambda profile, *_a, **_k: f"{type(profile).__name__}.plot")
+def plot_range_profile(profile, *, ax=None, title=None, figsize=(10, 4),
+                       **mpl_kw):
     """Render a 1-D ``value(range)`` carrier — :class:`Bathymetry` or
-    :class:`Altimetry`. Reached via ``profile.plot()``.
+    :class:`Altimetry`; ``profile.plot()`` is the method form.
 
     The carrier declares what it holds: ``_values``, ``_VALUE_LABEL`` /
     ``_VALUE_UNIT`` for the axis label, and ``_AXIS_DOWN`` for the
     orientation. A new range-profile carrier is drawn correctly without
-    touching this function."""
+    touching this function.
+
+    Parameters
+    ----------
+    profile : Bathymetry or Altimetry
+        The carrier to draw.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    title : str, optional
+        Axes title. ``None`` draws the default caption.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(10, 4)`` by default; unused when
+        ``ax`` is given.
+    **mpl_kw
+        Matplotlib keywords for the line.
+    """
     axis_down = profile._AXIS_DOWN
     values = np.asarray(profile._values, dtype=float)
     label = f"{profile._VALUE_LABEL.capitalize()} ({profile._VALUE_UNIT})"

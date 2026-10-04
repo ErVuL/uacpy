@@ -38,10 +38,9 @@ from uacpy.core.exceptions import (
     ExecutableNotFoundError,
     ModelExecutionError,
 )
-from uacpy.io import file_manager as file_manager_module
 from uacpy.io.oalib_reader import read_prt
 from uacpy.models import RAM
-from uacpy.models import base as base_module
+from uacpy.models import _launch, _workspace
 
 
 LFS_POINTER = ('version https://git-lfs.github.com/spec/v1\n'
@@ -61,7 +60,9 @@ class TestUnrunnableBinaryIsTyped:
         dud = tmp_path / 'ramgeo'
         dud.write_bytes(b'\x7fELF' + b'\x00' * 64)
         dud.chmod(0o644)
-        with pytest.raises(ExecutableNotFoundError) as excinfo:
+        with pytest.raises(
+                ExecutableNotFoundError,
+                match=r'executable cannot be run: .*\(Permission denied\)') as excinfo:
             self._model()._run_subprocess([str(dud)], cwd=tmp_path)
         assert str(dud) in str(excinfo.value)
         assert isinstance(excinfo.value.__cause__, PermissionError)
@@ -70,7 +71,9 @@ class TestUnrunnableBinaryIsTyped:
         dud = tmp_path / 'ramgeo'
         dud.write_text(LFS_POINTER)
         dud.chmod(0o755)
-        with pytest.raises(ExecutableNotFoundError) as excinfo:
+        with pytest.raises(
+                ExecutableNotFoundError,
+                match=r'executable cannot be run: .*\(Exec format error\)') as excinfo:
             self._model()._run_subprocess([str(dud)], cwd=tmp_path)
         assert str(dud) in str(excinfo.value)
         assert excinfo.value.__cause__.errno == errno.ENOEXEC
@@ -78,7 +81,8 @@ class TestUnrunnableBinaryIsTyped:
     def test_a_directory_where_the_binary_belongs_is_typed(self, tmp_path):
         dud = tmp_path / 'ramgeo'
         dud.mkdir()
-        with pytest.raises(ExecutableNotFoundError) as excinfo:
+        with pytest.raises(ExecutableNotFoundError,
+                           match='executable cannot be run') as excinfo:
             self._model()._run_subprocess([str(dud)], cwd=tmp_path)
         assert str(dud) in str(excinfo.value)
 
@@ -89,7 +93,9 @@ class TestUnrunnableBinaryIsTyped:
         script = tmp_path / 'ramgeo'
         script.write_text('#!/bin/sh\nexit 3\n')
         script.chmod(0o755)
-        with pytest.raises(ModelExecutionError) as excinfo:
+        with pytest.raises(
+                ModelExecutionError,
+                match=r'execution failed \(exit code: 3\)') as excinfo:
             self._model()._run_subprocess([str(script)], cwd=tmp_path)
         assert excinfo.value.return_code == 3
         script.write_text('#!/bin/sh\nexit 0\n')
@@ -128,7 +134,7 @@ class TestUnrunnableBinaryIsTyped:
         good.write_text('#!/bin/sh\nexit 0\n')
         good.chmod(0o755)
 
-        monkeypatch.setattr(base_module, '_PACKAGE_DIR', tmp_path)
+        monkeypatch.setattr(_launch, '_PACKAGE_DIR', tmp_path)
         found = model._find_executable_in_paths(
             'probe', bin_subdirs=['first', 'second'])
         assert found == good
@@ -146,7 +152,9 @@ class TestVanishedWorkDirIsNamedAsSuch:
         gone = tmp_path / 'work'
         gone.mkdir()
         gone.rmdir()
-        with pytest.raises(ModelExecutionError) as excinfo:
+        with pytest.raises(
+                ModelExecutionError,
+                match='Work directory is no longer usable') as excinfo:
             RAM(verbose=False, timeout=30.0)._run_subprocess(
                 [self._exe()], cwd=gone)
         message = str(excinfo.value)
@@ -176,7 +184,7 @@ class TestCleanupFailuresDoNotMaskTheModelError:
         locked = tmp_path / 'locked'
         locked.mkdir()
         (locked / 'run.prt').write_text('tail\n')
-        fm = file_manager_module.FileManager(
+        fm = _workspace.FileManager(
             base_dir=str(tmp_path), cleanup=True, prefix='r24_')
         fm.adopt_work_dir(locked)
         locked.chmod(0o000)
@@ -207,7 +215,8 @@ class TestCleanupFailuresDoNotMaskTheModelError:
         reaches the caller intact, not replaced by the cleanup's EACCES."""
         fm, locked = self._adopted(tmp_path)
         try:
-            with pytest.raises(ModelExecutionError):
+            with pytest.raises(ModelExecutionError,
+                               match=r'Error output:\nboom'):
                 try:
                     raise ModelExecutionError('RAM', return_code=1,
                                               stderr='boom')
@@ -251,7 +260,8 @@ class TestReadOnlyWorkDirIsTyped:
         try:
             model = RAM(verbose=False, backend='ramgeo',
                         work_dir=str(work), cleanup=False)
-            with pytest.raises(ConfigurationError) as excinfo:
+            with pytest.raises(ConfigurationError,
+                               match='work_dir is not writable') as excinfo:
                 model.run(
                     Environment(name='ro', bathymetry=100.0, ssp=1500.0),
                     Source(depths=50.0, frequencies=50.0),
@@ -291,7 +301,7 @@ class TestFinishHandsBackThePinnedClaim:
 
     def test_finish_runs_the_release_hooks_when_cleanup_is_off(self, tmp_path):
         released = []
-        fm = file_manager_module.FileManager(
+        fm = _workspace.FileManager(
             base_dir=str(tmp_path), cleanup=False, prefix='r24_')
         work = fm.create_work_dir()
         (work / 'kept.txt').write_text('x')
@@ -302,7 +312,7 @@ class TestFinishHandsBackThePinnedClaim:
 
     def test_finish_removes_the_files_when_cleanup_is_on(self, tmp_path):
         released = []
-        fm = file_manager_module.FileManager(
+        fm = _workspace.FileManager(
             base_dir=str(tmp_path), cleanup=True, prefix='r24_')
         work = fm.create_work_dir()
         (work / 'scratch.txt').write_text('x')
@@ -325,7 +335,7 @@ class TestFinishHandsBackThePinnedClaim:
         except ModelExecutionError as exc:
             retained.append(exc)
         assert retained, "the stubbed run was supposed to raise"
-        assert str(work.resolve()) not in base_module._PINNED_WORK_DIRS
+        assert str(work.resolve()) not in _workspace._PINNED_WORK_DIRS
 
     @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
     def test_another_thread_may_use_the_dir_after_a_retained_failure(
@@ -365,36 +375,46 @@ class TestFinishHandsBackThePinnedClaim:
 
 
 @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
-class TestABorrowedFileManagerOutlivesOneFrequency:
-    """``_run_collins_one_freq`` finishes the manager only when it made it.
-
-    The broadband sweep hands one manager down for the whole band, so a
-    per-frequency ``finish()`` would free a directory the sweep is still
-    marching through — the trap in rewriting ``if owns_fm and fm.cleanup:``.
+class TestTheBandsWorkDirectoryOutlivesEachLaunch:
+    """A Collins band is one launch per bin in one work directory
+    (``RAM._run_engine``): no launch lets the directory go, so every bin
+    finds it where the first one left it, and the run lets it go once, on
+    the failure path too.
     """
 
-    def test_a_caller_supplied_manager_is_left_alone(self, tmp_path,
-                                                     monkeypatch):
-        def boom(model_self, cmd, cwd, **kwargs):
-            raise ModelExecutionError('RAM', return_code=1, stderr='simulated')
+    def test_a_failing_bin_releases_the_directory_once(self, tmp_path,
+                                                       monkeypatch):
+        model = RAM(verbose=False, backend='ramgeo', dr=20.0, dz=100.0 / 50.25,
+                    work_dir=str(tmp_path / 'band'), cleanup=True)
+        finishes, present = [], []
+        make = model._setup_file_manager
 
-        monkeypatch.setattr(RAM, '_run_subprocess', boom)
-        released = []
-        fm = file_manager_module.FileManager(
-            base_dir=str(tmp_path), cleanup=True, prefix='r24_')
-        work = fm.create_work_dir()
-        fm.on_release(lambda: released.append(True))
+        def counted_manager():
+            fm = make()
+            finish = fm.finish
+            fm.finish = lambda: (finishes.append(True), finish())[1]
+            return fm
+        monkeypatch.setattr(model, '_setup_file_manager', counted_manager)
 
-        model = RAM(verbose=False, backend='ramgeo', dr=20.0, dz=2.0)
-        with pytest.raises(ModelExecutionError):
-            model._run_collins_one_freq(
-                Environment(name='band', bathymetry=100.0, ssp=1500.0),
-                Source(depths=50.0, frequencies=50.0),
-                Receiver(depths=[50.0], ranges=[1000.0]),
-                kind='ramgeo', freq=50.0, theta=0.0, fm=fm)
+        def launch(inputs):
+            present.append(inputs.work_dir.exists())
+            if inputs.launch == 1:
+                raise ModelExecutionError('RAM', return_code=1,
+                                          stderr='simulated')
+        monkeypatch.setattr(model, '_run_collins_binary', launch)
+        monkeypatch.setattr(
+            'uacpy.models.ram._model.read_collins_output',
+            lambda inputs, **kwargs: {})
 
-        assert work.exists(), "the sweep's own work dir was removed under it"
-        assert released == []
+        with pytest.raises(ModelExecutionError,
+                           match=r'Error output:\nsimulated'):
+            model.run(Environment(name='band', bathymetry=100.0, ssp=1500.0),
+                      Source(depths=50.0, frequencies=50.0),
+                      Receiver(depths=[50.0], ranges=[1000.0]),
+                      run_mode='broadband', frequencies=[40.0, 50.0, 60.0])
+
+        assert present == [True, True]
+        assert finishes == [True]
 
 
 class TestSignalDeathIsNamed:
@@ -430,8 +450,74 @@ class TestSignalDeathIsNamed:
     @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
     def test_a_really_killed_child_is_named(self, tmp_path):
         """End to end through ``_run_subprocess``, not just the constructor."""
-        with pytest.raises(ModelExecutionError) as excinfo:
+        with pytest.raises(ModelExecutionError,
+                           match='was killed by signal SIGKILL') as excinfo:
             RAM(verbose=False, timeout=30.0)._run_subprocess(
                 ['/bin/sh', '-c', 'kill -9 $$'], cwd=tmp_path)
         assert excinfo.value.return_code == -9
         assert 'SIGKILL' in str(excinfo.value)
+
+
+def _setpriv_available():
+    from uacpy._stack import parent_death_prefix
+    return bool(parent_death_prefix())
+
+
+@pytest.mark.requires_binary  # constructs RAM (resolves its binary)
+@pytest.mark.skipif(not _setpriv_available(),
+                    reason="no setpriv with --pdeathsig on this host")
+def test_a_binary_dies_with_the_python_process_that_launched_it(tmp_path):
+    """Binaries run in their own session, so a Python process ended by
+    SIGKILL (a scheduler, a kernel restart, an outer ``timeout`` escalating)
+    runs no reaper and used to leave them running under init — three KRAKENC
+    runs were found at 98 % CPU hours later. The launch prefix sets the
+    parent-death signal, so the binary goes with its launcher."""
+    import signal
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+    import uacpy
+    pid_file = tmp_path / 'binary.pid'
+    long_run = tmp_path / 'long_run.sh'
+    # exec keeps the PID, so the file names the process that keeps running.
+    long_run.write_text('#!/bin/sh\necho $$ > "$1"\nexec sleep 300\n')
+    long_run.chmod(0o755)
+    launcher = (
+        "from uacpy.models import RAM\n"
+        f"RAM(verbose=False, timeout=600.0)._run_subprocess("
+        f"[{str(long_run)!r}, {str(pid_file)!r}], cwd={str(tmp_path)!r})\n")
+    def alive(pid):
+        # a process reaped between the open and the read raises ESRCH
+        try:
+            with open(f'/proc/{pid}/stat') as stat_file:
+                return stat_file.read().split(') ')[-1][:1] != 'Z'
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+
+    child = subprocess.Popen([sys.executable, '-c', launcher],
+                             cwd=str(Path(uacpy.__file__).parents[1]))
+    binary_pid = None
+    try:
+        deadline = time.monotonic() + 60.0
+        while not (pid_file.exists() and pid_file.read_text().strip()):
+            assert child.poll() is None, "the launcher exited early"
+            assert time.monotonic() < deadline, "the binary never started"
+            time.sleep(0.1)
+        binary_pid = int(pid_file.read_text())
+        child.send_signal(signal.SIGKILL)
+        child.wait(timeout=30)
+        deadline = time.monotonic() + 5.0
+        while alive(binary_pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not alive(binary_pid), (
+            "the binary outlived the Python process that launched it")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        # Leave no orphan behind when the assertion fails.
+        if binary_pid is not None and alive(binary_pid):
+            try:
+                os.kill(binary_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

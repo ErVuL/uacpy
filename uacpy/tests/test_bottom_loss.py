@@ -1,23 +1,21 @@
 """Tests for the plane-wave bottom-loss helper
 :func:`uacpy.core.acoustics.bottom_loss_curve` and the matching plot
-helper :func:`uacpy.visualization.plot_bottom_loss`."""
+helper :func:`uacpy.plot.plot_bottom_loss`."""
 
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-from uacpy.core.acoustics import boundaries
 from uacpy.core.acoustics import (
-    bottom_loss_curve, density, reflection_coeff, sound_speed_mackenzie)
+    bottom_loss_curve, reflection_coeff)
 from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
+from uacpy.core.exceptions import ConfigurationError
 
 # The water density every deck writes (1.027 g/cm³), which is also the
 # wrapper's default; the closed forms below are evaluated against it.
 _RHO_W = DEFAULT_WATER_DENSITY_G_CM3
 
-_THIS_FILE = Path(__file__).resolve()
 
 
 class TestBottomLossCurve:
@@ -51,7 +49,7 @@ class TestBottomLossCurve:
         # A dict carrying the 'sand' preset's three fluid properties must
         # take exactly the code path the preset name takes — identical
         # arrays, not merely finite ones.
-        m = dict(sound_speed=1650.0, density=1.9, attenuation=0.8)
+        m = dict(sound_speed=1650.0, density=1.9 * _RHO_W, attenuation=0.8)
         ang_d, loss_d = bottom_loss_curve(m)
         ang_p, loss_p = bottom_loss_curve('sand')
         np.testing.assert_array_equal(ang_d, ang_p)
@@ -71,18 +69,19 @@ class TestBottomLossCurve:
 class TestPresetBottomLossAnchors:
     """docs/models/bounce.md §"Reading the catalogue" anchors, reproduced by
     the Rayleigh closed form (no binary) against the 1.027 g/cm³ water every
-    deck writes: sand 0.7 dB per bounce at 10° grazing and 2.1 dB by 24°
-    (just under its critical angle arccos(1500/1650) = 24.6°); clay — c_p
-    equal to the water speed — has no critical angle and
-    |R| = (ρ₂−ρ_w)/(ρ₂+ρ_w) = 0.187 from the density contrast alone
-    (14.55 dB), 14.4 dB at 10°."""
+    deck writes. The presets carry Jensen et al. Table 1.3's RATIOS against
+    that water, so the anchors are the table's: sand 0.7 dB per bounce at 10°
+    grazing and 2.0 dB by 24° (just under its critical angle
+    arccos(1500/1650) = 24.6°); clay — c_p equal to the water speed — has no
+    critical angle and |R| = (1.5−1)/(1.5+1) = 0.2 from the density ratio
+    alone (13.98 dB), 13.9 dB at 10°."""
 
     def test_sand_per_bounce_losses_at_10_and_24_degrees(self):
         _, loss = bottom_loss_curve('sand',
                                     grazing_angles_deg=np.array([10.0, 24.0]))
-        # Computed 0.716 / 2.095 dB; the doc rounds to 0.7 / 2.1.
+        # Computed 0.719 / 2.042 dB; the doc rounds to 0.7 / 2.0.
         assert loss[0] == pytest.approx(0.72, abs=0.02)
-        assert loss[1] == pytest.approx(2.09, abs=0.02)
+        assert loss[1] == pytest.approx(2.04, abs=0.02)
 
     def test_sand_critical_grazing_angle_is_arccos_c1_over_c2(self):
         crit = np.degrees(np.arccos(1500.0 / 1650.0))
@@ -97,30 +96,32 @@ class TestPresetBottomLossAnchors:
 
     def test_clay_reflects_the_bare_density_contrast(self):
         # clay c_p = 1500 m/s = water speed exactly (COA Table 1.3 ratio
-        # 1.00), so the angle dependence drops out and
-        # |R| = (1.5-1.027)/(1.5+1.027) = 0.187 -> 14.55 dB — flat at every
-        # angle steeper than a few degrees (attenuation perturbs the 3rd
-        # digit: 14.43 dB at 10°).
+        # 1.00), so the angle dependence drops out and, the preset carrying
+        # the table's density ratio 1.5 against the deck water,
+        # |R| = (1.5-1)/(1.5+1) = 0.2 -> 13.98 dB — flat at every angle
+        # steeper than a few degrees (attenuation perturbs the 3rd digit:
+        # 13.88 dB at 10°).
         ang, loss = bottom_loss_curve('clay')
         steep = ang >= 10.0
         R = 10.0 ** (-loss[steep] / 20.0)
-        R_closed = (1.5 - _RHO_W) / (1.5 + _RHO_W)
-        assert R_closed == pytest.approx(0.1872, abs=1e-4)
-        np.testing.assert_allclose(R, R_closed, atol=3e-3)
-        assert loss[np.argmin(np.abs(ang - 10.0))] == pytest.approx(14.4,
+        np.testing.assert_allclose(R, 0.2, atol=3e-3)
+        assert loss[np.argmin(np.abs(ang - 10.0))] == pytest.approx(13.9,
                                                                     abs=0.1)
 
-    def test_textbook_water_density_reproduces_the_rho_w_equals_one_anchor(self):
-        # The docstring's remedy for a rho_w = 1 benchmark, typed back: with
-        # water_density=1.0 clay is the textbook (1.5-1)/(1.5+1) = 0.2
-        # (13.98 dB) and sand at 24° is 2.04 dB, not the 2.09 dB the deck
-        # water gives.
-        ang, loss = bottom_loss_curve('clay', water_density=1.0)
-        R = 10.0 ** (-loss[ang >= 10.0] / 20.0)
-        np.testing.assert_allclose(R, 0.2, atol=3e-3)
-        _, sand = bottom_loss_curve('sand', grazing_angles_deg=np.array([24.0]),
-                                    water_density=1.0)
-        assert sand[0] == pytest.approx(2.04, abs=0.02)
+    def test_a_textbook_ratio_in_unit_water_is_the_same_seabed(self):
+        # The remedy for a rho_w = 1 benchmark: the ratio itself as density,
+        # in water of density 1.0, is the same seabed the preset is in the
+        # deck water — and an absolute 1.5 read against 1.027 water is not.
+        ang, textbook = bottom_loss_curve(
+            dict(sound_speed=1500.0, density=1.5, attenuation=0.2),
+            water_density=1.0)
+        _, preset = bottom_loss_curve('clay')
+        np.testing.assert_allclose(textbook, preset, atol=1e-10)
+        _, absolute = bottom_loss_curve(
+            dict(sound_speed=1500.0, density=1.5, attenuation=0.2))
+        R = 10.0 ** (-absolute[ang >= 10.0] / 20.0)
+        np.testing.assert_allclose(R, (1.5 - _RHO_W) / (1.5 + _RHO_W),
+                                   atol=3e-3)
 
 
 class TestSlowBottomIntromission:
@@ -172,159 +173,76 @@ class TestSlowBottomIntromission:
     def test_phase_steps_through_180_degrees_across_intromission(self):
         # For the lossless slow bottom R is real and changes sign at the
         # intromission angle (COA Fig. 2.12 shows the same 180° step).
-        R_below = reflection_coeff(np.deg2rad(90.0 - 12.0), rho1=1400.0,
-                                   c1=1450.0, rho=1000.0 * _RHO_W, c=1500.0)
-        R_above = reflection_coeff(np.deg2rad(90.0 - 20.0), rho1=1400.0,
-                                   c1=1450.0, rho=1000.0 * _RHO_W, c=1500.0)
+        R_below = reflection_coeff(12.0, sound_speed=1450.0, density=1.4,
+                                   water_density=_RHO_W, water_sound_speed=1500.0)
+        R_above = reflection_coeff(20.0, sound_speed=1450.0, density=1.4,
+                                   water_density=_RHO_W, water_sound_speed=1500.0)
         assert np.real(R_below) * np.real(R_above) < 0.0
 
 
 class TestReflectionCoeffCrossCheck:
-    """DOCUMENTATION.md §15: ``reflection_coeff`` is the SI/radians helper
-    (ρ in kg/m³, incidence angle from the normal) while
-    ``bottom_loss_curve`` sits on the acoustic-input side (g/cm³, grazing
-    degrees, dB/λ attenuation). With the units converted explicitly the two
-    must be the same Rayleigh coefficient."""
+    """``reflection_coeff`` and ``bottom_loss_curve`` speak the same units
+    (grazing degrees, g/cm³, dB/λ), so the preset's own numbers passed
+    straight through give the same Rayleigh coefficient; the closed form is
+    re-derived here in B&L's incidence-from-normal variables."""
 
-    def test_same_curve_after_explicit_unit_conversion(self):
+    def test_same_curve_from_the_presets_numbers(self):
+        from uacpy.core.materials import get_material
         g = np.linspace(1.0, 89.0, 89)
         _, loss = bottom_loss_curve('sand', grazing_angles_deg=g)
-        # grazing deg -> incidence rad; g/cm³ -> kg/m³; dB/λ -> loss tangent.
-        alpha = 0.8 * np.log(10.0) / (40.0 * np.pi)
-        R = reflection_coeff(np.pi / 2.0 - np.deg2rad(g),
-                             rho1=1900.0, c1=1650.0, alpha=alpha,
-                             rho=1000.0 * _RHO_W, c=1500.0)
+        sand = get_material('sand')
+        R = reflection_coeff(g, sound_speed=sand['sound_speed'],
+                             density=sand['density'],
+                             attenuation=sand['attenuation'])
         np.testing.assert_allclose(loss, -20.0 * np.log10(np.abs(R)),
                                    atol=1e-10)
 
+    def test_the_closed_form_in_incidence_variables(self):
+        g = np.array([10.0, 30.0, 60.0])
+        theta = np.pi / 2.0 - np.deg2rad(g)
+        alpha = 0.8 * np.log(10.0) / (40.0 * np.pi)
+        n = 1500.0 / 1650.0 * (1 + 1j * alpha)
+        m = 1.9 / _RHO_W
+        V = np.conj((m * np.cos(theta) - np.sqrt(n ** 2 - np.sin(theta) ** 2))
+                    / (m * np.cos(theta) + np.sqrt(n ** 2 - np.sin(theta) ** 2)))
+        np.testing.assert_allclose(
+            reflection_coeff(g, sound_speed=1650.0, density=1.9,
+                             attenuation=0.8), V, rtol=1e-12)
 
-class TestDefaultWaterColumnIsAnnounced:
-    """``reflection_coeff`` called without ``c`` runs against a different
-    water column than ``bottom_loss_curve`` does — Mackenzie at its own
-    defaults (27 °C / S = 35 / 10 m, 1539.087 m/s, 1022.72 kg/m³) rather
-    than the pinned 1500.0 m/s and 1027 kg/m³ — and the seabed's reflection
-    loss moves by roughly 4 dB near
-    the critical angle between the two. The value is not being changed here,
-    because every external caller that omitted ``c`` would silently move with
-    it; what is pinned is that the fallback announces itself and names the
-    number it took, so a caller can see which water column produced the curve.
-    """
 
-    @pytest.fixture(autouse=True)
-    def _forget_the_one_shot_notice(self):
-        """The flag deduplicates per PROCESS, so a test that did not reset it
-        would pass or fail on the selection order — the lesson
-        ``test_bellhop.py`` records for ``_WARNED_RAY_VALIDITY``. Saved and
-        restored rather than just cleared: this file is not the only caller of
-        ``reflection_coeff`` in a session."""
-        emitted = boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED
-        boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED = False
-        yield
-        boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED = emitted
+class TestTheTwoEntryPointsShareOneWater:
+    """``reflection_coeff`` without ``water_*`` and ``bottom_loss_curve``
+    evaluate the same reference water — the nominal 1500 m/s and the
+    package's one water density, 1027 kg/m³.
 
-    @staticmethod
-    def _record(call):
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
-            call()
-        return record
+    Before, the direct call fell back to Mackenzie and EOS-80 at 27 °C
+    (1539.087 m/s, 1022.72 kg/m³) and warned, and the same seabed's loss
+    differed by about 4 dB near the critical angle between the two entry
+    points."""
 
-    def test_omitting_c_warns_and_names_the_sound_speed_it_took(self):
-        record = self._record(
-            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
-        assert len(record) == 1, [str(w.message) for w in record]
-        assert record[0].category is UserWarning
-        message = str(record[0].message)
-        assert 'sound_speed_mackenzie()' in message
-        # The number itself, not just the fact of a fallback: 1539.087 m/s is
-        # what a reader has to be able to compare against the 1500.0 m/s the
-        # wrapper pins, and 1022.72 kg/m³ against its 1027 kg/m³.
-        assert f"{sound_speed_mackenzie():.3f}" in message
-        assert f"{density():.2f}" in message
-
-    def test_the_notice_names_the_callers_file(self):
-        """``stacklevel=2`` has to land on the line the user wrote. Naming a
-        line inside ``boundaries.py`` would also key the once-per-location
-        registry to that line, so under the default filter one caller anywhere
-        in a program would silence every other."""
-        record = self._record(
-            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
-        assert Path(record[0].filename).resolve() == _THIS_FILE
-
-    def test_supplying_the_water_column_is_silent(self):
-        record = self._record(
-            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0,
-                                     rho=1000.0, c=1500.0))
-        assert [str(w.message) for w in record] == []
-
-    def test_supplying_only_c_is_silent(self):
-        """The notice is keyed to ``c``, the half worth ~4 dB; ``rho`` alone
-        falling back (1022.72 against 1027 kg/m³) is worth under 0.05 dB."""
-        record = self._record(
-            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0, c=1500.0))
-        assert [str(w.message) for w in record] == []
-
-    def test_bottom_loss_curve_stays_silent(self):
-        """The one in-package caller passes ``c`` on every path, so the
-        wrapper — which pins its own water column deliberately — must never
-        emit the notice meant for callers who did not choose one."""
-        record = self._record(lambda: bottom_loss_curve('sand'))
-        assert [str(w.message) for w in record] == []
-        record = self._record(lambda: bottom_loss_curve(
-            dict(sound_speed=1700.0, density=1.8, attenuation=0.3),
-            grazing_angles_deg=np.linspace(1.0, 89.0, 89)))
-        assert [str(w.message) for w in record] == []
-
-    def test_a_swept_grid_of_calls_warns_once(self):
-        record = self._record(lambda: [
-            reflection_coeff(np.deg2rad(a), 1800.0, 1700.0)
-            for a in (10.0, 20.0, 30.0)])
-        assert len(record) == 1, [str(w.message) for w in record]
-
-    def test_the_notice_returns_after_the_flag_is_cleared(self):
-        """The other side of the once-per-process boundary: silence after the
-        first call is the flag doing it, not the call being unreachable."""
-        self._record(lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
-        assert boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED is True
-        boundaries._DEFAULT_WATER_COLUMN_WARN_EMITTED = False
-        record = self._record(
-            lambda: reflection_coeff(np.pi / 4.0, 1800.0, 1700.0))
-        assert len(record) == 1, [str(w.message) for w in record]
-
-    def test_the_returned_coefficient_matches_the_explicit_seawater_defaults(self):
-        """The notice is the whole change: the number the fallback produces is
-        still ``sound_speed_mackenzie()``/``density()`` evaluated at their own defaults,
-        bit for bit, and the docstring's worked example still reads 0.1198 /
-        -18.43 dB."""
+    def test_the_default_call_is_silent(self):
         with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            R_default = reflection_coeff(np.pi / 4.0, 1800.0, 1700.0)
-            R_doc = reflection_coeff(np.pi / 4, 1200, 1600)
-        R_explicit = reflection_coeff(np.pi / 4.0, 1800.0, 1700.0,
-                                      rho=density(), c=sound_speed_mackenzie())
+            warnings.simplefilter('error')
+            reflection_coeff(45.0, sound_speed=1700.0, density=1.8)
+
+    def test_the_default_water_is_the_package_reference(self):
+        R_default = reflection_coeff(45.0, sound_speed=1700.0, density=1.8)
+        R_explicit = reflection_coeff(45.0, sound_speed=1700.0, density=1.8,
+                                      water_density=1.027,
+                                      water_sound_speed=1500.0)
         assert R_default == R_explicit
-        assert f"{R_doc:.4f}" == '0.1198'
-        assert f"{20.0 * np.log10(abs(R_doc)):.2f}" == '-18.43'
 
-    def test_the_two_entry_points_differ_by_about_four_dB(self):
-        """The magnitude the docstring quotes, on the seabed it quotes. The
-        peak sits at the critical angle and its exact height depends on how
-        finely the grid samples there (4.29 dB on the wrapper's own 181-point
-        grid, 4.34 dB at 100x that), so the bound is loose on purpose."""
-        crit_pinned = np.degrees(np.arccos(1500.0 / 1700.0))
-        crit_fallback = np.degrees(np.arccos(sound_speed_mackenzie() / 1700.0))
-        assert crit_pinned == pytest.approx(28.072, abs=0.001)
-        assert crit_fallback == pytest.approx(25.130, abs=0.001)
-
-        g, loss_pinned = bottom_loss_curve(
+    def test_the_two_entry_points_give_one_curve(self):
+        g, loss = bottom_loss_curve(
             dict(sound_speed=1700.0, density=1.8, attenuation=0.0))
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            R = reflection_coeff(np.pi / 2.0 - np.deg2rad(g), 1800.0, 1700.0)
-        loss_fallback = -20.0 * np.log10(np.abs(R) + 1e-300)
-        gap = np.abs(loss_pinned - loss_fallback)
-        assert 3.5 < gap.max() < 5.0
-        assert crit_fallback < g[np.argmax(gap)] < crit_pinned + 1.0
+        R = reflection_coeff(g, sound_speed=1700.0, density=1.8)
+        np.testing.assert_allclose(
+            loss, -20.0 * np.log10(np.abs(R) + 1e-300), atol=1e-9)
+
+    def test_the_docstring_example_reads_its_printed_values(self):
+        R_doc = reflection_coeff(45.0, sound_speed=1600.0, density=1.2)
+        assert f"{R_doc:.4f}" == '0.1461'
+        assert f"{20.0 * np.log10(abs(R_doc)):.2f}" == '-16.71'
 
 
 def _fluid_solid_R(graz_deg, cp1, rho1, cp2, cs2, rho2,
@@ -380,8 +298,8 @@ class TestShearLossMagnitude:
     def test_reference_reduces_to_the_fluid_curve_without_shear(self):
         # The elastic reference with c_s = 0 IS the package's Rayleigh
         # curve — validates the test-local closed form against the code.
-        R = _fluid_solid_R(self.G, 1500.0, _RHO_W, 1650.0, 0.0, 1.9,
-                           ap_dbl=0.8)
+        R = _fluid_solid_R(self.G, 1500.0, _RHO_W, 1650.0, 0.0,
+                           1.9 * _RHO_W, ap_dbl=0.8)
         _, fluid = bottom_loss_curve('sand', grazing_angles_deg=self.G)
         np.testing.assert_allclose(-20.0 * np.log10(np.abs(R)), fluid,
                                    atol=1e-10)
@@ -392,13 +310,13 @@ class TestShearLossMagnitude:
 
     def test_chalk_and_limestone_lose_an_extra_11_to_16_dB(self):
         band = (self.G >= 20.0) & (self.G <= 30.0)
-        # Computed peaks: chalk 15.7 dB, limestone 11.7 dB in the band —
+        # Computed peaks: chalk 16.2 dB, limestone 11.4 dB in the band —
         # the doc's "extra 11–16 dB near 20–30°". abs=0.5 covers the 1°
         # grid.
         assert np.max(self._extra_loss('chalk')[band]) == pytest.approx(
-            15.7, abs=0.5)
+            16.2, abs=0.5)
         assert np.max(self._extra_loss('limestone')[band]) == pytest.approx(
-            11.7, abs=0.5)
+            11.4, abs=0.5)
 
     @pytest.mark.parametrize('name,cs', [('basalt', 2500.0),
                                          ('granite', 3000.0)])
@@ -412,22 +330,44 @@ class TestShearLossMagnitude:
         assert np.max(np.abs(self._extra_loss(name)[band])) < 0.1
 
 
-class TestReflectionCoeffRefusesAnAngleOutsideItsConvention:
-    """The angle is the incidence angle from the normal in radians. A grazing
-    angle in DEGREES — the carriers' convention — lands far outside [0, pi/2]
-    and used to return |R| = 1.0 without a word."""
+class TestReflectionCoeffSpeaksThePackagesUnits:
+    """Grazing degrees in [0, 90], g/cm³, dB/λ, the medium keyword-only. The
+    old arlpy call ``reflection_coeff(angle_rad, rho1_kg_m3, c1)`` fails
+    loudly — positional medium arguments are a TypeError, and a kg/m³
+    density is refused naming the g/cm³ value."""
 
-    def test_degrees_are_refused_and_the_message_names_the_convention(self):
-        from uacpy.core.acoustics import reflection_coeff
-        from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError, match='radians'):
-            reflection_coeff(30.0, 1800.0, 1700.0, c=1500.0, rho=1000.0)
+    def test_the_whole_grazing_range_is_accepted_and_beyond_it_refused(self):
+        for g in (0.0, 45.0, 90.0):
+            assert np.isfinite(np.abs(reflection_coeff(
+                g, sound_speed=1700.0, density=1.8)))
+        for g in (-0.1, 90.1):
+            with pytest.raises(ConfigurationError, match='grazing_deg'):
+                reflection_coeff(g, sound_speed=1700.0, density=1.8)
 
-    def test_the_whole_radian_range_is_accepted(self):
-        from uacpy.core.acoustics import reflection_coeff
-        for angle in (0.0, np.pi / 4.0, np.pi / 2.0):
-            R = reflection_coeff(angle, 1800.0, 1700.0, c=1500.0, rho=1000.0)
-            assert np.isfinite(np.abs(R))
+    def test_the_old_positional_call_is_a_type_error(self):
+        with pytest.raises(TypeError, match='takes 1 positional argument but'):
+            reflection_coeff(0.5, 1800.0, 1700.0)
+
+    def test_a_kg_per_m3_density_is_refused_naming_g_per_cm3(self):
+        with pytest.raises(ConfigurationError, match='g/cm'):
+            reflection_coeff(30.0, sound_speed=1700.0, density=1800.0)
+        assert np.isfinite(np.abs(reflection_coeff(
+            30.0, sound_speed=1700.0, density=20.0)))
+        # The threshold itself: just above 20 g/cm³ is a kg/m³ number.
+        with pytest.raises(ConfigurationError, match='g/cm'):
+            reflection_coeff(30.0, sound_speed=1700.0, density=20.001)
+        with pytest.raises(ConfigurationError, match='water_density'):
+            reflection_coeff(30.0, sound_speed=1700.0, density=1.8,
+                             water_density=20.001)
+        assert np.isfinite(np.abs(reflection_coeff(
+            30.0, sound_speed=1700.0, density=1.8, water_density=20.0)))
+
+    def test_bottom_loss_curve_names_the_water_speed_water_sound_speed(self):
+        with pytest.raises(TypeError,
+                           match="unexpected keyword argument 'water_speed'"):
+            bottom_loss_curve('sand', water_speed=1490.0)
+        g, loss = bottom_loss_curve('sand', water_sound_speed=1490.0)
+        assert np.all(np.isfinite(loss))
 
 
 class TestPlotBottomLoss:
@@ -441,7 +381,7 @@ class TestPlotBottomLoss:
         plt.close(fig)
 
     def test_one_curve_per_material_named_after_it(self):
-        from uacpy.visualization import plot_bottom_loss
+        from uacpy.plot import plot_bottom_loss
         fig, ax = plot_bottom_loss(['sand', 'silt', 'basalt'])
         try:
             assert len(ax.lines) == 3
@@ -452,7 +392,7 @@ class TestPlotBottomLoss:
             self._close(fig)
 
     def test_a_property_dict_is_drawn_beside_the_presets(self):
-        from uacpy.visualization import plot_bottom_loss
+        from uacpy.plot import plot_bottom_loss
         fetched = dict(sound_speed=1521.0, density=1.52, attenuation=0.11)
         fig, ax = plot_bottom_loss({'sand': 'sand', 'fetched': fetched})
         try:
@@ -466,7 +406,7 @@ class TestPlotBottomLoss:
         """Both are dicts. Only the property keys tell them apart, and
         getting it wrong sends the whole mapping to ``bottom_loss_curve``
         as though it described one seabed."""
-        from uacpy.visualization import plot_bottom_loss
+        from uacpy.plot import plot_bottom_loss
         fig, ax = plot_bottom_loss({'a': 'sand', 'b': 'silt', 'c': 'basalt'})
         try:
             assert len(ax.lines) == 3
@@ -475,21 +415,29 @@ class TestPlotBottomLoss:
             self._close(fig)
 
     def test_the_curve_is_bottom_loss_curve_verbatim(self):
-        from uacpy.visualization import plot_bottom_loss
-        angles, loss = bottom_loss_curve('sand', water_speed=1490.0)
-        fig, ax = plot_bottom_loss('sand', water_speed=1490.0)
+        from uacpy.plot import plot_bottom_loss
+        angles, loss = bottom_loss_curve('sand', water_sound_speed=1490.0)
+        fig, ax = plot_bottom_loss('sand', water_sound_speed=1490.0)
         try:
             np.testing.assert_allclose(ax.lines[0].get_xdata(), angles)
             np.testing.assert_allclose(ax.lines[0].get_ydata(), loss)
         finally:
             self._close(fig)
 
+    def test_the_water_speed_is_named_water_sound_speed(self):
+        """One name for the water's speed across the package; the retired
+        spelling is not quietly forwarded to matplotlib."""
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.plot import plot_bottom_loss
+        with pytest.raises(ConfigurationError, match='water_speed'):
+            plot_bottom_loss('sand', water_speed=1490.0)
+
     def test_mark_critical_rules_the_fast_seabeds_only(self):
         """A seabed slower than the water has no critical angle, so it gets
         no rule rather than one at an angle it does not have."""
-        from uacpy.visualization import plot_bottom_loss
+        from uacpy.plot import plot_bottom_loss
         # clay is 1500 m/s: slower than 1510 water, faster than 1480
-        fig, ax = plot_bottom_loss(['clay', 'basalt'], water_speed=1510.0,
+        fig, ax = plot_bottom_loss(['clay', 'basalt'], water_sound_speed=1510.0,
                                    mark_critical=True)
         try:
             rules = [l for l in ax.lines if l.get_linestyle() == ':']
@@ -500,16 +448,65 @@ class TestPlotBottomLoss:
         finally:
             self._close(fig)
 
+    def test_the_packages_own_seabed_objects_are_drawn(self):
+        """``env.bottom`` and a ``BoundaryProperties`` failed with a raw
+        ``TypeError: ... is not iterable``. A carrier, alone or in a list or
+        mapping, draws the curve its three properties give; a layered or
+        range-dependent Bottom, which has no single half-space reflection, is
+        refused naming ``halfspace_at``."""
+        import uacpy
+        from uacpy.core.boundary import BoundaryProperties
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.plot import plot_bottom_loss
+        props = dict(sound_speed=1650.0, density=1.8, attenuation=0.8)
+        _, expected = bottom_loss_curve(props)
+        bp = BoundaryProperties(acoustic_type='half-space', **props)
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0,
+                                bottom=bp)
+        for materials in (bp, [bp], {'site': bp, 'sand': 'sand'},
+                          env.bottom):
+            fig, ax = plot_bottom_loss(materials, mark_critical=True)
+            try:
+                np.testing.assert_allclose(ax.lines[0].get_ydata(), expected)
+                rule = [l for l in ax.lines if l.get_linestyle() == ':'][0]
+                assert rule.get_xdata()[0] == pytest.approx(
+                    np.degrees(np.arccos(1500.0 / 1650.0)))
+            finally:
+                self._close(fig)
+        from uacpy.core.bottom import Bottom
+        rd = Bottom.from_halfspaces([0.0, 5000.0], sound_speed=[1600.0, 1700.0],
+                                    density=[1.8, 1.8], attenuation=[0.8, 0.8])
+        assert rd.is_range_dependent
+        with pytest.raises(ConfigurationError, match='range-dependent') as rd_err:
+            plot_bottom_loss(rd)
+        assert 'halfspace_at(range=r)' in str(rd_err.value.remediation)
+        # A layered seabed is refused on its own: its half-space alone is a
+        # different reflection, so the remedy names the routes that model
+        # the layers, not halfspace_at.
+        from uacpy.core.boundary import SedimentLayer
+        from uacpy.core.bottom import SeabedColumn
+        layered = Bottom.from_column(SeabedColumn(
+            layers=[SedimentLayer(thickness=15.0, sound_speed=1650.0,
+                                  density=1.6, attenuation=0.4)],
+            halfspace=bp))
+        assert layered.is_layered and not layered.is_range_dependent
+        with pytest.raises(ConfigurationError, match='layered Bottom') as err:
+            plot_bottom_loss(layered)
+        assert 'Bounce' in str(err.value.remediation)
+        assert 'halfspace_at' not in str(err.value.remediation)
+        with pytest.raises(ConfigurationError, match='cannot draw a int'):
+            plot_bottom_loss(3)
+
     def test_without_mark_critical_there_are_no_rules(self):
-        from uacpy.visualization import plot_bottom_loss
-        fig, ax = plot_bottom_loss(['sand', 'basalt'], water_speed=1500.0)
+        from uacpy.plot import plot_bottom_loss
+        fig, ax = plot_bottom_loss(['sand', 'basalt'], water_sound_speed=1500.0)
         try:
             assert not [l for l in ax.lines if l.get_linestyle() == ':']
         finally:
             self._close(fig)
 
     def test_an_empty_material_list_is_refused(self):
-        from uacpy.visualization import plot_bottom_loss
+        from uacpy.plot import plot_bottom_loss
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError, match='no materials'):
             plot_bottom_loss([])
@@ -524,7 +521,7 @@ class TestTheCriticalAngleHasAnEntryPointOfItsOwn:
 
     def test_a_faster_seabed_has_one(self):
         import uacpy
-        assert uacpy.critical_angle(1650.0, 1500.0) == pytest.approx(
+        assert uacpy.acoustics.critical_angle(1650.0, 1500.0) == pytest.approx(
             np.degrees(np.arccos(1500.0 / 1650.0)), rel=1e-12)
 
     def test_a_seabed_no_faster_than_the_water_has_none(self):
@@ -533,15 +530,15 @@ class TestTheCriticalAngleHasAnEntryPointOfItsOwn:
         would read as "totally reflecting everywhere", the opposite."""
         import uacpy
         from uacpy.core.materials import get_material
-        assert np.isnan(uacpy.critical_angle(
+        assert np.isnan(uacpy.acoustics.critical_angle(
             float(get_material('clay')['sound_speed']), 1500.0))
-        assert np.isnan(uacpy.critical_angle(1400.0, 1500.0))
+        assert np.isnan(uacpy.acoustics.critical_angle(1400.0, 1500.0))
 
     def test_a_non_positive_speed_is_refused(self):
         import uacpy
         from uacpy.core.exceptions import ConfigurationError
         with pytest.raises(ConfigurationError, match='must be > 0'):
-            uacpy.critical_angle(0.0, 1500.0)
+            uacpy.acoustics.critical_angle(0.0, 1500.0)
 
     def test_the_figure_rules_exactly_what_the_function_returns(self):
         """One formula: the plotter asks, it does not re-derive."""
@@ -550,19 +547,100 @@ class TestTheCriticalAngleHasAnEntryPointOfItsOwn:
         import matplotlib.pyplot as plt
         import uacpy
         from uacpy.core.materials import get_material
-        from uacpy.visualization import plot_bottom_loss
+        from uacpy.plot import plot_bottom_loss
 
         names = ['sand', 'granite', 'clay']
         fig, ax = plot_bottom_loss(names, mark_critical=True,
-                                   water_speed=1500.0)
+                                   water_sound_speed=1500.0)
         try:
             ruled = sorted(float(l.get_xdata()[0]) for l in ax.lines
                            if l.get_linestyle() == ':')
             want = sorted(
-                a for a in (uacpy.critical_angle(
+                a for a in (uacpy.acoustics.critical_angle(
                     float(get_material(n)['sound_speed']), 1500.0)
                     for n in names) if np.isfinite(a))
             assert ruled == pytest.approx(want, rel=1e-12)
             assert len(ruled) == 2, 'clay must not be ruled'
         finally:
             plt.close(fig)
+
+
+class TestBottomLossCurveReadsTheSeabedCarriers:
+    """A user holds a ``BoundaryProperties`` (``env.bottom.halfspace_at``) or
+    a ``SedimentLayer``; ``bottom_loss_curve`` reads their sound speed,
+    density and attenuation exactly as it reads the same numbers in a dict,
+    and refuses an object that carries none of them by name."""
+
+    props = dict(sound_speed=1700.0, density=1.8, attenuation=0.4)
+
+    def test_a_boundary_properties_gives_the_dict_curve(self):
+        from uacpy.core.boundary import BoundaryProperties
+        hs = BoundaryProperties(acoustic_type='half-space', **self.props)
+        np.testing.assert_array_equal(bottom_loss_curve(hs)[1],
+                                      bottom_loss_curve(self.props)[1])
+
+    def test_a_sediment_layer_gives_the_dict_curve(self):
+        from uacpy.core.boundary import SedimentLayer
+        layer = SedimentLayer(thickness=5.0, **self.props)
+        np.testing.assert_array_equal(bottom_loss_curve(layer)[1],
+                                      bottom_loss_curve(self.props)[1])
+
+    def test_an_object_without_the_properties_is_refused(self):
+        with pytest.raises(ConfigurationError, match='bottom_loss_curve'):
+            bottom_loss_curve(object())
+
+    def test_the_module_docstring_describes_one_water(self):
+        import uacpy.core.acoustics.boundaries as B
+        assert '27 °C' not in B.__doc__ and '4 dB' not in B.__doc__
+
+
+class TestANonHalfSpaceCarrierIsNotReadAsOne:
+    """A rigid, vacuum, file or precalc boundary carries placeholder
+    sound_speed / density / attenuation (1600 m/s, 1.5, 0.5); read as a
+    half-space they drew a 12-13 dB loss curve for a boundary that
+    reflects totally."""
+
+    @pytest.mark.parametrize('kind', ['rigid', 'vacuum'])
+    def test_a_totally_reflecting_boundary_loses_nothing(self, kind):
+        from uacpy.core.boundary import BoundaryProperties
+        angles, loss = bottom_loss_curve(
+            BoundaryProperties(acoustic_type=kind),
+            grazing_angles_deg=[10.0, 45.0, 90.0])
+        np.testing.assert_array_equal(angles, [10.0, 45.0, 90.0])
+        np.testing.assert_array_equal(loss, [0.0, 0.0, 0.0])
+
+    def test_the_environment_route_of_the_docstring_agrees(self):
+        import uacpy
+        from uacpy.core.boundary import BoundaryProperties
+        env = uacpy.Environment(
+            bathymetry=100.0, bottom=BoundaryProperties(acoustic_type='rigid'))
+        _, loss = bottom_loss_curve(env.bottom.halfspace_at(range=0.0))
+        assert np.all(loss == 0.0) and loss.size == 181
+
+    def test_a_reflection_table_boundary_is_refused(self):
+        from uacpy.core.boundary import BoundaryProperties
+        with pytest.raises(ConfigurationError, match='reflection-coefficient'):
+            bottom_loss_curve(BoundaryProperties(acoustic_type='file'))
+
+    def test_a_half_space_carrier_reads_its_own_numbers(self):
+        from uacpy.core.boundary import BoundaryProperties
+        hs = BoundaryProperties(acoustic_type='half-space', sound_speed=1650.0,
+                                density=1.9, attenuation=0.8)
+        np.testing.assert_array_equal(
+            bottom_loss_curve(hs)[1],
+            bottom_loss_curve({'sound_speed': 1650.0, 'density': 1.9,
+                               'attenuation': 0.8})[1])
+
+
+def test_the_quoted_water_density_difference_on_sand_is_the_computed_one():
+    """``bottom_loss_curve``'s docstring quotes the largest gap between the
+    1.027 g/cm³ default water and the textbook 1.0 on 'sand'. Recomputed
+    here so the figure cannot drift from the curve: Z ratio 3219.6/1540.5
+    against 3219.6/1500 at normal incidence is 0.28 dB."""
+    from uacpy.core.acoustics.boundaries import bottom_loss_curve
+    angles, default = bottom_loss_curve('sand')
+    _, textbook = bottom_loss_curve('sand', water_density=1.0)
+    gap = np.abs(np.asarray(default) - np.asarray(textbook))
+    assert angles[int(np.argmax(gap))] == pytest.approx(90.0)
+    assert f"at most {gap.max():.2f} dB, at normal incidence" in \
+        bottom_loss_curve.__doc__

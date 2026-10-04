@@ -78,6 +78,17 @@ jobs:
       - name: Install Python package (editable + dev extras)
         run: pip install -e ".[dev]"
 
+      # The pure-Python tier on a tree with no model binaries and no OASES
+      # sources — what a fresh clone, or `./install.sh --no-models`, has. It
+      # runs before the OASES cache is restored and before the build, so a
+      # test that needs a binary or the OASES tree and lacks its
+      # `requires_binary` / `requires_oases` marker fails here instead of
+      # passing unnoticed on the fully built runner below.
+      - name: Run pure-Python tier (no binaries yet)
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: pytest -n logical --dist=worksteal -rs -m "not requires_binary and not requires_network" uacpy/tests/
+
       # Cache the OASES source tree + compiled binaries so CI does not hit
       # acoustics.mit.edu on every run (the MIT server is the single point
       # of failure for the `--oases yes` path). Key is hashed on

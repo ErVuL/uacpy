@@ -57,31 +57,34 @@ suite by a source scan, not by a sampling test —
 figure script and fails on `np.random.<draw>`, `import random`, or a
 non-generator import from `numpy.random`.
 
-**Exactly ten public functions draw at all**, and every one of them takes a
-seeding argument. **Nine of the ten draw afresh unless you seed them** — those
+**Exactly nine public functions draw at all**, and every one of them takes a
+seeding argument. **Eight of the nine draw afresh unless you seed them** — those
 are the ones a reproducible run has to pin:
 
 | Module | Functions | Seeded by | Default |
 |---|---|---|---|
-| `uacpy.acoustic_signal` | `add_noise`, `make_bandlimited_noise`, `make_noise_waveform`, `synthesize_noise_from_psd` | `rng=` | unseeded |
+| `uacpy.acoustic_signal` | `make_bandlimited_noise`, `synthesize_noise_from_psd` | `rng=` | unseeded |
 | `uacpy.comms` | `awgn`, `fading_taps`, `simulate_link`, `ber_sweep` | `rng=` | unseeded |
-| `uacpy` | `generate_sea_surface` | `seed=` | unseeded |
+| `uacpy` | `generate_sea_surface` | `rng=` | unseeded |
+| `uacpy.data` | `fetch_sea_surface` | `rng=` | unseeded |
 | `uacpy.comms` | `schmidl_cox_preamble` | `seed=` | **fixed seed** |
 
-`schmidl_cox_preamble` is the tenth and the exception: its `seed=` defaults to a
+`schmidl_cox_preamble` is the exception: its `seed=` defaults to a
 fixed integer, not `None`, so two unseeded calls return the same preamble and it
 needs no action from you. It is listed because the point of this table is that
 it is exhaustive — a drawing function absent from it is a stream you cannot know
 to look for.
 
-`generate_sea_surface` builds a Pierson-Moskowitz surface realisation and takes
-an integer `seed=` rather than a generator. The data layer reaches it through
-`fetch_sea_surface(seed=…)` and `fetch_environment(altimetry_seed=…)`, both
+`generate_sea_surface` builds a Pierson-Moskowitz surface realisation from the
+generator it is given, like every function above but `schmidl_cox_preamble`.
+The data layer reaches it through
+`fetch_sea_surface(rng=…)` and `fetch_environment(altimetry_rng=…)`, both
 defaulting to `None`; a plain `fetch_environment` call draws nothing, because
 its `altimetry_sources` defaults to `None` too.
 
 Each of the nine returns identical output for a given seed or seeded generator,
-and a fresh draw when the seeding argument is omitted — the right default for a
+and the eight unseeded ones a fresh draw when the seeding argument is omitted —
+the right default for a
 Monte-Carlo sweep, and the wrong one for a figure you intend to publish:
 
 ```python
@@ -186,12 +189,11 @@ export OMP_NUM_THREADS=1
 
 ## 5. A checklist for a reproducible run
 
-1. **Seed every draw.** `rng=np.random.default_rng(seed)` on any of the nine
+1. **Seed every draw.** `rng=np.random.default_rng(seed)` on any of the eight
    unseeded-by-default functions in
-   [§2](#2-the-analysis-layer-is-deterministic) — `seed=` on
-   `generate_sea_surface`, or `altimetry_seed=` when you reach it through
-   `fetch_environment` — and record the seed next to the result.
-   `schmidl_cox_preamble`, the tenth, already carries a fixed seed.
+   [§2](#2-the-analysis-layer-is-deterministic) — `altimetry_rng=` when you
+   reach the sea surface through `fetch_environment` — and record the seed
+   next to the result. `schmidl_cox_preamble` already carries a fixed seed.
 2. **Pin the Bellhop backend** — `Bellhop(backend='fortran')` — if a Bellhop
    field is in the chain. Check `result.backend` to confirm what ran.
 3. **Pin `realization=`** on OASSP.
@@ -202,6 +204,11 @@ export OMP_NUM_THREADS=1
    timestamp on the Acoustics Toolbox models.
 7. **Record the machine and the NumPy version.** Nothing above was measured
    across either.
+8. **Keep the result, not only the script.** `result.run_settings` records
+   every knob and every value the run derived, and it travels with
+   `save` / `to_netcdf`; `Model.from_run_settings(result.run_settings)` builds
+   the engine that repeats the run with all of them pinned
+   (`RAM.from_run_settings(Field.from_netcdf(path).run_settings)`).
 
 ---
 

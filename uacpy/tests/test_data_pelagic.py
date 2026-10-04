@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from uacpy.core.environment import BoundaryProperties, Bottom
-from uacpy.data import pelagic
-from uacpy.data.sediment import bottom_from_grain_size
+from uacpy.data import fetch_bottom_transect, pelagic
+from uacpy.data.sediment import bottom_from_grain_size, transect_fetcher
 
 
 @pytest.mark.parametrize('depth_m, lat, litho', [
@@ -71,8 +71,8 @@ def test_transect_classifies_each_waypoint_from_its_own_cell():
     assert [pelagic.pelagic_lithology(depth(la, -30.0), la, -30.0)
             for la in (-60.0, -30.0, 0.0)] == \
         ['diatom ooze', 'calcareous ooze', 'pelagic clay']
-    rdb = pelagic.fetch_bottom_pelagic_transect((-60.0, -30.0), (0.0, -30.0),
-                                                n_points=3, depth=depth)
+    rdb = fetch_bottom_transect((-60.0, -30.0), (0.0, -30.0),
+                                source='pelagic', n_points=3, depth=depth)
     assert isinstance(rdb, Bottom)
     assert rdb.ranges.shape == (3,) and rdb.ranges[0] == 0.0
     assert np.all(np.diff(rdb.ranges) > 0)
@@ -99,6 +99,6 @@ def test_the_depth_fetch_carries_a_finite_default_timeout(monkeypatch):
 
     monkeypatch.setattr(pelagic, '_water_depth', _depth)
     pelagic.fetch_bottom_pelagic((10.0, 20.0))
-    pelagic.fetch_bottom_pelagic_transect((10.0, 20.0), (11.0, 20.0),
-                                          n_points=2)
+    transect_fetcher(pelagic.fetch_bottom_pelagic, 'pelagic model')(
+        (10.0, 20.0), (11.0, 20.0), n_points=2)
     assert seen and all(t == 30.0 for t in seen)

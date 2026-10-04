@@ -1,21 +1,146 @@
-"""OASN array-product result types: Covariance and Replicas."""
+"""Array-product result types — the spatial :class:`Covariance` and the
+matched-field :class:`Replicas` — and :func:`ambiguity_field`, the one
+builder of the ambiguity Field a matched-field processor returns."""
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
-from typing import Optional, Tuple
+from typing import Dict, Optional
 
 from uacpy.core.exceptions import ConfigurationError
 
-from uacpy.core._beamforming import loaded_inverse, quadratic_form
+from uacpy.core.results._base import Result, coordinate_axis
+from uacpy.core.results.quantities import coordinate_unit
+from uacpy.core._repr import count
 
-from uacpy.core.results._base import Result
+
+def _copy_or_none(array):
+    """A copy of ``array``, or ``None`` for ``None``."""
+    return None if array is None else np.array(array)
+
+
+def _check_frequency_axis(result, n_slices: int, who: str) -> None:
+    """Refuse a ``frequencies`` axis whose length is not the array's
+    frequency-axis length: ``n_frequencies`` reads the array, and a
+    frequency label per slice is what ``frequencies`` claims to be."""
+    if result.frequencies is not None and len(result.frequencies) != n_slices:
+        raise ConfigurationError(
+            f"{who}: frequencies holds {len(result.frequencies)} value(s) but "
+            f"the array's frequency axis (axis 0) holds {n_slices}; give one "
+            f"frequency per slice, or leave frequencies unset.")
+
+
+def _check_receiver_positions(positions, n_receivers: int, who: str):
+    """``positions`` as an owned ``(n_receivers, 3)`` float array of
+    ``(x, y, z)`` metres, or ``None``; any other shape is refused."""
+    if positions is None:
+        return None
+    rp = np.array(positions, dtype=float)
+    if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != n_receivers:
+        raise ConfigurationError(
+            f"{who}.receiver_positions: must have shape "
+            f"(n_receivers={n_receivers}, 3); got {rp.shape}."
+        )
+    return rp
+
+
+def _receiver_coords(positions) -> dict:
+    """The ``receiver_x`` / ``receiver_y`` / ``receiver_z`` auxiliary
+    coordinates (m) along ``receiver`` of an ``(n, 3)`` position table, or
+    none."""
+    if positions is None:
+        return {}
+    return {f'receiver_{axis}': (positions[:, i], 'm', 'receiver')
+            for i, axis in enumerate('xyz')}
+
+
+def _positions_from(arrays):
+    """The ``(n, 3)`` position table :func:`_receiver_coords` wrote, or
+    ``None``."""
+    if 'receiver_x' not in arrays:
+        return None
+    return np.stack([arrays[f'receiver_{axis}'] for axis in 'xyz'], axis=1)
+
+
+def _frequency_coord(result) -> dict:
+    """The ``frequency`` coordinate of a result that labels its slices, or
+    none."""
+    if result.frequencies is None:
+        return {}
+    return {'frequency': (result.frequencies, coordinate_unit('frequency'))}
+
+
+def ambiguity_field(surface, candidates, *, reference_unit: str,
+                    frequencies=None, model: str = ''):
+    """A matched-field ambiguity surface as a
+    :class:`~uacpy.core.results.Field`, in dB re its own maximum.
+
+    ``surface`` is a linear processor output —
+    :func:`uacpy.acoustic_signal.bartlett` or
+    :func:`~uacpy.acoustic_signal.mvdr` over a replica bank — indexed by the
+    ``candidates`` mapping in order: one named coordinate per surface axis,
+    in the Field's vocabulary (``'frequency'``, ``'depth'``, ``'range'``,
+    ``'x'``, ``'y'``). The Field carries ``kind='ambiguity'``, so it plots
+    with ``.plot()`` on the ambiguity colormap and ``.max()`` returns the
+    estimate as a slice with its coordinates.
+
+    The linear power the dB values are relative to is kept on the Field as
+    :attr:`~uacpy.core.results.Field.reference` in ``reference_unit`` (the
+    covariance's unit for an unnormalised surface, ``'1'`` for a trace- or
+    max-normalised one), so ``field.reference * 10**(field.data / 10)`` is
+    the linear surface again.
+
+    A candidate with zero power is ``-inf`` dB and one :func:`mvdr` could not
+    evaluate stays NaN; neither is floored, since a floor is a display choice
+    (``plot_matched_field``'s ``dynamic_range_dB``, or ``vmin=`` on
+    ``.plot()``).
+
+    Parameters
+    ----------
+    surface : ndarray
+        The linear processor output.
+    candidates : mapping
+        One named coordinate per surface axis, in order.
+    reference_unit : str
+        Unit of the linear power the dB values are relative to.
+    frequencies : array_like, optional
+        Frequencies (Hz) stamped on the Field.
+    model : str, optional
+        Model name stamped on the Field.
+
+    Raises
+    ------
+    ConfigurationError
+        When the surface's shape is not the candidate grid's, or it has no
+        finite positive peak to be relative to.
+    """
+    # Imported here: this module is loaded with the results package, which
+    # must not load field.py's dependencies before a Field is built.
+    from uacpy.core.results.field import Field
+    power = np.asarray(surface, dtype=float)
+    coords = {str(name): np.atleast_1d(np.asarray(values, dtype=float))
+              for name, values in dict(candidates).items()}
+    grid = tuple(values.size for values in coords.values())
+    if power.shape != grid:
+        raise ConfigurationError(
+            f"ambiguity_field: surface has shape {power.shape}, but the "
+            f"candidate grid {list(coords)} is {grid}; the surface is indexed "
+            f"by the candidates in order.")
+    finite = power[np.isfinite(power)]
+    peak = float(finite.max()) if finite.size else float('nan')
+    if not (peak > 0.0):
+        raise ConfigurationError(
+            "ambiguity_field: the surface has no finite positive peak, so a "
+            "level relative to it is undefined.")
+    with np.errstate(divide='ignore'):
+        level = 10.0 * np.log10(power / peak)
+    return Field(data=level, coords=coords, model=model,
+                 frequencies=frequencies, kind='ambiguity', unit='dB',
+                 reference=peak, reference_unit=str(reference_unit))
 
 
 class Covariance(Result):
-    """OASN spatial covariance matrix ``C(f, i, j)``.
+    """Spatial covariance matrix ``C(f, i, j)``, as OASN writes it.
 
     Hydrophone × hydrophone correlation per frequency, written by OASN with
     option ``N`` to a ``.xsm`` file. The eigenvectors of ``C[ifreq]`` are
@@ -28,189 +153,236 @@ class Covariance(Result):
         Complex covariance matrices.
     receiver_positions : ndarray, optional, shape ``(n_receivers, 3)``
         ``(x, y, z)`` positions in metres.
+    unit : str
+        The unit of ``covariance`` (``'Pa²/Hz'`` from OASN); ``''`` when
+        the producer states none.
 
     Notes
     -----
     To extract MFP signal-subspace eigenvectors call
     ``np.linalg.eigh(cov.covariance[ifreq])`` directly.
     """
-    field_type = "covariance"
 
     def __init__(
         self,
         *,
         covariance: np.ndarray,
         receiver_positions: Optional[np.ndarray] = None,
+        unit: str = '',
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.unit = str(unit)
         # Copy on ingest so a caller mutating their source array can't silently
         # corrupt this result.
         cov = np.array(covariance)
         if cov.ndim != 3 or cov.shape[1] != cov.shape[2]:
             raise ConfigurationError(
                 f"Covariance.covariance: must be 3-D (n_freq, n_rcv, n_rcv); "
-                f"got shape {cov.shape}"
+                f"got shape {cov.shape}."
             )
+        _check_frequency_axis(self, cov.shape[0], "Covariance")
         self.covariance = cov
-        if receiver_positions is not None:
-            rp = np.array(receiver_positions, dtype=float)
-            if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != cov.shape[1]:
-                raise ConfigurationError(
-                    f"Covariance.receiver_positions: must have shape "
-                    f"(n_receivers={cov.shape[1]}, 3); got {rp.shape}"
-                )
-            self.receiver_positions = rp
-        else:
-            self.receiver_positions = None
+        self.receiver_positions = _check_receiver_positions(
+            receiver_positions, cov.shape[1], "Covariance")
 
     @property
     def n_frequencies(self) -> int:
+        """Frequency slices held, ``covariance.shape[0]``; equal to
+        ``len(frequencies)`` whenever ``frequencies`` is set (checked at
+        construction), and still the slice count when it is not."""
         return int(self.covariance.shape[0])
 
     @property
     def n_receivers(self) -> int:
         return int(self.covariance.shape[1])
 
-    def _repr_extra(self) -> str:
-        return f"n_rcv={self.n_receivers}"
+    def _repr_bits(self) -> list:
+        return [count(self.n_receivers, 'receiver')]
 
-    def _replica_grid(self, replicas: "Replicas") -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
-        """Validate and reshape the replica field to ``(n_f, n_pts, n_rcv)``."""
-        if replicas.replicas.shape[0] != self.n_frequencies:
+    def to_dict(self) -> dict:
+        """Serialise this covariance to plain arrays: ``covariance``
+        ``(n_f, n_rcv, n_rcv)``, ``receiver_positions`` (``None`` when not
+        recorded) and the identity, as :meth:`Field.to_dict` writes it.
+        ``np.savez(f, **d)`` stores it; read it back with
+        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`."""
+        return {
+            'covariance': self.covariance.copy(),
+            'receiver_positions': _copy_or_none(self.receiver_positions),
+            'unit': self.unit,
+            **self._identity_dict(),
+        }
+
+    def _payload(self):
+        return {'covariance': (self.covariance,
+                               ('frequency', 'receiver', 'receiver_'),
+                               self.unit)}
+
+    def _export_attrs(self):
+        return {**super()._export_attrs(), 'unit': self.unit}
+
+    def _coords(self):
+        return {**_frequency_coord(self),
+                **_receiver_coords(self.receiver_positions)}
+
+    @classmethod
+    def _from_export(cls, arrays, attrs):
+        return cls(covariance=arrays['covariance'],
+                   receiver_positions=_positions_from(arrays),
+                   unit=str(attrs.get('unit', '')),
+                   **cls._identity_from_attrs(attrs, reserved=('unit',)))
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Covariance":
+        """Reconstruct a :class:`Covariance` from :meth:`to_dict` output, or
+        from the mapping ``np.load(f, allow_pickle=True)`` returns for a file
+        written with ``np.savez(f, **cov.to_dict())``.
+
+        Parameters
+        ----------
+        d : mapping
+            :meth:`to_dict` output, or the mapping ``np.load`` returns for it.
+        """
+        d = cls._unwrap_saved(d, payload=('covariance',))
+        return cls(covariance=d['covariance'],
+                   receiver_positions=d.get('receiver_positions'),
+                   unit=str(d.get('unit', '')),
+                   **cls._identity_from_dict(d))
+
+    def _ambiguity_candidates(self, replicas: "Replicas") -> dict:
+        """The candidate grid of an ambiguity surface of ``replicas`` against
+        this covariance: ``'frequency'`` first, then the replicas' own
+        candidate axes. Refuses replicas of another frequency count or
+        another array, and a frequency axis neither result records."""
+        if replicas.n_frequencies != self.n_frequencies:
             raise ConfigurationError(
                 f"Covariance MFP: frequency mismatch — "
                 f"covariance has {self.n_frequencies} freq, "
-                f"replicas has {replicas.replicas.shape[0]}."
+                f"replicas has {replicas.n_frequencies}."
             )
-        if replicas.replicas.shape[-1] != self.n_receivers:
+        if replicas.n_receivers != self.n_receivers:
             raise ConfigurationError(
                 f"Covariance MFP: receiver-count mismatch — "
                 f"covariance has {self.n_receivers}, "
-                f"replicas has {replicas.replicas.shape[-1]}."
+                f"replicas has {replicas.n_receivers}."
             )
-        n_f = replicas.replicas.shape[0]
-        nz, nx, ny = replicas.replicas.shape[1:4]
-        flat = replicas.replicas.reshape(n_f, nz * nx * ny, self.n_receivers)
-        return flat, (n_f, nz, nx, ny)
+        frequencies = (self.frequencies if self.frequencies is not None
+                       else replicas.frequencies)
+        if frequencies is None:
+            raise ConfigurationError(
+                "Covariance MFP: neither the covariance nor the replicas "
+                "record their frequencies, so the ambiguity surface has no "
+                "frequency axis to stand on. Build them with frequencies=.")
+        return {'frequency': frequencies, **replicas.candidates}
 
-    @staticmethod
-    def _normalise_weights(w: np.ndarray) -> np.ndarray:
-        norm = np.linalg.norm(w, axis=-1, keepdims=True)
-        norm = np.where(norm > 0, norm, 1.0)
-        return w / norm
+    def _ambiguity(self, surface, candidates: dict):
+        """``surface`` as the ambiguity Field over ``candidates`` (from
+        :meth:`_ambiguity_candidates`), relative to its peak in this
+        covariance's unit (:attr:`unit`; ``''`` when it records none)."""
+        return ambiguity_field(
+            surface, candidates,
+            reference_unit=self.unit,
+            frequencies=candidates['frequency'], model=self.model)
 
-    def bartlett(self, replicas: "Replicas") -> np.ndarray:
-        """Conventional Bartlett MFP ambiguity surface.
+    def bartlett(self, replicas: "Replicas"):
+        """Conventional Bartlett MFP ambiguity surface of ``replicas``
+        against this covariance, per frequency:
+        :func:`uacpy.acoustic_signal.bartlett` with ``normalize=None``.
 
-        ``B(z, x, y; f) = w(z, x, y; f)ᴴ · C(f) · w(z, x, y; f)``
+        ``B(f, c) = w(f, c)ᴴ · C(f) · w(f, c)``, with ``w`` the replica
+        vector at each candidate point ``c`` scaled to unit length. A
+        zero-norm replica — a candidate position the forward model put no
+        energy at — scores a genuine zero ("nothing matches here"), ``-inf``
+        dB; :meth:`mvdr` instead leaves it undefined, NaN.
 
-        with ``w`` the replica vector at each candidate point, normalised
-        to unit length. A zero-norm replica row — a candidate position the
-        forward model put no energy at — is left at zero rather than
-        normalised, so it scores as a genuine zero ("nothing matches
-        here"); :meth:`mvdr` instead returns NaN for the same degenerate
-        candidate point.
+        Parameters
+        ----------
+        replicas : Replicas
+            The candidate replica set.
 
         Returns
         -------
-        ndarray, shape ``(n_freq, n_zr, n_xr, n_yr)``
-            Real-valued ambiguity power. Argmax over the last three axes
-            is the source-localisation peak.
+        Field
+            ``kind='ambiguity'``, in dB re the surface's peak over every
+            frequency and candidate, on
+            ``('frequency', *replicas.candidates)``.
+            ``reference`` is that peak power, in this covariance's unit.
         """
-        flat, (n_f, nz, nx, ny) = self._replica_grid(replicas)
-        out = np.empty((n_f, nz * nx * ny), dtype=float)
-        for f in range(n_f):
-            W = self._normalise_weights(flat[f])  # (n_pts, n_rcv)
-            # The shared Bartlett/MVDR core (core/_beamforming).
-            out[f] = quadratic_form(self.covariance[f], W)
-        return out.reshape(n_f, nz, nx, ny)
+        from uacpy.acoustic_signal.beamforming import bartlett
+        candidates = self._ambiguity_candidates(replicas)
+        return self._ambiguity(bartlett(self.covariance, replicas.replicas),
+                               candidates)
 
-    def mvdr(
-        self,
-        replicas: "Replicas",
-        *,
-        diagonal_loading: float = 1e-6,
-    ) -> np.ndarray:
-        """Minimum-Variance Distortionless-Response (Capon) MFP.
+    def mvdr(self, replicas: "Replicas", *, diagonal_loading: float = 1e-6):
+        """Minimum-Variance Distortionless-Response (Capon) MFP ambiguity
+        surface of ``replicas`` against this covariance, per frequency:
+        :func:`uacpy.acoustic_signal.mvdr` with ``normalize=None``.
 
-        ``M(z, x, y; f) = 1 / (wᴴ · (C(f) + δ·I)⁻¹ · w)`` with
-        ``δ = diagonal_loading · trace(C(f))/N``. Small loading
-        (~1e-6) stabilises rank-deficient covariance for sharp Capon
-        peaks; larger loading (~0.1+) flattens the surface toward
-        Bartlett for mismatch robustness. This is *not* the
-        Cox/Zeskind/Owen white-noise-constrained processor (that
-        requires per-replica Lagrange-multiplier bisection).
+        ``M(f, c) = 1 / (wᴴ · (C(f) + δ·I)⁻¹ · w)`` with
+        ``δ = diagonal_loading · trace(C(f))/N``. Small loading (~1e-6)
+        stabilises a rank-deficient covariance for sharp Capon peaks; larger
+        loading (~0.1+) flattens the surface toward Bartlett for mismatch
+        robustness. The 1e-6 default suits the full-rank covariance OASN
+        writes to its ``.xsm``; :func:`uacpy.sonar.mvdr`, over a *measured*
+        few-snapshot CSDM, defaults to 1e-2 instead. A frequency bin carrying
+        no power is NaN throughout, with a warning, and so is a candidate
+        with a zero-norm replica.
 
-        The 1e-6 default matches :func:`uacpy.acoustic_signal.mvdr_spectrum`
-        and suits the full-rank covariance OASN writes to its ``.xsm``.
-        :func:`uacpy.sonar.mvdr` — the same processor over a *measured*
-        CSDM — defaults to 1e-2 instead, because a few-snapshot ``csdm()``
-        is routinely rank-deficient. The two agree numerically at equal
-        loading, up to the max-scaling ``sonar.mvdr`` applies, and both
-        return NaN for a degenerate candidate point — a zero-norm replica
-        row, which :meth:`bartlett` instead scores as a genuine zero
-        ("nothing matches here").
+        Parameters
+        ----------
+        replicas : Replicas
+            The candidate replica set.
+        diagonal_loading : float, optional
+            Loading as a fraction of ``trace(C)/N``. Default 1e-6.
+
+        Returns
+        -------
+        Field
+            As :meth:`bartlett`.
         """
-        flat, (n_f, nz, nx, ny) = self._replica_grid(replicas)
-        out = np.empty((n_f, nz * nx * ny), dtype=float)
-        for f in range(n_f):
-            C = self.covariance[f]
-            tr = float(np.real(np.trace(C))) / max(C.shape[0], 1)
-            # The loading is a fraction of tr(C)/N and vanishes with it, so a
-            # frequency bin carrying no power leaves C singular; that whole
-            # bin's surface is undefined rather than zero.
-            if tr <= 0.0:
-                warnings.warn(
-                    f"Covariance.mvdr: frequency bin {f} carries no power, so "
-                    f"its ambiguity surface is undefined; returning NaN.",
-                    UserWarning, stacklevel=2)
-                out[f] = np.nan
-                continue
-            W = self._normalise_weights(flat[f])
-            denom = quadratic_form(loaded_inverse(C, diagonal_loading), W)
-            # For a positive-definite loaded covariance denom > 0. It reaches
-            # 0 only for a replica carrying no energy (an unpopulated .rpo
-            # cell) and goes negative only when C is not positive-definite,
-            # i.e. not a covariance. Neither is a power: a finite value there
-            # would sit in the surface as a genuine localisation peak. Same
-            # rule as :func:`uacpy.sonar.mvdr`.
-            with np.errstate(divide='ignore', invalid='ignore'):
-                out[f] = np.where(denom > 0, 1.0 / denom, np.nan)
-        return out.reshape(n_f, nz, nx, ny)
+        from uacpy.acoustic_signal.beamforming import mvdr
+        candidates = self._ambiguity_candidates(replicas)
+        return self._ambiguity(
+            mvdr(self.covariance, replicas.replicas,
+                 diagonal_loading=diagonal_loading),
+            candidates)
 
 
 class Replicas(Result):
-    """OASN matched-field-processing replicas.
+    """Matched-field-processing replicas: the array response to a source at
+    every candidate position.
 
     Frequency-domain Green's-function samples at every array element for
-    every candidate source position. Written by OASN with option ``R`` to
-    a ``.rpo`` file.
+    every candidate source position — written by OASN with option ``R`` to a
+    ``.rpo`` file, or built by :func:`uacpy.sonar.replica_bank` /
+    :func:`~uacpy.sonar.replica_bank_from_field`.
 
     Attributes
     ----------
-    replicas : ndarray, shape ``(n_frequencies, n_zr, n_xr, n_yr, n_receivers)``
-        Complex array responses per candidate source ``(z, x, y)``.
-    replica_z, replica_x, replica_y : ndarray
-        Coordinate axes of the candidate-source grid (m, m, m).
+    replicas : ndarray, shape ``(n_frequencies, *candidate_grid, n_receivers)``
+        Complex array responses, the element axis last: one row of element
+        weights per candidate, the layout
+        :func:`uacpy.acoustic_signal.bartlett` takes.
+    candidates : dict
+        The candidate grid, one named coordinate (m) per grid axis in order:
+        ``{'depth', 'x', 'y'}`` for OASN, ``{'depth', 'range'}`` for a
+        vertical-array replica bank.
     receiver_positions : ndarray, optional, shape ``(n_receivers, 3)``
         ``(x, y, z)`` positions in metres.
 
     Notes
     -----
-    Feed these to :meth:`Covariance.bartlett` or :meth:`Covariance.mvdr`
-    for an ambiguity surface; both contract a covariance estimate against
-    the replica field across the array index.
+    Feed these to :meth:`Covariance.bartlett` / :meth:`Covariance.mvdr` or
+    :func:`uacpy.sonar.bartlett` / :func:`~uacpy.sonar.mvdr` for an
+    ambiguity surface; each contracts a covariance against the replicas
+    across the element axis.
     """
-    field_type = "replicas"
 
     def __init__(
         self,
         *,
         replicas: np.ndarray,
-        replica_z: np.ndarray,
-        replica_x: np.ndarray,
-        replica_y: np.ndarray,
+        candidates: Dict[str, np.ndarray],
         receiver_positions: Optional[np.ndarray] = None,
         **kwargs,
     ):
@@ -218,45 +390,109 @@ class Replicas(Result):
         # Copy on ingest so a caller mutating their source array can't silently
         # corrupt this result.
         rep = np.array(replicas)
-        if rep.ndim != 5:
+        if not isinstance(candidates, dict) or not candidates:
             raise ConfigurationError(
-                f"Replicas.replicas: must be 5-D "
-                f"(n_freq, n_zr, n_xr, n_yr, n_rcv); got shape {rep.shape}"
+                "Replicas.candidates: must be a non-empty dict of candidate "
+                "axis name → coordinates (m), one per grid axis in order; got "
+                f"{type(candidates).__name__}.")
+        grid = {str(name): np.atleast_1d(np.array(values, dtype=float))
+                for name, values in candidates.items()}
+        if rep.ndim != len(grid) + 2:
+            raise ConfigurationError(
+                f"Replicas.replicas: must be (n_freq, *candidate_grid, "
+                f"n_rcv) with one grid axis per candidate {list(grid)}, "
+                f"{len(grid) + 2}-D; got shape {rep.shape}.")
+        _check_frequency_axis(self, rep.shape[0], "Replicas")
+        expected = tuple(values.size for values in grid.values())
+        if rep.shape[1:-1] != expected:
+            raise ConfigurationError(
+                f"Replicas.replicas: the grid axes {rep.shape[1:-1]} must "
+                f"match the candidates {list(grid)} = {expected}."
             )
         self.replicas = rep
-        self.replica_z = np.atleast_1d(np.array(replica_z, dtype=float))
-        self.replica_x = np.atleast_1d(np.array(replica_x, dtype=float))
-        self.replica_y = np.atleast_1d(np.array(replica_y, dtype=float))
-        expected = (
-            len(self.replica_z), len(self.replica_x), len(self.replica_y),
-        )
-        if rep.shape[1:4] != expected:
-            raise ConfigurationError(
-                f"Replicas.replicas: axes 1-3 {rep.shape[1:4]} must match "
-                f"(n_zr, n_xr, n_yr) = {expected}"
-            )
-        if receiver_positions is not None:
-            rp = np.array(receiver_positions, dtype=float)
-            if rp.ndim != 2 or rp.shape[1] != 3 or rp.shape[0] != rep.shape[4]:
-                raise ConfigurationError(
-                    f"Replicas.receiver_positions: must have shape "
-                    f"(n_receivers={rep.shape[4]}, 3); got {rp.shape}"
-                )
-            self.receiver_positions = rp
-        else:
-            self.receiver_positions = None
+        self.candidates = grid
+        self.receiver_positions = _check_receiver_positions(
+            receiver_positions, rep.shape[-1], "Replicas")
 
     @property
     def n_frequencies(self) -> int:
+        """Frequency slices held, ``replicas.shape[0]``; equal to
+        ``len(frequencies)`` whenever ``frequencies`` is set (checked at
+        construction), and still the slice count when it is not."""
         return int(self.replicas.shape[0])
 
     @property
     def n_receivers(self) -> int:
-        return int(self.replicas.shape[4])
+        return int(self.replicas.shape[-1])
 
     @property
     def n_replica_points(self) -> int:
-        return int(self.replicas.shape[1] * self.replicas.shape[2] * self.replicas.shape[3])
+        return int(np.prod(self.replicas.shape[1:-1]))
 
-    def _repr_extra(self) -> str:
-        return f"n_pts={self.n_replica_points}, n_rcv={self.n_receivers}"
+    def _repr_bits(self) -> list:
+        return [*(coordinate_axis(name, values)
+                  for name, values in self.candidates.items()),
+                count(self.n_receivers, 'receiver')]
+
+    def to_dict(self) -> dict:
+        """Serialise these replicas to plain arrays: ``replicas``
+        ``(n_f, *candidate_grid, n_rcv)``, ``candidates`` (a dict of
+        coordinate arrays, metres), ``receiver_positions`` (``None`` when
+        not recorded) and the identity, as :meth:`Field.to_dict` writes it.
+        ``np.savez(f, **d)`` stores it; read it back with
+        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`."""
+        return {
+            'replicas': self.replicas.copy(),
+            'candidates': {name: values.copy()
+                           for name, values in self.candidates.items()},
+            'receiver_positions': _copy_or_none(self.receiver_positions),
+            **self._identity_dict(),
+        }
+
+    def _payload(self):
+        return {'replicas': (self.replicas,
+                             ('frequency', *self.candidates, 'receiver'), '')}
+
+    def _coords(self):
+        return {**_frequency_coord(self),
+                **{name: (values, coordinate_unit(name))
+                   for name, values in self.candidates.items()},
+                **_receiver_coords(self.receiver_positions)}
+
+    @classmethod
+    def from_xarray(cls, obj) -> "Replicas":
+        """:class:`Replicas` from the ``xarray.Dataset`` :meth:`to_xarray`
+        writes: the candidate axes are the dimensions between ``frequency``
+        and ``receiver``, in order.
+
+        Parameters
+        ----------
+        obj : xarray.Dataset
+            A dataset as :meth:`to_xarray` writes it.
+        """
+        from uacpy.core._export import join_complex
+        obj = join_complex(obj)
+        names = [str(d) for d in obj['replicas'].dims[1:-1]]
+        return cls(replicas=np.asarray(obj['replicas'].values),
+                   candidates={name: np.asarray(obj[name].values)
+                               for name in names},
+                   receiver_positions=_positions_from(
+                       {name: np.asarray(c.values)
+                        for name, c in obj.coords.items()}),
+                   **cls._identity_from_attrs(dict(obj.attrs)))
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Replicas":
+        """Reconstruct :class:`Replicas` from :meth:`to_dict` output, or from
+        the mapping ``np.load(f, allow_pickle=True)`` returns for a file
+        written with ``np.savez(f, **replicas.to_dict())``.
+
+        Parameters
+        ----------
+        d : mapping
+            :meth:`to_dict` output, or the mapping ``np.load`` returns for it.
+        """
+        d = cls._unwrap_saved(d, payload=('replicas',))
+        return cls(replicas=d['replicas'], candidates=d['candidates'],
+                   receiver_positions=d.get('receiver_positions'),
+                   **cls._identity_from_dict(d))

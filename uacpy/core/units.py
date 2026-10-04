@@ -20,17 +20,35 @@ from uacpy.core.exceptions import ConfigurationError
 
 
 def km_to_m(x):
-    """Multiply a km axis by 1000 to get metres."""
+    """Multiply a km axis by 1000 to get metres.
+
+    Parameters
+    ----------
+    x : float or array_like
+        Lengths in km.
+    """
     return np.asarray(x, dtype=float) * 1000.0
 
 
 def m_to_km(x):
-    """Divide a metres axis by 1000 to get km."""
+    """Divide a metres axis by 1000 to get km.
+
+    Parameters
+    ----------
+    x : float or array_like
+        Lengths in metres.
+    """
     return np.asarray(x, dtype=float) / 1000.0
 
 
 def deg_to_rad(x):
-    """Convert degrees to radians."""
+    """Convert degrees to radians.
+
+    Parameters
+    ----------
+    x : float or array_like
+        Angles in degrees.
+    """
     return np.asarray(x, dtype=float) * (np.pi / 180.0)
 
 
@@ -41,34 +59,48 @@ def rad_to_deg(x):
     radians and the ``.brc``/``.trc`` reflection tables hold it in degrees,
     so :func:`~uacpy.io.refl_io.write_reflection_coefficient` converts here
     and :func:`~uacpy.io.refl_io.read_reflection_coefficient` converts back.
+
+    Parameters
+    ----------
+    x : float or array_like
+        Angles in radians.
     """
     return np.asarray(x, dtype=float) * (180.0 / np.pi)
 
 
-#: Knots per metre per second. The public noise and scattering surfaces take
-#: wind in **knots** (``wind_speed_kn``) while every fetcher returns m/s, so
-#: this factor sat as prose in two docstrings — "multiply the m/s returned
-#: here" — and in no callable. Reading a m/s value as knots
-#: understates the Wenz total by a measured 5.7 dB at 1 kHz for 10 m/s.
-#: One nautical mile per hour, from the SI definition: 1852 m in an hour.
-#: Written as the definition rather than as a rounded decimal, so the one
-#: value in the package is the exact one. The literal it replaces differed
-#: by 3.9e-9 relative — nothing numerically, and two numbers to keep in
-#: step.
+#: Knots per metre per second. The public wind arguments take knots
+#: (``wind_speed_kn``), as every fetcher returns them; the fits stated in m/s
+#: convert inside. Passing a m/s value as knots understates the Wenz total by a
+#: measured 5.7 dB at 1 kHz for 10 m/s, which is why the unit is in the
+#: name. One nautical mile per hour, from the SI definition: 1852 m in
+#: an hour, written as the definition rather than as a rounded decimal so the
+#: package holds the exact value once.
 KNOTS_PER_M_PER_S = 3600.0 / 1852.0
 
 
 def ms_to_knots(x):
-    """Convert a wind speed in m/s to knots."""
+    """Convert a wind speed in m/s to knots.
+
+    Parameters
+    ----------
+    x : float or array_like
+        Wind speeds in m/s.
+    """
     return np.asarray(x, dtype=float) * KNOTS_PER_M_PER_S
 
 
 def knots_to_ms(x):
-    """Convert a wind speed in knots to m/s."""
+    """Convert a wind speed in knots to m/s.
+
+    Parameters
+    ----------
+    x : float or array_like
+        Wind speeds in knots.
+    """
     return np.asarray(x, dtype=float) / KNOTS_PER_M_PER_S
 
 
-#: Beaufort force -> (sea state, wind speed range in knots), Urick (1984).
+#: Beaufort force -> (sea state, wind speed range in knots), Urick (1983).
 #: It indexes the same way Knudsen, Alford & Emling (1948) Fig. 4 indexes its
 #: noise curves — except at sea state 6, where they differ. Fig. 4 pairs sea
 #: state 6 with wind force **7**; this table gives sea state 6 to both force 7
@@ -117,7 +149,7 @@ def beaufort_to_wind_speed(force, *, units="kn"):
     if force not in BEAUFORT_SCALE:
         raise ConfigurationError(
             f"beaufort_to_wind_speed: force must be one of "
-            f"{sorted(BEAUFORT_SCALE)}; got {force!r}. The Urick (1984) "
+            f"{sorted(BEAUFORT_SCALE)}; got {force!r}. The Urick (1983) "
             f"table this reads stops at force 8 (40 knots).")
     low, high = BEAUFORT_SCALE[force][1]
     kn = 0.5 * (low + high)
@@ -135,6 +167,13 @@ def sea_state_to_wind_speed(sea_state, *, units="kn"):
     Sea state 6 maps to force 8 rather than 7, following Dahl's statement
     of the WMO correspondence — 37 kn rather than 30.5 kn, worth +1.67 dB
     in the default wind term at 1 kHz (+3.01 dB on ``'coates'``).
+
+    Parameters
+    ----------
+    sea_state : float
+        A sea state of :data:`BEAUFORT_SCALE`: 0, 0.5 or 1 to 6.
+    units : {'kn', 'm/s'}, optional
+        Unit of the returned speed. Default knots.
     """
     matches = [f for f, (ss, _) in BEAUFORT_SCALE.items() if ss == sea_state]
     if not matches:
@@ -151,6 +190,13 @@ def wind_speed_to_beaufort(speed, *, units="kn"):
     The inverse of :func:`beaufort_to_wind_speed` at band resolution: a
     speed above force 8's range returns 8, which is the table's ceiling
     rather than the scale's.
+
+    Parameters
+    ----------
+    speed : float
+        One wind speed, >= 0.
+    units : {'kn', 'm/s'}, optional
+        Unit of ``speed``. Default knots.
     """
     if units not in ("kn", "m/s"):
         raise ConfigurationError(
@@ -167,7 +213,7 @@ def wind_speed_to_beaufort(speed, *, units="kn"):
     kn = float(speed) if units == "kn" else float(ms_to_knots(speed))
     if not kn >= 0.0:
         raise ConfigurationError(
-            f"wind_speed_to_beaufort: wind speed must be >= 0; got {speed!r}")
+            f"wind_speed_to_beaufort: wind speed must be >= 0; got {speed!r}.")
     edges = [BEAUFORT_SCALE[f][1][1] for f in sorted(BEAUFORT_SCALE)]
     return int(np.searchsorted(edges, float(kn), side="left"
                                ).clip(0, max(BEAUFORT_SCALE)))

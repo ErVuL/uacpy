@@ -18,8 +18,8 @@ from figure_scripts._common import (
 
 import uacpy
 from uacpy.models import Kraken, RunMode
-from uacpy.visualization.plots import shared_colorbar
-from uacpy.visualization.plots import plot_modes_heatmap
+from uacpy.plot import shared_colorbar
+from uacpy.plot import plot_modes_heatmap
 
 
 def mode_functions():
@@ -78,7 +78,7 @@ def phase_speed_window():
         model = Kraken(**kwargs)
         modes = model.compute_modes(env, source)
         axes[0].plot(np.arange(1, modes.n_modes + 1),
-                     modes.compute_phase_speeds(), 'o-', color=colour,
+                     modes.phase_speeds, 'o-', color=colour,
                      markersize=4, label=f'{label} — {modes.n_modes} modes')
         tl = model.run(env, source, line)
         axes[1].plot(np.asarray(line.ranges) / 1000.0,
@@ -120,7 +120,7 @@ def leaky_modes():
     for modes, label, marker, colour in (
             (leaky, f'leaky_modes=True — {leaky.n_modes} modes', 's', 'C1'),
             (trapped, f'default — {trapped.n_modes} modes', 'o', 'C0')):
-        ax.plot(modes.compute_phase_speeds(), np.abs(np.imag(modes.k)),
+        ax.plot(modes.phase_speeds, np.abs(np.imag(modes.k)),
                 marker, color=colour, markersize=5, label=label)
     ax.axvline(c_bottom, color='0.4', linestyle='--', linewidth=1.0)
     ax.text(c_bottom * 1.02, 2e-5, f'bottom speed ({c_bottom:.0f} m/s)',

@@ -10,6 +10,7 @@ construct a model (which resolves its executable) and a few of those do run
 one. Whole file: a few seconds.
 """
 
+import re
 import warnings
 
 import functools
@@ -19,7 +20,7 @@ import pytest
 
 import uacpy
 from uacpy.core.exceptions import (
-    ConfigurationError, UnsupportedFeatureError,
+    ConfigurationError, ProvenanceWarning, UnsupportedFeatureError,
 )
 from uacpy.models.bellhop import Bellhop
 from uacpy.models.ram import RAM
@@ -32,9 +33,155 @@ from uacpy.core.environment import (
     SedimentLayer,
     SoundSpeedProfile,
 )
+from uacpy.tests.conftest import build_engine, engine_entry, engine_params
+from uacpy.models.ram import _band as ram_band
+from uacpy.tests.conftest import recorded_warnings
+from uacpy.tests.conftest import make_pekeris
 
 
 # --- G1 monotonicity -------------------------------------------------------
+
+# ── assignment is checked as construction is (D5, one carrier style) ─────────
+#
+# Each row: a valid carrier, a field and a value its constructor refuses. The
+# constructor must refuse the value, and so must an assignment to a built
+# carrier, leaving it as it was. A row whose constructor accepted the value
+# would test nothing, so that half is asserted first.
+def _ssp():
+    return uacpy.SoundSpeedProfile(depths=[0.0, 100.0],
+                                   sound_speed=[1500.0, 1490.0])
+
+
+def _layer():
+    return SedimentLayer(thickness=10.0, sound_speed=1650.0, density=1.9)
+
+
+def _halfspace():
+    return BoundaryProperties(sound_speed=1700.0, density=1.8)
+
+
+def _fg():
+    return uacpy.FrancoisGarrison(10.0, 35.0, 8.0)
+
+
+_REFUSED_ASSIGNMENTS = [
+    (_ssp, 'depths', [5.0, 1.0]),
+    (_ssp, 'sound_speed', [-1.0, -1.0]),
+    (lambda: uacpy.Bathymetry(ranges=[0.0, 1000.0], depths=[100.0, 120.0]),
+     'depths', [-1.0, -1.0]),
+    (lambda: uacpy.Altimetry(ranges=[0.0, 1000.0], heights=[0.0, 1.0]),
+     'heights', [np.nan, 1.0]),
+    (_layer, 'thickness', -1.0),
+    (_layer, 'attenuation', -0.5),
+    (_halfspace, 'density', -1.0),
+    (_halfspace, 'acoustic_type', 'halfspace'),
+    (lambda: BoundaryProperties(), 'density', 2.0),
+    (_fg, 'temperature', float('nan')),
+    (_fg, 'pH', 14.1),
+    (_fg, 'pH', -0.1),
+    (lambda: uacpy.BiologicalLayer(10.0, 50.0, 1000.0, 5.0, 0.01),
+     'z_bottom_m', 5.0),
+    (lambda: uacpy.ConstantAbsorption(0.1), 'value_dB_per_wavelength', -1.0),
+    (lambda: uacpy.Source(depths=50.0, frequencies=100.0), 'depths', -5.0),
+    (lambda: uacpy.Receiver(depths=[10.0], ranges=[100.0, 200.0]),
+     'ranges', [3.0, 1.0]),
+    (_layer, 'roughness', -1.0),
+    (_halfspace, 'roughness', -1.0),
+    (lambda: BoundaryProperties(acoustic_type='vacuum'), 'roughness', -1.0),
+    (lambda: Environment(bathymetry=100.0), 'location', (999.0, 0.0)),
+    (lambda: Environment(bathymetry=100.0), 'transect', ((43.0, 5.0),)),
+    (lambda: Environment(bathymetry=100.0), 'bathymetry', -10.0),
+    (lambda: Environment(bathymetry=100.0), 'water_density', 1027.0),
+    (lambda: Environment(bathymetry=100.0), 'absorption', 'thorp'),
+    (lambda: Environment(bathymetry=100.0), 'extra_data_sources',
+     ('GEBCO',)),
+]
+
+
+@pytest.mark.parametrize('build, field, bad', _REFUSED_ASSIGNMENTS,
+                         ids=[f'{i}-{row[1]}' for i, row
+                              in enumerate(_REFUSED_ASSIGNMENTS)])
+def test_every_carrier_refuses_an_assignment_its_constructor_refuses(
+        build, field, bad):
+    import dataclasses
+    import re
+    carrier = build()
+    kwargs = {f.name: carrier.__dict__[f.name]
+              for f in dataclasses.fields(carrier)}
+    if isinstance(carrier, BoundaryProperties):
+        kwargs = carrier._fields_for_assignment(field, bad)
+    kwargs[field] = bad
+    try:
+        type(carrier)(**kwargs)
+    except ConfigurationError as exc:
+        refusal = str(exc)
+    else:
+        pytest.fail(f"{type(carrier).__name__}({field}={bad!r}) was accepted "
+                    f"by the constructor; the row tests nothing")
+    before = repr(carrier)
+    # The assignment is refused with the constructor's own message.
+    with pytest.raises(ConfigurationError, match=re.escape(refusal)):
+        setattr(carrier, field, bad)
+    assert repr(carrier) == before
+
+
+def test_a_carrier_is_under_construction_only_while_its_init_runs():
+    """``RevalidateOnAssignMixin`` treats a store as construction while the
+    carrier's id is in ``_carrier``'s thread-local set. The id is added on
+    entry to ``__init__`` and removed in a ``finally``, so the set is empty
+    between constructions — also after a refused one — and a carrier born at
+    an address a freed one used is checked on assignment like any other.
+    Thousands of short-lived carriers make the address reuse happen."""
+    from uacpy.core._carrier import _under_construction
+    assert _under_construction() == set()
+    with pytest.raises(ConfigurationError, match='thickness'):
+        SedimentLayer(thickness=-1.0, sound_speed=1650.0, density=1.9)
+    assert _under_construction() == set()
+    seen = set()
+    for i in range(5000):
+        layer = SedimentLayer(thickness=10.0 + i % 7, sound_speed=1650.0,
+                              density=1.9)
+        seen.add(id(layer))
+        assert _under_construction() == set()
+        if i % 250 == 0:
+            with pytest.raises(ConfigurationError, match='thickness'):
+                layer.thickness = -1.0
+            assert layer.thickness == 10.0 + i % 7
+        del layer
+    # The loop reused addresses: fewer distinct ids than carriers built.
+    assert len(seen) < 5000
+
+
+def test_an_assignment_is_normalised_as_the_constructor_normalises():
+    """An accepted assignment is stored as the constructor would store it:
+    a list of speeds becomes the ``(n_depth, 1)`` float array."""
+    ssp = _ssp()
+    ssp.sound_speed = [1510.0, 1500.0]
+    assert isinstance(ssp.sound_speed, np.ndarray)
+    assert ssp.sound_speed.shape == (2, 1)
+
+
+@pytest.mark.parametrize('kind', ['vacuum', 'rigid'])
+def test_a_parameter_free_boundary_takes_a_roughness_and_refuses_geoacoustics(
+        kind):
+    """A vacuum or rigid node holds the resolved defaults of the half-space
+    parameters it ignores; rebuilding it with them passed explicitly would
+    read as the conflict its constructor refuses, so an interface write and a
+    provenance write go through, and a geoacoustic one is refused as
+    ``BoundaryProperties(kind, density=2)`` is."""
+    node = BoundaryProperties(acoustic_type=kind)
+    node.roughness = 1.0
+    node.data_sources = ()
+    assert (node.acoustic_type, node.roughness) == (kind, 1.0)
+    for field in ('density', 'sound_speed', 'attenuation', 'shear_speed',
+                  'shear_attenuation'):
+        with pytest.raises(ConfigurationError, match='ignores half-space'):
+            setattr(node, field, 2.0)
+    assert (node.acoustic_type, node.roughness) == (kind, 1.0)
+    halfspace = _halfspace()
+    halfspace.acoustic_type = kind
+    assert repr(halfspace) == f'BoundaryProperties({kind})'
+
 
 def test_ssp_depth_must_be_strictly_increasing():
     with pytest.raises(ConfigurationError, match="strictly increasing"):
@@ -46,7 +193,7 @@ def test_ssp_ranges_must_be_strictly_increasing():
     data = np.array([[1500.0, 1490.0, 1500.0], [1480.0, 1470.0, 1480.0]])
     with pytest.raises(ConfigurationError, match="strictly increasing"):
         SoundSpeedProfile(
-            depths=depths, data=data,
+            depths=depths, sound_speed=data,
             ranges=np.array([0.0, 5000.0, 3000.0]),
         )
 
@@ -113,25 +260,19 @@ def test_receiver_grid_ranges_must_be_increasing():
                        ranges=np.array([1000.0, 500.0]))
 
 
-def test_receiver_line_rejected_at_construction():
-    """``receiver_type='line'`` raises in the carrier, not at run() time.
-
-    No model collapses the depth x range grid to paired samples, so the
-    layout is refused as early as possible rather than after a model run.
-    """
-    with pytest.raises(ConfigurationError, match="receiver_type='line'"):
-        uacpy.Receiver(
-            depths=np.array([10.0, 50.0, 30.0]),
-            ranges=np.array([1000.0, 2000.0, 1500.0]),
-            receiver_type='line',
-        )
-
-
 # --- G8 acoustic_type ------------------------------------------------------
 
-def test_acoustic_type_alias_accepted():
-    BoundaryProperties(acoustic_type='halfspace')
-    BoundaryProperties(acoustic_type='HALF-SPACE')
+def test_acoustic_type_takes_each_value_in_any_case():
+    assert BoundaryProperties(acoustic_type='HALF-SPACE').acoustic_type \
+        == 'half-space'
+    assert BoundaryProperties(acoustic_type='Rigid').acoustic_type == 'rigid'
+
+
+@pytest.mark.parametrize('alias', ['halfspace', 'elastic', 'half_space',
+                                   'HALF_SPACE', 'A', 'v', 'R', 'f', 'p'])
+def test_acoustic_type_refuses_every_other_spelling(alias):
+    with pytest.raises(ConfigurationError, match="not recognized"):
+        BoundaryProperties(acoustic_type=alias)
 
 
 def test_acoustic_type_typo_rejected():
@@ -164,8 +305,7 @@ def test_per_range_receiver_below_shoaling_seafloor():
         depths=np.array([100.0]),
         ranges=np.array([1000.0, 5000.0, 9000.0]),
     )
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with recorded_warnings() as caught:
         bellhop.validate_inputs(env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL)
     msgs = [str(w.message) for w in caught]
     assert any("below the local seafloor" in m for m in msgs)
@@ -186,6 +326,24 @@ def test_per_range_receiver_check_passes_when_under_seafloor():
     bellhop.validate_inputs(env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL)
 
 
+@pytest.mark.requires_binary  # constructs a model (resolves its binary)
+@pytest.mark.parametrize('run_mode', [None, 'coherent_tl'])
+def test_validate_inputs_resolves_the_default_and_string_run_mode(run_mode):
+    """``validate_inputs`` resolves ``run_mode`` as ``run()`` does: the
+    default ``None`` and the value string both check as ``COHERENT_TL`` and
+    refuse a two-frequency Source; one frequency passes."""
+    bellhop = Bellhop()
+    env = Environment(bathymetry=100.0, ssp=1500.0)
+    rcv = uacpy.Receiver(depths=[30.0], ranges=[1000.0])
+    with pytest.raises(ConfigurationError, match='single source frequency'):
+        bellhop.validate_inputs(
+            env, uacpy.Source(depths=10.0, frequencies=[100.0, 200.0]), rcv,
+            run_mode=run_mode)
+    bellhop.validate_inputs(
+        env, uacpy.Source(depths=10.0, frequencies=100.0), rcv,
+        run_mode=run_mode)
+
+
 # --- G3 range coverage warning ---------------------------------------------
 
 @pytest.mark.requires_binary  # constructs a model (resolves its binary)
@@ -198,8 +356,7 @@ def test_warn_when_receiver_overruns_bathymetry():
     src = uacpy.Source(depths=10.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
                          ranges=np.array([8_000.0]))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with recorded_warnings() as caught:
         bellhop.validate_inputs(env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL)
     msgs = [str(w.message) for w in caught]
     assert any("env.bathymetry" in m and "constant-extrapolated" in m for m in msgs)
@@ -217,8 +374,7 @@ def test_warn_when_receiver_overruns_ssp_ranges():
     src = uacpy.Source(depths=10.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
                          ranges=np.array([5_000.0]))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with recorded_warnings() as caught:
         bellhop.validate_inputs(env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL)
     msgs = [str(w.message) for w in caught]
     assert any("env.ssp.ranges" in m for m in msgs)
@@ -249,14 +405,13 @@ def test_ram_collins_threads_rd_bottom(tmp_path):
     env = Environment(bathymetry=100.0, ssp=1500.0,
                       bottom=_elastic_rd_bottom([1700.0, 1800.0], [1.7, 1.9],
                                                 [0.5, 0.4]))
-    assert env.has_elastic_bottom
+    assert env.bottom.is_elastic
     ram = RAM(work_dir=str(tmp_path), cleanup=False)
     assert ram.select_backend(env) == 'rams'
     src = uacpy.Source(depths=10.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
                          ranges=np.array([2_000.0]))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with recorded_warnings() as caught:
         field = ram.run(env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL)
     p_rd = complex(np.asarray(field.data).ravel()[0])
     assert np.isfinite(p_rd)
@@ -398,8 +553,8 @@ def test_ssp_eval_interpolates_off_grid_range():
                          [1480.0, 1470.0, 1460.0]])
     )
     sliced = ssp.eval(range=2_000.0)
-    assert sliced.data[0, 0] == pytest.approx(1495.0)
-    assert sliced.data[1, 0] == pytest.approx(1475.0)
+    assert sliced.sound_speed[0, 0] == pytest.approx(1495.0)
+    assert sliced.sound_speed[1, 0] == pytest.approx(1475.0)
 
 
 def test_ssp_eval_clamps_beyond_last_range():
@@ -409,8 +564,8 @@ def test_ssp_eval_clamps_beyond_last_range():
         matrix=np.array([[1500.0, 1490.0], [1480.0, 1470.0]])
     )
     sliced = ssp.eval(range=10_000.0)
-    assert sliced.data[0, 0] == pytest.approx(1490.0)
-    assert sliced.data[1, 0] == pytest.approx(1470.0)
+    assert sliced.sound_speed[0, 0] == pytest.approx(1490.0)
+    assert sliced.sound_speed[1, 0] == pytest.approx(1470.0)
 
 
 def test_rd_bottom_halfspace_at_steps_to_the_nearest_column_at_the_midpoint():
@@ -455,7 +610,7 @@ def test_independent_bathy_ssp_bottom_ranges_compose_ok():
     env = Environment(bathymetry=bathy, ssp=ssp, bottom=rd_bot)
     assert env.is_range_dependent
     assert env.bathymetry.eval(range=4_000.0) == pytest.approx(140.0)
-    assert env.ssp.eval(range=4_000.0).data[0, 0] == pytest.approx(1496.0)
+    assert env.ssp.eval(range=4_000.0).sound_speed[0, 0] == pytest.approx(1496.0)
     # The seabed steps midway between its 3 and 6 km columns.
     assert env.bottom.halfspace_at(range=4_500.0 - 1e-6).sound_speed == 1650.0
     assert env.bottom.halfspace_at(range=4_500.0 + 1e-6).sound_speed == 1700.0
@@ -520,8 +675,7 @@ def test_receiver_depth_accepted_across_models_harmonized():
     # → accepted, no warning.
     from uacpy.models.kraken import Kraken
     for model in (Scooter(), Kraken()):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with recorded_warnings() as caught:
             model.validate_inputs(
                 env, src,
                 uacpy.Receiver(depths=np.array([50.0, 130.0]),
@@ -532,8 +686,7 @@ def test_receiver_depth_accepted_across_models_harmonized():
 
     # A ray model stops at the seafloor: the same 130 m receiver is still
     # accepted, but warns that the result reflects below-domain behaviour.
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with recorded_warnings() as caught:
         Bellhop().validate_inputs(
             env, src,
             uacpy.Receiver(depths=np.array([130.0]), ranges=np.array([500.0])),
@@ -542,7 +695,7 @@ def test_receiver_depth_accepted_across_models_harmonized():
                for w in caught)
 
     # The source, by contrast, must lie within the resolvable medium.
-    with pytest.raises(InvalidDepthError):
+    with pytest.raises(InvalidDepthError, match='exceeds resolvable depth'):
         Bellhop().validate_inputs(
             env, uacpy.Source(depths=130.0, frequencies=50.0),
             uacpy.Receiver(depths=np.array([50.0]), ranges=np.array([500.0])),
@@ -567,8 +720,7 @@ def test_scooter_collapses_rd_env_with_warning():
         bathymetry=[(0.0, 100.0), (5_000.0, 200.0)],
         ssp=ssp,
     )
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with recorded_warnings() as caught:
         projected = scooter._project_environment(env)
     assert not projected.is_range_dependent
     text = " ".join(str(w.message) for w in caught)
@@ -590,8 +742,7 @@ def test_per_range_receiver_below_seafloor_emits_warning_not_error():
         ranges=np.array([2_000.0, 9_000.0]),
     )
     ram = RAM()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with recorded_warnings() as caught:
         ram.validate_inputs(env, src, rcv, run_mode=uacpy.RunMode.COHERENT_TL)
     assert any("below the local seafloor" in str(w.message) for w in caught)
 
@@ -600,7 +751,7 @@ def test_kraken_segmentation_unions_distinct_axes():
     """Kraken builds its segment list from the union of bathy / SSP
     / bottom change-points, so a bathy with 3 ranges and an SSP with 5
     ranges should yield at least 5 segments."""
-    from uacpy.models._segmentation import segment_environment_by_range
+    from uacpy.models.kraken._segments import segment_environment_by_range
 
     ssp = SoundSpeedProfile.from_2d(
         depths=np.array([0.0, 200.0]),
@@ -620,7 +771,7 @@ def test_kraken_segmentation_unions_distinct_axes():
 
 
 def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
-    """Bellhop should pass ssp.ranges/.data through verbatim to .ssp,
+    """Bellhop should pass ssp.ranges/.sound_speed through verbatim to .ssp,
     independent of bathymetry / receiver grids — plus one prepended
     negative-range guard column so back-scattered rays do not trip
     bellhopcuda's BHC_ERR_OUTSIDE_SSP (x < Seg.r[0]) range-box check."""
@@ -667,36 +818,7 @@ def test_bellhop_quad_ssp_emits_unchanged_ssp_file(tmp_path):
 # ──────────────────────────────────────────────────────────────────────
 
 
-_OASES_MODEL_NAMES = {'OAST', 'OASN', 'OASR', 'OASP'}
-
-
-def _all_concrete_model_params():
-    from uacpy.models.bellhop import Bellhop
-    from uacpy.models.bounce import Bounce
-    from uacpy.models.kraken import Kraken
-    from uacpy.models.oases import OAST, OASN, OASR, OASP
-    from uacpy.models.ram import RAM
-    from uacpy.models.scooter import Scooter
-    from uacpy.models.sparc import SPARC
-    classes = [
-        Bellhop, Bounce,
-        Kraken,
-        OAST, OASN, OASR, OASP,
-        RAM, Scooter, SPARC,
-    ]
-    # Every model resolves (and existence-checks) its binary in __init__, so
-    # constructing one needs that binary — requires_binary for all, plus
-    # requires_oases for the separately-licensed OASES family.
-    params = []
-    for cls in classes:
-        marks = [pytest.mark.requires_binary]
-        if cls.__name__ in _OASES_MODEL_NAMES:
-            marks.append(pytest.mark.requires_oases)
-        params.append(pytest.param(cls, id=cls.__name__, marks=marks))
-    return params
-
-
-@pytest.mark.parametrize("model_cls", _all_concrete_model_params())
+@pytest.mark.parametrize("model_cls", engine_params())
 def test_run_rejects_unknown_kwarg(model_cls):
     """Every concrete ``run()`` declares its full keyword set; unknown
     names raise :class:`TypeError` at the call site. Constructing the model
@@ -707,7 +829,7 @@ def test_run_rejects_unknown_kwarg(model_cls):
     src = uacpy.Source(depths=50.0, frequencies=100.0)
     rcv = uacpy.Receiver(depths=[25.0, 50.0], ranges=[1000.0, 2000.0])
 
-    model = model_cls()
+    model = build_engine(model_cls.__name__)
     with pytest.raises(TypeError, match=r"unexpected keyword argument"):
         model.run(env, src, rcv, totally_bogus_kwarg=1)
 
@@ -715,18 +837,18 @@ def test_run_rejects_unknown_kwarg(model_cls):
 def test_generate_sea_surface_rejects_nonpositive_range():
     from uacpy import generate_sea_surface
     for bad in (0.0, -100.0):
-        with pytest.raises(ConfigurationError, match="max_range"):
+        with pytest.raises(ConfigurationError, match="rmax_m"):
             generate_sea_surface(bad)
 
 
 @pytest.mark.parametrize("bad", ['deep', object(), {'a': 1}])
 def test_bathymetry_nonnumeric_is_typed(bad):
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match='Bathymetry: .*non-numeric'):
         uacpy.Environment(bathymetry=bad, ssp=1500.0)
 
 
 def test_altimetry_nonnumeric_is_typed():
-    with pytest.raises(ConfigurationError):
+    with pytest.raises(ConfigurationError, match='Altimetry: .*non-numeric'):
         uacpy.Environment(bathymetry=100.0, ssp=1500.0, altimetry='wavy')
 
 
@@ -748,40 +870,36 @@ def test_surface_source_warns_for_field_runs():
 
 
 # --- Silent-coercion guards: extrapolation and container types -------------
-def test_get_sound_speed_warns_on_extrapolation():
+def test_sound_speed_at_warns_on_extrapolation():
     """Depths outside the (bathymetry-extended) SSP are constant-extrapolated
     with a UserWarning, not silently."""
-    ssp = SoundSpeedProfile(depths=[0, 50, 100], data=[1500, 1490, 1480])
+    ssp = SoundSpeedProfile(depths=[0, 50, 100], sound_speed=[1500, 1490, 1480])
     env = Environment(ssp=ssp, bathymetry=200.0)  # SSP extended to 200 m
     with pytest.warns(UserWarning, match="constant-extrapolated"):
-        assert float(env.get_sound_speed(250)[0]) == 1480.0
+        assert float(env.ssp.sound_speed_at(250)[0]) == 1480.0
     with pytest.warns(UserWarning, match="constant-extrapolated"):
-        assert float(env.get_sound_speed(-10)[0]) == 1500.0
+        assert float(env.ssp.sound_speed_at(-10)[0]) == 1500.0
     # in-range query must not warn
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        env.get_sound_speed(75)
+        env.ssp.sound_speed_at(75)
 
 
 def test_francois_garrison_accepts_list_pH():
     """pH as a Python list must not raise a bare TypeError (it is coerced)."""
-    from uacpy.core.absorption import _francois_garrison_dB_per_km
-    out = _francois_garrison_dB_per_km(10000, 10, 35, [8.0, 8.1], 100)
+    from uacpy.core.acoustics.attenuation import absorption_francois_garrison
+    out = absorption_francois_garrison(10000, 10, 35, [8.0, 8.1], 100)
     out = np.atleast_1d(np.asarray(out, dtype=float))
     assert out.shape == (2,) and np.all(out > 0)
 
 
 @pytest.mark.requires_binary  # constructs the named model (resolves its binary)
 @pytest.mark.parametrize('model_name', ['Bellhop', 'Kraken', 'Scooter', 'RAM'])
-def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
-    """``receiver_type='line'`` must raise, not return the full grid.
-
-    No model's result assembly collapses depth x range to the paired samples,
-    so the carrier refuses the layout outright; the documented ``'grid'``
-    workaround still runs on every model.
+def test_paired_samples_come_from_a_grid_run(model_name):
+    """The Receiver docstring's recipe for paired (depth, range) samples
+    runs on every model: a grid run, indexed by the pairs.
     """
     import uacpy
-    from uacpy.core.exceptions import ConfigurationError
 
     env = uacpy.Environment(
         name='p', bathymetry=200.0, ssp=1500.0,
@@ -793,9 +911,6 @@ def test_receiver_type_line_is_rejected_not_silently_gridded(model_name):
     r = np.array([1000.0, 2000.0, 3000.0])
 
     model = getattr(uacpy, model_name)(verbose=False)
-    with pytest.raises(ConfigurationError, match="receiver_type='line'"):
-        uacpy.Receiver(depths=d, ranges=r, receiver_type='line')
-    # The documented workaround still works.
     tl = np.asarray(model.run(env, src,
                               uacpy.Receiver(depths=d, ranges=r)).dB)
     i = np.arange(len(d))
@@ -843,7 +958,7 @@ class TestAttenuationCeiling:
     ``bellhopcxx`` instead returns *less* loss at 1e6 dB/lambda than at 0.5."""
 
     def test_the_constant_is_the_one_the_fortran_implies(self):
-        from uacpy.core.constants import MAX_ATTENUATION_DB_PER_WAVELENGTH
+        from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
         assert MAX_ATTENUATION_DB_PER_WAVELENGTH == pytest.approx(54.57505391,
                                                                  abs=1e-7)
 
@@ -862,14 +977,14 @@ class TestAttenuationCeiling:
             sound_speed=1800.0, density=2.0, attenuation=alpha) is not None
 
     def test_the_shear_channel_is_bounded_too(self):
-        from uacpy.core.bottom import SedimentLayer
+        from uacpy.core.boundary import SedimentLayer
         with pytest.raises(uacpy.core.exceptions.ConfigurationError,
                            match='shear_attenuation'):
             SedimentLayer(thickness=1.0, sound_speed=1600.0, density=1.7,
                           attenuation=0.5, shear_attenuation=100.0)
 
     def test_sediment_layers_are_bounded_too(self):
-        from uacpy.core.bottom import SedimentLayer
+        from uacpy.core.boundary import SedimentLayer
         with pytest.raises(uacpy.core.exceptions.ConfigurationError,
                            match='dB/wavelength'):
             SedimentLayer(thickness=1.0, sound_speed=1600.0, density=1.7,
@@ -897,7 +1012,7 @@ class TestAxesMustSurviveTheDeckPrintResolution:
         with pytest.raises(uacpy.core.exceptions.ConfigurationError,
                            match='must increase by more than'):
             uacpy.core.SoundSpeedProfile(
-                depths=[0.0, 100.0], data=np.full((2, 3), 1500.0),
+                depths=[0.0, 100.0], sound_speed=np.full((2, 3), 1500.0),
                 ranges=[0.0, 1e-7, 5000.0])
 
     def test_bathymetry_ranges(self):
@@ -938,8 +1053,9 @@ class TestAxesMustSurviveTheDeckPrintResolution:
     def test_the_resolutions_are_the_ones_the_decks_print(self):
         """1 µm on a depth axis (metres at %.6f) and 1 mm on a range axis
         (kilometres at %.6f)."""
-        from uacpy.core.constants import (DECK_DEPTH_RESOLUTION_M,
-                                          DECK_RANGE_RESOLUTION_M)
+        from uacpy.core.deck_limits import (
+            DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
+        )
         assert DECK_DEPTH_RESOLUTION_M == 1e-6
         assert DECK_RANGE_RESOLUTION_M == 1e-3
 
@@ -950,21 +1066,22 @@ class TestAxesMustSurviveTheDeckPrintResolution:
         deck can print it; the writer's column format is what decides whether
         it can. Both sides of that threshold: one resolution apart must give
         two tokens, and anything below it must give one."""
-        from uacpy.core.constants import (DECK_AXIS_DECIMALS,
-                                          DECK_DEPTH_RESOLUTION_M,
-                                          DECK_RANGE_RESOLUTION_M)
-        from uacpy.io.oalib_writer import _DECK_DEPTH_FMT, DECK_RANGE_QUANTUM_M
+        from uacpy.core.deck_limits import (
+            DECK_AXIS_DECIMALS, DECK_DEPTH_RESOLUTION_M,
+            DECK_RANGE_RESOLUTION_M,
+        )
+        from uacpy.core.deck_limits import DECK_DEPTH_FMT
         from uacpy.core.units import m_to_km
 
         def token(value, fmt):
             return format(value, fmt)
 
         depth = 100.0
-        assert (token(depth, _DECK_DEPTH_FMT)
-                != token(depth + DECK_DEPTH_RESOLUTION_M, _DECK_DEPTH_FMT))
-        assert (token(depth, _DECK_DEPTH_FMT)
+        assert (token(depth, DECK_DEPTH_FMT)
+                != token(depth + DECK_DEPTH_RESOLUTION_M, DECK_DEPTH_FMT))
+        assert (token(depth, DECK_DEPTH_FMT)
                 == token(depth + DECK_DEPTH_RESOLUTION_M / 10.0,
-                         _DECK_DEPTH_FMT))
+                         DECK_DEPTH_FMT))
 
         range_fmt = f'.{DECK_AXIS_DECIMALS}f'
         r = 4000.0
@@ -975,9 +1092,6 @@ class TestAxesMustSurviveTheDeckPrintResolution:
                 == token(float(m_to_km(r + DECK_RANGE_RESOLUTION_M / 10.0)),
                          range_fmt))
 
-        # The writer's own name for the range quantum is the carriers' number,
-        # not a second copy of it.
-        assert DECK_RANGE_QUANTUM_M == DECK_RANGE_RESOLUTION_M
 
     @pytest.mark.parametrize('axis', ['depths', 'ranges'])
     def test_ordinary_axes_pass(self, axis):
@@ -1038,7 +1152,7 @@ class TestExtendToUsesTheReadersOwnEpsilon:
         assert float(np.asarray(out.depths)[-1]) == pytest.approx(base + delta)
 
     def test_the_epsilon_is_the_fortran_one(self):
-        from uacpy.core.constants import AT_LAST_SSP_POINT_EPS_M
+        from uacpy.core.deck_limits import AT_LAST_SSP_POINT_EPS_M
         assert AT_LAST_SSP_POINT_EPS_M == pytest.approx(1.1920929e-05, rel=1e-9)
 
     def test_a_snap_that_would_cross_the_previous_sample_raises(self):
@@ -1095,28 +1209,28 @@ def test_sparc_refuses_empty_wavenumber_loop():
         bottom=uacpy.BoundaryProperties(acoustic_type='rigid'))
     src = uacpy.Source(depths=25.0, frequencies=50.0)
     rcv = uacpy.Receiver(depths=[50.0], ranges=[2.0, 4.0])
-    model = SPARC(f_min=49.0, f_max=50.0, c_low=1400.0, c_high=1600.0,
-                  rmax_safety_margin=1.0)
+    model = SPARC(freq_min=49.0, freq_max=50.0, c_low=1400.0, c_high=1600.0,
+                  rmax_factor=1.0)
     with pytest.raises(ConfigurationError, match="wavenumber"):
         model.run(env, src, rcv)
 
 
 @pytest.mark.requires_binary  # constructs SPARC (resolves its binary)
 def test_sparc_refuses_inverted_pulse_band():
-    """f_min >= f_max makes Nk negative through the sparc.f90:116 formula
+    """freq_min >= freq_max makes Nk negative through the sparc.f90:116 formula
     ``Nk = INT(1000·RMax·(kMax − kMin)/2π)``; the constructor names the cause
-    instead. A negative f_min is refused for the same reason.
+    instead. A negative freq_min is refused for the same reason.
 
-    ``f_min = 0`` is *not* refused: ``sparc.f90:114`` clamps the resulting
+    ``freq_min = 0`` is *not* refused: ``sparc.f90:114`` clamps the resulting
     ``kMin`` to 1e-20 ("avoid a zero that would produce a divide check when
     the phase speed is written"), so the binary runs that deck.
     """
     from uacpy.models.sparc import SPARC
-    with pytest.raises(ConfigurationError, match="f_min < f_max"):
-        SPARC(f_min=200.0, f_max=50.0)
-    with pytest.raises(ConfigurationError, match="f_min >= 0"):
-        SPARC(f_min=-1.0)
-    assert SPARC(f_min=0.0).f_min == 0.0
+    with pytest.raises(ConfigurationError, match="freq_min < freq_max"):
+        SPARC(freq_min=200.0, freq_max=50.0)
+    with pytest.raises(ConfigurationError, match="freq_min >= 0"):
+        SPARC(freq_min=-1.0)
+    assert SPARC(freq_min=0.0).freq_min == 0.0
 
 
 @pytest.mark.requires_binary
@@ -1126,20 +1240,23 @@ def test_oassp_rejects_complex_contour_options():
     ('O', or no 'J' under automatic sampling — unoassp30.f:285-290, :983,
     :382-385) writes a spectrum the time-series synthesis cannot undo."""
     from uacpy.models.oases import OASSP
+    from uacpy.models.oases.oassp import _reject_unreadable_oassp_options
+
+    def check(model):
+        _reject_unreadable_oassp_options(model.options, model.n_wavenumbers)
+
     with pytest.raises(ConfigurationError, match="'O'"):
-        OASSP(correlation_length=5.0,
-              options='N J s O')._reject_unreadable_options()
+        check(OASSP(correlation_length=5.0, options='N J s O'))
     with pytest.raises(ConfigurationError, match="'J'"):
-        OASSP(correlation_length=5.0,
-              options='N s')._reject_unreadable_options()
+        check(OASSP(correlation_length=5.0, options='N s'))
     # The typed-flag default path always carries 'J' and never 'O'.
-    OASSP(correlation_length=5.0)._reject_unreadable_options()
+    check(OASSP(correlation_length=5.0))
 
 
 @pytest.mark.requires_binary  # constructs RAM (resolves its binary)
 def test_ram_broadband_grid_round_trips_the_request():
     """The (fc, Q, T) inversion must reproduce every requested bin: odd
-    counts exactly, even counts as a superset (one extra bin at f_max+Δf) —
+    counts exactly, even counts as a superset (one extra bin at freq_max+Δf) —
     never the old lose-a-bin-and-shift-by-Δf/2 behaviour. Pinning both Q and
     T alongside a frequency array is a contradiction and raises."""
     from uacpy.models.ram import RAM as _RAM
@@ -1148,30 +1265,44 @@ def test_ram_broadband_grid_round_trips_the_request():
         for n in (8, 9, 2, 16):
             req = np.linspace(100.0, 100.0 + 5.0 * (n - 1), n)
             model = _RAM()
-            fc, q, t = model._resolve_broadband_grid(
-                uacpy.Source(depths=25.0, frequencies=req))
-            marched = model._broadband_frequencies(fc, q, t)
+            fc, q, t = ram_band.resolve_broadband_grid(
+                uacpy.Source(depths=25.0, frequencies=req),
+                knobs=model._knob_record(), log=model._log)
+            marched = ram_band.broadband_frequencies(fc, q, t)
             for f in req:
                 assert np.isclose(marched, f).any(), (n, f, marched)
             assert marched.size <= req.size + 1
     with pytest.warns(UserWarning, match="pinned"):
-        RAM(Q=2.0, T=10.0)._resolve_broadband_grid(
-            uacpy.Source(depths=25.0, frequencies=np.linspace(100, 110, 11)))
+        ram = RAM(q_factor=2.0, record_duration=10.0)
+        ram_band.resolve_broadband_grid(
+            uacpy.Source(depths=25.0, frequencies=np.linspace(100, 110, 11)),
+            knobs=ram._knob_record(), log=ram._log)
 
 
 @pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
 def test_kraken_leaky_modes_keeps_c_high_verbatim():
-    """leaky_modes used to overwrite self.c_high with 1e9, breaking the
-    copy()/repr() verbatim-storage invariant and skipping validation; now
-    the sentinel is resolved at deck time and the contradiction raises."""
+    """leaky_modes keeps self.c_high as given (the copy()/repr() verbatim-
+    storage invariant): the leaky window, 10 x the fastest speed in the
+    profile, is resolved into the run's settings, and a pinned c_high beside
+    it raises."""
     from uacpy.models.kraken import Kraken
     with pytest.raises(ConfigurationError, match="leaky_modes"):
         Kraken(c_high=1700.0, leaky_modes=True)
+    env = uacpy.Environment(name='lk', bathymetry=100.0, ssp=1500.0,
+                            bottom=uacpy.BoundaryProperties(
+                                acoustic_type='half-space',
+                                sound_speed=1600.0, density=1.5,
+                                attenuation=0.5))
+    src = uacpy.Source(depths=50.0, frequencies=100.0)
+    rcv = uacpy.Receiver(depths=[50.0], ranges=[1000.0])
     m = Kraken(leaky_modes=True)
     assert m.c_high is None
-    assert m._effective_c_high() == 1e9
+    assert m.run_settings(env, src, rcv).engine.launches[0].c_high == (
+        pytest.approx(16000.0),)
     clone = m.copy(leaky_modes=False)
-    assert clone.c_high is None and clone._effective_c_high() is None
+    assert clone.c_high is None
+    assert clone.run_settings(env, src, rcv).engine.launches[0].c_high == (
+        pytest.approx(1680.0),)
 
 
 @pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
@@ -1194,15 +1325,15 @@ def test_kraken_top_reflection_file_carries_roughness_into_the_drop(tmp_path):
         bathymetry=100.0, ssp=1500.0,
         bottom=uacpy.BoundaryProperties(sound_speed=1600.0, density=1.5,
                                         attenuation=0.5),
-        surface=Surface(properties=[uacpy.BoundaryProperties(
+        surface=Surface(nodes=[uacpy.BoundaryProperties(
             acoustic_type='vacuum', roughness=1.5)]))
     with pytest.warns(UserWarning, match=r'roughness=1\.5 m was dropped'):
         projected = Kraken(top_reflection_file=trc)._project_environment(env)
-    assert projected.surface.properties[0].acoustic_type == 'file'
+    assert projected.surface.nodes[0].acoustic_type == 'file'
     assert float(projected.surface.roughness) == 0.0
 
 
-# --- shared carrier validators (uacpy/core/_carrier_validate.py) -----------
+# --- shared carrier validators (uacpy/core/_validate.py) -------------------
 
 class TestValidatorMessagesStayBounded:
     """The shared validators report the first offending element (value, flat
@@ -1210,47 +1341,102 @@ class TestValidatorMessagesStayBounded:
     a large axis stays a single readable line."""
 
     def test_finite_reports_first_offender_not_the_array(self):
-        from uacpy.core._carrier_validate import _require_finite
+        from uacpy.core._validate import require_finite
         big = np.arange(50000.0)
         big[123] = np.nan
         with pytest.raises(ConfigurationError, match="must be finite") as exc:
-            _require_finite(big, "X")
+            require_finite(big, "X")
         msg = str(exc.value)
         assert len(msg) < 500
         assert "index 123" in msg
         assert "50000" in msg
 
     def test_positive_reports_first_offender(self):
-        from uacpy.core._carrier_validate import _require_positive
+        from uacpy.core._validate import require_positive
         vals = np.ones(10000)
         vals[7] = -2.0
         with pytest.raises(ConfigurationError, match="must be positive") as exc:
-            _require_positive(vals, "X")
+            require_positive(vals, "X")
         msg = str(exc.value)
         assert len(msg) < 500
         assert "-2" in msg and "index 7" in msg
 
     def test_non_negative_reports_first_offender(self):
-        from uacpy.core._carrier_validate import _require_non_negative
+        from uacpy.core._validate import require_non_negative
         vals = np.zeros(10000)
         vals[42] = -1.5
         with pytest.raises(ConfigurationError,
                            match="must be non-negative") as exc:
-            _require_non_negative(vals, "X")
+            require_non_negative(vals, "X")
         msg = str(exc.value)
         assert len(msg) < 500
         assert "-1.5" in msg and "index 42" in msg
 
     def test_strictly_increasing_reports_pair_and_length(self):
-        from uacpy.core._carrier_validate import _require_strictly_increasing
+        from uacpy.core._validate import require_strictly_increasing
         axis = np.arange(10000.0)
         axis[500] = 0.0
         with pytest.raises(ConfigurationError,
                            match="strictly increasing") as exc:
-            _require_strictly_increasing(axis, "X")
+            require_strictly_increasing(axis, "X")
         msg = str(exc.value)
         assert len(msg) < 500
         assert "axis length 10000" in msg
+
+
+class TestTheRealSignalGuard:
+    """``require_real_signal`` refuses complex input before the float cast
+    that would drop its imaginary part, then a wrong dimension, then an empty
+    or non-finite signal; a real signal of the asked dimension comes back as
+    float."""
+
+    def test_complex_input_is_refused_with_the_callers_reason(self):
+        from uacpy.core._validate import require_real_signal
+        with pytest.raises(ConfigurationError,
+                           match=r"f: data must be real \(got complex "
+                                 r"input\); because") as exc:
+            require_real_signal(np.array([1.0, 1j]), "f", why="; because",
+                                remediation="Do this.")
+        assert 'Do this.' in str(exc.value)
+
+    @pytest.mark.parametrize('ndim, shape', [(1, (2, 3)), (2, (6,))])
+    def test_a_wrong_dimension_is_refused(self, ndim, shape):
+        from uacpy.core._validate import require_real_signal
+        with pytest.raises(ConfigurationError,
+                           match=rf"must be {ndim}-D \(nt\); got shape"):
+            require_real_signal(np.ones(shape), "f", ndim=ndim,
+                                shape_hint=" (nt)")
+
+    def test_a_nan_is_refused_and_a_real_signal_returns_as_float(self):
+        from uacpy.core._validate import require_real_signal
+        with pytest.raises(ConfigurationError, match="NaN or Inf"):
+            require_real_signal(np.array([1.0, np.nan]), "f")
+        out = require_real_signal(np.array([1, 2, 3]), "f")
+        assert out.dtype == float and out.tolist() == [1.0, 2.0, 3.0]
+
+
+class TestTheAxisGuard:
+    """``normalize_axis`` returns the non-negative axis index, on both sides of
+    each end of the array's axes, and refuses a non-integer."""
+
+    @pytest.mark.parametrize('axis, index', [(-3, 0), (-1, 2), (0, 0), (2, 2)])
+    def test_every_axis_of_the_array_is_admitted(self, axis, index):
+        from uacpy.core._validate import normalize_axis
+        assert normalize_axis(np.ones((2, 3, 4)), axis, "f") == index
+
+    @pytest.mark.parametrize('axis', [-4, 3])
+    def test_an_axis_past_either_end_is_refused(self, axis):
+        from uacpy.core._validate import normalize_axis
+        with pytest.raises(ConfigurationError,
+                           match=rf"f: axis={axis} is not an axis of an array "
+                                 r"with shape \(2, 3, 4\)"):
+            normalize_axis(np.ones((2, 3, 4)), axis, "f")
+
+    def test_a_non_integer_axis_is_refused(self):
+        from uacpy.core._validate import normalize_axis
+        with pytest.raises(ConfigurationError,
+                           match="f: axis must be an integer; got 'x'"):
+            normalize_axis(np.ones(3), 'x', "f")
 
 
 class TestAnEmptyAxisIsRefused:
@@ -1261,12 +1447,12 @@ class TestAnEmptyAxisIsRefused:
     """
 
     def test_zero_samples_are_refused_and_one_sample_is_accepted(self):
-        from uacpy.core._carrier_validate import _require_strictly_increasing
+        from uacpy.core._validate import require_strictly_increasing
         with pytest.raises(ConfigurationError,
                            match="at least one value") as exc:
-            _require_strictly_increasing(np.array([]), "X.ranges")
+            require_strictly_increasing(np.array([]), "X.ranges")
         assert "X.ranges" in exc.value.remediation
-        _require_strictly_increasing(np.array([7.0]), "X.ranges")
+        require_strictly_increasing(np.array([7.0]), "X.ranges")
 
     def test_an_ssp_range_axis_of_zero_columns_is_refused(self):
         """Measured entry point: this profile carries no sound speeds at all.
@@ -1274,15 +1460,15 @@ class TestAnEmptyAxisIsRefused:
         ``IndexError`` naming no input the caller passed."""
         with pytest.raises(ConfigurationError, match="at least one value"):
             SoundSpeedProfile(depths=np.array([0.0, 200.0]),
-                              data=np.zeros((2, 0)), ranges=np.array([]))
+                              sound_speed=np.zeros((2, 0)), ranges=np.array([]))
 
     @pytest.mark.parametrize('build', [
         lambda: uacpy.Receiver(depths=[], ranges=[1000.0]),
         lambda: uacpy.Receiver(depths=[10.0], ranges=[]),
         lambda: uacpy.Source(depths=[], frequencies=[100.0]),
-        lambda: SoundSpeedProfile(depths=np.array([]), data=np.array([])),
+        lambda: SoundSpeedProfile(depths=np.array([]), sound_speed=np.array([])),
         lambda: SoundSpeedProfile(depths=np.array([0.0, 200.0]),
-                                  data=np.zeros((2, 0)), ranges=np.array([])),
+                                  sound_speed=np.zeros((2, 0)), ranges=np.array([])),
         lambda: Bottom(columns=[SeabedColumn(
             layers=[], halfspace=BoundaryProperties(
                 acoustic_type='half-space', sound_speed=1600.0,
@@ -1291,19 +1477,20 @@ class TestAnEmptyAxisIsRefused:
         lambda: uacpy.Altimetry(ranges=np.array([]), heights=np.array([])),
     ])
     def test_every_axis_carrier_refuses_an_empty_axis(self, build):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError, match='at least one'):
             build()
 
     def test_the_value_predicates_accept_an_empty_array(self):
         """The asymmetry is deliberate: ``_require_finite`` also guards
         ``Field.coords``, where an axis sliced to nothing is a supported
         state that ``Field.max`` reports in those terms."""
-        from uacpy.core._carrier_validate import (
-            _require_finite, _require_positive, _require_non_negative)
+        from uacpy.core._validate import (
+            require_finite, require_positive, require_non_negative,
+        )
         empty = np.array([])
-        _require_finite(empty, "X")
-        _require_positive(empty, "X")
-        _require_non_negative(empty, "X")
+        require_finite(empty, "X")
+        require_positive(empty, "X")
+        require_non_negative(empty, "X")
         field = uacpy.Field(data=np.zeros((0,), dtype=complex),
                             coords={'range': empty})
         assert field.coords['range'].size == 0
@@ -1314,9 +1501,9 @@ class TestAnEmptyAxisIsRefused:
 def test_coerce_data_sources_none_is_empty_provenance():
     """``data_sources=None`` means no provenance and coerces to ``()``,
     like an empty sequence."""
-    from uacpy.core._carrier_validate import _coerce_data_sources
-    assert _coerce_data_sources(None, "X") == ()
-    assert _coerce_data_sources((), "X") == ()
+    from uacpy.core._provenance import coerce_data_sources
+    assert coerce_data_sources(None, "X") == ()
+    assert coerce_data_sources((), "X") == ()
 
 
 # --- base.py validate_inputs funnel: frequency / depth / surface guards ----
@@ -1332,15 +1519,32 @@ def test_coerce_data_sources_none_is_empty_provenance():
 def _guard_env():
     """Scalar Pekeris env with geoacoustic half-space (RAM's own
     validate_inputs refuses vacuum/rigid/tabulated bottoms)."""
-    return uacpy.Environment(
-        name='guards', bathymetry=100.0, ssp=1500.0,
-        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
-                                        sound_speed=1700.0, density=1.7,
-                                        attenuation=0.5))
+    return make_pekeris(name='guards', density=1.7)
 
 
 def _guard_rcv():
     return uacpy.Receiver(depths=[50.0], ranges=[1000.0])
+
+
+def _guard_env_for(model_cls):
+    """:func:`_guard_env`, with a rough seabed for OASS and OASSP: both
+    refuse a smooth one in their checking stage, since the mean field would
+    write an empty ``.rhs``; and a rigid floor for SPARC, whose checking
+    stage refuses a half-space (its deck carries only vacuum and rigid
+    bottoms)."""
+    # OASS/OASSP arrive as partials carrying their correlation_length.
+    name = getattr(model_cls, 'func', model_cls).__name__
+    if name == 'SPARC':
+        return uacpy.Environment(
+            name='guards-rigid', bathymetry=100.0, ssp=1500.0,
+            bottom=uacpy.BoundaryProperties(acoustic_type='rigid'))
+    if name not in ('OASS', 'OASSP'):
+        return _guard_env()
+    return uacpy.Environment(
+        name='guards-rough', bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                        sound_speed=1700.0, density=1.7,
+                                        attenuation=0.5, roughness=0.5))
 
 
 def _model_mode_params(entries):
@@ -1382,19 +1586,20 @@ def _model_mode_params(entries):
     ('Kraken', uacpy.RunMode.MODES),
     ('Scooter', uacpy.RunMode.COHERENT_TL),
     ('RAM', uacpy.RunMode.COHERENT_TL),
-    ('OAST', uacpy.RunMode.COHERENT_TL),
     ('OASP', uacpy.RunMode.COHERENT_TL),
 ]))
 def test_single_frequency_mode_refuses_multi_frequency_source(model_cls,
                                                               mode):
     """A multi-frequency Source passed to a mode in
-    ``_SINGLE_FREQUENCY_MODES`` raises, pointing at BROADBAND/TIME_SERIES.
+    ``spec.traits.single_frequency_modes`` raises, pointing at BROADBAND/TIME_SERIES.
 
     Not covered here because the base guard genuinely does not apply:
     SPARC (TIME_SERIES only), Bounce (REFLECTION stays out of the set;
     its own run()-level guard is pinned below) and OASR/OASN/OASS/OASSP,
     whose modes (REFLECTION/COVARIANCE/REPLICA/REVERBERATION/BROADBAND)
-    sweep multiple frequencies by design.
+    sweep multiple frequencies by design. OAST is refused by the same rule
+    but phrases it itself (``_multi_frequency_refusal`` names OASP, since
+    it has no BROADBAND mode): ``test_oases.py::TestOastRefusesAFrequencySweep``.
     """
     src = uacpy.Source(depths=10.0, frequencies=[100.0, 200.0])
     with pytest.raises(ConfigurationError, match='single source frequency'):
@@ -1404,7 +1609,7 @@ def test_single_frequency_mode_refuses_multi_frequency_source(model_cls,
 
 @pytest.mark.requires_binary  # constructs Bounce (resolves its binary)
 def test_bounce_run_refuses_multi_frequency_source():
-    """``RunMode.REFLECTION`` stays out of ``_SINGLE_FREQUENCY_MODES`` (OASR
+    """``RunMode.REFLECTION`` stays out of the single-frequency modes (OASR
     does sweep), so Bounce guards multi-frequency itself in ``run()`` — with
     its own message, before any deck is written."""
     from uacpy.models.bounce import Bounce
@@ -1415,13 +1620,14 @@ def test_bounce_run_refuses_multi_frequency_source():
 
 
 @pytest.mark.parametrize('model_cls,mode', _model_mode_params([
-    ('Kraken', uacpy.RunMode.MODES), ('OASN', uacpy.RunMode.COVARIANCE),
+    ('OASN', uacpy.RunMode.COVARIANCE),
     ('OASN', uacpy.RunMode.REPLICA), ('OASR', uacpy.RunMode.REFLECTION),
     ('OASS', uacpy.RunMode.REVERBERATION), ('OASS', uacpy.RunMode.COVARIANCE),
 ]))
 def test_multi_depth_source_refused_in_a_non_field_mode(model_cls, mode):
-    """Mode shapes, reflection tables and array products have no per-source
-    linear sum, so a multi-depth Source in one of these modes raises
+    """Reflection tables and array products have no per-source linear sum
+    (Kraken's mode set needs none), so a multi-depth Source in one of these
+    modes raises
     'single source depth' from ``_validate_geometry`` and names the field
     modes that do stack. Bellhop declares ``multi_source_depth`` and is
     excluded; Bounce's geometry validation is a no-op, so the guard
@@ -1433,6 +1639,115 @@ def test_multi_depth_source_refused_in_a_non_field_mode(model_cls, mode):
                                     run_mode=mode)
 
 
+def test_a_rectangular_grid_over_a_slope_logs_its_buried_cells(capsys):
+    """Seafloor 50 / 100 / 150 m: 80 and 120 m sit below it at 0 m, 120 m
+    at 1 km — three points, but every range keeps a receiver in the water,
+    so the grid is drawn as asked and the count is an info line."""
+    from uacpy.models._checks import check_per_range_receiver_depth
+    env = uacpy.Environment(bathymetry=[(0.0, 50.0), (2000.0, 150.0)],
+                            bottom='sand')
+    receiver = uacpy.Receiver(depths=[40.0, 80.0, 120.0],
+                              ranges=[0.0, 1000.0, 2000.0])
+    with recorded_warnings() as record:
+        check_per_range_receiver_depth('Kraken', env, receiver,
+                                       paired=False, verbose='info')
+    assert record == []
+    assert ('3 receiver point(s) sit below the local seafloor'
+            in capsys.readouterr().out)
+
+
+@pytest.mark.parametrize('shallowest, warns', [(50.0, False), (50.1, True)])
+def test_a_range_with_every_receiver_under_the_seafloor_warns(shallowest,
+                                                              warns):
+    """The 0 m column is buried once its shallowest receiver passes the 50 m
+    seafloor there; the deeper columns keep receivers in the water."""
+    from uacpy.models._checks import check_per_range_receiver_depth
+    env = uacpy.Environment(bathymetry=[(0.0, 50.0), (2000.0, 150.0)],
+                            bottom='sand')
+    receiver = uacpy.Receiver(depths=[shallowest, 120.0],
+                              ranges=[0.0, 1000.0, 2000.0])
+    with recorded_warnings() as record:
+        check_per_range_receiver_depth('Kraken', env, receiver,
+                                       paired=False)
+    messages = [str(w.message) for w in record]
+    if warns:
+        (message,) = messages
+        assert ('1 receiver range(s) lie entirely below the local seafloor, '
+                'the first at range=0.0 m') in message
+    else:
+        assert messages == []
+
+
+@pytest.mark.parametrize('first_depth, warns', [(0.0, False), (0.5, True)])
+def test_a_profile_starting_under_the_surface_is_announced(first_depth,
+                                                           warns):
+    from uacpy.models._checks import warn_on_ssp_start
+    env = uacpy.Environment(bathymetry=100.0, bottom='sand',
+                            ssp=[(first_depth, 1500.0), (100.0, 1490.0)])
+    with recorded_warnings() as record:
+        warn_on_ssp_start('Kraken', env)
+    messages = [str(w.message) for w in record]
+    if warns:
+        (message,) = messages
+        assert 'starts at 0.5 m, not at the sea surface' in message
+        assert '(1500 m/s) is held up to z = 0' in message
+    else:
+        assert messages == []
+
+
+@pytest.mark.parametrize('first_range, warns', [(0.0, False), (0.5, True)])
+def test_a_range_axis_starting_past_the_source_is_announced(first_range,
+                                                            warns):
+    from uacpy.models._checks import warn_on_range_coverage
+    env = uacpy.Environment(
+        bathymetry=[(first_range, 100.0), (5000.0, 200.0)], bottom='sand')
+    receiver = uacpy.Receiver(depths=50.0, ranges=[1000.0, 5000.0])
+    with recorded_warnings() as record:
+        warn_on_range_coverage('Kraken', env, receiver)
+    messages = [str(w.message) for w in record if 'past the source' in
+                str(w.message)]
+    if warns:
+        (message,) = messages
+        assert 'env.bathymetry starts at 0.5 m' in message
+    else:
+        assert messages == []
+
+
+@pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
+@pytest.mark.parametrize('run_mode, refusal', [
+    ('coherent_tl', None),
+    (uacpy.RunMode.COHERENT_TL, None),
+    ('COHERENT_TL', "'COHERENT_TL' is the name of RunMode.COHERENT_TL"),
+    ('cohernt_tl', "run_mode='cohernt_tl' must be a RunMode member or its "
+                   "string value"),
+])
+def test_a_run_mode_string_is_a_value_or_a_configuration_error(run_mode,
+                                                               refusal):
+    from uacpy.models import Kraken
+    args = (_guard_env(), uacpy.Source(depths=25.0, frequencies=100.0),
+            _guard_rcv())
+    if refusal is None:
+        Kraken().validate_inputs(*args, run_mode=run_mode)
+    else:
+        with pytest.raises(ConfigurationError, match=re.escape(refusal)):
+            Kraken().validate_inputs(*args, run_mode=run_mode)
+
+
+@pytest.mark.requires_binary  # runs Kraken
+def test_kraken_modes_returns_one_mode_set_for_a_multi_depth_source():
+    """The mode set does not depend on the source depth: one ``Modes``,
+    not a stack, whose ``source_depths`` lists every depth."""
+    from uacpy.core.results import Modes
+    from uacpy.models import Kraken
+    src = uacpy.Source(depths=[20.0, 60.0], frequencies=200.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        modes = Kraken().run(_guard_env(), src, _guard_rcv(),
+                             run_mode=uacpy.RunMode.MODES)
+    assert type(modes) is Modes
+    np.testing.assert_array_equal(modes.source_depths, [20.0, 60.0])
+
+
 @pytest.mark.parametrize('model_cls,mode', _model_mode_params([
     ('Kraken', None), ('Scooter', None), ('SPARC', None), ('RAM', None),
     ('OAST', None), ('OASP', None), ('OASSP', None),
@@ -1440,20 +1755,26 @@ def test_multi_depth_source_refused_in_a_non_field_mode(model_cls, mode):
 ]))
 def test_multi_depth_source_accepted_in_a_field_mode(model_cls, mode):
     """In a field mode ``run()`` splits the depths into one run each
-    (``PropagationModel._run_per_source_depth``), so validation of the
+    (``_stacking.run_per_source_depth``), so validation of the
     whole Source passes; the refusal above is the other side of the same
     ``_FIELD_MODES`` test."""
     src = uacpy.Source(depths=[10.0, 20.0], frequencies=100.0)
-    model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
-                                run_mode=mode)
+    kw = {}
+    if mode == uacpy.RunMode.TIME_SERIES:
+        # validate_inputs refuses a TIME_SERIES call without its pulse, as
+        # run() does.
+        kw = dict(source_waveform=np.hanning(40), sample_rate=400.0)
+    model_cls().validate_inputs(_guard_env_for(model_cls), src, _guard_rcv(),
+                                run_mode=mode, **kw)
 
 
 def test_bounce_rejects_quad_interp_at_construction():
     """BOUNCE decks carry no water column, so there is no .ssp file for the
-    'quad' scheme to read; the constructor refuses it. The guard precedes
-    binary resolution in ``__init__``, so no binary is needed."""
+    'quad' scheme to read; the constructor refuses it with the same exception
+    type the other AT wrappers raise for 'quad'. The guard precedes binary
+    resolution in ``__init__``, so no binary is needed."""
     from uacpy.models.bounce import Bounce
-    with pytest.raises(ConfigurationError, match="'quad'"):
+    with pytest.raises(UnsupportedFeatureError, match="'quad'"):
         Bounce(interp_ssp='quad')
 
 
@@ -1466,8 +1787,13 @@ def test_quad_interp_refused_before_launch(model_cls, mode):
     reader (``misc/sspMod.f90:61-89``) has no 'Q' code; it is Bellhop-only.
     Kraken's equivalent guard is pinned in test_kraken.py."""
     src = uacpy.Source(depths=10.0, frequencies=100.0)
+    # SPARC refuses a half-space bottom first, so it gets a rigid one.
+    env = (_guard_env() if model_cls.__name__ != 'SPARC'
+           else uacpy.Environment(
+               name='guards-rigid', bathymetry=100.0, ssp=1500.0,
+               bottom=uacpy.BoundaryProperties(acoustic_type='rigid')))
     with pytest.raises(UnsupportedFeatureError, match='Bellhop-only'):
-        model_cls(interp_ssp='quad').run(_guard_env(), src, _guard_rcv())
+        model_cls(interp_ssp='quad').run(env, src, _guard_rcv())
 
 
 @pytest.mark.parametrize('model_cls,mode', _model_mode_params([
@@ -1489,8 +1815,21 @@ def test_surface_source_warns_on_non_bellhop_field_models(model_cls, mode):
     pinned in test_surface_source_warns_for_field_runs above."""
     src = uacpy.Source(depths=0.0, frequencies=100.0)
     with pytest.warns(UserWarning, match='pressure-release sea surface'):
-        model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
-                                    run_mode=mode)
+        if model_cls is RAM:
+            # RAM's validate_inputs resolves its grid too, and a source
+            # above the first depth cell is refused there, as run() does.
+            with pytest.raises(ConfigurationError,
+                               match='shallower than one depth cell'):
+                model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
+                                            run_mode=mode)
+            return
+        # OASS's Block VIII range step divides by NR - 1, so its receiver
+        # needs two ranges (refused in stage 2 otherwise).
+        model = model_cls()
+        rcv = (uacpy.Receiver(depths=[50.0], ranges=[1000.0, 2000.0])
+               if type(model).__name__ == 'OASS' else _guard_rcv())
+        model.validate_inputs(_guard_env_for(model_cls), src, rcv,
+                              run_mode=mode)
 
 
 @pytest.mark.parametrize('model_cls,mode', _model_mode_params([
@@ -1507,31 +1846,50 @@ def test_surface_source_is_silent_for_modes_and_reflection(model_cls, mode):
     Scoped to the surface-source phrase rather than erroring on every
     ``UserWarning``. The blanket form also caught the OASES licence notice,
     which ``PropagationModel`` deduplicates per PROCESS
-    (``_WARNED_MODEL_SOURCES``, ``models/base.py``), so the OASR case passed
+    (``_WARNED_MODEL_PROVENANCE``, ``models/_notices.py``), so the OASR case passed
     only when some earlier test in the same worker had already consumed it —
     green under the full suite, red whenever the selection changed.
     """
     src = uacpy.Source(depths=0.0, frequencies=100.0)
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
+    with recorded_warnings() as rec:
         model_cls().validate_inputs(_guard_env(), src, _guard_rcv(),
                                     run_mode=mode)
     assert [w for w in rec
             if 'pressure-release sea surface' in str(w.message)] == []
 
 
+@pytest.mark.requires_oases
+def test_the_oases_licence_notice_warns_once_per_process(monkeypatch):
+    """The licence notice is a ProvenanceWarning the first time an OASES
+    engine is built in a process, and silent for every later one, OAST or
+    another OASES program alike (one source, ``oases``)."""
+    from uacpy.models import base as models_base
+    from uacpy.models.oases import OASR, OAST
+    monkeypatch.setattr(models_base, '_WARNED_MODEL_PROVENANCE', set())
+
+    def licence_notices(cls):
+        with recorded_warnings() as rec:
+            cls()
+        return [w for w in rec if issubclass(w.category, ProvenanceWarning)
+                and 'OASES' in str(w.message)]
+
+    assert len(licence_notices(OAST)) == 1
+    assert licence_notices(OAST) == []
+    assert licence_notices(OASR) == []
+
+
 # --- receiver grids whose largest range is 0 m ------------------------------
 
 def _field_model_params():
-    """Field-computing wrappers, one ``requires_binary`` param each (their
-    constructors resolve the executable), plus ``requires_oases`` for OAST."""
+    """Field-computing wrappers, one param each with the markers of the
+    installs its registry entry declares (their constructors resolve the
+    executable)."""
     from uacpy.models.kraken import Kraken
     from uacpy.models.oases import OAST
     params = []
     for cls in (Bellhop, Kraken, Scooter, RAM, OAST):
-        marks = [pytest.mark.requires_binary]
-        if cls.__name__ in _OASES_MODEL_NAMES:
-            marks.append(pytest.mark.requires_oases)
+        marks = [getattr(pytest.mark, f'requires_{install}')
+                 for install in engine_entry(cls.__name__).requires]
         params.append(pytest.param(cls, id=cls.__name__, marks=marks))
     return params
 
@@ -1563,8 +1921,7 @@ class TestAReceiverWhoseLargestRangeIsZeroIsRefusedBeforeTheDeck:
             raise AssertionError("a work directory was created before the "
                                  "receiver-range check")
         monkeypatch.setattr(model, '_setup_file_manager', _no_deck)
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             with pytest.raises(ConfigurationError,
                                match=r"largest range is 0 m"):
                 model.run(env, src,
@@ -1584,8 +1941,164 @@ class TestAReceiverWhoseLargestRangeIsZeroIsRefusedBeforeTheDeck:
     @pytest.mark.requires_binary  # constructs Kraken (resolves its binary)
     def test_modes_accepts_an_all_zero_range_grid(self):
         from uacpy.models.kraken import Kraken
-        from uacpy.models.base import RunMode
+        from uacpy.core.run_settings import RunMode
         env, src = self._triple()
         Kraken(verbose=False).validate_inputs(
             env, src, uacpy.Receiver(depths=[50.0], ranges=[0.0]),
             run_mode=RunMode.MODES)
+
+
+# --- Assignment after construction runs the constructor's checks -----------
+
+class TestAssignmentIsValidatedLikeConstruction:
+    """``Environment``, ``Source`` and ``Receiver`` refuse on assignment what
+    they refuse at construction, and normalise what they normalise there; a
+    refused assignment leaves the carrier as it was."""
+
+    def test_environment_refuses_a_kg_per_m3_water_density(self):
+        env = Environment(bathymetry=100.0)
+        with pytest.raises(ConfigurationError, match="kg/m³"):
+            env.water_density = 1027.0
+        assert env.water_density == pytest.approx(1.027)
+
+    def test_environment_stores_an_assigned_density_as_a_float(self):
+        env = Environment(bathymetry=100.0)
+        env.water_density = np.float32(1.03)
+        assert type(env.water_density) is float
+
+    def test_environment_refuses_an_absorption_that_is_not_a_model(self):
+        env = Environment(bathymetry=100.0)
+        with pytest.raises(ConfigurationError, match="must be an Absorption law"):
+            env.absorption = 'thorp'
+        assert env.absorption is None
+
+    def test_source_normalises_assigned_depths_and_frequencies(self):
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        src.depths = [40.0, 60.0]
+        src.frequencies = 200.0
+        assert src.depths.dtype == np.float64
+        np.testing.assert_array_equal(src.frequencies, [200.0])
+        np.testing.assert_array_equal(src.weights, [1.0, 1.0])
+
+    def test_source_refuses_decreasing_depths_and_keeps_its_own(self):
+        src = uacpy.Source(depths=[40.0, 60.0], frequencies=100.0)
+        with pytest.raises(ConfigurationError, match="strictly increasing"):
+            src.depths = [60.0, 40.0]
+        np.testing.assert_array_equal(src.depths, [40.0, 60.0])
+
+    def test_a_uniform_source_weight_follows_new_depths(self):
+        src = uacpy.Source(depths=[40.0, 60.0], frequencies=100.0,
+                           weights=2.0)
+        src.depths = [10.0, 20.0, 30.0]
+        np.testing.assert_array_equal(src.weights, [2.0, 2.0, 2.0])
+
+    def test_distinct_source_weights_refuse_a_new_depth_count(self):
+        src = uacpy.Source(depths=[40.0, 60.0], frequencies=100.0,
+                           weights=[1.0, -1.0])
+        with pytest.raises(ConfigurationError, match="different weights"):
+            src.depths = [10.0, 20.0, 30.0]
+        src.depths = [10.0, 20.0]
+        np.testing.assert_array_equal(src.weights, [1.0, -1.0])
+
+    def test_source_refuses_an_assigned_weight_count_mismatch(self):
+        src = uacpy.Source(depths=[40.0, 60.0], frequencies=100.0)
+        with pytest.raises(ConfigurationError, match="one weight per depth"):
+            src.weights = [1.0, 2.0, 3.0]
+
+    def test_receiver_refuses_a_negative_non_increasing_axis(self):
+        rcv = uacpy.Receiver(depths=[10.0, 20.0], ranges=[100.0, 200.0])
+        with pytest.raises(ConfigurationError, match="non-negative"):
+            rcv.depths = np.array([20.0, 10.0, -5.0])
+        np.testing.assert_array_equal(rcv.depths, [10.0, 20.0])
+        rcv.ranges = 500.0
+        np.testing.assert_array_equal(rcv.ranges, [500.0])
+
+    def test_a_copy_and_a_pickle_keep_validating(self):
+        import pickle
+        src = uacpy.Source(depths=[40.0, 60.0], frequencies=100.0)
+        for other in (src.copy(), pickle.loads(pickle.dumps(src))):
+            with pytest.raises(ConfigurationError,
+                               match='depths must be strictly increasing'):
+                other.depths = [60.0, 40.0]
+            assert sorted(vars(other)) == sorted(vars(src))
+
+
+@pytest.mark.requires_binary
+def test_compute_modes_checks_every_source_depth():
+    """RA-CONTRACT-22: the modes are solved on the first source depth only
+    (they do not depend on it), but every depth is checked as ``run``
+    checks it, so a depth below the domain is refused instead of being
+    dropped silently. Refused before anything is launched."""
+    from uacpy.core.exceptions import InvalidDepthError
+    from uacpy.models.kraken import Kraken
+    env = uacpy.Environment(
+        bathymetry=100.0, ssp=1500.0,
+        bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
+                                        sound_speed=1700.0, density=1.8,
+                                        attenuation=0.5))
+    model = Kraken()
+
+    def _no_launch(*a, **k):
+        raise AssertionError('launched')
+    model._run_subprocess = _no_launch
+    with pytest.raises(InvalidDepthError, match='exceeds resolvable depth'):
+        model.compute_modes(env, uacpy.Source(depths=[50.0, 5000.0],
+                                              frequencies=100.0))
+
+
+class TestOneUniformStepDecider:
+    """``steps_are_uniform`` decides "are these axis steps equal" for both
+    transforms that ask it (``Field.to_transfer_function``'s time axis and
+    ``uniform_frequency_step``'s frequency axis), at ``UNIFORM_STEP_RTOL``.
+    The axes the package writes pass; an axis with a real step error is
+    refused."""
+
+    #: float64 ``arange`` time axis, 2**23 samples at 96 kHz: step jitter
+    #: 1.16e-9 relative, which a 1e-9 tolerance refused.
+    LONG_TIME = np.arange(2 ** 23) / 96000.0
+    #: 3000 bins of 1/3 Hz from 10 Hz, printed ``%.12g`` as an AT deck writes
+    #: them and read back: step jitter 2.0e-8 relative.
+    DECK_FREQS = np.array([float('%.12g' % (10.0 + i / 3.0))
+                           for i in range(3000)])
+
+    @staticmethod
+    def _jitter(axis):
+        steps = np.diff(axis)
+        return float(np.max(np.abs(steps - steps.mean())) / steps.mean())
+
+    def test_the_constant(self):
+        from uacpy.core._validate import UNIFORM_STEP_RTOL
+        assert UNIFORM_STEP_RTOL == 1e-6
+
+    def test_the_measured_axes_carry_the_jitter_they_were_measured_at(self):
+        assert self._jitter(self.LONG_TIME) > 1e-9
+        assert self._jitter(self.DECK_FREQS) > 1e-8
+
+    def test_a_long_float64_time_axis_transforms(self):
+        from uacpy.core.results import Field
+        trace = Field(data=np.zeros(self.LONG_TIME.size),
+                      coords={'time': self.LONG_TIME},
+                      frequencies=1000.0, kind='pressure')
+        H = trace.to_transfer_function()
+        assert 'frequency' in H.coords
+
+    def test_a_deck_printed_frequency_axis_has_one_step(self):
+        from uacpy.acoustic_signal.channel import uniform_frequency_step
+        assert uniform_frequency_step(self.DECK_FREQS) == pytest.approx(
+            1.0 / 3.0, rel=1e-6)
+
+    def test_a_time_axis_with_a_real_step_error_is_refused(self):
+        t = np.arange(64) / 1000.0
+        t[40:] += 1e-4 / 1000.0          # one step 1e-4 too long
+        from uacpy.core.results import Field
+        trace = Field(data=np.zeros(t.size), coords={'time': t},
+                      frequencies=100.0, kind='pressure')
+        with pytest.raises(ConfigurationError, match='not uniformly spaced'):
+            trace.to_transfer_function()
+
+    def test_a_frequency_axis_with_a_real_step_error_is_refused(self):
+        from uacpy.acoustic_signal.channel import uniform_frequency_step
+        f = np.arange(64) * 0.5 + 10.0
+        f[40:] += 1e-4 * 0.5
+        with pytest.raises(ConfigurationError, match='uniformly spaced'):
+            uniform_frequency_step(f)

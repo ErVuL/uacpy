@@ -19,10 +19,28 @@ import numpy as np
 import uacpy
 from uacpy.models import Bellhop
 from uacpy import Field
-from uacpy.core.results import Rays, Arrivals, ResultStack
-from uacpy.models.base import RunMode
-from uacpy.models.bellhop import (_RAY_VALIDITY_D_OVER_LAMBDA,
-                                  _WARNED_RAY_VALIDITY)
+from uacpy.core.results import Rays, Arrivals, Result, ResultStack
+from uacpy.core.run_settings import RunMode
+from uacpy.models.bellhop._backend import (
+    arrivals_need_merge, build_command, warn_on_engine_stdout_warnings,
+)
+from uacpy.models.bellhop._output import warn_if_arrival_table_filled
+from uacpy.models.bellhop._plan import (
+    _RAY_VALIDITY_D_OVER_LAMBDA, eigenray_beam_count, fan_miss_notice,
+    ray_validity_notice, resolve_ray_step,
+)
+from uacpy.acoustic_signal import arrival_grid_transfer_function
+from uacpy.models.bellhop._synthesis import warn_if_attenuation_extrapolates
+from uacpy.tests.conftest import make_pekeris
+from uacpy.tests.conftest import warning_messages
+from uacpy.tests.conftest import recorded_warnings
+
+
+def _cell_tf(cell, frequencies, **kwargs):
+    """``H(f)`` of one Bellhop arrival cell
+    (:func:`~uacpy.acoustic_signal.arrival_grid_transfer_function`)."""
+    return arrival_grid_transfer_function(frequencies, [[cell]],
+                                          **kwargs)[0, 0]
 from uacpy.core import (
     Environment, Source, Receiver, BoundaryProperties,
 )
@@ -59,12 +77,36 @@ def _run_type_record(lines):
     return hits[0]
 
 
-def _messages(fn, needle):
-    """Run ``fn`` and return the warning messages containing ``needle``."""
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
-        fn()
-    return [str(w.message) for w in rec if needle in str(w.message)]
+def _say(notice):
+    """Announce a stage-3 notice (``None``: nothing) as ``run`` does: one
+    ``UserWarning``."""
+    if notice is not None:
+        warnings.warn(notice, UserWarning)
+
+
+def _say_fan_miss(model, source, receiver):
+    """Announce ``model``'s launch-fan notice for ``source``/``receiver``."""
+    _say(fan_miss_notice(source, receiver, launch_angles=model.launch_angles,
+                         grid_type=model.grid_type,
+                         model_name=model.model_name))
+
+
+def _merge(model):
+    """Whether ``model`` reads its ``.arr`` with the pair-merge."""
+    return arrivals_need_merge(backend=model._resolved_backend, exe=model._exe,
+                               model_name=model.model_name)
+
+
+def _command(model, base_name, **kw):
+    """The argv ``model`` launches the deck ``base_name`` with."""
+    return build_command(model._exe, base_name, backend=model._resolved_backend,
+                         dimensionality=model.dimensionality, **kw)
+
+
+def _scan_stdout(model, stdout):
+    """``model``'s scan of an engine's stdout for the ports' diagnoses."""
+    warn_on_engine_stdout_warnings(stdout, model_name=model.model_name,
+                                   backend=model._resolved_backend)
 
 
 class TestBellhopRunModes:
@@ -135,13 +177,10 @@ class TestBellhopRunModes:
         assert isinstance(result, Field)
         assert result.shape == (len(setup_receiver.depths), len(setup_receiver.ranges))
         assert np.all(np.isfinite(result.data))
-        # AT parks the incoherent magnitude sum in the complex .shd slot, so
-        # the payload stays complex with an identically zero imaginary part
-        # (docs/guide/results.md §9 "An incoherent field has no phase",
-        # DOCUMENTATION.md §7 "its phase an artefact of AT's storage") — the
-        # phase carries no information and .dB is the cross-engine surface.
-        assert np.iscomplexobj(result.data)
-        assert np.all(np.imag(result.data) == 0.0)
+        # An incoherent magnitude sum has no phase, so it is stored as real
+        # dB TL, as Kraken and Scooter store the same run mode.
+        assert not np.iscomplexobj(result.data)
+        assert result.unit == 'dB'
 
     @pytest.mark.requires_binary
     def test_bellhop_semicoherent_tl(self, setup_env, setup_source, setup_receiver):
@@ -235,7 +274,7 @@ class TestBellhopRunModes:
 
     @pytest.mark.requires_binary
     def test_rays_filter_helpers_preserve_is_eigen(self, setup_env, setup_source, setup_receiver):
-        """Rays.filter / filter_by_bounces / filter_by_launch_angle preserve is_eigen."""
+        """Rays.filter / filter_by_bounces / window preserve is_eigen."""
         bellhop = Bellhop(verbose=False)
         rays = bellhop.run(
             env=setup_env, source=setup_source, receiver=setup_receiver,
@@ -247,9 +286,9 @@ class TestBellhopRunModes:
         assert custom.is_eigen is False
         assert len(custom.rays) == len(rays.rays)
 
-        sub = rays.filter_by_launch_angle(min_deg=-5.0, max_deg=5.0)
+        sub = rays.window(launch_angle_deg=(-5.0, 5.0))
         assert sub.is_eigen is False
-        assert all(-5.0 <= r['alpha'] <= 5.0 for r in sub.rays)
+        assert all(-5.0 <= r['launch_angle'] <= 5.0 for r in sub.rays)
 
         direct = rays.filter_by_bounces(kind='direct')
         assert direct.is_eigen is False
@@ -269,7 +308,8 @@ class TestBellhopRunModes:
         few_top = rays.filter_by_bounces(top=(0, 1))
         assert all(0 <= r.get('n_top_bounces', 0) <= 1 for r in few_top.rays)
 
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match="bounce filter: kind='bogus' not in"):
             rays.filter_by_bounces(kind='bogus')
 
     @pytest.mark.requires_binary
@@ -336,7 +376,7 @@ class TestBellhopRunModes:
         assert 'frequency' in result.coords
         assert np.iscomplexobj(result.data)
         # A multi-element source IS the band, verbatim — no expansion, no
-        # resampling (base.py _resolve_broadband_frequencies): 3 depths x
+        # resampling (models/_band.py broadband_band): 3 depths x
         # 3 ranges x exactly the 3 requested bins.
         assert result.data.shape == (3, 3, 3)
         np.testing.assert_array_equal(
@@ -349,26 +389,35 @@ class TestBroadbandAttenuationWarningNamesTheTracedCarrier:
     ray trace actually ran at — the source-derived fc — not the resolved
     band's midpoint: an explicit off-centre ``frequencies=`` band moves the
     midpoint away from the traced carrier, and a bound anchored there
-    understates the true band-edge error."""
+    understates the true error. Only a Biological law is scaled linearly
+    (the separable laws scale exactly), so the layer carries the check."""
 
     def test_off_centre_explicit_band_reports_the_traced_fc_bound(self):
-        from uacpy.core.absorption import Thorp
+        from uacpy.core.absorption import (
+            Biological, band_absorption_error_dB_per_km)
+        bio = Biological(layers=[(20.0, 80.0, 16000.0, 4.0, 0.05)])
         env = Environment(
-            name='thorp', bathymetry=100.0, ssp=1500.0, absorption=Thorp(),
+            name='bio', bathymetry=100.0, ssp=1500.0, absorption=bio,
             bottom=BoundaryProperties(acoustic_type='half-space',
                                       sound_speed=1700.0, density=1.8,
                                       attenuation=0.5))
         source = Source(depths=50.0, frequencies=10000.0)
         receiver = Receiver(depths=[50.0], ranges=[200.0])
-        # Traced carrier 10 kHz; band midpoint 12 kHz. Anchored at the
-        # midpoint the Thorp bound reads 0.577 dB/km; at the traced
-        # carrier it is 0.872 dB/km.
+        band = np.array([8000.0, 16000.0])
+        depths = np.linspace(0.0, 100.0, 65)
+        traced = band_absorption_error_dB_per_km(bio, band, 10000.0,
+                                                 depths=depths)
+        midpoint = band_absorption_error_dB_per_km(bio, band, 12000.0,
+                                                   depths=depths)
+        # Traced carrier 10 kHz: 0.768 dB/km; the 12 kHz midpoint would read
+        # 0.700.
+        assert f"{traced:.3g}" == '0.768' and f"{midpoint:.3g}" == '0.7'
         with pytest.warns(UserWarning,
                           match=r'traced once at 1e\+04 Hz'
-                                r'(?s:.*)0\.872 dB/km'):
+                                r'(?s:.*)0\.768 dB/km'):
             Bellhop(verbose=False).run(
                 env, source, receiver, run_mode=RunMode.BROADBAND,
-                frequencies=np.array([8000.0, 16000.0]))
+                frequencies=band)
 
 
 class TestRunWithBounceConstructorPlumbing:
@@ -377,22 +426,21 @@ class TestRunWithBounceConstructorPlumbing:
 
     def test_bounce_sees_env_absorption(self, monkeypatch):
         """env.absorption (Francois-Garrison) flows through Bellhop's
-        auto-BOUNCE call into the Bounce subprocess."""
+        BOUNCE route into the deck the Bounce launch writes, with the knobs
+        the call passed."""
         from uacpy.models import bounce as bounce_mod
         from uacpy.core.absorption import FrancoisGarrison
 
         captured = {}
 
-        def spy_run(self_, env, source, receiver, **kwargs):
-            captured['absorption'] = env.absorption
-            captured.update(kwargs)
+        def spy_write(self_, inputs):
+            captured['absorption'] = inputs.env.absorption
+            captured['knobs'] = (self_.c_low, self_.c_high, self_.rmax_m)
             raise RuntimeError("stop after Bounce.run capture")
 
-        monkeypatch.setattr(bounce_mod.Bounce, 'run', spy_run)
+        monkeypatch.setattr(bounce_mod.Bounce, '_write_input', spy_write)
 
-        fg = FrancoisGarrison(
-            temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=1000.0,
-        )
+        fg = FrancoisGarrison(temperature=10.0, salinity=35.0, pH=8.0)
         bellhop = Bellhop(verbose=False)
         env = Environment(
             name='b', bathymetry=100.0, ssp=1500.0, absorption=fg,
@@ -402,23 +450,30 @@ class TestRunWithBounceConstructorPlumbing:
         with pytest.raises(RuntimeError, match='stop after Bounce.run capture'):
             bellhop.run_with_bounce(
                 env=env, source=source, receiver=receiver,
-                c_low=1450.0, c_high=20000.0, rmax=42000.0,
+                c_low=1450.0, c_high=20000.0, rmax_m=42000.0,
             )
         assert isinstance(captured.get('absorption'), FrancoisGarrison)
-        assert captured['absorption'].temperature_c == 10.0
-        assert captured['absorption'].salinity_psu == 35.0
+        assert captured['absorption'].temperature == 10.0
+        assert captured['absorption'].salinity == 35.0
+        assert captured['knobs'] == (1450.0, 20000.0, 42000.0)
+
+
+def test_run_with_bounce_takes_rmax_m_not_rmax():
+    import inspect
+    params = inspect.signature(Bellhop.run_with_bounce).parameters
+    assert 'rmax_m' in params and 'rmax' not in params
 
 
 class TestFrancoisGarrisonValidation:
     """FrancoisGarrison validates its own params at construction."""
 
-    def test_francois_garrison_constructs(self):
+    def test_francois_garrison_goes_into_the_ssp_rows(self):
         from uacpy.core.absorption import FrancoisGarrison
-        fg = FrancoisGarrison(
-            temperature_c=10.0, salinity_psu=35.0, pH=8.0, z_bar_m=1000.0,
-        )
-        assert fg.topopt_code() == 'F'
-        assert fg.as_at_tuple() == (10.0, 35.0, 8.0, 1000.0)
+        fg = FrancoisGarrison(temperature=10.0, salinity=35.0, pH=8.0)
+        from uacpy.io.at_codes import (
+            volume_attenuation_code, writes_alpha_per_ssp_row)
+        assert volume_attenuation_code(fg) == ' '
+        assert writes_alpha_per_ssp_row(fg)
 
 
 class TestBellhopRangeDependentSSP:
@@ -605,7 +660,7 @@ class TestBellhopMultiSourceDepth:
         env = Environment(name='multi-rays', bathymetry=100.0, ssp=1500.0)
         receiver = Receiver(depths=np.array([30.0, 60.0]),
                             ranges=np.array([200.0, 1000.0]))
-        bh = Bellhop(verbose=False, n_beams=20, alpha=(-30, 30))
+        bh = Bellhop(verbose=False, n_beams=20, launch_angles=(-30, 30))
         stack = bh.run(
             env, Source(depths=[20.0, 50.0, 80.0], frequencies=100.0),
             receiver, run_mode=RunMode.RAYS,
@@ -628,7 +683,7 @@ class TestBellhopMultiSourceDepth:
         env = Environment(name='multi-arr', bathymetry=100.0, ssp=1500.0)
         receiver = Receiver(depths=np.array([30.0, 60.0]),
                             ranges=np.array([500.0, 1000.0]))
-        bh = Bellhop(verbose=False, n_beams=20, alpha=(-30, 30))
+        bh = Bellhop(verbose=False, n_beams=20, launch_angles=(-30, 30))
         stack = bh.run(
             env, Source(depths=[20.0, 50.0, 80.0], frequencies=100.0),
             receiver, run_mode=RunMode.ARRIVALS,
@@ -654,7 +709,7 @@ class TestBellhopMultiSourceDepth:
         from uacpy.core.results import Rays, ResultStack
         env = Environment(name='multi-eig', bathymetry=100.0, ssp=1500.0)
         receiver = Receiver(depths=50.0, ranges=1000.0)
-        bh = Bellhop(verbose=False, n_beams=20, alpha=(-30, 30))
+        bh = Bellhop(verbose=False, n_beams=20, launch_angles=(-30, 30))
         stack = bh.run(
             env, Source(depths=[20.0, 50.0, 80.0], frequencies=100.0),
             receiver, run_mode=RunMode.EIGENRAYS,
@@ -668,10 +723,23 @@ class TestBellhopMultiSourceDepth:
             assert slab.is_eigen is True
 
 
-def test_bellhop_backend_fallback_warns(monkeypatch):
-    """An explicitly requested backend that isn't built must fall back to the
-    Fortran binary with a ``UserWarning`` (not a hard error). Verified by
-    hiding the cxx/cuda variants so only ``bellhop`` resolves."""
+def test_the_time_series_record_is_placed_by_run_alone():
+    """``output_duration`` and ``t_start`` place the TIME_SERIES record per
+    call, as on every engine; the constructor takes neither."""
+    import inspect
+    ctor = inspect.signature(Bellhop.__init__).parameters
+    run = inspect.signature(Bellhop.run).parameters
+    assert {'output_duration', 't_start'} <= set(run)
+    assert not {'time_window', 't_start'} & set(ctor)
+
+
+@pytest.mark.parametrize('backend', ['cuda', 'cxx'])
+def test_an_explicit_bellhop_backend_without_its_binary_raises(monkeypatch,
+                                                               backend):
+    """An explicitly requested backend that isn't built raises, naming the
+    ``install.sh`` flag that builds it; no other engine runs in its place.
+    The cxx/cuda variants are hidden so only ``bellhop`` resolves, and the
+    automatic pick on the same install resolves to that Fortran binary."""
     from uacpy.core.exceptions import ExecutableNotFoundError
     fortran = Bellhop(backend='fortran', verbose=False)._exe   # real bellhop path
 
@@ -682,10 +750,12 @@ def test_bellhop_backend_fallback_warns(monkeypatch):
         raise ExecutableNotFoundError('Bellhop', repr(names))
 
     monkeypatch.setattr(Bellhop, '_find_executable_in_paths', fake_find)
-    with pytest.warns(UserWarning, match='falling back'):
-        bh = Bellhop(backend='cuda', verbose=False)
-    assert bh.version == 'fortran'
-    assert bh.backend == 'cuda'                # requested value retained for copy()
+    with pytest.raises(ExecutableNotFoundError,
+                       match=rf'install\.sh --bellhop {backend}'):
+        Bellhop(backend=backend, verbose=False)
+    auto = Bellhop(verbose=False)
+    assert auto._resolved_backend == 'fortran'
+    assert auto.backend is None
 
 
 def test_bellhop_compute_arrivals_and_transfer_function():
@@ -715,11 +785,13 @@ class TestConstructorValidation:
     def test_dimensionality_3d_raises(self):
         # '3D' would emit --3D against a 2D-only env file (silent 2D on
         # Fortran, abort on cxx/cuda).
-        with pytest.raises(UnsupportedFeatureError):
+        with pytest.raises(UnsupportedFeatureError,
+                           match="does not support: dimensionality='3D'"):
             Bellhop(dimensionality='3D')
 
     def test_dimensionality_arbitrary_raises(self):
-        with pytest.raises(UnsupportedFeatureError):
+        with pytest.raises(UnsupportedFeatureError,
+                           match="does not support: dimensionality='foo'"):
             Bellhop(dimensionality='foo')
 
     def test_dimensionality_2d_ok(self):
@@ -727,7 +799,8 @@ class TestConstructorValidation:
 
     def test_invalid_beam_type_raises(self):
         # Unknown letters silently map to geometric-hat in the Fortran reader.
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match="is not a known beam type"):
             Bellhop(beam_type='Q')
 
     @pytest.mark.parametrize('bt', ['B', 'R', 'C', 'g', 'G', 'S'])
@@ -735,16 +808,19 @@ class TestConstructorValidation:
         assert Bellhop(beam_type=bt).beam_type == bt
 
     def test_invalid_grid_type_raises(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match=r"grid_type='Q'\) is not valid"):
             Bellhop(grid_type='Q')
 
-    def test_alpha_wrong_length_raises(self):
-        with pytest.raises(ConfigurationError):
-            Bellhop(alpha=(-80, 0, 80))
+    def test_launch_angles_wrong_length_raises(self):
+        with pytest.raises(ConfigurationError,
+                           match="must be a 2-element sequence"):
+            Bellhop(launch_angles=(-80, 0, 80))
 
-    def test_alpha_scalar_raises(self):
-        with pytest.raises(ConfigurationError):
-            Bellhop(alpha=80)
+    def test_launch_angles_scalar_raises(self):
+        with pytest.raises(ConfigurationError,
+                           match="must be a 2-element sequence"):
+            Bellhop(launch_angles=80)
 
 
 class TestBellhopSourceGeometry:
@@ -755,11 +831,14 @@ class TestBellhopSourceGeometry:
         return Environment(bathymetry=200.0, ssp=1500.0)
 
     def test_constructor_rejects_source_type(self):
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError,
+                           match="unexpected keyword argument 'source_type'"):
             Bellhop(source_type='R')
 
     def test_constructor_rejects_beam_pattern_file(self):
-        with pytest.raises(TypeError):
+        with pytest.raises(
+                TypeError,
+                match="unexpected keyword argument 'source_beam_pattern_file'"):
             Bellhop(source_beam_pattern_file=None)
 
     def test_line_source_differs_from_point_source(self):
@@ -889,7 +968,8 @@ class TestAutoBounceWithBeamPattern:
 
     def test_layered_bottom_auto_route_accepts_beam_pattern(self):
         from uacpy.core import BoundaryProperties
-        from uacpy.core.bottom import Bottom, SeabedColumn, SedimentLayer
+        from uacpy.core.boundary import SedimentLayer
+        from uacpy.core.bottom import Bottom, SeabedColumn
         env = Environment(
             name='layered', bathymetry=100.0, ssp=1500.0,
             bottom=Bottom(columns=[SeabedColumn(
@@ -905,7 +985,7 @@ class TestAutoBounceWithBeamPattern:
                                             [180.0, -20.0]]))
         rcv = Receiver(depths=np.array([50.0]), ranges=np.array([1000.0]))
         result = Bellhop(verbose=False).run(env, src, rcv)
-        assert 'bounce_result' in result.metadata
+        assert 'bounce' in result.components
 
     def test_bounce_accepts_beam_pattern_source_directly(self):
         """The guard lives in ``_validate_geometry``, which Bounce no-ops —
@@ -967,8 +1047,8 @@ class TestEchoesLandAtTheDelayTheyWereGiven:
                     delays_imag=np.array([0.0]),
                     n_top_bounces=np.array([0]),
                     n_bot_bounces=np.array([0]),
-                    src_angles=np.array([0.0]),
-                    rcv_angles=np.array([0.0]))
+                    source_angles=np.array([0.0]),
+                    receiver_angles=np.array([0.0]))
 
     @staticmethod
     def _waveform(fs, fc, n=256):
@@ -976,7 +1056,7 @@ class TestEchoesLandAtTheDelayTheyWereGiven:
         return np.hanning(n) * np.sin(2 * np.pi * fc * k / fs)
 
     def _trace(self, delay, **kw):
-        from uacpy.models.bellhop import delayandsum
+        from uacpy.acoustic_signal import delayandsum
         rts, _ = delayandsum(
             rcv_arrivals=self._cell(delay),
             source_timeseries=self._waveform(self.FS, self.FC),
@@ -1049,29 +1129,40 @@ class TestVolumeAttenuationFromImaginaryDelay:
                     delays_imag=np.array([self.TAU_I]),
                     n_top_bounces=np.array([0]),
                     n_bot_bounces=np.array([0]),
-                    src_angles=np.array([0.0]),
-                    rcv_angles=np.array([0.0]))
+                    source_angles=np.array([0.0]),
+                    receiver_angles=np.array([0.0]))
 
     def test_transfer_function_applies_it(self):
-        H = Bellhop(verbose=False)._arrivals_to_tf(
-            self._cell(), np.array([self.FC]))
+        H = _cell_tf(self._cell(), np.array([self.FC]))
         expected = np.exp(2 * np.pi * self.FC * self.TAU_I)
         assert np.abs(np.asarray(H).ravel()[0]) == pytest.approx(expected,
                                                                  rel=1e-9)
         assert 20 * np.log10(expected) < -19.0
 
-    def test_delay_and_sum_applies_it(self):
-        from uacpy.models.bellhop import delayandsum
+    def test_delay_and_sum_applies_it_at_every_frequency(self):
+        """Each frequency of the pulse is absorbed by its own
+        ``exp(2 pi f Im tau)`` (linear in f with no law given), not by the
+        one factor at fc: the 16 and 24 kHz components of a 20 kHz pulse
+        lose 16 and 24 dB, as the transfer function says."""
+        from uacpy.acoustic_signal import delayandsum
         fs = 200000.0
-        wf = np.sin(2 * np.pi * self.FC * np.arange(64) / fs)
+        n = 2000
+        t = np.arange(n) / fs
+        # A 10-30 kHz chirp, so every checked frequency carries energy.
+        wf = np.hanning(n) * np.sin(
+            2 * np.pi * (10000.0 * t + 0.5 * (20000.0 / t[-1]) * t ** 2))
         loud, _ = delayandsum(rcv_arrivals=self._cell(), source_timeseries=wf,
                               sample_rate=fs, fc=self.FC)
         lossless = dict(self._cell(), delays_imag=np.array([0.0]))
         ref, _ = delayandsum(rcv_arrivals=lossless, source_timeseries=wf,
                              sample_rate=fs, fc=self.FC)
-        ratio = np.max(np.abs(loud)) / np.max(np.abs(ref))
-        assert ratio == pytest.approx(np.exp(2 * np.pi * self.FC * self.TAU_I),
-                                      rel=1e-6)
+        f = np.fft.rfftfreq(loud.size, 1.0 / fs)
+        ratio = np.abs(np.fft.rfft(loud)) / np.abs(np.fft.rfft(ref))
+        for fk in (16000.0, 20000.0, 24000.0):
+            k = int(np.argmin(np.abs(f - fk)))
+            assert 20 * np.log10(ratio[k]) == pytest.approx(
+                20 * np.log10(np.exp(2 * np.pi * f[k] * self.TAU_I)),
+                abs=0.05)
 
 
 class TestEnvRecordOrder:
@@ -1084,7 +1175,7 @@ class TestEnvRecordOrder:
     """
 
     @staticmethod
-    def _ice_env():
+    def _ice_env(absorption=None):
         from uacpy.core.absorption import FrancoisGarrison
         from uacpy.core.environment import BoundaryProperties
         return Environment(
@@ -1092,23 +1183,39 @@ class TestEnvRecordOrder:
             surface=BoundaryProperties(
                 acoustic_type='half-space', sound_speed=3500.0, density=0.9,
                 attenuation=0.1, shear_speed=1800.0, shear_attenuation=0.2),
-            absorption=FrancoisGarrison(temperature_c=4.0, salinity_psu=34.0,
-                                        pH=8.0, z_bar_m=50.0),
+            absorption=(FrancoisGarrison(temperature=4.0, salinity=34.0,
+                                         pH=8.0)
+                        if absorption is None else absorption),
         )
 
-    def test_absorption_block_precedes_top_halfspace(self, tmp_path):
+    def _order_lines(self, tmp_path, env):
         from uacpy.io.bellhop_writer import write_bellhop_env_file
         path = tmp_path / 'order.env'
         write_bellhop_env_file(
-            path, self._ice_env(), Source(depths=25.0, frequencies=100.0),
+            path, env, Source(depths=25.0, frequencies=100.0),
             Receiver(depths=np.array([50.0]),
                      ranges=np.linspace(100.0, 5000.0, 10)))
         lines = path.read_text().splitlines()
-        topopt = next(i for i, ln in enumerate(lines) if ln.startswith("'CAWF"))
-        # F-G record (T S pH z_bar) first, then the elastic half-space row.
-        assert lines[topopt + 1].split() == ['4.0000', '34.0000', '8.0000',
-                                             '50.0000']
-        assert lines[topopt + 2].split()[:3] == ['0.00', '3500.000000',
+        return lines, next(i for i, ln in enumerate(lines)
+                           if ln.startswith("'CAW"))
+
+    def test_absorption_block_precedes_top_halfspace(self, tmp_path):
+        from uacpy.core.absorption import Biological
+        lines, topopt = self._order_lines(tmp_path, self._ice_env(
+            Biological(layers=[(10.0, 20.0, 400.0, 5.0, 0.1)])))
+        assert lines[topopt][4] == 'B'
+        # The bio-layer count and row first, then the elastic half-space row.
+        assert lines[topopt + 1].strip() == '1'
+        assert [float(v) for v in lines[topopt + 2].split()] == [
+            10.0, 20.0, 400.0, 5.0, 0.1]
+        assert lines[topopt + 3].split()[:3] == ['0.00', '3500.000000',
+                                                 '1800.000000']
+
+    def test_francois_garrison_writes_no_row_before_the_halfspace(
+            self, tmp_path):
+        lines, topopt = self._order_lines(tmp_path, self._ice_env())
+        assert lines[topopt][4] == ' '
+        assert lines[topopt + 1].split()[:3] == ['0.00', '3500.000000',
                                                  '1800.000000']
 
     @pytest.mark.requires_binary
@@ -1142,7 +1249,7 @@ class TestQuadSSPMatrixAlignment:
         data = np.column_stack([cls.C, cls.C + 1.0, cls.C + 2.0])
         return Environment(
             name='quad-align', bathymetry=cls.DEPTH,
-            ssp=SoundSpeedProfile(depths=cls.Z, data=data,
+            ssp=SoundSpeedProfile(depths=cls.Z, sound_speed=data,
                                   ranges=np.array([0.0, 10000.0, 20000.0])))
 
     @staticmethod
@@ -1276,8 +1383,10 @@ class TestRayCenteredGaussianRejected:
             path, Environment(bathymetry=100.0, ssp=1500.0),
             Source(depths=25.0, frequencies=100.0),
             Receiver(depths=np.array([50.0]),
-                     ranges=np.linspace(100.0, 2000.0, 5)))
-        path.write_text(path.read_text().replace("'CB ", "'Cb "))
+                     ranges=np.linspace(100.0, 2000.0, 5)), beam_type='B')
+        deck = path.read_text()
+        assert deck.count("'CB ") == 1, deck
+        path.write_text(deck.replace("'CB ", "'Cb "))
         subprocess.run([str(Bellhop(backend='fortran', verbose=False)._exe),
                         'raycen'], cwd=tmp_path, capture_output=True,
                        text=True, timeout=300)
@@ -1334,14 +1443,13 @@ class TestLineSourceArrivalsPhase:
                     delays_imag=np.array([0.0, 0.0]),
                     n_top_bounces=np.array([0, 1]),
                     n_bot_bounces=np.array([0, 0]),
-                    src_angles=np.array([0.0, 5.0]),
-                    rcv_angles=np.array([0.0, 5.0]))
+                    source_angles=np.array([0.0, 5.0]),
+                    receiver_angles=np.array([0.0, 5.0]))
 
     def test_transfer_function_phase_offset(self):
         f = np.linspace(90.0, 110.0, 8)
-        base = Bellhop(verbose=False)._arrivals_to_tf(self._cell(), f)
-        shifted = Bellhop(verbose=False)._arrivals_to_tf(
-            self._cell(), f, phase_offset=-np.pi / 4.0)
+        base = _cell_tf(self._cell(), f)
+        shifted = _cell_tf(self._cell(), f, phase_offset=-np.pi / 4.0)
         np.testing.assert_allclose(shifted, base * np.exp(-1j * np.pi / 4.0),
                                    rtol=1e-12, atol=1e-12)
 
@@ -1392,7 +1500,7 @@ class TestIrregularGridBroadband:
             rcv, RunMode.BROADBAND)
         assert list(result.coords) == ['range', 'frequency']
         assert result.data.shape == (3, 3)
-        assert np.asarray(result.metadata['receiver_depths']) == pytest.approx(
+        assert np.asarray(result.aux_coords['receiver_depth'][1]) == pytest.approx(
             np.asarray(rcv.depths))
 
     def test_rectilinear_broadband_keeps_its_depth_axis(self):
@@ -1468,7 +1576,7 @@ class TestBeamPatternMustSpanTheLaunchFan:
                        ranges=[50.0, 100.0, 200.0, 400.0, 800.0, 1600.0])
         src = Source(depths=25.0, frequencies=200.0,
                      beam_pattern=self._lobe(span_deg))
-        return Bellhop(beam_type='G', n_beams=501, alpha=fan,
+        return Bellhop(beam_type='G', n_beams=501, launch_angles=fan,
                        backend='fortran').compute_tl(self._env(), src, rcv)
 
     def test_a_pattern_narrower_than_the_fan_is_refused(self):
@@ -1476,8 +1584,8 @@ class TestBeamPatternMustSpanTheLaunchFan:
             self._run(30.0, (-80.0, 80.0))
 
     def test_the_default_fan_is_what_makes_this_reachable(self):
-        """``alpha`` defaults to ±80°, so an ordinary narrow lobe trips it."""
-        assert Bellhop().alpha == (-80, 80)
+        """``launch_angles`` defaults to ±80°, so an ordinary narrow lobe trips it."""
+        assert Bellhop().launch_angles == (-80, 80)
 
     @pytest.mark.requires_binary
     def test_a_pattern_covering_the_fan_runs_and_is_finite(self):
@@ -1536,10 +1644,12 @@ class TestBeamTypeCapabilities:
             env, src, rcv, RunMode.RAYS)
         assert isinstance(result, Rays)
 
-    @pytest.mark.parametrize('beam_type', ['G', 'B', 'g', 'C', 'R'])
+    @pytest.mark.parametrize('beam_type', ['G', 'B', 'g'])
     def test_incoherent_runs_where_the_branch_exists(self, beam_type):
-        """Both Cerveny routines do implement ``CASE ( 'I', 'S' )``
-        (``influence.f90:137-140`` and :279-283), so only ``'S'`` is gated."""
+        """The geometric beams implement ``'I'``; so do both Cerveny
+        routines (``influence.f90:137-140`` and :279-283), but their level
+        falls with the beam count, so those pairs are refused (see
+        ``TestCervenyBeamsRefuseTheMagnitudeSumModes``)."""
         env, src, rcv = self._fixture()
         result = Bellhop(verbose=False, beam_type=beam_type).run(
             env, src, rcv, RunMode.INCOHERENT_TL)
@@ -1558,8 +1668,8 @@ class TestBeamTypeCapabilities:
         ``'A'``/``'a'`` branches, so a vendor refresh that changes which ones do
         must fail here rather than silently invalidate the table."""
         from pathlib import Path
-        from uacpy.models.bellhop import (_BEAM_TYPE_RUN_TYPES,
-                                          _INFLUENCE_ROUTINE)
+        from uacpy.models.bellhop._tables import (_BEAM_TYPE_RUN_TYPES,
+                                                  _INFLUENCE_ROUTINE)
         src_file = (Path(__file__).resolve().parent.parent / 'third_party' /
                     'Acoustics-Toolbox' / 'Bellhop' / 'influence.f90')
         text = src_file.read_text()
@@ -1656,10 +1766,7 @@ class TestBeamCountGuard:
 
     @staticmethod
     def _env():
-        return Environment(bathymetry=100.0, ssp=1500.0,
-                           bottom=BoundaryProperties(
-                               acoustic_type='half-space', sound_speed=1600.0,
-                               density=1.5, attenuation=0.5))
+        return make_pekeris(sound_speed=1600.0, density=1.5)
 
     @pytest.mark.parametrize('run_mode', [RunMode.COHERENT_TL, RunMode.ARRIVALS])
     def test_degenerate_fan_is_refused_for_influence_modes(self, run_mode):
@@ -1822,10 +1929,7 @@ class TestSingleReceiverRangeBeamTypes:
 
     @staticmethod
     def _env():
-        return Environment(bathymetry=100.0, ssp=1500.0,
-                           bottom=BoundaryProperties(
-                               acoustic_type='half-space', sound_speed=1600.0,
-                               density=1.8, attenuation=0.5))
+        return make_pekeris(sound_speed=1600.0)
 
     @pytest.mark.parametrize('beam_type', ['g', 'C', 'R'])
     def test_single_range_is_refused(self, beam_type):
@@ -1864,10 +1968,7 @@ class TestSolverWarningsReachTheCaller:
 
     @staticmethod
     def _env():
-        return Environment(bathymetry=200.0, ssp=1500.0,
-                           bottom=BoundaryProperties(
-                               acoustic_type='half-space', sound_speed=1700.0,
-                               density=1.8, attenuation=0.5))
+        return make_pekeris(bathymetry=200.0)
 
     def _run(self, n_beams):
         return Bellhop(n_beams=n_beams, backend='fortran').run(
@@ -1937,7 +2038,7 @@ class TestBroadbandNoDataCellsAreNaN:
         empty = dict(n_arrivals=0, amplitudes=np.array([]),
                      phases=np.array([]), delays=np.array([]),
                      delays_imag=np.array([]))
-        H = Bellhop._arrivals_to_tf(empty, np.linspace(90.0, 110.0, 8))
+        H = _cell_tf(empty, np.linspace(90.0, 110.0, 8))
         assert np.isnan(H).all()
 
     def test_broadband_r0_column_is_nan_and_warns(self):
@@ -2032,12 +2133,11 @@ class TestAutoBounceTriggersOnLayeringOnly:
                                       sound_speed=1700.0, density=1.6,
                                       attenuation=0.3, shear_speed=400.0,
                                       shear_attenuation=0.5))
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             f = Bellhop(verbose=False).run(env, self._src(), self._rcv(),
                                            run_mode=RunMode.COHERENT_TL)
         assert not [w for w in caught if 'BOUNCE' in str(w.message)]
-        assert 'bounce_result' not in f.metadata
+        assert 'bounce' not in f.components
         assert np.isfinite(np.asarray(f.dB)).all()
 
     def test_rd_elastic_bottom_runs_natively(self):
@@ -2050,12 +2150,11 @@ class TestAutoBounceTriggersOnLayeringOnly:
                 density=[1.6, 2.2, 1.6], attenuation=0.3,
                 shear_speed=[400.0, 1200.0, 400.0],
                 shear_attenuation=0.5))
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             f = Bellhop(verbose=False).run(env, self._src(), self._rcv(),
                                            run_mode=RunMode.COHERENT_TL)
         assert not [w for w in caught if 'BOUNCE' in str(w.message)]
-        assert 'bounce_result' not in f.metadata
+        assert 'bounce' not in f.components
         assert np.isfinite(np.asarray(f.dB)).all()
 
 
@@ -2099,13 +2198,11 @@ class TestTLModeRelationships:
         assert not np.allclose(semi, coh, atol=0.1)
         assert not np.allclose(semi, inc, atol=0.1)
 
-    def test_incoherent_payload_is_complex_with_zero_imag(self, tl_fields):
+    def test_incoherent_payload_is_a_real_level(self, tl_fields):
         # docs/guide/results.md §9 "An incoherent field has no phase": the
-        # incoherent sum rides in the complex .shd container with an
-        # identically zero imaginary part.
+        # incoherent sum is stored as real dB TL on every engine.
         data = np.asarray(tl_fields[RunMode.INCOHERENT_TL].data)
-        assert np.iscomplexobj(data)
-        assert np.all(np.imag(data) == 0.0)
+        assert not np.iscomplexobj(data)
 
 
 class TestBeamShiftRunTypePosition7:
@@ -2224,7 +2321,7 @@ class TestCervenyKnobsOnNonCervenyBeams:
 
 
 def test_bandwidth_factor_above_one_warns():
-    """bellhop.md §6 "amplitudes are computed once at the band centre":
+    """bellhop.md §6 "held flat, so only first-order correct":
     arrival amplitudes are held frequency-flat, so a band wider than
     +/-50% of fc degrades toward the
     edges — ``bandwidth_factor > 1`` warns at construction; 1.0 is the
@@ -2240,16 +2337,16 @@ class TestBroadbandFrequencyGridResolution:
     """A single centre frequency expands to ``n_freqs`` bins spanning
     ``fc*(1 +/- bandwidth_factor/2)``
     (DOCUMENTATION.md §15 "Bellhop synthesizes", base.py
-    ``_resolve_broadband_frequencies``); explicit ``frequencies=`` wins over
+    ``_band.broadband_band``); explicit ``frequencies=`` wins over
     everything. Resolver-level — nothing runs."""
 
     def test_default_is_128_bins_over_half_fc(self):
-        from uacpy.core.constants import DEFAULT_BROADBAND_N_FREQS
+        from uacpy.models._defaults import DEFAULT_BROADBAND_N_FREQS
         assert DEFAULT_BROADBAND_N_FREQS == 128
         model = Bellhop(verbose=False)
-        freqs = model._resolve_broadband_frequencies(
-            Source(depths=50.0, frequencies=200.0), None,
-            n_freqs=model.n_freqs, bandwidth_factor=model.bandwidth_factor)
+        freqs = model._requested_frequencies(
+            RunMode.BROADBAND, Source(depths=50.0, frequencies=200.0), None,
+            None).frequencies
         assert freqs.shape == (128,)
         assert freqs[0] == pytest.approx(150.0)
         assert freqs[-1] == pytest.approx(250.0)
@@ -2257,19 +2354,18 @@ class TestBroadbandFrequencyGridResolution:
 
     def test_constructor_knobs_shape_the_grid(self):
         model = Bellhop(verbose=False, n_freqs=16, bandwidth_factor=0.2)
-        freqs = model._resolve_broadband_frequencies(
-            Source(depths=50.0, frequencies=200.0), None,
-            n_freqs=model.n_freqs, bandwidth_factor=model.bandwidth_factor)
+        freqs = model._requested_frequencies(
+            RunMode.BROADBAND, Source(depths=50.0, frequencies=200.0), None,
+            None).frequencies
         assert freqs.shape == (16,)
         assert freqs[0] == pytest.approx(180.0)
         assert freqs[-1] == pytest.approx(220.0)
 
     def test_explicit_frequencies_win(self):
         model = Bellhop(verbose=False, n_freqs=16)
-        freqs = model._resolve_broadband_frequencies(
-            Source(depths=50.0, frequencies=200.0),
-            np.array([90.0, 100.0, 110.0]),
-            n_freqs=model.n_freqs, bandwidth_factor=model.bandwidth_factor)
+        freqs = model._requested_frequencies(
+            RunMode.BROADBAND, Source(depths=50.0, frequencies=200.0),
+            np.array([90.0, 100.0, 110.0]), None).frequencies
         np.testing.assert_array_equal(freqs, [90.0, 100.0, 110.0])
 
 
@@ -2309,14 +2405,15 @@ class TestRayBoxDefaults:
 
 
 @pytest.mark.requires_binary
-def test_broadband_metadata_carries_c0_and_the_arrivals_field():
-    """One 1-bin broadband run, two documented metadata contracts:
-    ``metadata['c0']`` is the sea-surface sound speed of the first profile
+def test_a_broadband_run_states_its_surface_speed_and_its_arrivals():
+    """One 1-bin broadband run, two documented contracts:
+    ``speeds.surface`` is the sea-surface sound speed of the first profile
     (DOCUMENTATION.md §8 "the sea-surface sound speed of the first profile" —
     a physical speed, deliberately not 1500), and
-    ``metadata['arrivals_field']`` keeps the :class:`Arrivals` the band was
-    synthesised from so a different waveform needs no re-run.
-    results.md §8 "under `metadata['arrivals_field']`, so you can re-synthesise"
+    ``components['arrivals']`` keeps the :class:`Arrivals` the band was
+    synthesised from so a different waveform needs no re-run, and no nested
+    result rides in ``metadata``.
+    results.md §8 "`components['arrivals']`, so you can re-synthesise"
     """
     from uacpy.core.ssp import SoundSpeedProfile
     env = Environment(
@@ -2326,8 +2423,10 @@ def test_broadband_metadata_carries_c0_and_the_arrivals_field():
         env, Source(depths=25.0, frequencies=200.0),
         Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])),
         run_mode=RunMode.BROADBAND, frequencies=np.array([200.0]))
-    assert result.metadata['c0'] == pytest.approx(1490.0)
-    assert isinstance(result.metadata['arrivals_field'], Arrivals)
+    assert result.speeds.surface == pytest.approx(1490.0)
+    assert isinstance(result.components['arrivals'], Arrivals)
+    assert not [key for key, value in result.metadata.items()
+                if isinstance(value, (Result, ResultStack))]
 
 
 class TestBackendAutoSelectionPriority:
@@ -2368,12 +2467,12 @@ class TestBackendAutoSelectionPriority:
             stub.chmod(0o755)
         monkeypatch.setattr(Bellhop, '_find_executable_in_paths',
                             self._fake_find(tmp_path))
-        # bellhop.md §7 "auto-pick never warns at all" — only an explicit
-        # backend= that falls back does.
+        # bellhop.md §7 "picks the first installed binary" — without a
+        # warning.
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
             model = Bellhop(verbose=False)
-        assert model.version == expected_version
+        assert model._resolved_backend == expected_version
         assert model._exe.name == expected_name
 
 
@@ -2391,7 +2490,7 @@ def test_gaussian_beams_picket_the_arrivals_and_hat_beams_do_not():
     counts = {}
     for beam_type in ('B', 'G'):
         arr = Bellhop(verbose=False, beam_type=beam_type, n_beams=800,
-                      alpha=(-45.0, 45.0)).run(env, src, rcv,
+                      launch_angles=(-45.0, 45.0)).run(env, src, rcv,
                                                run_mode=RunMode.ARRIVALS)
         counts[beam_type] = int(arr.by_receiver[0][0][0]['n_arrivals'])
     assert counts['G'] >= 1
@@ -2405,8 +2504,8 @@ def _ray_validity_messages(depth_m, sound_speed, frequency_hz):
     env = uacpy.Environment(bathymetry=depth_m, ssp=float(sound_speed),
                             bottom='sand')
     src = uacpy.Source(depths=depth_m / 4.0, frequencies=frequency_hz)
-    return _messages(
-        lambda: Bellhop()._warn_if_below_ray_validity(env, src),
+    return warning_messages(
+        lambda: _say(ray_validity_notice(env, src, model_name='Bellhop')),
         _D_OVER_LAMBDA)
 
 
@@ -2420,20 +2519,6 @@ class TestBellhopRayValidityFloor:
     guard test using values far from the boundary pins that the guard fires,
     never where.
     """
-
-    @pytest.fixture(autouse=True)
-    def _forget_ray_validity_warnings(self):
-        """``_WARNED_RAY_VALIDITY`` deduplicates per PROCESS, so a test that
-        did not clear it would pass or fail on the selection order (the lesson
-        ``test_input_validation.py`` records for ``_WARNED_MODEL_SOURCES``).
-
-        Scoped to this class rather than the module: the rest of this file has
-        no stake in that set, and an autouse fixture reaching them would be
-        clearing global state under 180 unrelated tests.
-        """
-        _WARNED_RAY_VALIDITY.clear()
-        yield
-        _WARNED_RAY_VALIDITY.clear()
 
     def test_depth_of_exactly_five_wavelengths_is_accepted(self):
         """100 m at 75 Hz in 1500 m/s is D/lambda = 5 exactly. The sources put
@@ -2471,13 +2556,15 @@ class TestBellhopRayValidityFloor:
         resolution criterion."""
         env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom='sand')
         src = uacpy.Source(depths=25.0, frequencies=[50.0, 1000.0])
-        assert len(_messages(
-            lambda: Bellhop()._warn_if_below_ray_validity(env, src),
+        assert len(warning_messages(
+            lambda: _say(ray_validity_notice(env, src, model_name='Bellhop')),
             _D_OVER_LAMBDA)) == 1
 
-    def test_one_geometry_warns_once_per_process(self):
-        for expected in (1, 0, 0):
-            assert len(_ray_validity_messages(80.0, 1500.0, 20.0)) == expected
+    def test_one_geometry_gets_the_notice_on_every_call(self):
+        """The notice is decided in stage 3 from the call alone, so every
+        call's settings carry it (no state kept between calls)."""
+        for _ in range(3):
+            assert len(_ray_validity_messages(80.0, 1500.0, 20.0)) == 1
 
     def test_each_geometry_gets_its_own_warning(self):
         assert len(_ray_validity_messages(80.0, 1500.0, 20.0)) == 1
@@ -2491,8 +2578,8 @@ class TestBellhopRayValidityFloor:
                 acoustic_type='half-space', sound_speed=1600.0,
                 density=1.5, attenuation=0.5))
         src = uacpy.Source(depths=50.0, frequencies=100.0)
-        assert _messages(
-            lambda: Bellhop()._warn_if_below_ray_validity(env, src),
+        assert warning_messages(
+            lambda: _say(ray_validity_notice(env, src, model_name='Bellhop')),
             _D_OVER_LAMBDA) == []
 
     def test_the_docs_readme_quick_start_is_silent(self):
@@ -2503,8 +2590,8 @@ class TestBellhopRayValidityFloor:
                 acoustic_type='half-space', sound_speed=1650.0,
                 density=1.8, attenuation=0.6))
         src = uacpy.Source(depths=25.0, frequencies=200.0)
-        assert _messages(
-            lambda: Bellhop()._warn_if_below_ray_validity(env, src),
+        assert warning_messages(
+            lambda: _say(ray_validity_notice(env, src, model_name='Bellhop')),
             _D_OVER_LAMBDA) == []
 
     @pytest.mark.requires_binary   # constructs Bellhop (resolves its binary)
@@ -2512,15 +2599,15 @@ class TestBellhopRayValidityFloor:
     def test_run_reaches_the_guard_before_the_binary(self, monkeypatch,
                                                      frequency, warns):
         """The guard has to sit on the real entry point, not just be
-        callable. ``_run_bellhop`` is replaced with a raise, so the deck is
+        callable. ``_launch`` is replaced with a raise, so the deck is
         built and the binary never runs: whatever the guard says, it has said
         by then. 80 m at 20 Hz is D/lambda = 1.07, at 200 Hz it is 10.7."""
         class _Stop(RuntimeError):
             pass
 
         monkeypatch.setattr(
-            Bellhop, '_run_bellhop',
-            lambda self, base_name, work_dir: (_ for _ in ()).throw(_Stop()))
+            Bellhop, '_launch',
+            lambda self, inputs, deck: (_ for _ in ()).throw(_Stop()))
         env = uacpy.Environment(bathymetry=80.0, ssp=1500.0, bottom='sand')
         src = uacpy.Source(depths=10.0, frequencies=frequency)
         rcv = uacpy.Receiver(depths=np.array([40.0]),
@@ -2530,21 +2617,43 @@ class TestBellhopRayValidityFloor:
             with pytest.raises(_Stop):
                 Bellhop(verbose=False).run(env, src, rcv)
 
-        assert (len(_messages(_attempt, _D_OVER_LAMBDA)) == 1) is warns
+        assert (len(warning_messages(_attempt, _D_OVER_LAMBDA)) == 1) is warns
 
     def test_an_environment_without_a_usable_sound_speed_is_silent(self):
         """A diagnostic never decides whether a run happens; the deck-validity
         guards own that. Same geometry either side — only ``c`` changes."""
         env = uacpy.Environment(bathymetry=100.0, ssp=1500.0, bottom='sand')
         src = uacpy.Source(depths=25.0, frequencies=20.0)
-        assert len(_messages(
-            lambda: Bellhop()._warn_if_below_ray_validity(env, src),
+        assert len(warning_messages(
+            lambda: _say(ray_validity_notice(env, src, model_name='Bellhop')),
             _D_OVER_LAMBDA)) == 1
-        env.ssp.data[:] = np.nan
-        _WARNED_RAY_VALIDITY.clear()
-        assert _messages(
-            lambda: Bellhop()._warn_if_below_ray_validity(env, src),
+        env.ssp.sound_speed[:] = np.nan
+        assert warning_messages(
+            lambda: _say(ray_validity_notice(env, src, model_name='Bellhop')),
             _D_OVER_LAMBDA) == []
+
+
+@pytest.mark.requires_binary
+def test_the_geometry_notices_are_settings_the_preview_shows():
+    """The launch-fan, r = 0 and ray-validity conditions are decided in
+    stage 3: ``run_settings().engine.notices`` holds them, in the order they
+    are announced, ``run_settings`` announces them, and ``validate_inputs``
+    says nothing. 80 m at 20 Hz is D/lambda = 1.07; a receiver 70 m below
+    the source at 10 m range needs 81.9 deg, outside the +/-80 deg fan."""
+    env = uacpy.Environment(bathymetry=80.0, ssp=1500.0, bottom='sand')
+    src = uacpy.Source(depths=10.0, frequencies=20.0)
+    rcv = uacpy.Receiver(depths=[80.0 - 0.5], ranges=[0.0, 10.0, 500.0])
+    model = Bellhop(verbose=False)
+    with recorded_warnings() as rec:
+        model.validate_inputs(env, src, rcv)
+    assert rec == []
+    with recorded_warnings() as rec:
+        notices = [n.message for n in model.run_settings(env, src, rcv).engine.notices]
+    assert ['launch angle outside' in n for n in notices[:3]] == [
+        True, False, False]
+    assert 'starts at r=0 m' in notices[1]
+    assert 'D/lambda = 1.07' in notices[2]
+    assert [str(w.message) for w in rec][:3] == list(notices[:3])
 
 
 @pytest.mark.requires_binary
@@ -2564,32 +2673,32 @@ class TestBellhopConstructorGuards:
     def test_a_numpy_integer_n_beams_is_accepted(self):
         assert Bellhop(verbose=False, n_beams=np.int64(300)).n_beams == 300
 
-    def test_reversed_alpha_limits_raise_the_ordering_guard(self):
+    def test_reversed_launch_angles_limits_raise_the_ordering_guard(self):
         with pytest.raises(ConfigurationError, match='min_deg < max_deg'):
-            Bellhop(verbose=False, alpha=(80, -80))
+            Bellhop(verbose=False, launch_angles=(80, -80))
 
-    def test_equal_alpha_limits_raise_the_ordering_guard(self):
+    def test_equal_launch_angles_limits_raise_the_ordering_guard(self):
         with pytest.raises(ConfigurationError, match='min_deg < max_deg'):
-            Bellhop(verbose=False, alpha=(45, 45))
+            Bellhop(verbose=False, launch_angles=(45, 45))
 
-    def test_a_nan_alpha_limit_raises_the_ordering_guard(self):
+    def test_a_nan_launch_angles_limit_raises_the_ordering_guard(self):
         with pytest.raises(ConfigurationError, match='min_deg < max_deg'):
-            Bellhop(verbose=False, alpha=(float('nan'), 80))
+            Bellhop(verbose=False, launch_angles=(float('nan'), 80))
 
     def test_non_numeric_alpha_entries_raise_a_typed_error(self):
         with pytest.raises(ConfigurationError, match='numbers'):
-            Bellhop(verbose=False, alpha=('a', 'b'))
+            Bellhop(verbose=False, launch_angles=('a', 'b'))
 
     def test_a_negative_step_raises(self):
         with pytest.raises(ConfigurationError, match='>= 0 and finite'):
-            Bellhop(verbose=False, step=-5.0)
+            Bellhop(verbose=False, ray_step=-5.0)
 
     def test_an_infinite_step_raises(self):
         with pytest.raises(ConfigurationError, match='>= 0 and finite'):
-            Bellhop(verbose=False, step=float('inf'))
+            Bellhop(verbose=False, ray_step=float('inf'))
 
     def test_zero_step_is_the_automatic_step_sentinel(self):
-        assert Bellhop(verbose=False, step=0.0).step == 0.0
+        assert Bellhop(verbose=False, ray_step=0.0).ray_step == 0.0
 
 
 class TestBellhopComponentIsRayCentredOnly:
@@ -2612,8 +2721,7 @@ class TestBellhopComponentIsRayCentredOnly:
 
     @pytest.mark.parametrize('beam_type', ['C', 'R', 'G'])
     def test_pressure_is_silent_everywhere(self, beam_type):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             Bellhop(beam_type=beam_type, component='P', verbose=False)
         assert not [w for w in caught if 'component' in str(w.message)]
 
@@ -2672,7 +2780,7 @@ def test_bellhop_two_beam_fan_returns_a_usable_field():
     def _tl(n_beams):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            result = Bellhop(n_beams=n_beams, alpha=(-10, 10),
+            result = Bellhop(n_beams=n_beams, launch_angles=(-10, 10),
                              verbose=False).run(env, source, receiver,
                                                 run_mode=RunMode.COHERENT_TL)
         return float(np.asarray(result.dB, dtype=float).ravel()[0])
@@ -2708,21 +2816,18 @@ class TestBellhopResolvesItsOwnRayStep:
                                                  (100.0, 2.0)])
     def test_an_unpinned_step_scales_with_the_water_depth(self, depth,
                                                           expected):
-        from uacpy.models import Bellhop
-        assert Bellhop(verbose=False)._resolve_step(
-            self._env(depth)) == pytest.approx(expected)
+        assert resolve_ray_step(
+            self._env(depth), ray_step=0.0) == pytest.approx(expected)
 
     def test_a_pinned_step_reaches_the_deck_unchanged(self):
-        from uacpy.models import Bellhop
-        assert Bellhop(step=250.0, verbose=False)._resolve_step(
-            self._env(5000.0)) == pytest.approx(250.0)
+        assert resolve_ray_step(
+            self._env(5000.0), ray_step=250.0) == pytest.approx(250.0)
 
     def test_the_resolved_step_is_finer_than_the_binarys_own_default(self):
         # The whole point: whatever uacpy sends must be positive, so
         # bellhop.f90:170-174 never substitutes depth/10.
-        from uacpy.models import Bellhop
         for depth in (100.0, 1000.0, 5000.0):
-            resolved = Bellhop(verbose=False)._resolve_step(self._env(depth))
+            resolved = resolve_ray_step(self._env(depth), ray_step=0.0)
             assert 0.0 < resolved < depth / 10.0
 
 
@@ -2742,22 +2847,22 @@ class TestBellhopReportsAFanThatCannotReachAReceiver:
     """
 
     @staticmethod
-    def _check(ranges, alpha=(-80.0, 80.0)):
+    def _check(ranges, launch_angles=(-80.0, 80.0)):
         from uacpy.core import Receiver, Source
         from uacpy.models import Bellhop
-        Bellhop(alpha=alpha, verbose=False)._warn_if_fan_misses_receivers(
+        _say_fan_miss(Bellhop(launch_angles=launch_angles, verbose=False),
             Source(depths=10.0, frequencies=2000.0),
             Receiver(depths=[90.0], ranges=ranges))
 
     def test_the_suggested_fan_covers_the_angle_actually_needed(self):
-        """The advice was a hardcoded ``alpha=(-89.9, 89.9)`` whatever the fan
+        """The advice was a hardcoded ``launch_angles=(-89.9, 89.9)`` whatever the fan
         or the geometry. It has to be derived from the angle needed, and must
         never be NARROWER than the fan already in use."""
         with pytest.warns(UserWarning, match='launch angle outside') as rec:
-            self._check([10.0], alpha=(-80.0, 80.0))
+            self._check([10.0], launch_angles=(-80.0, 80.0))
         msg = str(rec[0].message)
-        assert 'Widen alpha' in msg, msg
-        nums = [float(x) for x in re.findall(r'alpha=\(-([0-9.]+)', msg)]
+        assert 'Widen launch_angles' in msg, msg
+        nums = [float(x) for x in re.findall(r'launch_angles=\(-([0-9.]+)', msg)]
         assert nums and nums[0] >= 82.9, msg      # covers atan2(80, 10)
         assert nums[0] > 80.0, msg                # wider than what is in use
 
@@ -2768,9 +2873,9 @@ class TestBellhopReportsAFanThatCannotReachAReceiver:
         here: widening recovers most of these pairs, and a residual blind cone
         remains because 90 deg is a vertical ray."""
         with pytest.warns(UserWarning, match='launch angle outside') as rec:
-            self._check([0.05], alpha=(-80.0, 80.0))
+            self._check([0.05], launch_angles=(-80.0, 80.0))
         msg = str(rec[0].message)
-        assert 'Widen alpha' in msg, msg
+        assert 'Widen launch_angles' in msg, msg
         assert 'blind cone' in msg, msg
 
     def test_a_fan_already_at_the_vertical_limit_is_not_told_to_widen(self):
@@ -2778,9 +2883,9 @@ class TestBellhopReportsAFanThatCannotReachAReceiver:
         asymptote: the blind cone shrinks but never closes. The reachable
         remedy is the receiver range -- here r < 80/tan(89.95) = 0.07 m."""
         with pytest.warns(UserWarning, match='launch angle outside') as rec:
-            self._check([0.05], alpha=(-89.95, 89.95))
+            self._check([0.05], launch_angles=(-89.95, 89.95))
         msg = str(rec[0].message)
-        assert 'Widen alpha' not in msg, msg
+        assert 'Widen launch_angles' not in msg, msg
         assert 'range' in msg.lower(), msg
         assert '0.07' in msg, msg
 
@@ -2799,7 +2904,7 @@ class TestBellhopReportsAFanThatCannotReachAReceiver:
         import warnings as _w
         with _w.catch_warnings():
             _w.simplefilter('error')
-            self._check([10.0], alpha=(-89.9, 89.9))
+            self._check([10.0], launch_angles=(-89.9, 89.9))
 
     def test_the_report_names_an_angle_the_fan_really_misses(self):
         # An asymmetric fan misses at one end only; the reported angle has to
@@ -2807,7 +2912,7 @@ class TestBellhopReportsAFanThatCannotReachAReceiver:
         with pytest.warns(UserWarning, match='steepest is -8') as rec:
             from uacpy.core import Receiver, Source
             from uacpy.models import Bellhop
-            Bellhop(alpha=(0.0, 80.0), verbose=False)._warn_if_fan_misses_receivers(
+            _say_fan_miss(Bellhop(launch_angles=(0.0, 80.0), verbose=False),
                 Source(depths=90.0, frequencies=2000.0),
                 Receiver(depths=[10.0], ranges=[10.0]))
         assert 'steepest is -8' in str(rec[0].message)
@@ -2822,7 +2927,7 @@ class TestFanMissReportEqualsTheDenseAngleGrid:
     decide WHETHER anything is outside; they do not decide HOW MANY pairs are
     (a count is not an extremal quantity) nor WHICH angle is steepest among the
     misses (a corner only when the fan spans the horizontal). A fan that
-    excludes zero, which ``alpha=(17, 74)`` is and ``Bellhop.__init__``
+    excludes zero, which ``launch_angles=(17, 74)`` is and ``Bellhop.__init__``
     accepts, is where a corner-only shortcut names the wrong angle, so it is
     the case pinned hardest here.
     """
@@ -2854,7 +2959,7 @@ class TestFanMissReportEqualsTheDenseAngleGrid:
     @pytest.mark.parametrize('zs,zr,rr', GEOMETRIES)
     @pytest.mark.parametrize('lo,hi', FANS)
     def test_count_and_steepest_match_the_dense_grid(self, zs, zr, rr, lo, hi):
-        from uacpy.models.bellhop import _fan_miss_count_and_worst
+        from uacpy.models.bellhop._plan import _fan_miss_count_and_worst
         zs, zr, rr = (np.atleast_1d(np.asarray(a, dtype=float))
                       for a in (zs, zr, rr))
         count, worst = self._dense(zs, zr, rr, lo, hi)
@@ -2865,15 +2970,13 @@ class TestFanMissReportEqualsTheDenseAngleGrid:
 
     @pytest.mark.parametrize('lo,hi', FANS)
     def test_the_early_out_fires_exactly_when_nothing_is_outside(self, lo, hi):
-        import warnings as _w
         from uacpy.core import Receiver, Source
         from uacpy.models import Bellhop
         zs, zr, rr = [30.0], [5.0, 150.0], [12.0, 60.0, 3000.0]
         count, _ = self._dense(zs, zr, rr, lo, hi)
-        model = Bellhop(alpha=(lo, hi), verbose=False)
-        with _w.catch_warnings(record=True) as rec:
-            _w.simplefilter('always')
-            model._warn_if_fan_misses_receivers(
+        model = Bellhop(launch_angles=(lo, hi), verbose=False)
+        with recorded_warnings() as rec:
+            _say_fan_miss(model,
                 Source(depths=zs, frequencies=2000.0),
                 Receiver(depths=zr, ranges=rr))
         fired = [w for w in rec if 'launch angle outside' in str(w.message)]
@@ -2886,9 +2989,9 @@ class TestFanMissReportEqualsTheDenseAngleGrid:
         zs, zr, rr = [50.0], [10.0, 95.0, 240.0], [15.0, 45.0, 700.0]
         lo, hi = 17.0, 74.0
         count, worst = self._dense(zs, zr, rr, lo, hi)
-        model = Bellhop(alpha=(lo, hi), verbose=False)
+        model = Bellhop(launch_angles=(lo, hi), verbose=False)
         with pytest.warns(UserWarning, match='launch angle outside') as rec:
-            model._warn_if_fan_misses_receivers(
+            _say_fan_miss(model,
                 Source(depths=zs, frequencies=2000.0),
                 Receiver(depths=zr, ranges=rr))
         msg = str(rec[0].message)
@@ -2907,7 +3010,6 @@ class TestFanMissReportEqualsTheDenseAngleGrid:
 # so a .sbp lobe is drawn over the water it ensonifies. If the sign ever
 # flipped, that plot would silently mirror against the field beside it.
 
-@pytest.mark.convention
 def test_positive_launch_angle_traces_a_downward_ray():
     """``alpha > 0`` goes deeper — ``ray2D(1)%t = [COS(alpha), SIN(alpha)]/c``
     over a depth axis that is positive downward."""
@@ -2915,15 +3017,14 @@ def test_positive_launch_angle_traces_a_downward_ray():
     src = uacpy.Source(depths=1000.0, frequencies=200.0)
     rcv = uacpy.Receiver(depths=np.linspace(0.0, 2000.0, 21),
                          ranges=np.linspace(0.0, 5000.0, 11))
-    rays = Bellhop(verbose=False, alpha=(-10.0, 10.0), n_beams=3).run(
+    rays = Bellhop(verbose=False, launch_angles=(-10.0, 10.0), n_beams=3).run(
         env, src, rcv, run_mode='rays')
 
-    by_angle = {round(ray['alpha']): np.asarray(ray['z']) for ray in rays.rays}
+    by_angle = {round(ray['launch_angle']): np.asarray(ray['z']) for ray in rays.rays}
     assert by_angle[10][1] > by_angle[10][0]      # +10° dives
     assert by_angle[-10][1] < by_angle[-10][0]    # -10° climbs
 
 
-@pytest.mark.convention
 def test_downward_only_pattern_ensonifies_below_the_source():
     """A ``.sbp`` passing only positive angles moves energy to the deeper
     receiver, which is what the polar plot claims when it draws that lobe
@@ -2933,7 +3034,7 @@ def test_downward_only_pattern_ensonifies_below_the_source():
                          ranges=np.array([2000.0]))
     downward = np.array([[-180.0, -40.0], [-0.001, -40.0],
                          [0.0, 0.0], [180.0, 0.0]])
-    model = Bellhop(verbose=False, alpha=(-80.0, 80.0), n_beams=2001)
+    model = Bellhop(verbose=False, launch_angles=(-80.0, 80.0), n_beams=2001)
 
     def below_minus_above(beam_pattern):
         src = uacpy.Source(depths=1000.0, frequencies=200.0,
@@ -2964,7 +3065,7 @@ class TestDelayAndSumSaysWhatTheWindowLeavesOut:
                     delays_imag=np.zeros(n),
                     n_top_bounces=np.zeros(n, dtype=int),
                     n_bot_bounces=np.zeros(n, dtype=int),
-                    src_angles=np.zeros(n), rcv_angles=np.zeros(n))
+                    source_angles=np.zeros(n), receiver_angles=np.zeros(n))
 
     def _waveform(self, n=200):
         # 2 ms hann-windowed tone burst
@@ -2972,8 +3073,8 @@ class TestDelayAndSumSaysWhatTheWindowLeavesOut:
         return np.hanning(n) * np.sin(2 * np.pi * self.FC * k / self.FS)
 
     def _run(self, cell, **kw):
-        from uacpy.models.bellhop import delayandsum
-        return _messages(lambda: delayandsum(
+        from uacpy.acoustic_signal import delayandsum
+        return warning_messages(lambda: delayandsum(
             rcv_arrivals=cell, source_timeseries=self._waveform(),
             sample_rate=self.FS, fc=self.FC, **kw),
             "does not hold every echo")
@@ -3007,11 +3108,15 @@ class TestDelayAndSumSaysWhatTheWindowLeavesOut:
                          t_start=0.0, time_window=0.030)
         assert len(msgs) == 1 and "run past its end" in msgs[0], msgs
 
+    def test_the_notice_names_delayandsum_as_the_caller(self):
+        msgs = self._run(self._cell(0.010, 0.050),
+                         t_start=0.0, time_window=0.030)
+        assert msgs and msgs[0].startswith('delayandsum:'), msgs
+
     def test_a_report_dict_totals_the_cells_and_stays_silent(self):
-        from uacpy.models.bellhop import delayandsum
+        from uacpy.acoustic_signal import delayandsum
         report = {}
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
+        with recorded_warnings() as rec:
             for cell in (self._cell(0.010, 0.050), self._cell(0.012, 0.060)):
                 delayandsum(rcv_arrivals=cell,
                             source_timeseries=self._waveform(),
@@ -3041,7 +3146,7 @@ class TestTheDefaultBroadbandGridReportsWhatItFolds:
 
     def test_the_default_grid_names_the_arrivals_it_folds(self):
         env, source, receiver = self._geometry()
-        msgs = _messages(lambda: Bellhop(verbose=False).run(
+        msgs = warning_messages(lambda: Bellhop(verbose=False).run(
             env, source, receiver, run_mode=RunMode.BROADBAND),
             "fold back onto the early trace")
         assert len(msgs) == 1, msgs
@@ -3052,7 +3157,7 @@ class TestTheDefaultBroadbandGridReportsWhatItFolds:
     def test_a_grid_the_caller_chose_is_not_second_guessed(self):
         env, source, receiver = self._geometry()
         grid = np.linspace(30e3, 50e3, 128)     # the same spacing, chosen
-        assert _messages(lambda: Bellhop(verbose=False).run(
+        assert warning_messages(lambda: Bellhop(verbose=False).run(
             env, source, receiver, run_mode=RunMode.BROADBAND,
             frequencies=grid), "fold back onto the early trace") == []
 
@@ -3088,7 +3193,7 @@ class TestRayCentredBeamsFillEveryRequestedRangeColumn:
         np.testing.assert_allclose(a, b[:, 1:-1], rtol=1e-5, atol=1e-9)
 
     def test_a_first_range_within_one_step_of_the_source_is_declared(self):
-        msgs = _messages(lambda: self._run('R', np.linspace(100.0, 500.0, 5)),
+        msgs = warning_messages(lambda: self._run('R', np.linspace(100.0, 500.0, 5)),
                          "never fills the first receiver-range column")
         assert len(msgs) == 1, msgs
 
@@ -3123,7 +3228,7 @@ class TestEigenraysDeclareWhatTheirBeamTypeCannotDeliver:
 
     def test_the_ray_centred_beam_says_it_returns_no_rays_at_the_first_range(self):
         env, source, receiver = self._rig()
-        msgs = _messages(
+        msgs = warning_messages(
             lambda: Bellhop(verbose=False, beam_type='g', n_beams=300).run(
                 env, source, receiver, run_mode=RunMode.EIGENRAYS),
             "no rays at receiver.ranges[0]")
@@ -3145,7 +3250,7 @@ class TestEigenraysDeclareWhatTheirBeamTypeCannotDeliver:
     @pytest.mark.parametrize('beam_type', ['G', 'B'])
     def test_the_bracket_walking_beams_are_quiet(self, beam_type):
         env, source, receiver = self._rig()
-        assert _messages(
+        assert warning_messages(
             lambda: Bellhop(verbose=False, beam_type=beam_type,
                             n_beams=300).run(env, source, receiver,
                                              run_mode=RunMode.EIGENRAYS),
@@ -3155,7 +3260,7 @@ class TestEigenraysDeclareWhatTheirBeamTypeCannotDeliver:
         # The TL branch pads around the same hole, so it must NOT inherit
         # the eigenray warning.
         env, source, receiver = self._rig(depths=(30.0, 60.0))
-        assert _messages(
+        assert warning_messages(
             lambda: Bellhop(verbose=False, beam_type='g', n_beams=200).run(
                 env, source, receiver, run_mode=RunMode.COHERENT_TL),
             "no rays at receiver.ranges[0]") == []
@@ -3164,7 +3269,7 @@ class TestEigenraysDeclareWhatTheirBeamTypeCannotDeliver:
 
     def test_the_simple_gaussian_beam_says_its_eigenrays_are_unscreened(self):
         env, source, receiver = self._rig()
-        msgs = _messages(
+        msgs = warning_messages(
             lambda: Bellhop(verbose=False, beam_type='S', n_beams=300).run(
                 env, source, receiver, run_mode=RunMode.EIGENRAYS),
             "not screened for passing near a receiver")
@@ -3189,7 +3294,7 @@ class TestEigenraysDeclareWhatTheirBeamTypeCannotDeliver:
 
     def test_a_simple_gaussian_tl_run_is_quiet(self):
         env, source, receiver = self._rig()
-        assert _messages(
+        assert warning_messages(
             lambda: Bellhop(verbose=False, beam_type='S', n_beams=300).run(
                 env, source, receiver, run_mode=RunMode.COHERENT_TL),
             "not screened for passing near a receiver") == []
@@ -3201,7 +3306,7 @@ class TestEigenraysDeclareWhatTheirBeamTypeCannotDeliver:
         # mirrors the Fortran's CASE branches and nothing else — dropping
         # 'E' from it would contradict influence.f90:700-703 and redden
         # test_the_table_matches_the_vendored_source.
-        from uacpy.models.bellhop import _BEAM_TYPE_RUN_TYPES
+        from uacpy.models.bellhop._tables import _BEAM_TYPE_RUN_TYPES
         assert 'E' in _BEAM_TYPE_RUN_TYPES['S']
         rays = self._eigenrays('S')
         assert isinstance(rays, Rays) and len(rays.rays) > 0
@@ -3219,11 +3324,12 @@ class TestTheTimeSeriesEchoNoticeIsSaidOnce:
         fs = 8e3
         t = np.arange(int(0.005 * fs)) / fs
         wf = np.hanning(t.size) * np.sin(2 * np.pi * 2e3 * t)
-        # Anchored at emission, a 0.3 s window closes before the first echo
-        # at ~0.67 s: every echo is dropped.
-        msgs = _messages(lambda: Bellhop(verbose=False).run(
+        # Anchored at emission (t_start=0), a 0.3 s window closes before the
+        # first echo at ~0.67 s: every echo is dropped.
+        msgs = warning_messages(lambda: Bellhop(verbose=False).run(
             env, source, receiver, run_mode=RunMode.TIME_SERIES,
-            source_waveform=wf, sample_rate=fs, output_duration=0.3),
+            source_waveform=wf, sample_rate=fs, output_duration=0.3,
+            t_start=0.0),
             "does not hold every echo")
         assert len(msgs) == 1, msgs
         assert "all of the received energy" in msgs[0]
@@ -3242,10 +3348,10 @@ class TestArrivalsAreMergedExactlyOnce:
 
     def test_the_wrapper_keys_the_merge_on_the_engine(self):
         model = Bellhop(verbose=False)
-        model.version = 'fortran'
-        assert model._arrivals_need_merge() is False
-        model.version = 'cuda'
-        assert model._arrivals_need_merge() is True
+        model._resolved_backend = 'fortran'
+        assert _merge(model) is False
+        model._resolved_backend = 'cuda'
+        assert _merge(model) is True
 
     @pytest.mark.requires_binary
     def test_both_backends_return_the_same_arrivals(self):
@@ -3257,7 +3363,7 @@ class TestArrivalsAreMergedExactlyOnce:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 model = Bellhop(verbose=False, backend=backend, n_beams=300)
-            if model.version != backend:
+            if model._resolved_backend != backend:
                 pytest.skip(f"{backend} binary not installed")
             results[backend] = model.run(env, source, receiver,
                                          run_mode=RunMode.ARRIVALS)
@@ -3375,7 +3481,7 @@ class TestAPinnedExecutableIsReadLikeTheAutoPickedOne:
     def test_the_variant_is_inferred_from_the_basename(
             self, tmp_path, name, version):
         model = Bellhop(executable=self._stub(tmp_path, name), verbose=False)
-        assert model.version == version
+        assert model._resolved_backend == version
         assert model.executable == tmp_path / name
 
     def test_a_pinned_cxx_path_merges_like_the_auto_picked_one(
@@ -3383,20 +3489,20 @@ class TestAPinnedExecutableIsReadLikeTheAutoPickedOne:
         model = Bellhop(executable=self._stub(tmp_path, 'bellhopcxx'),
                         verbose=False)
         monkeypatch.setattr(os, 'cpu_count', lambda: 4)
-        assert model._arrivals_need_merge() is True
+        assert _merge(model) is True
         monkeypatch.setattr(os, 'cpu_count', lambda: 1)
-        assert model._arrivals_need_merge() is False
-        assert model._build_command('base')[1] == '--2D'
+        assert _merge(model) is False
+        assert _command(model, 'base')[1] == '--2D'
 
     def test_an_unrecognised_name_stays_custom_and_warns_on_arrivals(
             self, tmp_path):
         model = Bellhop(executable=self._stub(tmp_path, 'ray-solver'),
                         verbose=False)
-        assert model.version == 'custom'
-        assert model._build_command('base') == [str(tmp_path / 'ray-solver'),
+        assert model._resolved_backend == 'custom'
+        assert _command(model, 'base') == [str(tmp_path / 'ray-solver'),
                                                 'base']
         with pytest.warns(UserWarning, match='merge'):
-            assert model._arrivals_need_merge() is False
+            assert _merge(model) is False
 
     def test_a_recognised_name_reads_arrivals_without_a_warning(
             self, tmp_path):
@@ -3404,7 +3510,7 @@ class TestAPinnedExecutableIsReadLikeTheAutoPickedOne:
                         verbose=False)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            assert model._arrivals_need_merge() is False
+            assert _merge(model) is False
 
 
 class TestALineSourceArrivalsCarryTheGreensFunctionPhase:
@@ -3435,7 +3541,11 @@ class TestALineSourceArrivalsCarryTheGreensFunctionPhase:
                 Source(depths=50.0, frequencies=1000.0,
                        source_type=source_type),
                 Receiver(depths=[50.0], ranges=[500.0]),
-                run_mode=run_mode, frequencies=cls.FREQS)
+                run_mode=run_mode,
+                # ARRIVALS runs at the Source frequency; only the broadband
+                # routes take a grid.
+                **({} if run_mode == RunMode.ARRIVALS
+                   else {'frequencies': cls.FREQS}))
 
     def test_line_arrival_phases_sit_45_deg_behind_point_ones(self):
         point = self._run('point', RunMode.ARRIVALS)
@@ -3453,7 +3563,7 @@ class TestALineSourceArrivalsCarryTheGreensFunctionPhase:
         # differ); the line run's own amplitudes with those phases and ONE
         # explicit -pi/4 is the reference H(f). Applying the offset twice
         # or not at all lands 45 deg away from it.
-        from uacpy.models.bellhop import _LINE_SOURCE_PHASE
+        from uacpy.models.bellhop._output import _LINE_SOURCE_PHASE
         point = self._run('point', RunMode.ARRIVALS).by_receiver[0][0][0]
         line = self._run('line', RunMode.ARRIVALS).by_receiver[0][0][0]
         tf = self._run('line', RunMode.BROADBAND)
@@ -3461,17 +3571,17 @@ class TestALineSourceArrivalsCarryTheGreensFunctionPhase:
         reference = {k: (v[i_l] if isinstance(v, np.ndarray) else v)
                      for k, v in line.items()}
         reference['phases'] = point['phases'][i_p]
-        expected = Bellhop._arrivals_to_tf(reference, self.FREQS,
-                                           phase_offset=_LINE_SOURCE_PHASE)
+        expected = _cell_tf(reference, self.FREQS,
+                                  phase_offset=_LINE_SOURCE_PHASE)
         np.testing.assert_allclose(np.asarray(tf.data)[0, 0, :], expected,
                                    rtol=1e-9, atol=0)
 
     def test_the_transfer_function_is_built_from_the_arrivals_as_they_are(self):
         # The same offset must not be added again on synthesis: H(f) is
-        # ``_arrivals_to_tf`` of the returned cell with no extra phase.
+        # ``arrival_grid_transfer_function`` of the returned cell with no extra phase.
         arr = self._run('line', RunMode.ARRIVALS)
         tf = self._run('line', RunMode.BROADBAND)
-        expected = Bellhop._arrivals_to_tf(arr.by_receiver[0][0][0], self.FREQS)
+        expected = _cell_tf(arr.by_receiver[0][0][0], self.FREQS)
         np.testing.assert_allclose(np.asarray(tf.data)[0, 0, :], expected,
                                    rtol=1e-12, atol=0)
 
@@ -3483,10 +3593,10 @@ class TestTheFanMissCheckFollowsThePairedGrid:
 
     @staticmethod
     def _check(grid_type, depths, ranges):
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
-            Bellhop(alpha=(-80.0, 80.0), grid_type=grid_type,
-                    verbose=False)._warn_if_fan_misses_receivers(
+        with recorded_warnings() as rec:
+            _say_fan_miss(
+                Bellhop(launch_angles=(-80.0, 80.0), grid_type=grid_type,
+                        verbose=False),
                 Source(depths=10.0, frequencies=2000.0),
                 Receiver(depths=depths, ranges=ranges))
         return [str(w.message) for w in rec
@@ -3515,10 +3625,48 @@ def _layered_bottom_env(name='layered'):
         bottom=Bottom.from_presets([('silt', 5.0)], halfspace='sand'))
 
 
+class TestBroadbandOverALayeredBottomWarnsOfTheFcTable:
+    """BROADBAND/TIME_SERIES trace once at fc, and a layered bottom routes
+    that trace through BOUNCE, which tabulates R(theta) at fc alone — while a
+    layer stack's R(theta) moves with frequency (bounce.md). The run says so;
+    a half-space bottom, or auto_bounce=False, takes no BOUNCE table."""
+
+    def _warnings(self, env, auto_bounce=True, run_mode=RunMode.BROADBAND):
+        # run_settings says what run would, and launches nothing.
+        model = Bellhop(verbose=False, auto_bounce=auto_bounce)
+        with recorded_warnings() as caught:
+            model.run_settings(
+                env, Source(depths=[10.0], frequencies=500.0),
+                Receiver(depths=[30.0], ranges=[500.0]),
+                run_mode,
+                source_waveform=(np.hanning(64) if run_mode
+                                 == RunMode.TIME_SERIES else None),
+                sample_rate=(8000.0 if run_mode == RunMode.TIME_SERIES
+                             else None))
+        return [str(w.message) for w in caught
+                if 'BOUNCE reflection table' in str(w.message)]
+
+    @pytest.mark.parametrize('run_mode', [RunMode.BROADBAND,
+                                          RunMode.TIME_SERIES])
+    def test_a_layered_bottom_warns(self, run_mode):
+        said = self._warnings(_layered_bottom_env(), run_mode=run_mode)
+        assert len(said) == 1 and 'fc = 500 Hz' in said[0], said
+
+    def test_a_half_space_bottom_is_silent(self):
+        env = Environment(name='hs', bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(
+                              acoustic_type='half-space', sound_speed=1700.0,
+                              density=1.8, attenuation=0.5))
+        assert not self._warnings(env)
+
+    def test_auto_bounce_off_is_silent(self):
+        assert not self._warnings(_layered_bottom_env(), auto_bounce=False)
+
+
 class TestBounceTableRidesOnEveryStackSlab:
     """A multi-depth Source stacks the ``.shd`` into a ``ResultStack`` whose
-    ``metadata`` is a copy of slab 0's dict, so the in-memory BOUNCE table the
-    constructor promises on ``result.metadata['bounce_result']`` has to sit on
+    ``components`` are slab 0's, so the in-memory BOUNCE table the
+    constructor promises as ``result.components['bounce']`` has to sit on
     each slab — and it is one table, since BOUNCE reads no source depth."""
 
     def test_multi_depth_tl_stack_carries_the_table_on_each_slab(self):
@@ -3530,30 +3678,23 @@ class TestBounceTableRidesOnEveryStackSlab:
                                               frequencies=500.0),
                 rcv, run_mode=RunMode.COHERENT_TL)
         assert isinstance(result, ResultStack)
-        assert 'bounce_result' in result.metadata
-        tables = [slab.metadata.get('bounce_result') for slab in result.slabs]
+        assert result.components['bounce'] is result.slabs[0].components[
+            'bounce']
+        assert 'bounce_result' not in result.metadata
+        tables = [slab.components.get('bounce') for slab in result.slabs]
         assert all(t is tables[0] and t is not None for t in tables), tables
         # The table is propagated to the receiver's own range.
-        assert tables[0].metadata['rmax'] == pytest.approx(rcv.range_max)
+        assert tables[0].run_settings.engine.rmax_m == pytest.approx(rcv.range_max)
 
 
-class TestEigenraysMultiDepthRoutesThroughBounceOnce:
+class TestEigenraysMultiDepthSharesOneBounceTable:
     """The BOUNCE table depends on the bottom column and frequency only, so a
-    multi-depth EIGENRAYS run on a layered bottom computes it once — as RAYS
-    does — before the per-depth ``.ray`` loop, not once per depth."""
+    multi-depth EIGENRAYS run on a layered bottom resolves it once, in the
+    call's settings, and says so once; the per-depth loop launches it beside
+    each depth's ``.ray`` run, and every depth reads the same table."""
 
-    def test_three_source_depths_run_bounce_once_and_warn_once(self, monkeypatch):
-        from uacpy.models import bounce as bounce_mod
-        calls = []
-        original_run = bounce_mod.Bounce.run
-
-        def counting_run(self_, *args, **kwargs):
-            calls.append(1)
-            return original_run(self_, *args, **kwargs)
-
-        monkeypatch.setattr(bounce_mod.Bounce, 'run', counting_run)
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
+    def test_three_source_depths_share_one_table_and_warn_once(self):
+        with recorded_warnings() as rec:
             result = Bellhop(verbose=False, beam_type='G').run(
                 _layered_bottom_env('eig'),
                 Source(depths=[10.0, 20.0, 30.0], frequencies=500.0),
@@ -3562,12 +3703,18 @@ class TestEigenraysMultiDepthRoutesThroughBounceOnce:
         routed = [w for w in rec
                   if 'auto-routing through BOUNCE' in str(w.message)]
         assert isinstance(result, ResultStack) and len(result) == 3
-        assert len(calls) == 1, f"Bounce.run called {len(calls)} times"
         assert len(routed) == 1, [str(w.message) for w in routed]
+        tables = [slab.components['bounce'] for slab in result.slabs]
+        for table in tables[1:]:
+            np.testing.assert_array_equal(table.magnitude, tables[0].magnitude)
+            np.testing.assert_array_equal(table.angles, tables[0].angles)
+        assert all(slab.run_settings.engine.bounce
+                   == result.slabs[0].run_settings.engine.bounce
+                   for slab in result.slabs)
 
 
 class TestAllZeroReceiverRangesResolveTheBounceRangeByFallback:
-    """``rmax`` for the spawned Bounce is left to ``Bounce.run``, whose own
+    """``rmax_m`` for the spawned Bounce is left to ``Bounce.run``, whose own
     rule reads ``receiver.range_max`` and falls back to 10 km when every
     receiver sits at r = 0 — so the hidden BOUNCE pass cannot fail on an
     input Bellhop itself accepts (its ``r_box`` uses the same fallback)."""
@@ -3581,7 +3728,7 @@ class TestAllZeroReceiverRangesResolveTheBounceRangeByFallback:
                 Receiver(depths=[50.0], ranges=[0.0]),
                 run_mode=RunMode.RAYS)
         assert isinstance(result, Rays)
-        assert result.metadata['bounce_result'].metadata['rmax'] == \
+        assert result.components['bounce'].run_settings.engine.rmax_m == \
             pytest.approx(10000.0)
 
 
@@ -3610,7 +3757,7 @@ class TestPairedGridReceiversBelowTheSeafloorAreNoData:
         assert list(result.coords) == ['range']
         tl = np.asarray(result.dB, dtype=float)
         assert np.isfinite(tl[0]) and np.isnan(tl[1]), tl
-        np.testing.assert_allclose(result.metadata['receiver_depths'],
+        np.testing.assert_allclose(result.aux_coords['receiver_depth'][1],
                                    [30.0, 120.0])
 
     def test_tl_cell_below_a_shoaling_seafloor_is_nan(self):
@@ -3633,7 +3780,7 @@ class TestPairedGridReceiversBelowTheSeafloorAreNoData:
         assert list(result.coords) == ['range', 'frequency']
         assert np.isfinite(result.data[0]).all()
         assert np.isnan(result.data[1]).all()
-        np.testing.assert_allclose(result.metadata['receiver_depths'],
+        np.testing.assert_allclose(result.aux_coords['receiver_depth'][1],
                                    [30.0, 120.0])
 
 
@@ -3642,7 +3789,7 @@ class TestCxxRunTimeWarningsReachTheUser:
     (``bellhopcuda/src/util/errors.cpp:26-36, 113-137``): a header ``N
     warning(s) thrown of the following type(s):`` and one
     ``BHC_WARN_<NAME>: ...`` line per condition, nothing in the ``.prt``.
-    ``Bellhop._warn_on_engine_stdout_warnings`` re-emits those lines as the
+    ``_backend.warn_on_engine_stdout_warnings`` re-emits those lines as the
     same ``UserWarning`` the Fortran ``.prt`` scan raises, so ``n_beams=3``
     warns on every backend. The block below is the stdout captured from a
     real ``backend='cxx'`` run of that case."""
@@ -3679,7 +3826,7 @@ class TestCxxRunTimeWarningsReachTheUser:
     def test_the_captured_block_is_re_emitted_verbatim(self):
         model = Bellhop(verbose=False)
         with pytest.warns(UserWarning) as record:
-            model._warn_on_engine_stdout_warnings(self._CAPTURED_CXX_STDOUT)
+            _scan_stdout(model, self._CAPTURED_CXX_STDOUT)
         messages = [str(w.message) for w in record
                     if 'BHC_WARN' in str(w.message)]
         assert len(messages) == 1, messages
@@ -3691,37 +3838,37 @@ class TestCxxRunTimeWarningsReachTheUser:
 
     def test_a_stdout_without_the_block_warns_nothing(self):
         model = Bellhop(verbose=False)
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
-            model._warn_on_engine_stdout_warnings(
-                "setup: 0.6 ms\nPreprocess: 0.1 ms\nRun: 0.4 ms\n")
+        with recorded_warnings() as record:
+            _scan_stdout(
+                model, "setup: 0.6 ms\nPreprocess: 0.1 ms\nRun: 0.4 ms\n")
         assert [str(w.message) for w in record] == []
 
     @pytest.mark.requires_binary
     def test_the_arrivals_launcher_is_scanned_and_the_engine_stays_silent(
             self, monkeypatch):
-        """One launcher serves every mode (``_run_bellhop``), so an ARRIVALS
+        """One launcher serves every mode (``Bellhop._launch``), so an ARRIVALS
         run's stdout goes through the same scan as a TL run's. What differs
         is the engine: both ports raise ``Too few beams`` only on a coherent
         TL run — ``bellhop.f90:255`` tests ``RunType(1:1) == 'C'`` and
-        ``bellhopcuda/src/trace.hpp:126`` tests ``IsCoherentRun(Beam)`` — so
+        ``bellhopcuda/src/trace.hpp:127`` tests ``IsCoherentRun(Beam)`` — so
         the same ``n_beams=3`` fan that warns in COHERENT_TL is silent in
         ARRIVALS on every backend, and uacpy passes that silence through
         rather than inventing a warning the engine did not make."""
+        from uacpy.models.bellhop import _model as bellhop_model
         seen = []
-        original = Bellhop._warn_on_engine_stdout_warnings
+        original = bellhop_model.warn_on_engine_stdout_warnings
 
-        def spy(model, stdout):
+        def spy(stdout, **kw):
             seen.append(stdout)
-            return original(model, stdout)
+            return original(stdout, **kw)
 
-        monkeypatch.setattr(Bellhop, '_warn_on_engine_stdout_warnings', spy)
+        monkeypatch.setattr(bellhop_model, 'warn_on_engine_stdout_warnings',
+                            spy)
         env = Environment(name='fewbeams', bathymetry=100.0, ssp=1500.0)
         src = Source(depths=50.0, frequencies=500.0)
         rcv = Receiver(depths=np.linspace(5.0, 95.0, 10),
                        ranges=np.linspace(100.0, 3000.0, 30))
-        with warnings.catch_warnings(record=True) as record:
-            warnings.simplefilter('always')
+        with recorded_warnings() as record:
             self._model('cxx').run(env, src, rcv, run_mode=RunMode.ARRIVALS)
         assert len(seen) == 1, "the ARRIVALS launcher skipped the scan"
         assert 'Run:' in seen[0], seen[0]
@@ -3731,3 +3878,956 @@ class TestCxxRunTimeWarningsReachTheUser:
         with pytest.warns(UserWarning, match='BHC_WARN_TOO_FEW_BEAMS'):
             self._model('cxx').run(env, src, rcv,
                                    run_mode=RunMode.COHERENT_TL)
+
+
+class TestPairedReceiverUnderTheSeabedHasNoTrace:
+    """A paired-grid receiver below a shoaling seabed is clamped onto the
+    boundary by BELLHOP, so what it reports is another receiver. TL and
+    BROADBAND returned no-data there while TIME_SERIES handed back a real
+    trace labelled with the buried depth."""
+
+    @staticmethod
+    def _run(run_mode, **kw):
+        env = Environment(name='shoal', bathymetry=[(0.0, 100.0),
+                                                    (6000.0, 40.0)],
+                          ssp=1500.0)
+        rcv = Receiver(depths=[20.0, 50.0, 80.0],
+                       ranges=[1000.0, 2000.0, 5500.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return Bellhop(verbose=False, grid_type='I', n_beams=300).run(
+                env, Source(depths=10.0, frequencies=500.0), rcv, run_mode,
+                **kw)
+
+    def test_time_series_is_no_data_where_tl_is(self):
+        tl = self._run(RunMode.COHERENT_TL)
+        ts = self._run(RunMode.TIME_SERIES,
+                       source_waveform=np.hanning(64), sample_rate=8000.0)
+        buried_tl = ~np.isfinite(np.asarray(tl.dB, dtype=float)).ravel()
+        buried_ts = np.all(~np.isfinite(np.asarray(ts.data)), axis=-1)
+        assert buried_tl.tolist() == [False, False, True]
+        assert buried_ts.tolist() == buried_tl.tolist()
+        assert np.asarray(ts.aux_coords['receiver_depth'][1]) == pytest.approx(
+            [20.0, 50.0, 80.0])
+
+
+
+class TestEveryEngineOpensItsRecordWhereAsked:
+    """``output_duration`` is the record's length and ``t_start`` its first
+    sample on every engine. Bellhop used to anchor an ``output_duration``
+    record at emission, all zeros for a receiver 1 km out (first echo
+    0.67 s) while the IFFT engines placed theirs at the arrival."""
+
+    @staticmethod
+    def _run(model, **kw):
+        env = uacpy.Environment(name='once', bathymetry=300.0, ssp=1500.0)
+        fs = 8e3
+        t = np.arange(int(0.005 * fs)) / fs
+        wf = np.hanning(t.size) * np.sin(2 * np.pi * 2e3 * t)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return model.run(env, Source(depths=150.0, frequencies=2e3),
+                             Receiver(depths=[150.0], ranges=[1000.0]),
+                             run_mode=RunMode.TIME_SERIES, source_waveform=wf,
+                             sample_rate=fs, **kw)
+
+    def test_an_output_duration_alone_holds_the_arrival(self):
+        ts = self._run(Bellhop(verbose=False), output_duration=0.3)
+        assert np.max(np.abs(np.asarray(ts.data))) > 0.0
+        assert float(ts.coords['time'][0]) > 0.5
+
+    def test_t_start_opens_the_record_there(self):
+        ts = self._run(Bellhop(verbose=False), output_duration=0.3,
+                       t_start=0.6)
+        assert float(ts.coords['time'][0]) == pytest.approx(0.6, abs=1e-6)
+
+    def test_a_mode_without_a_record_says_t_start_is_ignored(self):
+        env = uacpy.Environment(name='tl', bathymetry=300.0, ssp=1500.0)
+        with pytest.warns(UserWarning, match="t_start"):
+            Bellhop(verbose=False).run(
+                env, Source(depths=150.0, frequencies=2e3),
+                Receiver(depths=[150.0], ranges=[1000.0]),
+                run_mode=RunMode.COHERENT_TL, t_start=0.5)
+
+
+class TestIncoherentTlIsARealLevelOnEveryEngine:
+    """Bellhop kept INCOHERENT/SEMICOHERENT TL as complex Pa with a zero
+    phase that looked real; Kraken and Scooter store real dB. One payload
+    for magnitude sums (Theo's decision on MODELS_B-37)."""
+
+    @pytest.mark.parametrize('mode', [RunMode.INCOHERENT_TL,
+                                      RunMode.SEMICOHERENT_TL])
+    def test_the_payload_is_real_dB(self, mode):
+        env = uacpy.Environment(name='inc', bathymetry=100.0, ssp=1500.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            coh = Bellhop(verbose=False).run(
+                env, Source(depths=20.0, frequencies=200.0),
+                Receiver(depths=[30.0, 60.0], ranges=[500.0, 1000.0]),
+                run_mode=RunMode.COHERENT_TL)
+            inc = Bellhop(verbose=False).run(
+                env, Source(depths=20.0, frequencies=200.0),
+                Receiver(depths=[30.0, 60.0], ranges=[500.0, 1000.0]),
+                run_mode=mode)
+        assert not np.iscomplexobj(inc.data)
+        assert inc.unit == 'dB'
+        with pytest.raises((AttributeError, ConfigurationError),
+                           match='requires complex data'):
+            inc.phase
+        # The level is the same kind of number as the coherent one's .dB.
+        assert np.all(np.abs(np.asarray(inc.dB) - np.asarray(coh.dB)) < 30.0)
+
+
+class TestCoherentFieldDtypeMatchesTheOtherEngines:
+    """The ``.shd`` payload is complex64; Kraken, Scooter and OASP return
+    complex128, so Bellhop upcasts to the same dtype on every source type."""
+
+    @pytest.mark.parametrize('source_type', ['point', 'line'])
+    def test_coherent_tl_is_complex128(self, source_type):
+        env = Environment(name='dtype', bathymetry=100.0, ssp=1500.0)
+        field = Bellhop(verbose=False).compute_tl(
+            env, Source(depths=[20.0], frequencies=200.0,
+                        source_type=source_type),
+            Receiver(depths=[30.0, 50.0], ranges=[500.0, 1000.0]))
+        assert field.data.dtype == np.complex128
+
+
+def test_a_sub_200_hz_band_announces_francois_garrison_once():
+    """The broadband synthesis and its band check each evaluate the band in
+    one vectorised call, so Francois-Garrison's out-of-range notice (fitted
+    from 200 Hz) names the band once, where a per-frequency loop printed one
+    per frequency; the deck's water rows, written at the carrier, name it
+    once more. The values are the same kernel either way."""
+    from uacpy.core.absorption import FrancoisGarrison
+    fg = FrancoisGarrison(temperature=10.0, salinity=35.0, pH=8.0)
+    env = Environment(name='fg', bathymetry=100.0, ssp=1500.0,
+                      absorption=fg,
+                      bottom=BoundaryProperties(acoustic_type='half-space',
+                                                sound_speed=1700.0,
+                                                density=1.8, attenuation=0.5))
+    with recorded_warnings() as caught:
+        Bellhop(verbose=False).run(
+            env, Source(depths=30.0, frequencies=100.0),
+            Receiver(depths=[50.0], ranges=[2000.0]),
+            run_mode=RunMode.BROADBAND,
+            frequencies=np.linspace(60.0, 140.0, 9))
+    notices = {str(w.message) for w in caught
+               if str(w.message).startswith('FrancoisGarrison:')}
+    assert len(notices) == 2, notices
+    assert sum('1 of 1 frequency (100 Hz)' in n for n in notices) == 1
+    assert sum('10 of 10 frequencies (60-140 Hz)' in n for n in notices) == 1
+    band = fg.table([100.0, 60.0, 140.0], depths=0.0, units='dB/m').data
+    single = [float(np.ravel(fg.alpha_dB_per_m(f, 0.0))[0])
+              for f in (100.0, 60.0, 140.0)]
+    np.testing.assert_array_equal(band, single)
+
+
+@pytest.mark.parametrize('backend', ['fortran', None])
+def test_an_accented_environment_name_reads_back_its_ray_file(backend):
+    """The ``.ray`` header carries ``Title(1:70)`` after a 9-byte prefix
+    (``Bellhop/ReadEnvironmentBell.f90:45-46,557``); measured before deck
+    titles were folded to ASCII, ``'é'*79`` put half a character there and
+    ``read_ray_file`` failed with ``UnicodeDecodeError``."""
+    env = uacpy.Environment(name='é' * 79, bathymetry=100.0, ssp=1500.0)
+    kw = {} if backend is None else {'backend': backend}
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        rays = Bellhop(**kw).run(
+            env, uacpy.Source(depths=30.0, frequencies=200.0),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+            run_mode=RunMode.RAYS)
+    assert isinstance(rays, Rays)
+
+
+class TestPortsArrivalsMemoryBudget:
+    """bellhopcxx / bellhopcuda size and zero-fill the ARRIVALS table from
+    their whole memory budget (``src/mode/arr.hpp:83-105``), 4 GiB by
+    default: measured peak RSS 4.17 GiB for a 10 x 20 grid that Fortran ran
+    in 18 MB. ARRIVALS launches pass ``-mem=`` sized from the grid."""
+
+    def test_budget_is_clamped_and_scales_with_the_grid(self):
+        from uacpy.models.bellhop._backend import (
+            _BHC_ARRIVALS_MEMORY_CAP, _BHC_ARRIVALS_MEMORY_FLOOR,
+            _ports_arrivals_memory_bytes)
+        assert _ports_arrivals_memory_bytes(1, 1) == _BHC_ARRIVALS_MEMORY_FLOOR
+        assert (_ports_arrivals_memory_bytes(1, 4000)
+                < _ports_arrivals_memory_bytes(2, 4000)
+                <= _BHC_ARRIVALS_MEMORY_CAP)
+        assert _ports_arrivals_memory_bytes(10, 200_000) \
+            == _BHC_ARRIVALS_MEMORY_CAP
+
+    def test_the_port_command_carries_the_budget_in_kib(self, tmp_path):
+        stub = tmp_path / 'bellhopcxx'
+        stub.write_text('')
+        stub.chmod(0o755)
+        model = Bellhop(executable=stub, verbose=False)
+        cmd = _command(model, 'base', memory_bytes=64 * 1024 ** 2)
+        assert cmd == [str(stub), '--2D', '-mem=65536KiB', 'base']
+        assert _command(model, 'base') == [str(stub), '--2D', 'base']
+
+    def test_the_budget_keeps_every_arrival_the_default_budget_keeps(
+            self, monkeypatch):
+        from uacpy.core.exceptions import ExecutableNotFoundError
+        from uacpy.models.bellhop import _backend as bellhop_backend
+        try:
+            model = Bellhop(backend='cxx', verbose=False)
+        except ExecutableNotFoundError:
+            pytest.skip("no cxx Bellhop binary on this host")
+        env = Environment(name='arrmem', bathymetry=100.0, ssp=1500.0)
+        src = Source(depths=[30.0, 60.0], frequencies=500.0)
+        rcv = Receiver(depths=np.linspace(5.0, 95.0, 10),
+                       ranges=np.linspace(100.0, 3000.0, 30))
+
+        def counts():
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                result = model.run(env, src, rcv, run_mode=RunMode.ARRIVALS)
+            slabs = (result.slabs if isinstance(result, ResultStack)
+                     else [result])
+            return sorted((i, a['depth_idx'], a['range_idx'])
+                          for i, slab in enumerate(slabs)
+                          for a in slab.arrivals)
+
+        sized = counts()
+        asked = []
+
+        def no_budget(n_sources, n_receivers):
+            asked.append((n_sources, n_receivers))
+            return None
+
+        monkeypatch.setattr(bellhop_backend, '_ports_arrivals_memory_bytes',
+                            no_budget)
+        assert sized == counts()
+        # The equality is vacuous unless the second run read the patched
+        # budget: two budgeted runs agree too.
+        assert asked, "the arrivals run never asked for a memory budget"
+
+
+class TestEigenraysWarnsBeforeALargeRayFile:
+    """An EIGENRAYS ``.ray`` holds a whole trajectory per (beam, receiver)
+    hit; with the automatic fan a 10 x 20 grid at 1 kHz passed 3 GB. The
+    warning fires before launch, from the receiver count times the beam count
+    the deck will get."""
+
+    @staticmethod
+    def _stopped_run(monkeypatch, n_beams, n_depths, n_ranges):
+        class _Stop(RuntimeError):
+            pass
+
+        monkeypatch.setattr(
+            Bellhop, '_launch',
+            lambda self, inputs, deck: (_ for _ in ()).throw(_Stop()))
+        env = Environment(name='eig', bathymetry=100.0, ssp=1500.0)
+        rcv = Receiver(depths=np.linspace(10.0, 90.0, n_depths),
+                       ranges=np.linspace(1000.0, 5000.0, n_ranges))
+        with recorded_warnings() as record:
+            with pytest.raises(_Stop):
+                Bellhop(backend='fortran', n_beams=n_beams,
+                        verbose=False).run(
+                    env, Source(depths=30.0, frequencies=1000.0), rcv,
+                    run_mode=RunMode.EIGENRAYS)
+        return [w for w in record if 'ray-receiver pairs' in str(w.message)]
+
+    def test_pairs_at_the_threshold_are_silent(self, monkeypatch):
+        assert self._stopped_run(monkeypatch, 1000, 4, 5) == []
+
+    def test_one_pair_past_the_threshold_warns(self, monkeypatch):
+        assert self._stopped_run(monkeypatch, 1001, 4, 5)
+
+    def test_the_automatic_fan_on_a_small_grid_warns(self, monkeypatch):
+        assert self._stopped_run(monkeypatch, 0, 10, 20)
+
+    def test_the_automatic_fan_count_follows_anglemod(self):
+        env = Environment(name='eig', bathymetry=100.0, ssp=1500.0)
+        rcv = Receiver(depths=[50.0], ranges=[5000.0])
+        n = eigenray_beam_count(
+            env, Source(depths=30.0, frequencies=1000.0), rcv, n_beams=0)
+        assert n == int(np.pi / np.arctan(100.0 / 50000.0))
+
+
+class TestAFullArrivalTableIsReported:
+    """No engine reports dropping arrivals: Fortran replaces the weakest once
+    a cell is full (``ArrMod.f90:49-59``), the ports keep the first to arrive
+    (``arrivals.hpp:113-119``), and both log only the capacity to the
+    ``.prt``. A cell at that capacity is reported."""
+
+    @staticmethod
+    def _check(tmp_path, n_in_cell):
+        import types
+        (tmp_path / 'm.prt').write_text('\n ( Maximum # of arrivals = 3 )\n')
+        result = types.SimpleNamespace(
+            by_receiver=[[[{'n_arrivals': 1}, {'n_arrivals': n_in_cell}]]])
+        with recorded_warnings() as record:
+            warn_if_arrival_table_filled(result, tmp_path, 'm')
+        return [w for w in record if 'full capacity' in str(w.message)]
+
+    def test_a_cell_below_capacity_is_silent(self, tmp_path):
+        assert self._check(tmp_path, 2) == []
+
+    def test_a_cell_at_capacity_warns(self, tmp_path):
+        assert self._check(tmp_path, 3)
+
+    def test_the_ports_capacity_notice_is_passed_through(self, tmp_path):
+        stub = tmp_path / 'bellhopcxx'
+        stub.write_text('')
+        stub.chmod(0o755)
+        model = Bellhop(executable=stub, verbose=False)
+        with pytest.warns(UserWarning, match='Only enough memory'):
+            _scan_stdout(
+                model, 'setup: 1 ms\n'
+                'Only enough memory to allocate up to 5 arrivals per '
+                'receiver\nRun: 1 ms\n')
+
+
+class TestAutoSelectedCudaWithoutADevice:
+    """A CUDA build on a host, job or container with no visible GPU exits 1
+    with ``cudaErrorNoDevice`` (``bellhopcuda/src/api.cpp:148``). With
+    ``backend=None`` the run moves to the next installed binary, warns once
+    and reports the backend that ran; ``backend='cuda'`` raises."""
+
+    @staticmethod
+    def _cuda_or_skip():
+        from uacpy.core.exceptions import ExecutableNotFoundError
+        try:
+            model = Bellhop(verbose=False)
+        except ExecutableNotFoundError:
+            pytest.skip("no Bellhop binary on this host")
+        if model._resolved_backend != 'cuda':
+            pytest.skip("auto selection does not pick bellhopcuda here")
+        return model
+
+    @staticmethod
+    def _case():
+        env = Environment(name='nodev', bathymetry=100.0, ssp=1500.0)
+        return (env, Source(depths=30.0, frequencies=200.0),
+                Receiver(depths=[50.0], ranges=[1000.0, 2000.0]))
+
+    def test_auto_selection_runs_the_next_binary(self, monkeypatch):
+        from uacpy.models.bellhop import _backend as bellhop_backend
+        monkeypatch.setattr(bellhop_backend, '_cuda_found_no_device', False)
+        model = self._cuda_or_skip()
+        monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '')
+        with pytest.warns(UserWarning, match='found no CUDA device'):
+            result = model.run(*self._case(), run_mode=RunMode.COHERENT_TL)
+        assert model._resolved_backend == 'cxx'
+        assert result.backend == 'cxx'
+        # The finding lands in the flag this test reset, so the reset
+        # reached the namespace the selection reads.
+        assert bellhop_backend._cuda_found_no_device is True
+
+    def test_an_explicit_cuda_backend_raises(self, monkeypatch):
+        from uacpy.core.exceptions import (
+            ExecutableNotFoundError, ModelExecutionError)
+        from uacpy.models.bellhop import _backend as bellhop_backend
+        monkeypatch.setattr(bellhop_backend, '_cuda_found_no_device', False)
+        try:
+            model = Bellhop(backend='cuda', verbose=False)
+        except ExecutableNotFoundError:
+            pytest.skip("no bellhopcuda binary on this host")
+        monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '')
+        with pytest.raises(ModelExecutionError, match='cudaErrorNoDevice'):
+            model.run(*self._case(), run_mode=RunMode.COHERENT_TL)
+        # An explicit backend raises without moving later auto-selections.
+        assert bellhop_backend._cuda_found_no_device is False
+
+
+# ── the protocol stages (w2-bellhop) ────────────────────────────────────────
+
+def _pekeris_env(depth=100.0, ssp=1500.0, **kw):
+    return make_pekeris(name='pekeris', bathymetry=depth, ssp=ssp,
+                        sound_speed=1650.0, density=1.5, **kw)
+
+
+def _layered_env(**kw):
+    from uacpy.core.bottom import Bottom
+    return Environment(
+        name='layered', bathymetry=100.0, ssp=1500.0,
+        bottom=Bottom.from_presets([('silt', 5.0)], halfspace='sand'), **kw)
+
+
+_SRC = Source(depths=[40.0], frequencies=200.0)
+_RCV = Receiver(depths=[30.0, 60.0], ranges=np.linspace(400.0, 2000.0, 5))
+
+
+class TestRunWithBounceRunsThroughTheTemplate:
+    """``run_with_bounce`` is ``run`` with the seabed routed through BOUNCE,
+    so it applies the source weights, loops a multi-depth BROADBAND source
+    and stamps the settings, as ``run`` does (RA-WAVE-1)."""
+
+    @staticmethod
+    def _model():
+        return Bellhop(backend='fortran', verbose=False, beam_type='G',
+                       n_beams=301)
+
+    def test_a_weighted_source_is_scaled_by_its_weight(self):
+        model = self._model()
+        unit = model.run_with_bounce(_layered_env(), _SRC, _RCV,
+                                     run_mode=RunMode.COHERENT_TL)
+        weighted = model.run_with_bounce(
+            _layered_env(),
+            Source(depths=[40.0], frequencies=200.0, weights=[2.0 - 1.0j]),
+            _RCV, run_mode=RunMode.COHERENT_TL)
+        ok = np.isfinite(unit.data) & (np.abs(unit.data) > 0)
+        ratio = np.asarray(weighted.data)[ok] / np.asarray(unit.data)[ok]
+        np.testing.assert_allclose(ratio, 2.0 - 1.0j, rtol=1e-12)
+
+    def test_a_two_depth_broadband_source_returns_a_stack(self):
+        stack = self._model().run_with_bounce(
+            _layered_env(), Source(depths=[30.0, 60.0], frequencies=200.0),
+            _RCV, run_mode=RunMode.BROADBAND,
+            frequencies=np.array([180.0, 200.0, 220.0]))
+        assert isinstance(stack, ResultStack)
+        assert stack.n_slabs == 2
+        assert all('bounce' in s.components for s in stack.slabs)
+
+    def test_the_result_carries_the_route_and_bounce_settings(self):
+        result = self._model().run_with_bounce(
+            _pekeris_env(), _SRC, _RCV, run_mode=RunMode.COHERENT_TL,
+            rmax_m=3000.0)
+        engine = result.run_settings.engine
+        assert result.run_mode == RunMode.COHERENT_TL
+        assert engine.bounce_origin == 'run_with_bounce'
+        assert engine.bounce.mode == RunMode.REFLECTION
+        assert engine.bounce.engine.rmax_m == 3000.0
+        assert result.components['bounce'].run_settings == engine.bounce
+
+    def test_a_weighted_incoherent_run_is_refused_as_run_refuses_it(self):
+        source = Source(depths=[40.0], frequencies=200.0, weights=[0.5j])
+        refusals = []
+        for call in (lambda m: m.run(_layered_env(), source, _RCV,
+                                     RunMode.INCOHERENT_TL),
+                     lambda m: m.run_with_bounce(
+                         _layered_env(), source, _RCV,
+                         run_mode=RunMode.INCOHERENT_TL)):
+            with pytest.raises(ConfigurationError,
+                               match='a weight cannot scale it') as info:
+                call(self._model())
+            refusals.append(str(info.value))
+        assert refusals[0] == refusals[1] and "'dB'" in refusals[0]
+
+    def test_run_without_the_route_carries_no_bounce_settings(self):
+        engine = self._model().run_settings(_pekeris_env(), _SRC,
+                                            _RCV).engine
+        assert engine.bounce is None and engine.bounce_origin is None
+
+
+class TestTheRayBoxIsRefusedInsideTheDomain:
+    """``bellhop.f90:571-572`` drops a ray whose depth exceeds ``z_box`` or
+    whose range exceeds ``r_box``; a box inside the domain loses paths with
+    no warning, so every entry point refuses it before launching
+    (RA-WAVE-5)."""
+
+    @staticmethod
+    def _calls(model, env=None, mode=RunMode.COHERENT_TL):
+        env = env if env is not None else _pekeris_env()
+        return [lambda: model.validate_inputs(env, _SRC, _RCV, mode),
+                lambda: model.run_settings(env, _SRC, _RCV, mode),
+                lambda: model.run(env, _SRC, _RCV, mode)]
+
+    @pytest.mark.parametrize('value', [0.0, -5.0, float('nan'), True, '50'])
+    def test_a_non_positive_box_is_refused_at_construction(self, value):
+        with pytest.raises(ConfigurationError, match='positive number'):
+            Bellhop(backend='fortran', verbose=False, z_box=value)
+        with pytest.raises(ConfigurationError, match='positive number'):
+            Bellhop(backend='fortran', verbose=False, r_box=value)
+
+    def test_a_depth_box_at_the_seafloor_is_refused(self, monkeypatch):
+        model = Bellhop(backend='fortran', verbose=False, z_box=100.0)
+        monkeypatch.setattr(model, '_run_subprocess', _never_launch)
+        for call in self._calls(model):
+            with pytest.raises(ConfigurationError, match='seafloor'):
+                call()
+
+    def test_a_depth_box_below_the_seafloor_is_accepted(self):
+        model = Bellhop(backend='fortran', verbose=False, z_box=100.001)
+        assert model.run_settings(_pekeris_env(), _SRC,
+                                  _RCV).engine.z_box == 100.001
+
+    def test_a_range_box_short_of_the_farthest_receiver_is_refused(
+            self, monkeypatch):
+        model = Bellhop(backend='fortran', verbose=False, r_box=1999.999)
+        monkeypatch.setattr(model, '_run_subprocess', _never_launch)
+        for call in self._calls(model):
+            with pytest.raises(ConfigurationError, match='farthest receiver'):
+                call()
+
+    def test_a_range_box_at_the_farthest_receiver_is_accepted(self):
+        model = Bellhop(backend='fortran', verbose=False, r_box=2000.0)
+        assert model.run_settings(_pekeris_env(), _SRC,
+                                  _RCV).engine.r_box == 2000.0
+
+    def test_a_ray_trace_keeps_the_box_it_is_given(self):
+        """A RAYS run has no receiver to reach: a box inside the domain, in
+        depth or in range, is the trace extent the caller chose, at every
+        entry point (lead decision on RA-WAVE-5)."""
+        model = Bellhop(backend='fortran', verbose=False, z_box=50.0,
+                        r_box=500.0)
+        model.validate_inputs(_pekeris_env(), _SRC, _RCV, RunMode.RAYS)
+        engine = model.run_settings(_pekeris_env(), _SRC, _RCV,
+                                    RunMode.RAYS).engine
+        assert (engine.z_box, engine.r_box) == (50.0, 500.0)
+
+    def test_the_same_box_is_refused_on_a_field_mode(self, monkeypatch):
+        model = Bellhop(backend='fortran', verbose=False, z_box=50.0)
+        monkeypatch.setattr(model, '_run_subprocess', _never_launch)
+        for call in self._calls(model, mode=RunMode.ARRIVALS):
+            with pytest.raises(ConfigurationError, match='seafloor'):
+                call()
+
+    def test_the_default_box_is_recorded_with_its_origin(self):
+        engine = Bellhop(backend='fortran', verbose=False).run_settings(
+            _pekeris_env(), _SRC, _RCV).engine
+        assert engine.z_box == pytest.approx(120.0)
+        assert engine.r_box == pytest.approx(2400.0)
+        assert engine.z_box_origin == '1.2 x env.depth'
+        assert engine.r_box_origin == '1.2 x receiver.range_max'
+
+
+def _never_launch(*_a, **_k):
+    raise AssertionError('the binary was launched')
+
+
+class TestCervenyBeamsRefuseTheMagnitudeSumModes:
+    """A Cerveny beam's INCOHERENT/SEMICOHERENT level falls as
+    ``n_beams**-0.5`` (``influence.f90:140``, ``:282``, ``:772-779``), so
+    those pairs are refused with the geometric beams as the remedy (B3,
+    RA-WAVE-14); COHERENT_TL and the geometric beams stay legal."""
+
+    @pytest.mark.parametrize('beam_type', ['C', 'R'])
+    @pytest.mark.parametrize('mode', [RunMode.INCOHERENT_TL,
+                                      RunMode.SEMICOHERENT_TL])
+    def test_refused_at_every_entry_point(self, beam_type, mode,
+                                          monkeypatch):
+        model = Bellhop(backend='fortran', verbose=False,
+                        beam_type=beam_type)
+        monkeypatch.setattr(model, '_run_subprocess', _never_launch)
+        for call in ('validate_inputs', 'run_settings', 'run'):
+            with pytest.raises(ConfigurationError,
+                               match=r"n_beams\*\*-0.5") as info:
+                getattr(model, call)(_pekeris_env(), _SRC, _RCV, mode)
+            assert "beam_type='G', 'B' or 'g'" in info.value.remediation
+
+    @pytest.mark.parametrize('beam_type,mode', [
+        ('C', RunMode.COHERENT_TL), ('R', RunMode.COHERENT_TL),
+        ('G', RunMode.INCOHERENT_TL), ('B', RunMode.SEMICOHERENT_TL)])
+    def test_the_other_pairs_resolve(self, beam_type, mode):
+        model = Bellhop(backend='fortran', verbose=False,
+                        beam_type=beam_type)
+        assert model.run_settings(_pekeris_env(), _SRC, _RCV,
+                                  mode).engine.beam_type == beam_type
+
+
+class TestTheBandKnobsAreCheckedAtConstruction:
+    """``n_freqs`` and ``bandwidth_factor`` shape every BROADBAND run, so a
+    value no run could use is refused when the model is built (RA-WAVE-6)."""
+
+    @pytest.mark.parametrize('n_freqs', [0, 1])
+    def test_fewer_than_two_bins_are_refused(self, n_freqs):
+        with pytest.raises(ConfigurationError, match='n_freqs'):
+            Bellhop(backend='fortran', verbose=False, n_freqs=n_freqs)
+
+    def test_two_bins_are_accepted(self):
+        assert Bellhop(backend='fortran', verbose=False,
+                       n_freqs=2).n_freqs == 2
+
+    @pytest.mark.parametrize('factor', [0.0, -0.5, float('nan')])
+    def test_a_non_positive_width_is_refused(self, factor):
+        with pytest.raises(ConfigurationError, match='bandwidth_factor'):
+            Bellhop(backend='fortran', verbose=False,
+                    bandwidth_factor=factor)
+
+    def test_a_reassigned_knob_is_refused_by_the_run(self):
+        model = Bellhop(backend='fortran', verbose=False)
+        model.n_freqs = 1
+        with pytest.raises(ConfigurationError, match='n_freqs'):
+            model.validate_inputs(_pekeris_env(), _SRC, _RCV)
+
+
+class TestTheBroadbandFieldCarriesTheWaterColumnsFastestSpeed:
+    """``Field.to_time_trace`` anchors its window at r / max(c_max, c0), so
+    the H(f) Bellhop returns carries the fastest WATER speed: the rays
+    travel in the water, and a faster seabed carries no head wave
+    (RA-WAVE-11)."""
+
+    def test_c_max_is_the_fastest_water_not_the_seabed(self):
+        from uacpy.core.environment import SoundSpeedProfile
+        env = _pekeris_env(ssp=SoundSpeedProfile.from_pairs(
+            np.array([[0.0, 1490.0], [100.0, 1520.0]])))
+        field = Bellhop(backend='fortran', verbose=False).run(
+            env, _SRC, _RCV, RunMode.BROADBAND,
+            frequencies=np.array([180.0, 200.0, 220.0]))
+        assert field.speeds.surface == 1490.0
+        assert field.speeds.water_max == 1520.0
+
+
+class TestTheBroadbandArrivalsAreAnArrivalsResult:
+    """BROADBAND / TIME_SERIES are built from one ARRIVALS launch at fc in
+    the same call; the arrivals are kept on the result stamped as the
+    ARRIVALS result they are."""
+
+    def test_the_arrivals_carry_their_own_mode_and_settings(self):
+        field = Bellhop(backend='fortran', verbose=False).run(
+            _pekeris_env(), _SRC, _RCV, RunMode.BROADBAND,
+            frequencies=np.array([180.0, 200.0, 220.0]))
+        arrivals = field.components['arrivals']
+        assert isinstance(arrivals, Arrivals)
+        assert arrivals.run_mode == RunMode.ARRIVALS
+        assert arrivals.run_settings.mode == RunMode.ARRIVALS
+        np.testing.assert_array_equal(arrivals.run_settings.frequencies,
+                                      [200.0])
+
+
+class TestTheBounceRouteWarnsOfWhatIsModelled:
+    """BOUNCE reads no surface, and it tabulates one seabed column against
+    one seafloor water speed while the ray trace keeps the environment's
+    surface, bathymetry and SSP (JRN-41): the route says so instead of
+    relaying notices about losses the Bellhop field does not suffer."""
+
+    @staticmethod
+    def _messages(env):
+        with recorded_warnings() as caught:
+            Bellhop(backend='fortran', verbose=False).run_settings(
+                env, _SRC, _RCV)
+        return [str(w.message) for w in caught]
+
+    def test_no_notice_about_the_surface(self):
+        env = _layered_env(altimetry=[(0.0, 0.0), (1000.0, -2.0),
+                                      (2000.0, 0.0)])
+        said = self._messages(env)
+        assert not any('Bounce does not support sea-surface altimetry' in m
+                       for m in said), said
+
+    def test_a_collapsed_bathymetry_is_said_to_concern_the_table(self):
+        from uacpy.core.bottom import Bottom
+        env = Environment(
+            name='slope', bathymetry=np.array([[0.0, 100.0],
+                                               [2000.0, 120.0]]),
+            ssp=1500.0,
+            bottom=Bottom.from_presets([('silt', 5.0)], halfspace='sand'))
+        said = self._messages(env)
+        table = [i for i, m in enumerate(said)
+                 if 'describe that table only' in m]
+        collapse = [i for i, m in enumerate(said)
+                    if m.startswith('Bounce does not support range-dependent '
+                                    'bathymetry')]
+        assert table and collapse and table[0] < collapse[0], said
+        assert 'keeps the bathymetry as given' in said[table[0]]
+
+    def test_a_flat_environment_gets_no_such_notice(self):
+        assert not any('describe that table only' in m
+                       for m in self._messages(_layered_env()))
+
+
+class TestTheSettingsRecordTheDeck:
+    """``run_settings().engine`` is what the deck is written from: the step,
+    the ray box and the beams read back from ``model.env`` equal it, and the
+    record round-trips and pickles, BOUNCE's own settings included."""
+
+    def test_the_deck_carries_the_settings(self, tmp_path):
+        model = Bellhop(backend='fortran', verbose=False, work_dir=tmp_path,
+                        cleanup=False, n_beams=201)
+        result = model.run(_pekeris_env(), _SRC, _RCV)
+        engine = result.run_settings.engine
+        assert engine == model.run_settings(_pekeris_env(), _SRC,
+                                            _RCV).engine
+        lines = (tmp_path / 'model.env').read_text().splitlines()
+        step_at = next(i for i, line in enumerate(lines)
+                       if line.strip().startswith(f"{engine.ray_step:.6f}"))
+        assert lines[step_at + 1].split() == [
+            f"{engine.z_box:.6f}", f"{engine.r_box / 1000.0:.6f}"]
+        assert f"{engine.launch_angles[0]:.6f} {engine.launch_angles[1]:.6f} /" in lines
+
+    def test_the_record_round_trips_and_pickles(self):
+        import pickle
+        from uacpy.models import RunSettings
+        from uacpy.models.bellhop import BellhopSettings
+        model = Bellhop(backend='fortran', verbose=False, beam_type='C')
+        engine = model.run_settings(_layered_env(), _SRC, _RCV).engine
+        assert engine.bounce is not None and engine.range_trim is not None
+        again = BellhopSettings.from_dict(engine.to_dict())
+        assert again == engine
+        # Equality compares the plain forms, so the nested record is checked
+        # for what it is, not only for what it prints.
+        assert isinstance(again.bounce, RunSettings)
+        assert again.bounce.mode == RunMode.REFLECTION
+        assert pickle.loads(pickle.dumps(engine)) == engine
+
+
+class TestTheAutomaticFanUsesAngleModsReferenceSpeed:
+    """angleMod's automatic beam count divides by its module constant
+    ``c0 = 1500`` (``angleMod.f90:15``), whatever the water's speed, so the
+    eigenray-file estimate does too (RA-WAVE-10)."""
+
+    def test_a_slow_water_column_keeps_the_1500_divisor(self):
+        env = Environment(name='deep', bathymetry=1000.0, ssp=1450.0)
+        rcv = Receiver(depths=[50.0], ranges=[5000.0])
+        n = eigenray_beam_count(
+            env, Source(depths=30.0, frequencies=1000.0), rcv, n_beams=0)
+        assert n == int(0.3 * 5000.0 * 1000.0 / 1500.0)
+
+
+class TestTheBackendDocstringsStateTheRefusal:
+    """An explicit backend that is not installed raises; nothing falls back
+    to the Fortran binary (RA-WAVE-2)."""
+
+    def test_the_backend_entry_names_the_error(self):
+        # Each engine documents its constructor once (class or __init__).
+        docs = [d for d in (Bellhop.__doc__, Bellhop.__init__.__doc__)
+                if d and 'backend :' in d]
+        assert docs, 'no docstring documents the backend parameter'
+        for doc in docs:
+            entry = doc[doc.index('backend :'):doc.index('dimensionality :')]
+            assert 'ExecutableNotFoundError' in entry
+            assert 'falls back' not in entry
+
+
+class TestTheFortranSimpleGaussianBeamSaysItWeightsALineSourceAsAPoint:
+    """The Fortran ``InfluenceSGB`` applies the point-source launch weight
+    to a line source too (``influence.f90:665``); the ports do not, and the
+    binary is left as built, so the run says so (RA-WAVE-9)."""
+
+    @staticmethod
+    def _said(beam_type, source_type):
+        model = Bellhop(backend='fortran', verbose=False, beam_type=beam_type)
+        with recorded_warnings() as caught:
+            model.run_settings(
+                _pekeris_env(),
+                Source(depths=[40.0], frequencies=200.0,
+                       source_type=source_type), _RCV)
+        return [str(w.message) for w in caught
+                if 'weights a line source as a point source' in str(w.message)]
+
+    def test_a_line_source_is_told(self):
+        assert len(self._said('S', 'line')) == 1
+
+    @pytest.mark.parametrize('beam_type,source_type', [('S', 'point'),
+                                                       ('G', 'line')])
+    def test_the_other_pairs_are_silent(self, beam_type, source_type):
+        assert self._said(beam_type, source_type) == []
+
+
+@pytest.mark.requires_binary
+class TestBellhop:
+    """Tests for Bellhop model. Smoke TL coverage on ``simple_env`` lives
+    in ``test_compute_wrappers.TestComputeAPI`` and ``test_bellhop`` —
+    only model-specific scenarios live here."""
+
+    def test_range_dependent_env_returns_full_receiver_grid(self, range_dependent_env, source, receiver_small):
+        """Test Bellhop with range-dependent environment."""
+        bellhop = Bellhop(verbose=False)
+        result = bellhop.compute_tl(
+            env=range_dependent_env,
+            source=source,
+            receiver=receiver_small
+        )
+
+        assert isinstance(result, Field)
+        assert result.shape[0] == len(receiver_small.depths)
+
+    def test_bellhop_cuda_backend_compute_tl(self, simple_env, source, receiver_small):
+        """Smoke test for ``Bellhop(backend='cuda')``. Skipped when the
+        bellhopcuda binary is not built, which that constructor reports as
+        ``ExecutableNotFoundError``.
+        """
+        from uacpy.core.exceptions import ExecutableNotFoundError
+        from uacpy.models import Bellhop
+        try:
+            bhc = Bellhop(backend='cuda', verbose=False)
+        except ExecutableNotFoundError:
+            pytest.skip("bellhopcuda binary not installed")
+        result = bhc.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        assert isinstance(result, Field)
+        assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
+
+
+class TestSeparableAbsorptionScalesExactlyAcrossTheBand:
+    """Bellhop's ``Im tau`` is ``-integral of alpha(f_t) ds / omega_t`` along
+    the ray (``Step.f90:73``, ``misc/AttenMod.f90:113``), so for Thorp the
+    absorption at any f is ``omega_t Im tau * alpha(f)/alpha(f_t)`` exactly.
+    Measured arrival by arrival against Bellhop traced at f itself:
+    0.0011 dB, where the linear-in-f scaling missed by 2.7 dB (20-60 kHz,
+    1 km). One Francois-Garrison row takes the same scaling by its surface
+    ratio, which its pressure terms bend with depth; the band check measures
+    that bend."""
+
+    @staticmethod
+    def _env(absorption, depth=100.0, bottom_speed=1700.0):
+        return Environment(
+            name='pek', bathymetry=depth, ssp=[(0.0, 1520.0), (depth, 1500.0)],
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=bottom_speed, density=1.8,
+                                      attenuation=0.5),
+            absorption=absorption)
+
+    @staticmethod
+    def _arrivals(env, f):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return Bellhop(verbose=False, backend='fortran', n_beams=2001).run(
+                env, Source(depths=50.0, frequencies=f),
+                Receiver(depths=[30.0], ranges=[1000.0]),
+                run_mode=RunMode.ARRIVALS)
+
+    def test_every_multipath_arrival_matches_its_own_trace(self):
+        from uacpy.core.absorption import Thorp
+        env = self._env(Thorp())
+        traced = self._arrivals(env, 40000.0)
+        assert type(traced.absorption).__name__ == 'Thorp'
+        worst, matched = 0.0, 0
+        for f in (20000.0, 60000.0):
+            own = self._arrivals(env, f)
+            scaled = traced._received_amplitudes_at(f, traced.arrivals)
+            geometric = np.abs(traced.amplitudes)
+            for a in own.arrivals:
+                same = [i for i, b in enumerate(traced.arrivals)
+                        if (b['n_top_bounces'], b['n_bot_bounces'])
+                        == (a['n_top_bounces'], a['n_bot_bounces'])]
+                if not same:
+                    continue
+                i = min(same, key=lambda i: abs(traced.arrivals[i]['delay']
+                                                - a['delay']))
+                if abs(traced.arrivals[i]['delay'] - a['delay']) > 1e-4:
+                    continue
+                loss_scaled = 20 * np.log10(np.abs(scaled[i]) / geometric[i])
+                loss_own = 20 * np.log10(np.exp(2 * np.pi * f * a['delay_imag']))
+                worst = max(worst, abs(loss_scaled - loss_own))
+                matched += 1
+        assert matched >= 20
+        assert worst <= 0.01, worst
+
+    def test_the_time_series_spectrum_follows_thorp(self):
+        from uacpy.core.absorption import Thorp
+        from uacpy.core.acoustics.attenuation import absorption_thorp
+        env = Environment(
+            name='deep', bathymetry=5000.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5))
+        fs = 480000.0
+        t = np.arange(int(0.002 * fs)) / fs
+        pulse = np.hanning(t.size) * np.sin(
+            2 * np.pi * (20000.0 * t + 0.5 * (40000.0 / t[-1]) * t ** 2))
+        traces = []
+        for absorption in (Thorp(), None):
+            env.absorption = absorption
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                traces.append(np.asarray(Bellhop(
+                    verbose=False, backend='fortran', launch_angles=(-10, 10),
+                    n_beams=401).run(
+                        env, Source(depths=2500.0, frequencies=40000.0),
+                        Receiver(depths=[2500.0], ranges=[1000.0]),
+                        run_mode=RunMode.TIME_SERIES, source_waveform=pulse,
+                        sample_rate=fs, output_duration=0.02).data,
+                    dtype=float).ravel())
+        f = np.fft.rfftfreq(traces[0].size, 1.0 / fs)
+        lossy, lossless = (np.abs(np.fft.rfft(x)) for x in traces)
+        for fk in (25000.0, 55000.0):
+            k = int(np.argmin(np.abs(f - fk)))
+            applied = 20 * np.log10(lossless[k] / lossy[k])
+            assert applied == pytest.approx(
+                float(absorption_thorp(f[k])), abs=0.05)
+
+    @pytest.mark.parametrize('a0, warns', [(0.0010, True), (0.0006, False)])
+    def test_a_subsurface_biological_layer_warns_above_the_threshold(
+            self, a0, warns):
+        """The linear scaling a Biological layer takes is checked over the
+        band and the water column: a layer at 30-70 m, invisible at the
+        surface, warns once its error passes 0.05 dB/km."""
+        from uacpy.core.absorption import (
+            BAND_ABSORPTION_CHECK_DEPTHS, BAND_ABSORPTION_WARN_DB_PER_KM,
+            Biological, band_absorption_error_dB_per_km)
+        bio = Biological(layers=[(30.0, 70.0, 3000.0, 8.0, a0)])
+        env = self._env(bio)
+        band = np.linspace(1000.0, 4000.0, 7)
+        err = band_absorption_error_dB_per_km(
+            bio, band, 2500.0,
+            depths=np.linspace(0.0, 100.0, BAND_ABSORPTION_CHECK_DEPTHS))
+        assert (err >= BAND_ABSORPTION_WARN_DB_PER_KM) is warns
+        with recorded_warnings() as caught:
+            warn_if_attenuation_extrapolates(
+                env, band, 2500.0, model_name='Bellhop')
+        fired = any('Biological absorption that varies with depth'
+                    in str(w.message) for w in caught)
+        assert fired is warns
+
+    @pytest.mark.parametrize('law, depth, warns', [
+        ('thorp', 5000.0, False), ('fg', 5000.0, True), ('fg', 100.0, False)])
+    def test_the_surface_ratio_is_checked_over_the_column(
+            self, law, depth, warns):
+        """Over 5-15 kHz Thorp's surface ratio is its ratio at every depth
+        (silent); one Francois-Garrison row's misses a 5 km column by
+        0.058 dB/km (warns) and a 100 m one by 0.003 (silent)."""
+        from uacpy.core.absorption import FrancoisGarrison, Thorp
+        env = self._env(Thorp() if law == 'thorp' else FrancoisGarrison(),
+                        depth=depth)
+        with recorded_warnings() as caught:
+            warn_if_attenuation_extrapolates(
+                env, np.linspace(5000.0, 15000.0, 11), 10000.0,
+                model_name='Bellhop')
+        fired = [str(w.message) for w in caught
+                 if "ratio alpha(f)/alpha(fc) at the surface"
+                 in str(w.message)]
+        assert bool(fired) is warns
+        if warns:
+            assert 'up to 0.0583 dB/km' in fired[0]
+
+    def test_a_wide_broadband_run_warns_for_a_francois_garrison_profile(self):
+        """A T/S profile does not scale from one trace frequency by one
+        ratio (its frequency dependence follows the local water), so a
+        5-15 kHz BROADBAND run applies it linearly and says so."""
+        from uacpy.core.exceptions import NumericsWarning
+        from uacpy.tests.conftest import two_layer_absorption
+        env = Environment(name='band', bathymetry=100.0, ssp=1500.0,
+                          bottom='sand', absorption=two_layer_absorption())
+        with recorded_warnings() as rec:
+            Bellhop(verbose=False).run(
+                env, Source(depths=30.0, frequencies=10000.0),
+                Receiver(depths=[20.0], ranges=[1000.0]),
+                run_mode=RunMode.BROADBAND,
+                frequencies=np.linspace(5000.0, 15000.0, 11))
+        hits = [str(w.message) for w in rec
+                if issubclass(w.category, NumericsWarning)
+                and 'does not scale from one frequency' in str(w.message)]
+        assert hits
+        assert 'FrancoisGarrison' in hits[0]
+
+
+class TestTheEigenrayFileInMemoryIsWeighedAsABound:
+    """EIGENRAYS in a work directory held in memory weighs the .ray file's
+    upper bound (pairs x RMax/step points x 53 B) with the memory budget and
+    never refuses it; on disk only the pair count speaks."""
+
+    @staticmethod
+    def _notice(monkeypatch, free, memory_backed):
+        from uacpy.core import BoundaryProperties, Environment, Receiver, Source
+        from uacpy.models import _budget
+        from uacpy.models.bellhop._plan import eigenray_size_notice
+        monkeypatch.setattr(_budget, 'available_memory_bytes', lambda: free)
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(
+                              acoustic_type='half-space', sound_speed=1700.0,
+                              density=1.8, attenuation=0.5))
+        return eigenray_size_notice(
+            env, Source(depths=[30.0], frequencies=[1000.0]),
+            Receiver(depths=[50.0], ranges=[3000.0]), n_beams=0,
+            grid_type='R', ray_step=2.0, memory_backed=memory_backed)
+
+    # 942 beams x 1 receiver x 3000/2 points x 53 B
+    BOUND = 942 * 1500 * 53
+
+    def test_half_the_free_memory_is_silent(self, monkeypatch):
+        assert self._notice(monkeypatch, 2 * self.BOUND, True) is None
+
+    def test_over_half_the_free_memory_is_announced(self, monkeypatch):
+        message = self._notice(monkeypatch, 2 * self.BOUND - 1, True)
+        assert 'held in memory' in message and '942 ray-receiver' in message
+        assert 'an upper bound' in message and 'work_dir=' in message
+
+    def test_over_the_free_memory_is_announced_not_refused(
+            self, monkeypatch):
+        message = self._notice(monkeypatch, self.BOUND - 1, True)
+        assert 'not refused' in message
+
+    def test_on_disk_the_free_memory_is_not_weighed(self, monkeypatch):
+        assert self._notice(monkeypatch, 1, False) is None

@@ -5,18 +5,21 @@ Four sound-speed equations over temperature, salinity and depth — Mackenzie
 (:func:`sound_speed_unesco`), Del Grosso 1974 (:func:`sound_speed_delgrosso`)
 and TEOS-10 (:func:`sound_speed_teos10`) — plus :func:`density` (Fofonoff
 IES-80) and :func:`doppler`, which reads a frequency shift off one of them.
+:func:`depth_to_pressure_dbar` / :func:`pressure_dbar_to_depth` convert the
+depth axis, and :func:`insitu_from_potential` turns an ocean model's potential
+temperature into the in-situ temperature the equations take (UNESCO 44).
 
 Each sound-speed equation warns outside the range its own authors fit, so a
 profile that strays past a published boundary says so rather than returning a
 silently extrapolated number.
 
 Two different defaults live in the package and neither is "the" default.
-Mackenzie is what the helpers in this subpackage fall back to when a caller
-supplies no sound speed (:func:`~uacpy.core.acoustics.boundaries` and the
-bubble models call it at its own argument defaults), because it is the one
-equation stated in DEPTH and those callers have a depth. The data routes
-default instead to ``DEFAULT_SOUND_SPEED_FORMULA`` (TEOS-10), because they
-carry pressure. Anything quoting a sound speed should say which.
+A helper handed no sound speed takes the nominal ``DEFAULT_SOUND_SPEED``,
+1500 m/s (:mod:`~uacpy.core.acoustics.boundaries` and the bubble models).
+A sound speed computed from temperature and salinity — the data routes and
+:meth:`uacpy.SoundSpeedProfile.from_temperature_salinity` — defaults to
+``DEFAULT_SOUND_SPEED_FORMULA`` (TEOS-10). Anything quoting a sound speed
+should say which.
 
 -------------------------------------------------------------------------------
 Portions of this file are adapted from arlpy (https://github.com/org-arl/arlpy)
@@ -40,33 +43,51 @@ import numpy as np
 from typing import Union, Optional
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
+from uacpy.core._validate import water_property
+from uacpy.core.constants import (
+    DEFAULT_SOUND_SPEED, REFERENCE_DEPTH_M, REFERENCE_SALINITY_PSU,
+    REFERENCE_TEMPERATURE_C, STANDARD_GRAVITY_M_S2)
+
+#: dbar per kgf/cm²: 1 kgf/cm² = g·1e4 Pa, which is g decibars.
+_DBAR_PER_KGF_CM2 = STANDARD_GRAVITY_M_S2
 
 __all__ = [
-    'sound_speed_mackenzie',
-    'sound_speed_unesco',
-    'sound_speed_delgrosso',
-    'sound_speed_teos10',
-    'density',
-    'doppler',
+    'sound_speed_mackenzie', 'sound_speed_unesco', 'sound_speed_delgrosso',
+    'sound_speed_teos10', 'sound_speed_at_depth', 'depth_to_pressure_dbar',
+    'pressure_dbar_to_depth', 'insitu_from_potential', 'density', 'doppler',
+    'REFERENCE_LATITUDE_DEG', 'DEFAULT_SOUND_SPEED_FORMULA',
+    'SOUND_SPEED_FORMULAS', 'canonical_formula',
 ]
 
 
+def _sequence_as_array(x):
+    """A list or tuple as a float64 array; a scalar or an ndarray is
+    returned as it is, so its dtype and the scalar arithmetic stay the
+    caller's."""
+    if np.isscalar(x) or isinstance(x, np.ndarray):
+        return x
+    return np.asarray(x, dtype=float)
+
+
 def sound_speed_mackenzie(
-    temperature: Union[float, np.ndarray] = 27,
-    salinity: Union[float, np.ndarray] = 35,
-    depth: Union[float, np.ndarray] = 10,
+    temperature: Union[float, np.ndarray] = REFERENCE_TEMPERATURE_C,
+    salinity: Union[float, np.ndarray] = REFERENCE_SALINITY_PSU,
+    depth: Optional[Union[float, np.ndarray]] = None,
 ) -> Union[float, np.ndarray]:
     """
     Calculate speed of sound in water using Mackenzie (1981) formula.
 
     Parameters
     ----------
-    temperature : float or ndarray, optional
-        Water temperature in degrees Celsius (default: 27)
-    salinity : float or ndarray, optional
+    temperature : float, ndarray or (N, 2) pairs, optional
+        Water temperature in degrees Celsius (default: 10, the package's
+        reference sea water, ``constants.REFERENCE_TEMPERATURE_C``); see
+        the water-property rule below.
+    salinity : float, ndarray or (N, 2) pairs, optional
         Salinity in parts per thousand (ppt) (default: 35)
     depth : float or ndarray, optional
-        Depth in meters (default: 10)
+        Depth in meters (default: ``None``, the surface, 0 m)
 
     Returns
     -------
@@ -79,7 +100,7 @@ def sound_speed_mackenzie(
     --------
     >>> c = sound_speed_mackenzie()
     >>> print(f"Sound speed: {c:.1f} m/s")
-    Sound speed: 1539.1 m/s
+    Sound speed: 1489.8 m/s
 
     >>> c = sound_speed_mackenzie(temperature=25, depth=20)
     >>> print(f"Sound speed: {c:.1f} m/s")
@@ -87,10 +108,15 @@ def sound_speed_mackenzie(
 
     Notes
     -----
+    **Water properties.** ``temperature`` and ``salinity`` each take a
+    single value, an array (broadcast with ``depth``), or ``(depth, value)``
+    pairs interpolated linearly onto ``depth`` (end values held), which then
+    must be given (:func:`uacpy.core._validate.water_property`).
+
     Mackenzie's nine-term formula is validated for
     ``temperature ∈ [-2, 30] °C``, ``salinity ∈ [25, 40] PSU``,
     ``depth ∈ [0, 8000] m``. Values outside these ranges trigger a
-    :class:`UserWarning` and the formula's output should be treated as
+    ``ValidityWarning`` and the formula's output should be treated as
     extrapolation.
 
     References
@@ -98,23 +124,28 @@ def sound_speed_mackenzie(
     Mackenzie, K. V. (1981). "Nine-term equation for sound speed in the oceans".
     The Journal of the Acoustical Society of America, 70(3), 807-812.
     """
+    temperature = _sequence_as_array(water_property(
+        temperature, depth, name='temperature', who='sound_speed_mackenzie'))
+    salinity = _sequence_as_array(water_property(
+        salinity, depth, name='salinity', who='sound_speed_mackenzie'))
+    depth = _sequence_as_array(REFERENCE_DEPTH_M if depth is None else depth)
     if np.any(np.asarray(temperature) < -2) or np.any(np.asarray(temperature) > 30):
         _warnings.warn(
             "Mackenzie sound speed: temperature outside validated range "
             "[-2, 30] °C; treating as extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     if np.any(np.asarray(salinity) < 25) or np.any(np.asarray(salinity) > 40):
         _warnings.warn(
             "Mackenzie sound speed: salinity outside validated range "
             "[25, 40] PSU; treating as extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     if np.any(np.asarray(depth) < 0) or np.any(np.asarray(depth) > 8000):
         _warnings.warn(
             "Mackenzie sound speed: depth outside validated range "
             "[0, 8000] m; treating as extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     c = (
         1448.96
@@ -125,6 +156,34 @@ def sound_speed_mackenzie(
     c += 1.340 * (salinity - 35) + 1.630e-2 * depth + 1.675e-7 * depth**2
     c += -1.025e-2 * temperature * (salinity - 35) - 7.139e-13 * temperature * depth**3
     return c
+
+
+def _water_at_pressure(temperature, salinity, depth, pressure_dbar,
+                       latitude_deg, who):
+    """``(T, S, P)`` as float arrays for an equation stated in pressure
+    (dbar), evaluated at ``depth`` (m, converted by
+    :func:`depth_to_pressure_dbar` at ``latitude_deg``, default
+    ``REFERENCE_LATITUDE_DEG``) or at ``pressure_dbar``; neither is the
+    surface. ``temperature`` and ``salinity`` follow the water-property
+    rule (:func:`~uacpy.core._validate.water_property`) on ``depth``, whose
+    pairs are ``(depth, value)``."""
+    if depth is not None and pressure_dbar is not None:
+        raise ConfigurationError(
+            f"{who}: pass depth= (m) or pressure_dbar= (dbar), not both.")
+    if latitude_deg is not None and depth is None:
+        raise ConfigurationError(
+            f"{who}: latitude_deg= converts depth= to pressure, and no "
+            f"depth= was given.")
+    t = water_property(temperature, depth, name='temperature', who=who)
+    s = water_property(salinity, depth, name='salinity', who=who)
+    if depth is not None:
+        lat = (REFERENCE_LATITUDE_DEG if latitude_deg is None
+               else float(latitude_deg))
+        p = depth_to_pressure_dbar(depth, lat)
+    else:
+        p = 0.0 if pressure_dbar is None else pressure_dbar
+    return (np.asarray(t, dtype=float), np.asarray(s, dtype=float),
+            np.asarray(p, dtype=float))
 
 
 # Chen & Millero and Del Grosso both state the cold end of their fit at 0 °C,
@@ -138,7 +197,9 @@ def sound_speed_mackenzie(
 _COLDEST_SEAWATER_C = -3.0
 
 
-def sound_speed_unesco(temperature=15.0, salinity=35.0, pressure=0.0):
+def sound_speed_unesco(temperature=REFERENCE_TEMPERATURE_C,
+                       salinity=REFERENCE_SALINITY_PSU, *, depth=None,
+                       pressure_dbar=None, latitude_deg=None):
     """Speed of sound in seawater — UNESCO (Chen & Millero 1977 / UNESCO 1983).
 
     The international standard algorithm. ``pressure`` is in **decibars** (the
@@ -147,7 +208,7 @@ def sound_speed_unesco(temperature=15.0, salinity=35.0, pressure=0.0):
     Valid for ``T ∈ [0, 40] °C``, ``S ∈ [0, 40] PSU`` and ``P ∈ [0, 1000]``
     **bar** — which in this argument's decibars is ``[0, 10000] dbar``, so
     roughly the full ocean depth. Values outside these ranges trigger a
-    :class:`UserWarning` and the output should be treated as extrapolation,
+    ``ValidityWarning`` and the output should be treated as extrapolation,
     matching :func:`sound_speed_mackenzie`. The one relaxation is the cold
     end: the warning starts at −3 °C rather than 0 °C, for the reason given
     at :data:`_COLDEST_SEAWATER_C`.
@@ -158,14 +219,34 @@ def sound_speed_unesco(temperature=15.0, salinity=35.0, pressure=0.0):
         Temperature [°C, ITS-90].
     salinity : float
         Practical salinity [PSU, PSS-78].
-    pressure : float
-        Pressure [dbar] — decibars, *not* bar. The equation is stated in bar
-        and is converted internally.
+    depth : float or array_like, optional (keyword)
+        Depth [m] the equation is evaluated at, converted to pressure (see
+        below).
+    pressure_dbar : float or array_like, optional (keyword)
+        Pressure [dbar] — decibars, *not* bar — the equation is evaluated at, for pressure-native
+        data; ``None`` with no ``depth`` is the surface.
+    latitude_deg : float, optional (keyword)
+        Latitude [deg] of the depth -> pressure conversion; default 45.
 
     Returns
     -------
     float
         Sound speed [m/s].
+
+    **Where it is evaluated.** ``depth`` (m, keyword) is converted to the
+    pressure the equation is stated in with :func:`depth_to_pressure_dbar`
+    (Leroy & Parthiot's standard ocean) at ``latitude_deg``, default
+    ``REFERENCE_LATITUDE_DEG`` (45°) — the conversion
+    :meth:`~uacpy.core.ssp.SoundSpeedProfile.from_temperature_salinity` and
+    :func:`sound_speed_at_depth` use. ``pressure_dbar`` (dbar, keyword)
+    gives the pressure itself, for pressure-native data such as an Argo
+    cast; pass one of the two, neither being the surface.
+
+    **Water properties.** ``temperature`` and ``salinity`` each take a
+    single value, an array broadcast with the coordinate, or ``(depth,
+    value)`` pairs (m) interpolated linearly onto ``depth`` (end values
+    held), which then must be given
+    (:func:`uacpy.core._validate.water_property`).
 
     References
     ----------
@@ -173,16 +254,17 @@ def sound_speed_unesco(temperature=15.0, salinity=35.0, pressure=0.0):
     pressures." JASA 62(5), 1129-1135. UNESCO (1983) Technical Papers in Marine
     Science 44, Eqns 33-37.
     """
-    t = np.asarray(temperature, dtype=float)
-    s = np.asarray(salinity, dtype=float)
-    p = np.asarray(pressure, dtype=float) / 10.0       # dbar -> bar
+    t, s, p = _water_at_pressure(temperature, salinity, depth,
+                                 pressure_dbar, latitude_deg,
+                                 'sound_speed_unesco')
+    p = p / 10.0                                       # dbar -> bar
     t68 = t * 1.00024                                  # ITS-90 -> IPTS-68
     if np.any(t < _COLDEST_SEAWATER_C) or np.any(t > 40):
         _warnings.warn(
             f"UNESCO sound speed: temperature outside validated range "
             f"[{_COLDEST_SEAWATER_C:g}, 40] °C; treating as "
             f"extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     # Split at zero because the two sides are not the same kind of miss: the
     # S^1.5 term of Eqn 36 has no real value for S < 0, so that side returns
@@ -193,13 +275,13 @@ def sound_speed_unesco(temperature=15.0, salinity=35.0, pressure=0.0):
             "UNESCO sound speed: salinity below the validated range "
             "[0, 40] PSU is undefined, not extrapolated — the S^1.5 term has "
             "no real value there, so the result is NaN.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     elif np.any(s > 40):
         _warnings.warn(
             "UNESCO sound speed: salinity outside validated range "
             "[0, 40] PSU; treating as extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     # Bounds are tested on the converted bar so they read as the equation
     # states them; the argument itself is decibars, ten times the number.
@@ -208,7 +290,7 @@ def sound_speed_unesco(temperature=15.0, salinity=35.0, pressure=0.0):
             "UNESCO sound speed: pressure outside validated range "
             "[0, 1000] bar = [0, 10000] dbar (this argument is in DECIBARS); "
             "treating as extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     # Eqn 34: pure-water term Cw(T, P)
@@ -246,18 +328,24 @@ def sound_speed_unesco(temperature=15.0, salinity=35.0, pressure=0.0):
     return float(c) if np.ndim(c) == 0 else c
 
 
-def sound_speed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
+def sound_speed_delgrosso(temperature=REFERENCE_TEMPERATURE_C,
+                          salinity=REFERENCE_SALINITY_PSU, *, depth=None,
+                          pressure_dbar=None, latitude_deg=None):
     """Speed of sound in seawater — Del Grosso (1974) "NRL II" equation.
 
     An alternative to UNESCO, often preferred at high pressure / in deep water.
     ``pressure`` is accepted in **decibars** and converted to the kg/cm² the
-    original equation uses (``1 kg/cm² = 9.80665 dbar``). Temperature in °C,
-    salinity in PSU. Standard deviation 0.05 m/s.
+    original equation uses (``1 kg/cm² = 9.80665 dbar``). Temperature in °C
+    on ITS-90, converted internally to the IPTS-68 scale in force when the
+    coefficients were fitted (Saunders' ``t68 = 1.00024·t90``, the conversion
+    the TEOS-10 manual §2.1 recommends; the same one
+    :func:`sound_speed_unesco` applies). Salinity in PSU. Standard deviation
+    0.05 m/s.
 
     Valid over ``T ∈ [0, 35] °C``, ``S ∈ [29, 43] ppt`` and ``P ∈ [0, 1000]``
     **kg/cm² gauge** — which in this argument's decibars is ``[0, 9807] dbar``,
     about the full ocean depth. Outside them the result is an extrapolation and
-    a :class:`UserWarning` says so, the same contract
+    a ``ValidityWarning`` says so, the same contract
     :func:`sound_speed_mackenzie` and :func:`sound_speed_unesco` keep,
     with the same relaxed cold end: the warning
     starts at −3 °C, not the fit's 0 °C, so polar deep water does not trip it
@@ -265,6 +353,36 @@ def sound_speed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
     a formality: the fit was built on "realistic triads" and 29 ppt is the
     lowest it covers, so brackish and estuarine water is outside this equation
     entirely — use :func:`sound_speed_unesco`, whose fit reaches S = 0.
+
+    Parameters
+    ----------
+    temperature : float or array_like, optional
+        Temperature [°C, ITS-90]. Default 10.
+    salinity : float or array_like, optional
+        Salinity [PSU]. Default 35.
+    depth : float or array_like, optional (keyword)
+        Depth [m] the equation is evaluated at, converted to pressure (see
+        below).
+    pressure_dbar : float or array_like, optional (keyword)
+        Pressure [dbar], converted to the equation's kg/cm²,, for pressure-native
+        data; ``None`` with no ``depth`` is the surface.
+    latitude_deg : float, optional (keyword)
+        Latitude [deg] of the depth -> pressure conversion; default 45.
+
+    **Where it is evaluated.** ``depth`` (m, keyword) is converted to the
+    pressure the equation is stated in with :func:`depth_to_pressure_dbar`
+    (Leroy & Parthiot's standard ocean) at ``latitude_deg``, default
+    ``REFERENCE_LATITUDE_DEG`` (45°) — the conversion
+    :meth:`~uacpy.core.ssp.SoundSpeedProfile.from_temperature_salinity` and
+    :func:`sound_speed_at_depth` use. ``pressure_dbar`` (dbar, keyword)
+    gives the pressure itself, for pressure-native data such as an Argo
+    cast; pass one of the two, neither being the surface.
+
+    **Water properties.** ``temperature`` and ``salinity`` each take a
+    single value, an array broadcast with the coordinate, or ``(depth,
+    value)`` pairs (m) interpolated linearly onto ``depth`` (end values
+    held), which then must be given
+    (:func:`uacpy.core._validate.water_property`).
 
     References
     ----------
@@ -275,14 +393,16 @@ def sound_speed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
     domain is tabulated in Etter, *Underwater Acoustic Modeling and
     Simulation*, Table 2.1.
     """
-    t = np.asarray(temperature, dtype=float)
-    s = np.asarray(salinity, dtype=float)
-    p = np.asarray(pressure, dtype=float) / 9.80665     # dbar -> kg/cm²
+    t, s, p = _water_at_pressure(temperature, salinity, depth,
+                                 pressure_dbar, latitude_deg,
+                                 'sound_speed_delgrosso')
+    p = p / _DBAR_PER_KGF_CM2                           # dbar -> kg/cm²
+    t68 = t * 1.00024                                   # ITS-90 -> IPTS-68
     if np.any(t < _COLDEST_SEAWATER_C) or np.any(t > 35):
         _warnings.warn(
             f"Del Grosso sound speed: temperature outside validated range "
             f"[{_COLDEST_SEAWATER_C:g}, 35] °C; treating as extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     if np.any(s < 29) or np.any(s > 43):
         _warnings.warn(
@@ -290,7 +410,7 @@ def sound_speed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
             "[29, 43] ppt; treating as extrapolation. This equation was fitted "
             "to open-ocean salinities only — for fresher water use "
             "sound_speed_unesco, which is validated to S = 0.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     # Bounds are tested on the converted kg/cm² so they read as the paper
     # states them; the argument itself is decibars, 9.80665 times the number.
@@ -299,9 +419,10 @@ def sound_speed_delgrosso(temperature=15.0, salinity=35.0, pressure=0.0):
             "Del Grosso sound speed: pressure outside validated range "
             "[0, 1000] kg/cm² = [0, 9807] dbar (this argument is in DECIBARS); "
             "treating as extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
+    t = t68
     c000 = 1402.392
     dct = (0.501109398873e1 * t - 0.550946843172e-1 * t ** 2
            + 0.221535969240e-3 * t ** 3)
@@ -442,7 +563,9 @@ def _teos10_gibbs_derivative(n_t, n_p, x, y, z):
     return total / (_TEOS10_TU_C ** n_t * _TEOS10_PU_PA ** n_p)
 
 
-def sound_speed_teos10(temperature=15.0, salinity=35.0, pressure=0.0):
+def sound_speed_teos10(temperature=REFERENCE_TEMPERATURE_C,
+                       salinity=REFERENCE_SALINITY_PSU, *, depth=None,
+                       pressure_dbar=None, latitude_deg=None):
     """Speed of sound in seawater — TEOS-10 (IOC, SCOR and IAPSO 2010).
 
     Evaluates Eqn. (2.17.1) of the TEOS-10 manual,
@@ -474,7 +597,7 @@ def sound_speed_teos10(temperature=15.0, salinity=35.0, pressure=0.0):
     Valid over the manual's §2.6 range: ``S_A ∈ [0, 42] g/kg`` (``S ∈
     [0, 41.80]`` on the Practical scale), ``t ∈ [−6, 40] °C`` and
     ``p ∈ [0, 10000] dbar``. Outside it the result is an extrapolation and a
-    :class:`UserWarning` says so, the contract the siblings keep; a negative
+    ``ValidityWarning`` says so, the contract the siblings keep; a negative
     salinity is undefined (``x = sqrt(S_A/S_u)``) and returns NaN. The cold
     end needs no relaxation: −6 °C already covers every polar cast.
 
@@ -484,15 +607,35 @@ def sound_speed_teos10(temperature=15.0, salinity=35.0, pressure=0.0):
         Temperature [°C, ITS-90].
     salinity : float or array
         Practical salinity [PSU, PSS-78].
-    pressure : float or array
-        Sea pressure [dbar] — decibars, *not* Pa. The Gibbs function is
-        stated in Pa and the argument is converted internally.
+    depth : float or array_like, optional (keyword)
+        Depth [m] the equation is evaluated at, converted to pressure (see
+        below).
+    pressure_dbar : float or array_like, optional (keyword)
+        Sea pressure [dbar] — decibars, *not* Pa —, for pressure-native
+        data; ``None`` with no ``depth`` is the surface.
+    latitude_deg : float, optional (keyword)
+        Latitude [deg] of the depth -> pressure conversion; default 45.
 
     Returns
     -------
     float or ndarray
         Sound speed [m/s]; a Python float for scalar input, otherwise the
         broadcast shape of the three arguments.
+
+    **Where it is evaluated.** ``depth`` (m, keyword) is converted to the
+    pressure the equation is stated in with :func:`depth_to_pressure_dbar`
+    (Leroy & Parthiot's standard ocean) at ``latitude_deg``, default
+    ``REFERENCE_LATITUDE_DEG`` (45°) — the conversion
+    :meth:`~uacpy.core.ssp.SoundSpeedProfile.from_temperature_salinity` and
+    :func:`sound_speed_at_depth` use. ``pressure_dbar`` (dbar, keyword)
+    gives the pressure itself, for pressure-native data such as an Argo
+    cast; pass one of the two, neither being the surface.
+
+    **Water properties.** ``temperature`` and ``salinity`` each take a
+    single value, an array broadcast with the coordinate, or ``(depth,
+    value)`` pairs (m) interpolated linearly onto ``depth`` (end values
+    held), which then must be given
+    (:func:`uacpy.core._validate.water_property`).
 
     References
     ----------
@@ -503,36 +646,36 @@ def sound_speed_teos10(temperature=15.0, salinity=35.0, pressure=0.0):
     Feistel, R. (2008). "A Gibbs function for seawater thermodynamics for
     −6 to 80 °C and salinity up to 120 g kg⁻¹." Deep-Sea Res. I 55, 1639-1671.
     """
-    t = np.asarray(temperature, dtype=float)
-    s = np.asarray(salinity, dtype=float)
-    p = np.asarray(pressure, dtype=float)
+    t, s, p = _water_at_pressure(temperature, salinity, depth,
+                                 pressure_dbar, latitude_deg,
+                                 'sound_speed_teos10')
     s_max = 42.0 / _TEOS10_PSS78_TO_G_PER_KG          # 42 g/kg on the PSS-78 scale
     if np.any(t < -6.0) or np.any(t > 40.0):
         _warnings.warn(
             "TEOS-10 sound speed: temperature outside validated range "
             "[-6, 40] °C; treating as extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     if np.any(s < 0):
         _warnings.warn(
             "TEOS-10 sound speed: salinity below 0 is undefined, not "
             "extrapolated — x = sqrt(S_A/S_u) has no real value there, so "
             "the result is NaN.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     elif np.any(s > s_max):
         _warnings.warn(
             f"TEOS-10 sound speed: salinity outside validated range "
             f"[0, {s_max:.2f}] PSU (S_A = 42 g/kg); treating as "
             f"extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     if np.any(p < 0) or np.any(p > 10000.0):
         _warnings.warn(
             "TEOS-10 sound speed: pressure outside validated range "
             "[0, 10000] dbar (this argument is in DECIBARS); treating as "
             "extrapolation.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     with np.errstate(invalid='ignore'):
@@ -559,6 +702,13 @@ def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
     ``delta_h_i`` of their eq. (12) / Table II is not applied, so a basin with
     a strongly non-standard T/S profile (Mediterranean, Baltic, Black Sea)
     carries that residual. ``sound_speed_*`` expect dbar.
+
+    Parameters
+    ----------
+    depth_m : float or array_like
+        Depth (m).
+    latitude_deg : float
+        Latitude (deg).
     """
     z = np.asarray(depth_m, dtype=float)
     phi = np.radians(latitude_deg)
@@ -569,7 +719,7 @@ def depth_to_pressure_dbar(depth_m, latitude_deg) -> np.ndarray:
     return h45 * k * 100.0                                   # MPa → dbar
 
 
-def pressure_dbar_to_depth(pres_dbar, lat) -> np.ndarray:
+def pressure_dbar_to_depth(pressure_dbar, latitude_deg) -> np.ndarray:
     """Pressure (dbar) → depth (m): Newton inversion of
     :func:`depth_to_pressure_dbar`.
 
@@ -580,15 +730,116 @@ def pressure_dbar_to_depth(pres_dbar, lat) -> np.ndarray:
     Parthiot coefficients live in exactly one place; a 1 m step is safe
     because ``h(z)`` is a smooth quartic whose curvature over a metre is
     negligible against its ~1 dbar/m slope.
+
+    Parameters
+    ----------
+    pressure_dbar : float or array_like
+        Pressure (dbar).
+    latitude_deg : float
+        Latitude (deg).
     """
-    p = np.asarray(pres_dbar, dtype=float)
+    p = np.asarray(pressure_dbar, dtype=float)
     z = p * 0.9905                                   # ~1 m per dbar initial guess
     for _ in range(5):
-        f = depth_to_pressure_dbar(z, lat) - p
-        df = (depth_to_pressure_dbar(z + 1.0, lat)
-              - depth_to_pressure_dbar(z - 1.0, lat)) / 2.0
+        f = depth_to_pressure_dbar(z, latitude_deg) - p
+        df = (depth_to_pressure_dbar(z + 1.0, latitude_deg)
+              - depth_to_pressure_dbar(z - 1.0, latitude_deg)) / 2.0
         z = z - f / df
     return z
+
+
+def _adiabatic_gradient(salinity, temp, pres):
+    """Adiabatic temperature gradient (°C/dbar), Bryden (1973).
+
+    The polynomial as published in UNESCO Technical Papers in Marine Science
+    44 (1983), Fofonoff & Millard, routine ``ATG``. Salinity is practical
+    salinity (PSS-78), ``temp`` in-situ °C, ``pres`` in decibars. The paper's
+    check value ``ATG(S=40, T=40, P=10000) = 3.255976e-4 °C/dbar`` is pinned
+    in the tests.
+    """
+    ds = np.asarray(salinity, dtype=float) - 35.0
+    t = np.asarray(temp, dtype=float)
+    p = np.asarray(pres, dtype=float)
+    return ((((-2.1687e-16 * t + 1.8676e-14) * t - 4.6206e-13) * p
+             + ((2.7759e-12 * t - 1.1351e-10) * ds
+                + ((-5.4481e-14 * t + 8.733e-12) * t - 6.7795e-10) * t
+                + 1.8741e-8)) * p
+            + (-4.2393e-8 * t + 1.8932e-6) * ds
+            + ((6.6228e-10 * t - 6.836e-8) * t + 8.5258e-6) * t + 3.5803e-5)
+
+
+def _shift_adiabatically(salinity, temp, pres_from, pres_to):
+    """Move a water parcel adiabatically from ``pres_from`` to ``pres_to``.
+
+    Fourth-order Runge-Kutta integration of :func:`_adiabatic_gradient` over
+    the pressure interval, in the coefficient form of UNESCO 44's ``THETA``
+    (Fofonoff 1977). One RK4 step spans the whole interval, which is what the
+    reference routine does and what its check value
+    ``THETA(S=40, T=40, P=10000, Pr=0) = 36.89073 °C`` certifies; the gradient
+    is a slowly varying polynomial, so the round trip closes to better than
+    2e-4 °C over the full oceanic range (both pinned in the tests).
+    """
+    p = np.asarray(pres_from, dtype=float)
+    t = np.asarray(temp, dtype=float)
+    h = np.asarray(pres_to, dtype=float) - p
+    xk = h * _adiabatic_gradient(salinity, t, p)
+    t = t + 0.5 * xk
+    q = xk
+    p = p + 0.5 * h
+    xk = h * _adiabatic_gradient(salinity, t, p)
+    t = t + 0.29289322 * (xk - q)
+    q = 0.58578644 * xk + 0.121320344 * q
+    xk = h * _adiabatic_gradient(salinity, t, p)
+    t = t + 1.707106781 * (xk - q)
+    q = 3.414213562 * xk - 4.121320344 * q
+    p = p + 0.5 * h
+    xk = h * _adiabatic_gradient(salinity, t, p)
+    return t + (xk - 2.0 * q) / 6.0
+
+
+def insitu_from_potential(*, salinity, theta, pressure_dbar) -> np.ndarray:
+    """Potential temperature (°C, referenced to the surface) → in-situ °C.
+
+    Ocean models report ``thetao``, the temperature a parcel *would* have if
+    brought adiabatically to 0 dbar; the sound-speed equations (UNESCO,
+    Del Grosso) want the temperature the parcel actually has at depth. The two
+    are the same at the surface and diverge with pressure: a parcel is warmed
+    by compression, so in-situ is always the warmer of the pair below 0 dbar.
+
+    Ignoring the difference is a deep-water error, not a uniform one. At
+    S=34.7 the in-situ excess and the sound-speed error it costs are
+
+    ======  ==========  =======  ==============
+    depth   theta (°C)  ΔT (°C)  Δc (m/s)
+    ======  ==========  =======  ==============
+    2000 m         2.5    0.149  +0.64
+    5000 m         1.5    0.462  +1.97
+    10000 m        1.2    1.286  +4.98
+    ======  ==========  =======  ==============
+
+    (UNESCO; Del Grosso agrees within 0.2 m/s.) Climatology and float sources
+    are unaffected — WOA23's ``t_an`` and Argo's ``TEMP`` are already in-situ.
+
+    Keyword-only: every other seawater function here takes temperature first,
+    and a positional ``(theta, salinity, …)`` call read as ``(salinity,
+    theta, …)`` returned 36.1 °C for a 2 °C parcel with nothing to flag it.
+
+    Parameters
+    ----------
+    salinity : array_like
+        Practical salinity (PSS-78). Conserved by the adiabatic shift.
+    theta : array_like
+        Potential temperature (°C), referenced to 0 dbar.
+    pressure_dbar : array_like
+        In-situ pressure (dbar), as :func:`depth_to_pressure_dbar` returns.
+
+    Returns
+    -------
+    numpy.ndarray
+        In-situ temperature (°C).
+    """
+    return np.asarray(
+        _shift_adiabatically(salinity, theta, 0.0, pressure_dbar), dtype=float)
 
 
 #: The reference latitude the depth<->pressure standard ocean is stated at.
@@ -616,31 +867,113 @@ def _mackenzie_at_pressure(temperature, salinity, pressure_dbar):
 #: every signature carries the same default rather than its own literal.
 DEFAULT_SOUND_SPEED_FORMULA = 'teos10'
 
-#: ``formula`` name -> ``(T °C, S PSU, p dbar) -> c m/s``. It lives here, with
-#: the four equations it indexes, and every consumer imports it: the fetchers,
-#: ``extend_ssp_below_data`` (which continues a column under the formula that
-#: built it, ``SoundSpeedProfile.formula``) and
-#: ``SoundSpeedProfile.from_temperature_salinity``.
-SOUND_SPEED_FORMULAS = {
+def _on_pressure(equation):
+    """``equation`` on the positional ``(T, S, p_dbar)`` signature of
+    :data:`SOUND_SPEED_FORMULAS`: its ``pressure_dbar=`` keyword."""
+    def at_pressure(temperature, salinity, pressure_dbar):
+        return equation(temperature, salinity, pressure_dbar=pressure_dbar)
+    at_pressure.__name__ = f"{equation.__name__}_at_pressure"
+    at_pressure.__doc__ = (f":func:`{equation.__name__}` at a pressure "
+                           f"(dbar) given positionally.")
+    return at_pressure
+
+
+#: The three equations stated in pressure, by ``formula`` name.
+_PRESSURE_EQUATIONS = {
     'unesco': sound_speed_unesco,
     'delgrosso': sound_speed_delgrosso,
     'teos10': sound_speed_teos10,
+}
+
+#: ``formula`` name -> ``(T °C, S PSU, p dbar) -> c m/s``, for pressure-native
+#: columns. It lives here, with the four equations it indexes, and every
+#: consumer imports it: the fetchers and ``extend_ssp_below_data`` (which
+#: continues a column under the formula that built it,
+#: ``SoundSpeedProfile.formula``).
+SOUND_SPEED_FORMULAS = {
+    **{name: _on_pressure(eq) for name, eq in _PRESSURE_EQUATIONS.items()},
     'mackenzie': _mackenzie_at_pressure,
 }
 
+
+def canonical_formula(formula, who: str) -> str:
+    """The :data:`SOUND_SPEED_FORMULAS` key ``formula`` names, in any case
+    (``'TEOS10'`` → ``'teos10'``); ``None`` is
+    :data:`DEFAULT_SOUND_SPEED_FORMULA`. Refuses an unknown name."""
+    if formula is None:
+        return DEFAULT_SOUND_SPEED_FORMULA
+    from uacpy.core._validate import canonical_choice
+    return canonical_choice(formula, tuple(SOUND_SPEED_FORMULAS), who,
+                            'formula')
+
+
+def sound_speed_at_depth(
+    temperature: Union[float, np.ndarray],
+    salinity: Union[float, np.ndarray],
+    depth: Union[float, np.ndarray],
+    *,
+    formula: Optional[str] = None,
+    latitude_deg: Optional[float] = None,
+) -> Union[float, np.ndarray]:
+    """Sound speed (m/s) of a cast held in depth, under any of the four
+    equations.
+
+    UNESCO, Del Grosso and TEOS-10 are stated in pressure, so ``depth`` is
+    converted with :func:`depth_to_pressure_dbar` at ``latitude_deg``
+    (default ``REFERENCE_LATITUDE_DEG``, 45°). Mackenzie is stated in depth
+    and is evaluated on ``depth`` directly, so its answer does not depend on
+    the latitude. This is the function
+    :meth:`~uacpy.core.ssp.SoundSpeedProfile.from_temperature_salinity`
+    builds a profile with.
+
+    Parameters
+    ----------
+    temperature, salinity : float, ndarray or (N, 2) pairs
+        In-situ temperature (°C) and practical salinity (psu): a single
+        value, an array broadcast with ``depth``, or ``(depth, value)``
+        pairs interpolated linearly onto ``depth``
+        (:func:`uacpy.core._validate.water_property`).
+    depth : float or ndarray
+        Depth (m, positive down).
+    formula : {'teos10', 'unesco', 'delgrosso', 'mackenzie'}, optional
+        Default ``DEFAULT_SOUND_SPEED_FORMULA`` (TEOS-10).
+    latitude_deg : float, optional
+        Latitude of the cast (degrees) for the depth -> pressure conversion.
+
+    Examples
+    --------
+    >>> round(float(sound_speed_at_depth(2.0, 34.7, 3000.0,
+    ...                                  formula='mackenzie')), 2)
+    1507.9
+    """
+    formula = canonical_formula(formula, 'sound_speed_at_depth')
+    temperature = water_property(temperature, depth, name='temperature',
+                                 who='sound_speed_at_depth')
+    salinity = water_property(salinity, depth, name='salinity',
+                              who='sound_speed_at_depth')
+    if formula == 'mackenzie':
+        return sound_speed_mackenzie(temperature=temperature,
+                                     salinity=salinity, depth=depth)
+    return _PRESSURE_EQUATIONS[formula](
+        temperature, salinity, depth=depth, latitude_deg=latitude_deg)
+
 def density(
-    temperature: Union[float, np.ndarray] = 27,
-    salinity: Union[float, np.ndarray] = 35,
+    temperature: Union[float, np.ndarray] = REFERENCE_TEMPERATURE_C,
+    salinity: Union[float, np.ndarray] = REFERENCE_SALINITY_PSU,
 ) -> Union[float, np.ndarray]:
     """
     Calculate density of sea water near the surface.
 
-    Uses Fofonoff (1985 - IES 80) formula.
+    Uses Fofonoff (1985 - IES 80) formula. EOS-80 is stated on the IPTS-68
+    temperature scale; the ITS-90 argument is converted with Saunders'
+    ``t68 = 1.00024·t90`` (TEOS-10 manual §2.1), as in
+    :func:`sound_speed_unesco`.
 
     Parameters
     ----------
     temperature : float or ndarray, optional
-        Water temperature in degrees Celsius (default: 27)
+        Water temperature in degrees Celsius, ITS-90 (default: 10, the
+        package's reference sea water)
     salinity : float or ndarray, optional
         Salinity in parts per thousand (ppt) (default: 35)
 
@@ -654,7 +987,7 @@ def density(
     --------
     >>> rho = density()
     >>> print(f"Density: {rho:.1f} kg/m³")
-    Density: 1022.7 kg/m³
+    Density: 1027.0 kg/m³
 
     References
     ----------
@@ -668,7 +1001,8 @@ def density(
     # are the S / S^1.5 / S^2 coefficients. Pressure is not a parameter, so this
     # is surface density only; deeper water needs the full EOS-80 with the
     # secant bulk modulus.
-    t = temperature
+    t = np.asarray(temperature, dtype=float) * 1.00024    # ITS-90 -> IPTS-68
+    salinity = _sequence_as_array(salinity)
     A = 1.001685e-04 + t * (-1.120083e-06 + t * 6.536332e-09)
     A = 999.842594 + t * (6.793952e-02 + t * (-9.095290e-03 + t * A))
     B = 7.6438e-05 + t * (-8.2467e-07 + t * 5.3875e-09)
@@ -681,12 +1015,13 @@ def density(
 def doppler(
     speed: Union[float, np.ndarray],
     frequency: Union[float, np.ndarray],
-    c: Optional[float] = None,
+    sound_speed: Optional[float] = None,
 ) -> Union[float, np.ndarray]:
     """
     Calculate Doppler-shifted frequency.
 
-    The approximation is valid when speed << c (typical for underwater vehicles).
+    The approximation is valid when speed << sound_speed (typical for
+    underwater vehicles).
 
     Parameters
     ----------
@@ -695,8 +1030,9 @@ def doppler(
         (positive = approaching, negative = receding)
     frequency : float or ndarray
         Transmission frequency in Hz
-    c : float, optional
-        Sound speed in m/s (default: calculated using sound_speed_mackenzie())
+    sound_speed : float, optional
+        Sound speed in m/s (default: ``DEFAULT_SOUND_SPEED``, the nominal
+        1500 m/s every sound-speed default in the package reads)
 
     Returns
     -------
@@ -705,16 +1041,23 @@ def doppler(
         Evaluated element-wise, so an array argument gives an array of the
         broadcast shape.
 
+    See Also
+    --------
+    uacpy.comms.doppler_from_speed : the dimensionless scale factor
+        ``a = v/c`` on the same default ``c``; ``doppler(v, f) == f·(1 + a)``.
+
     Examples
     --------
     >>> f_shifted = doppler(2, 50000)  # 2 m/s approach
     >>> print(f"Shifted frequency: {f_shifted:.2f} Hz")
-    Shifted frequency: 50064.97 Hz
+    Shifted frequency: 50066.67 Hz
 
     >>> f_shifted = doppler(-1, 50000)  # 1 m/s receding
     >>> print(f"Shifted frequency: {f_shifted:.2f} Hz")
-    Shifted frequency: 49967.51 Hz
+    Shifted frequency: 49966.67 Hz
     """
-    if c is None:
-        c = sound_speed_mackenzie()
-    return (1 + speed / c) * frequency
+    if sound_speed is None:
+        sound_speed = DEFAULT_SOUND_SPEED
+    speed = _sequence_as_array(speed)
+    frequency = _sequence_as_array(frequency)
+    return (1 + speed / sound_speed) * frequency

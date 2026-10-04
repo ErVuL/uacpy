@@ -24,6 +24,7 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import crust1_local, globsed_local
 from uacpy.data import _http
 from uacpy.tests._cache_builders import _write_crust1, _write_globsed
+from uacpy.tests.conftest import recorded_warnings
 
 
 @pytest.fixture(scope='module')
@@ -38,7 +39,7 @@ def _seis_root(tmp_path_factory):
 def cache(_seis_root, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(_seis_root))
     _cache.invalidate_grids()
-    crust1_local._MODEL.clear()
+    crust1_local._model.memo.clear()
     return _seis_root
 
 
@@ -54,8 +55,10 @@ def test_globsed_no_data_raises(cache):
 
 
 def test_globsed_transect(cache):
-    r, thk = globsed_local.fetch_sediment_thickness_transect(
+    track = globsed_local.fetch_sediment_thickness_transect(
         (30.0, -40.0), (31.0, -40.0), n_points=3)
+    r, thk = track.ranges, track.data
+    assert (track.quantity, track.unit) == ('sediment_thickness', 'm')
     assert r.shape == (3,) and thk.shape == (3,) and np.allclose(thk, 500.0)
 
 
@@ -79,8 +82,21 @@ def test_globsed_plus_180_reads_minus_180_column(cache):
 
 def test_crust1_profile(cache):
     p = crust1_local.fetch_crust1_profile((30.0, -40.0))
-    assert p['water_depth_m'] == 4000.0
-    assert p['sediment_thickness_m'] == 1000.0
+    assert p.water_depth == 4000.0
+    assert p.sediment_thickness == 1000.0
+    assert float(np.sum(p.thickness[[n.endswith('sed')
+                                     for n in p.layer_names]])) == 1000.0
+
+
+def test_crust1_profile_is_one_row_per_layer(cache):
+    pytest.importorskip('pandas')
+    p = crust1_local.fetch_crust1_profile((30.0, -40.0))
+    frame = p.to_dataframe()
+    assert list(frame.columns) == ['layer', 'thickness', 'sound_speed',
+                                   'shear_speed', 'density']
+    assert frame['layer'].tolist() == list(p.layer_names)
+    assert frame['sound_speed'].iloc[0] == 2000.0       # 2.0 km/s → m/s
+    assert frame['shear_speed'].iloc[0] == 600.0
 
 
 def test_crust1_bottom_layered_elastic(cache):
@@ -154,8 +170,7 @@ def test_crust1_zero_sediment_column_is_quiet_below_the_layer_threshold(cache):
     """Below ``_MIN_SEDIMENT_M`` the answer is bare rock on any column, so
     nothing is discarded by the zero-sediment branch and the notice stays
     quiet — the far side of the threshold the warning fires on."""
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
+    with recorded_warnings() as rec:
         b = crust1_local.fetch_bottom_crust1(
             (82.5, -56.5), sediment_thickness=crust1_local._MIN_SEDIMENT_M / 2)
     assert not [w for w in rec if 'no sediment layers' in str(w.message)]
@@ -166,8 +181,7 @@ def test_crust1_sediment_bearing_column_does_not_warn_about_discards(cache):
     """The discard notice belongs to zero-sediment columns only: a normal cell
     rescales to GlobSed silently (bar the licence notice) and keeps the
     ``'globsed'`` stamp."""
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter('always')
+    with recorded_warnings() as rec:
         b = crust1_local.fetch_bottom_crust1((30.0, -40.0))
     assert b.sediment_thickness_source == 'globsed'
     assert not [w for w in rec if 'no sediment layers' in str(w.message)]
@@ -192,6 +206,61 @@ def test_crust1_transect(cache):
     assert isinstance(rdl, Bottom)
     assert len(rdl.columns) == 3 and rdl.ranges[0] == 0.0
     assert rdl.sediment_thickness_source == 'globsed'   # GlobSed applied per point
+
+
+def _land_north_of(monkeypatch, lat_min):
+    """Make every CRUST1.0 cell at or north of ``lat_min`` dry land."""
+    column = crust1_local._column
+
+    def fake(lat, lon):
+        bnds, vp, vs, rho = column(lat, lon)
+        if lat >= lat_min:
+            bnds = np.array(bnds, dtype=float)
+            bnds[1] = 0.2                   # water base above sea level
+        return bnds, vp, vs, rho
+    monkeypatch.setattr(crust1_local, '_column', fake)
+
+
+def test_crust1_transect_fills_a_land_waypoint_from_its_neighbour(
+        cache, monkeypatch):
+    _land_north_of(monkeypatch, 30.9)
+    with pytest.warns(UserWarning, match='1 of 3 transect waypoints'):
+        rdl = crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), n_points=3)
+    assert len(rdl.columns) == 3
+    assert rdl.columns[2] is not rdl.columns[1]
+    assert (rdl.columns[2].total_thickness()
+            == rdl.columns[1].total_thickness())
+
+
+def test_crust1_transect_raises_a_waypoint_read_error_rather_than_filling(
+        cache, monkeypatch):
+    column = crust1_local._column
+
+    def failing(lat, lon):
+        if lat >= 30.9:
+            raise DataFetchError("Cached crust1 data is present but unreadable.")
+        return column(lat, lon)
+    monkeypatch.setattr(crust1_local, '_column', failing)
+    with recorded_warnings() as caught:
+        with pytest.raises(DataFetchError, match='unreadable'):
+            crust1_local.fetch_bottom_crust1_transect(
+                (30.0, -40.0), (31.0, -40.0), n_points=3)
+    assert not [w for w in caught if 'transect waypoints' in str(w.message)]
+
+
+def test_crust1_transect_all_land_raises(cache, monkeypatch):
+    _land_north_of(monkeypatch, -90.0)
+    with pytest.raises(DataFetchError, match='anywhere along the transect'):
+        crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), n_points=3)
+
+
+def test_crust1_transect_all_water_fills_nothing(cache):
+    with recorded_warnings() as caught:
+        crust1_local.fetch_bottom_crust1_transect(
+            (30.0, -40.0), (31.0, -40.0), n_points=3)
+    assert not [w for w in caught if 'transect waypoints' in str(w.message)]
 
 
 @pytest.mark.parametrize("point, shape", [
@@ -248,14 +317,23 @@ def test_crust1_transect_carries_roughness_to_every_waypoint(cache):
 
 def test_every_bottom_fetcher_takes_a_roughness_argument():
     """The parity ``fetch_bottom_crust1``'s docstring claims with the network
-    bottom fetchers, checked across the whole public family."""
+    bottom fetchers, checked across the package-level dispatchers and every
+    provider's point and transect fetcher."""
     import inspect
 
     import uacpy.data as data
+    from uacpy.data import environment
 
-    missing = [name for name in data.__all__ if name.startswith('fetch_bottom')
-               if 'roughness' not in inspect.signature(
-                   getattr(data, name)).parameters]
+    fetchers = [data.fetch_bottom, data.fetch_bottom_transect]
+    for provider in environment._BOTTOM_PROVIDERS:
+        for cached in ((True, False) if provider.has_cached_variant else (None,)):
+            pair = (provider.resolve(cached) if cached is not None
+                    else provider.resolve())
+            fetchers.extend(pair)
+    # A transect sampled from a point fetcher passes its options to it.
+    fetchers = [getattr(fn, 'point_fetcher', fn) for fn in fetchers]
+    missing = [getattr(fn, '__name__', repr(fn)) for fn in fetchers
+               if 'roughness' not in inspect.signature(fn).parameters]
     assert missing == []
 
 
@@ -288,8 +366,7 @@ def test_crust1_emits_commercial_warning(cache):
     # warn exactly once (not once per waypoint).
     with pytest.warns(UserWarning, match='commercial'):
         crust1_local.fetch_bottom_crust1((30.0, -40.0))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
+    with recorded_warnings() as caught:
         crust1_local.fetch_bottom_crust1_transect(
             (30.0, -40.0), (31.0, -40.0), n_points=4)
     commercial = [w for w in caught
@@ -366,7 +443,7 @@ def test_crust1_transect_lets_another_thread_raise_the_same_notice(cache):
 
 def test_crust1_missing_cache_names_flag(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    crust1_local._MODEL.clear()
+    crust1_local._model.memo.clear()
     with pytest.raises(ConfigurationError, match='install.sh --data crust1'):
         crust1_local.fetch_bottom_crust1((30.0, -40.0))
 
@@ -635,19 +712,19 @@ def _crust1_cache_with_cell(tmp_path, monkeypatch, lat, lon, water_base_km):
     bnds.write_text('\n'.join(lines) + '\n')
     monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
     _cache.invalidate_grids()
-    crust1_local._MODEL.clear()
+    crust1_local._model.memo.clear()
     return root
 
 
 @pytest.mark.parametrize('water_base_km', [0.54, 0.0])
 def test_crust1_refuses_a_cell_with_no_water_layer(
         tmp_path, monkeypatch, water_base_km):
-    """A land cell (water_depth_m = -540) and a coastline cell (0) both
+    """A land cell (water_depth = -540) and a coastline cell (0) both
     raise, with the bathymetry fetchers' remediation, instead of returning a
     seabed column for ground that has none."""
     _crust1_cache_with_cell(tmp_path, monkeypatch, 45.0, 5.0, water_base_km)
     profile = crust1_local.fetch_crust1_profile((45.0, 5.0))
-    assert profile['water_depth_m'] == pytest.approx(-water_base_km * 1000.0)
+    assert profile.water_depth == pytest.approx(-water_base_km * 1000.0)
     with pytest.raises(DataFetchError, match='no water layer') as info:
         crust1_local.fetch_bottom_crust1((45.0, 5.0))
     assert 'offshore point' in info.value.remediation
@@ -661,11 +738,13 @@ def test_crust1_builds_the_shallowest_wet_cell(tmp_path, monkeypatch):
     assert b.total_thickness() == pytest.approx(1000.0)
 
 
-def test_crust1_transect_refuses_a_land_waypoint(tmp_path, monkeypatch):
+def test_crust1_transect_fills_a_land_cell_from_the_nearest_water(
+        tmp_path, monkeypatch):
     _crust1_cache_with_cell(tmp_path, monkeypatch, 45.0, 5.0, 0.54)
-    with pytest.raises(DataFetchError, match=r'45\.\d+, 5\.\d+'):
-        crust1_local.fetch_bottom_crust1_transect(
+    with pytest.warns(UserWarning, match='1 of 3 transect waypoints'):
+        rdl = crust1_local.fetch_bottom_crust1_transect(
             (44.5, 4.5), (45.5, 5.5), n_points=3, use_globsed=False)
+    assert len(rdl.ranges) == 3
     # The same transect over water builds every waypoint.
     _crust1_cache_with_cell(tmp_path / 'wet', monkeypatch, 45.0, 5.0, -4.0)
     rdl = crust1_local.fetch_bottom_crust1_transect(

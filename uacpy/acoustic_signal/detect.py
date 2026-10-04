@@ -2,7 +2,7 @@
 
 One question — *is my transmission in there, and where* — answered by
 :func:`matched_filter` and :func:`pulse_compression`, with
-:func:`processing_gain` for what the compression buys and
+:func:`processing_gain_dB` for what the compression buys and
 :func:`ambiguity_function` for how delay and Doppler trade against each other.
 """
 
@@ -12,7 +12,8 @@ from collections import namedtuple
 import numpy as np
 from scipy.signal import fftconvolve
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.acoustic_signal._signal_validate import require_positive_finite_scalar
+from uacpy.core._validate import require_positive_finite_scalar
+from uacpy.acoustic_signal._results import PlottedResult
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -23,7 +24,8 @@ from uacpy.acoustic_signal._signal_validate import require_positive_finite_scala
 # ──────────────────────────────────────────────────────────────────────
 
 
-class AmbiguityResult(namedtuple("AmbiguityResult", "delays_s doppler_hz amplitude")):
+class AmbiguityResult(PlottedResult,
+                      namedtuple("AmbiguityResult", "delays_s doppler_hz amplitude")):
     """Ambiguity surface ``|chi|`` over ``delays_s`` and ``doppler_hz``.
 
     The tuple is the measurement, so ``delays_s, doppler_hz, amplitude = ...``
@@ -32,17 +34,11 @@ class AmbiguityResult(namedtuple("AmbiguityResult", "delays_s doppler_hz amplitu
 
     __slots__ = ()
 
-    def plot(self, **kwargs):
-        """Draw this result through :func:`uacpy.visualization.plot_ambiguity`.
+    _plotter = "plot_ambiguity"
+    _plot_fields = ("delays_s", "doppler_hz", "amplitude")
 
-        ``kwargs`` reach the plotter. Returns ``(fig, ax)``, as
-        every plotter in the package does.
-        """
-        # Deferred into the body: ``uacpy.visualization`` imports
-        # ``uacpy.core`` at module scope, so this at file scope would
-        # make ``import uacpy`` raise (docs/DEV.md section 7).
-        from uacpy import visualization
-        return visualization.plot_ambiguity(self.delays_s, self.doppler_hz, self.amplitude, **kwargs)
+    def _field_units(self):
+        return {"delays_s": "s", "doppler_hz": "Hz", "amplitude": ""}
 
 
 def matched_filter(received, replica, *, mode: str = "full", normalize: bool = True):
@@ -78,9 +74,9 @@ def matched_filter(received, replica, *, mode: str = "full", normalize: bool = T
     if r.ndim != 1 or h.ndim != 1:
         raise ConfigurationError(
             "matched_filter: received and replica must be 1-D; got received "
-            f"shape {r.shape} and replica shape {h.shape}")
+            f"shape {r.shape} and replica shape {h.shape}.")
     if h.size == 0:
-        raise ConfigurationError("matched_filter: replica must be non-empty")
+        raise ConfigurationError("matched_filter: replica must be non-empty.")
     energy = float(np.sum(np.abs(h) ** 2))
     if normalize and energy == 0.0:
         raise ConfigurationError(
@@ -99,6 +95,18 @@ def pulse_compression(received, replica, sample_rate: float, *, normalize: bool 
 
     Returns ``(lags_s, compressed)`` where ``lags_s`` is the echo-delay axis
     (lag 0 = replica aligned with the start of ``received``).
+
+    Parameters
+    ----------
+    received : array_like
+        The received record.
+    replica : array_like
+        The transmitted waveform.
+    sample_rate : float
+        Sample rate (Hz).
+    normalize : bool, optional
+        Divide by the replica energy, so a matched unit-amplitude echo
+        compresses to unit peak. Default True.
     """
     r = np.asarray(received)
     h = np.asarray(replica)
@@ -109,13 +117,25 @@ def pulse_compression(received, replica, sample_rate: float, *, normalize: bool 
     return lags, comp
 
 
-def processing_gain(bandwidth_hz: float, duration_s: float) -> float:
-    """Matched-filter processing gain (dB) = ``10*log10(B*T)``."""
+def processing_gain_dB(bandwidth_hz: float, duration_s: float) -> float:
+    """Matched-filter processing gain (dB) = ``10*log10(B*T)``.
+
+    For a spreading code the same gain is ``10*log10(N)`` with ``N`` the chip
+    count (``N = B*T`` for chips of duration ``1/B``); that form, taking the
+    code itself, is :func:`uacpy.comms.spreading_gain_dB`.
+
+    Parameters
+    ----------
+    bandwidth_hz : float
+        Signal bandwidth (Hz).
+    duration_s : float
+        Signal duration (s).
+    """
     bt = float(bandwidth_hz) * float(duration_s)
     if bt <= 0.0:
         raise ConfigurationError(
-            f"processing_gain: B*T must be > 0; got bandwidth_hz="
-            f"{bandwidth_hz!r} x duration_s={duration_s!r} = {bt:g}")
+            f"processing_gain_dB: B*T must be > 0; got bandwidth_hz="
+            f"{bandwidth_hz!r} x duration_s={duration_s!r} = {bt:g}.")
     return float(10.0 * np.log10(bt))
 
 
@@ -159,7 +179,7 @@ def ambiguity_function(waveform, sample_rate: float, *, doppler_hz=None,
     if s.ndim != 1 or s.size == 0:
         raise ConfigurationError(
             "ambiguity_function: waveform must be 1-D non-empty; "
-            f"got shape {s.shape}")
+            f"got shape {s.shape}.")
     n = s.size
     fs = require_positive_finite_scalar(
         sample_rate, "ambiguity_function", "sample_rate", " Hz")

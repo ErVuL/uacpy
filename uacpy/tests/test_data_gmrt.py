@@ -22,6 +22,29 @@ def test_point_depth(monkeypatch):
     assert gmrt_live.point_depth((43.2, 7.5)) == 2455.0
 
 
+@pytest.mark.parametrize('source, module', [('gmrt', 'gmrt_live'),
+                                            ('emodnet_dtm', 'emodnet_bathy_live')])
+@pytest.mark.parametrize('n_points', [bathymetry.LIVE_POINT_REQUEST_WARN,
+                                      bathymetry.LIVE_POINT_REQUEST_WARN + 1])
+def test_a_per_point_live_transect_warns_past_the_request_budget(
+        monkeypatch, source, module, n_points):
+    """GMRT and the EMODnet DTM answer one waypoint per request: a transect
+    past the budget announces the request count, one at the budget does not."""
+    import importlib
+    import warnings
+    backend = importlib.import_module(f'uacpy.data.{module}')
+    monkeypatch.setattr(backend, 'depths_along',
+                        lambda lats, lons, **kw: np.full(len(lats), 100.0))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        track = bathymetry.fetch_bathy_transect((43.0, 7.0), (44.0, 8.0),
+                                                n_points=n_points,
+                                                source=source)
+    assert track.shape == (n_points, 2)
+    burst = [w for w in caught if 'sequential requests' in str(w.message)]
+    assert bool(burst) is (n_points > bathymetry.LIVE_POINT_REQUEST_WARN)
+
+
 def test_point_land_raises(monkeypatch):
     monkeypatch.setattr(gmrt_live, 'http_get', _stub_point(150))   # +up = land
     with pytest.raises(DataFetchError, match='land'):
@@ -199,7 +222,7 @@ def test_gmrt_region_grid_closes_its_handle_when_a_variable_is_missing(
 
     monkeypatch.setattr(_netcdf, 'open_netcdf', fake_open)
     monkeypatch.setattr(gmrt_live, 'http_get', lambda url, **kw: b'not-a-grid')
-    with pytest.raises(DataFetchError):
+    with pytest.raises(DataFetchError, match='missing an expected variable'):
         gmrt_live.region_grid((0.0, 1.0), (0.0, 1.0), 2, 2)
     assert opened and all(ds.closed for ds in opened)
 

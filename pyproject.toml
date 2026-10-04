@@ -15,7 +15,14 @@ requires-python = ">=3.12"
 # SPDX ``license`` string is a hard InvalidConfigError, and the classifier is
 # itself deprecated.
 license = "GPL-3.0-or-later"
-license-files = ["LICENSE"]
+license-files = [
+    "LICENSE",
+    # The BSD-3-Clause text and function list for the arlpy-adapted code in
+    # uacpy/core/acoustics/; third_party/ itself is not in the wheel, so these
+    # two files are what carry the notice into an installed copy.
+    "uacpy/third_party/arlpy/LICENSE",
+    "uacpy/third_party/arlpy/NOTICE",
+]
 authors = [
     { name = "ErVuL", email = "ervul.github@gmail.com" },
 ]
@@ -88,6 +95,14 @@ copernicus = [
     "copernicusmarine>=2.0",
 ]
 
+# Labelled-array export of a Field (Field.to_xarray / Field.from_xarray),
+# which gives NetCDF through xarray's own writers. An extra: nothing else in
+# uacpy imports xarray, and the two methods raise naming this extra when it
+# is missing.
+xarray = [
+    "xarray>=2024.1",
+]
+
 test = [
     # Floors are what this project's own config needs, not the oldest release
     # that ever worked: pytest gained Python 3.12 support in 7.3.2 (the
@@ -147,6 +162,13 @@ namespaces = false
 # in the package, however completely it is annotated. One marker in the
 # top-level package covers the subpackages under it.
 uacpy = ["py.typed"]
+
+[tool.setuptools.exclude-package-data]
+# `license-files` above lists the two arlpy notices under third_party/, which
+# puts them in the build's file list, and include-package-data (on by default
+# for a pyproject build) would then also copy them into the importable tree
+# as uacpy/third_party/arlpy/*. They ship once, under .dist-info/licenses/.
+uacpy = ["third_party/*", "third_party/**/*"]
 
 # No native binaries are bundled as package-data. Every model binary
 # (OALIB/bellhopcuda/mpiramS/ramsurf/ramgeo, and the academic-licensed OASES)
@@ -237,7 +259,7 @@ filterwarnings = [
 markers = [
     "slow: long-running tests (excluded by `-m 'not slow'`)",
     "requires_binary: requires a compiled Fortran/C model binary in uacpy/bin/",
-    "requires_oases: requires OASES binaries (download separately, see ./install.sh --oases yes)",
+    "requires_oases: requires the OASES binaries or sources (download separately, see ./install.sh --oases yes)",
     "requires_network: hits a live external service (uacpy.data fetchers); auto-skipped offline",
     "benchmark: validates model output against a closed-form analytic / canonical reference",
     "convention: pins repo conventions rather than runtime behaviour (docstring prose, source-convention sweeps, repr snapshots); failure signals doc/convention drift",

@@ -13,6 +13,7 @@ when running from a checkout; else the per-user cache directory
 """
 
 import contextlib
+import functools
 import os
 import tempfile
 import threading
@@ -26,7 +27,9 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 __all__ = ['cache_root', 'dataset_root', 'prepare_download', 'require',
            'require_npz', 'cached_grid',
            'cached_grid_at', 'register_cache', 'invalidate_grids', 'atomic_write',
-           'staging_path', 'reading', 'memoize', 'memo_lock', 'DATASETS']
+           'staging_path', 'reading', 'memoize', 'memo_lock', 'per_root_memo',
+           'DATASETS',
+           'UnreadableCacheError', 'is_cache_miss']
 
 # uacpy/uacpy/data/_cache.py → parents[2] is the repo root in the documented
 # clone + `pip install -e .` layout; under a plain wheel install it is
@@ -110,9 +113,27 @@ def cache_root() -> Path:
     return Path(env).expanduser() if env else _default_cache_root()
 
 
+def _dataset(name: str, label: str):
+    """The catalogue entry for ``name``; ``ConfigurationError`` listing the
+    known names when it has none."""
+    if name not in DATASETS:
+        raise ConfigurationError(
+            f"{label}: unknown dataset {name!r}.",
+            remediation=f"Known datasets: {', '.join(sorted(DATASETS))}.")
+    return DATASETS[name]
+
+
 def dataset_root(name: str) -> Path:
-    """Directory a given dataset is expected to live in (may not exist yet)."""
-    return cache_root() / DATASETS[name].subdir
+    """Directory a given dataset is expected to live in (may not exist yet).
+
+    An unknown ``name`` raises ``ConfigurationError`` listing the known ones.
+
+    Parameters
+    ----------
+    name : str
+        A dataset of the cache catalogue.
+    """
+    return cache_root() / _dataset(name, 'dataset_root').subdir
 
 
 def prepare_download(name: str, banner: str, *, cache_dir=None, verbose=False,
@@ -121,8 +142,9 @@ def prepare_download(name: str, banner: str, *, cache_dir=None, verbose=False,
 
     ``cache_dir`` when given, else the dataset's own directory under the cache
     root. Created if absent, announced with ``banner``, and returned. Raises
-    ``KeyError`` for a ``name`` the catalogue does not hold.
+    ``ConfigurationError`` for a ``name`` the catalogue does not hold.
     """
+    _dataset(name, 'prepare_download')
     dest = Path(cache_dir) if cache_dir else dataset_root(name)
     dest.mkdir(parents=True, exist_ok=True)
     # ``log_tag`` where the channel differs from the dataset: the EMODnet
@@ -138,7 +160,7 @@ def require(name: str, *relative: str) -> Path:
     with parts to require a specific file inside it (e.g. a WOA23 field). The
     error names the ``install.sh`` flag that downloads the dataset.
     """
-    ds = DATASETS[name]
+    ds = _dataset(name, 'require')
     path = dataset_root(name).joinpath(*relative)
     if not path.exists():
         target = f"{ds.description} ({path})" if relative else ds.description
@@ -157,11 +179,16 @@ def is_installed(name: str, *relative: str) -> bool:
     rather than failing on a missing one. An unknown dataset name is a caller
     error, not an uninstalled dataset, so it raises rather than answering
     ``False``.
+
+    Parameters
+    ----------
+    name : str
+        A dataset of the cache catalogue.
+    *relative : str
+        Path components of one file inside the dataset's directory; none
+        asks about the directory itself.
     """
-    if name not in DATASETS:
-        raise ConfigurationError(
-            f"is_installed: unknown dataset {name!r}.",
-            remediation=f"Known datasets: {', '.join(sorted(DATASETS))}.")
+    _dataset(name, 'is_installed')
     try:
         require(name, *relative)
     except ConfigurationError:
@@ -172,12 +199,11 @@ def is_installed(name: str, *relative: str) -> bool:
 def require_npz(name: str, filename: str, superseding: str) -> Path:
     """Resolve a cached ``.npz`` index, refusing the pickle it replaced.
 
-    The EMODnet polygon index and the NSIDC sea-ice climatology used to be
-    cached as pickles, so anything that could write the cache directory could
-    run arbitrary code in every later reader. Both are ``.npz`` now, loaded
-    with ``allow_pickle=False``.
+    The EMODnet polygon index and the NSIDC sea-ice climatology are cached as
+    ``.npz`` and loaded with ``allow_pickle=False``, so writing the cache
+    directory cannot run code in a later reader.
 
-    A cache still holding the old ``superseding`` file is refused rather than
+    A cache holding the pickled ``superseding`` file is refused rather than
     converted: converting it would have to unpickle it first, which is exactly
     the execution this format change removes. The error names the file to
     delete and the flag that rebuilds the dataset.
@@ -264,6 +290,30 @@ def atomic_write(out):
     os.replace(part, out)
 
 
+class UnreadableCacheError(DataFetchError):
+    """A cached dataset file is present but cannot be read (truncated,
+    damaged, or missing an expected variable).
+
+    A :class:`DataFetchError` to every caller, so the source-fallback chains
+    and user code treat it like any other fetch failure. The cache-first
+    loops tell it apart from a *read* local answer (:func:`is_cache_miss`):
+    it says nothing about the data, so the live twin is still asked.
+    """
+
+
+def is_cache_miss(exc) -> bool:
+    """Whether a local twin's failure leaves the question unanswered.
+
+    ``True`` for a cache that is absent (``ConfigurationError``) or unreadable
+    (:class:`UnreadableCacheError`): the live twin of the same dataset is the
+    next thing to ask. ``False`` for any other ``DataFetchError`` — a local
+    read that answered "no coverage here" or "on land", which the live twin of
+    the same dataset would answer identically, so a cache-first loop ends that
+    source there instead of asking the network the same question.
+    """
+    return isinstance(exc, (ConfigurationError, UnreadableCacheError))
+
+
 @contextlib.contextmanager
 def reading(name: str, path):
     """Re-raise whatever a cached file's parser throws as a typed error.
@@ -290,7 +340,7 @@ def reading(name: str, path):
         remedy = (f"Delete {path} and re-run `{entry.install_flag}`."
                   if entry is not None else
                   f"Delete {path} and re-fetch it.")
-        raise DataFetchError(
+        raise UnreadableCacheError(
             f"Cached {name} data at {path} is present but unreadable "
             f"({type(exc).__name__}: {exc}).",
             remediation=remedy,
@@ -355,13 +405,13 @@ def cached_grid_at(path, factory, name: str = 'cached'):
 
     The open runs under :func:`reading`, so a truncated or damaged NetCDF file
     raises this package's ``DataFetchError`` rather than netCDF4's bare
-    ``OSError``. Without it the largest, most download-interruptible files in
-    the cache — GEBCO at 7.5 GB and WOA23 at 1.5 GB — aborted the
-    source-fallback chains that catch only ``DataFetchError`` and
-    ``ConfigurationError``: a corrupt GLODAP file took down an entire
-    ``fetch_environment`` whose pH axis is documented as best-effort, and a
-    corrupt Graw or GlobSed file stopped ``'auto'`` from reaching the pelagic
-    terminus it is documented never to fail at.
+    ``OSError``. The source-fallback chains catch only ``DataFetchError`` and
+    ``ConfigurationError``, so this is what lets a corrupt file in the largest,
+    most download-interruptible grids — GEBCO at 7.5 GB, WOA23 at 1.5 GB —
+    fall through to the next source: a corrupt GLODAP file leaves the
+    best-effort pH axis empty rather than failing ``fetch_environment``, and a
+    corrupt Graw or GlobSed file still lets ``'auto'`` reach the pelagic
+    terminus.
 
     The open runs through :func:`memoize`, so threads racing a cold path open
     the file once between them rather than once each.
@@ -385,6 +435,28 @@ def register_cache(clear) -> None:
     have one invalidation entry point instead of seven.
     """
     _CLEARERS.append(clear)
+
+
+def per_root_memo(entry):
+    """Memoise ``entry()`` once per cache root, across threads.
+
+    For a backend whose loaded model (a KD-tree, an STRtree, a decoded
+    raster) belongs to the cache root rather than to one file: the value is
+    built through :func:`memoize` on the key ``str(cache_root())``, so a
+    changed ``$UACPY_DATA_CACHE`` loads afresh and N threads arriving on a
+    cold root build it once; the memo is registered with
+    :func:`register_cache`, so :func:`invalidate_grids` drops it. The memo
+    dict is the wrapper's ``memo`` attribute.
+    """
+    store = {}
+    register_cache(store.clear)
+
+    @functools.wraps(entry)
+    def cached():
+        return memoize(store, str(cache_root()), entry)
+
+    cached.memo = store
+    return cached
 
 
 def invalidate_grids() -> None:

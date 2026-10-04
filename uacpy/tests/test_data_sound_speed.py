@@ -8,11 +8,42 @@ THREDDS server (auto-skipped offline).
 import numpy as np
 import pytest
 
+from uacpy.data import bathymetry
+
 import uacpy
 from uacpy.core.environment import Bathymetry, SoundSpeedProfile
-from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.core.exceptions import (
+    ConfigurationError, DataFetchError, ProvenanceWarning,
+)
 from uacpy.data import _cache
 from uacpy.data import sound_speed as ss
+
+
+#: The real dry-point check, for the tests that are about it.
+_REAL_DRY_POINT_CHECK = bathymetry._refuse_a_dry_point
+
+
+@pytest.fixture(autouse=True)
+def _no_live_dry_point_check(monkeypatch):
+    """fetch_ssp / fetch_ts_profile / fetch_bottom first ask whether the
+    point is dry, from the GEBCO grid or else OpenTopoData; these tests are
+    about the fetchers behind that check, so it never reaches the network."""
+    from uacpy.data import bathymetry, environment
+    monkeypatch.setattr(bathymetry, '_refuse_a_dry_point',
+                        lambda point, **kw: None)
+    monkeypatch.setattr(environment, '_refuse_a_dry_point',
+                        lambda point, **kw: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_cache(monkeypatch, tmp_path):
+    """The per-layer fetchers are cache-first; the stubbed network paths
+    these tests check must not be pre-empted by the workspace's installed
+    grids. A test that wants a cache points UACPY_DATA_CACHE at its own."""
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'no_cache'))
+    from uacpy.data import _cache
+    _cache.invalidate_grids()
+
 
 
 @pytest.fixture(autouse=True)
@@ -82,14 +113,26 @@ def test_fetch_ssp_builds_profile(annual_http):
     assert isinstance(profile, SoundSpeedProfile)
     np.testing.assert_allclose(profile.depths, _Z)
     # Sound speed is physical and decreases into the cold layer then rises.
-    assert np.all((1450 < profile.data[:, 0]) & (profile.data[:, 0] < 1560))
+    assert np.all((1450 < profile.sound_speed[:, 0]) & (profile.sound_speed[:, 0] < 1560))
     env = uacpy.Environment(name='woa', bathymetry=1000.0, ssp=profile)
     assert env.ssp.n_depths == 5
 
 
+def test_mackenzie_reads_the_woa23_depths_directly(annual_http):
+    # Mackenzie is stated in depth: no pressure round trip at any latitude.
+    from uacpy.core.acoustics import sound_speed_mackenzie
+    temp, sal = _ANNUAL[('t', 0)][1], _ANNUAL[('s', 0)][1]
+    for point in ((0.5, -40.5), (60.5, -40.5)):
+        c = ss.fetch_ssp(point, formula='mackenzie').sound_speed[:, 0]
+        np.testing.assert_allclose(
+            c, sound_speed_mackenzie(temperature=np.array(temp),
+                                     salinity=np.array(sal),
+                                     depth=np.array(_Z)), rtol=0, atol=1e-9)
+
+
 def test_unesco_vs_delgrosso_close(annual_http):
-    cu = ss.fetch_ssp((30.5, -40.5), formula='unesco').data[:, 0]
-    cd = ss.fetch_ssp((30.5, -40.5), formula='delgrosso').data[:, 0]
+    cu = ss.fetch_ssp((30.5, -40.5), formula='unesco').sound_speed[:, 0]
+    cd = ss.fetch_ssp((30.5, -40.5), formula='delgrosso').sound_speed[:, 0]
     assert np.allclose(cu, cd, atol=1.0)  # standard formulas agree ~1 m/s
 
 
@@ -106,12 +149,23 @@ def test_wet_cell_fallback_stamps_the_cell_actually_used(monkeypatch):
         return np.array([]), np.array([]), np.array([])
 
     monkeypatch.setattr(ss, '_get_column', fake_get_column)
-    with pytest.warns(UserWarning, match='closest wet cell'):
+    # The hop is past the 1° cell's 73.4 km half-diagonal at 30.5°N, so the
+    # offset rule names the cell read and the km.
+    with pytest.warns(ProvenanceWarning,
+                      match=r'nearest wet 1° cell, centred 30\.50 N, '
+                            r'39\.50 W, 95\.8 km'):
         profile = ss.fetch_ssp((30.5, -40.5))
     prov = profile.data_sources[0]
     assert prov.requested_point == (30.5, -40.5)
     assert prov.data_point == (30.5, -39.5)
     assert prov.offset_km == pytest.approx(95.8, abs=0.5)  # 1 deg lon at 30.5N
+    # max_distance_km refuses the hop just below its 95.8 km and keeps it
+    # just above.
+    with pytest.raises(DataFetchError, match='past max_distance_km=95.7'):
+        ss.fetch_ssp((30.5, -40.5), max_distance_km=95.7)
+    with pytest.warns(ProvenanceWarning):
+        kept = ss.fetch_ssp((30.5, -40.5), max_distance_km=95.9)
+    assert kept.data_sources[0].data_point == (30.5, -39.5)
 
 
 def test_on_centre_request_stamps_zero_offset(monkeypatch):
@@ -131,8 +185,52 @@ def test_land_cell_raises(monkeypatch):
         ('s', 0): (_Z, [FILL] * 5),
     }
     monkeypatch.setattr(ss, 'http_get', _make_fake_http(land))
+    # A point GEBCO puts at sea (-1488 m), so WOA23's own empty column is
+    # what refuses it.
+    monkeypatch.setattr(bathymetry, '_refuse_a_dry_point',
+                        lambda point, **kw: None)
     with pytest.raises(DataFetchError, match='no water-column'):
-        ss.fetch_ssp((40.0, 0.0))
+        ss.fetch_ssp((40.0, 2.0))
+
+
+@pytest.mark.parametrize('fetch', ['fetch_ssp', 'fetch_ts_profile',
+                                   'fetch_bottom'])
+@pytest.mark.parametrize('elevation, refused', [(0.0, True), (39.0, True),
+                                                (-1.0, False)])
+def test_a_point_gebco_puts_on_land_is_refused_before_any_source(
+        monkeypatch, fetch, elevation, refused):
+    """Paris: fetch_ssp returned a WOA23 cell 226.7 km away and fetch_bottom
+    a grain-size sample 223.3 km away, each with a warning only. A dry point
+    has no water column, whatever the nearest wet cell holds."""
+    from uacpy import data
+    from uacpy.data import gebco_local
+
+    class _Grid:
+        def elevation(self, lat, lon):
+            return elevation
+    monkeypatch.setattr(gebco_local, '_grid', lambda: _Grid())
+    from uacpy.data import environment as env_mod
+    monkeypatch.setattr(bathymetry, '_refuse_a_dry_point',
+                        _REAL_DRY_POINT_CHECK)
+    monkeypatch.setattr(env_mod, '_refuse_a_dry_point', _REAL_DRY_POINT_CHECK)
+    reached = []
+    monkeypatch.setattr(ss, '_woa_cache_first',
+                        lambda source, call: reached.append(source) or 'ssp')
+    monkeypatch.setattr(ss, '_ssp_chain_fetch',
+                        lambda *a, **kw: reached.append('chain') or 'ssp')
+    from uacpy.data import environment as env_mod
+    monkeypatch.setattr(env_mod, '_fetch_bottom',
+                        lambda *a, **kw: reached.append('bottom') or ('b', 'x'))
+    call = lambda: getattr(data, fetch)((48.85, 2.35), source='local')
+    if refused:
+        with pytest.raises(DataFetchError,
+                           match=rf'{fetch}: GEBCO reports land \(elevation '
+                                 rf'{elevation:.0f} m\)'):
+            call()
+        assert reached == []
+    else:
+        call()
+        assert len(reached) == 1
 
 
 def test_seafloor_truncation(monkeypatch):
@@ -162,6 +260,11 @@ def test_month_splices_annual_below_cap(monkeypatch):
     # Upper part from July, deep part appended from annual (>1500 m).
     assert profile.depths.tolist() == [0.0, 50.0, 1500.0, 2000.0, 3000.0]
     assert np.all(np.diff(profile.depths) > 0)
+    # The record says which period lies where.
+    (rec,) = profile.data_sources
+    assert (rec.split_depth_m, rec.period_below) == (1500.0, 'annual mean')
+    assert ('date month 07 (climatology) above 1500 m, annual mean below'
+            in rec._fetch_line())
 
 
 def test_month_no_splice_when_seafloor_above_cap(monkeypatch):
@@ -175,6 +278,8 @@ def test_month_no_splice_when_seafloor_above_cap(monkeypatch):
     monkeypatch.setattr(ss, 'http_get', _make_fake_http(cols))
     profile = ss.fetch_ssp((30.5, -40.5), month=7)
     assert profile.depths.tolist() == [0.0, 50.0, 200.0]
+    (rec,) = ss.fetch_ssp((30.5, -40.5), month=7).data_sources
+    assert rec.split_depth_m is None and rec.period_below is None
 
 
 def test_date_selects_month(monkeypatch):
@@ -225,7 +330,7 @@ def test_grid_index_and_lon_normalization():
 
 def test_depth_to_pressure_dbar():
     # ~1 dbar per metre, with the latitude/compressibility correction.
-    from uacpy.data._geo import depth_to_pressure_dbar
+    from uacpy.core.acoustics.seawater import depth_to_pressure_dbar
     p = depth_to_pressure_dbar(np.array([0.0, 1000.0, 5000.0]), 30.0)
     assert p[0] == pytest.approx(0.0, abs=1e-6)
     assert 1000 < p[1] < 1020
@@ -235,27 +340,50 @@ def test_depth_to_pressure_dbar():
 def test_fetch_ssp_transect_builds_2d(annual_http):
     ssp = ss.fetch_ssp_transect((0.0, 0.0), (1.0, 0.0), n_points=4)
     assert ssp.is_range_dependent
-    assert ssp.data.shape == (len(_Z), 4)        # depths × columns
+    assert ssp.sound_speed.shape == (len(_Z), 4)        # depths × columns
     assert ssp.ranges[0] == 0.0
     assert np.all(np.diff(ssp.ranges) > 0)       # increasing range axis
     # 1° latitude ≈ 111 km total transect length.
     assert ssp.ranges[-1] == pytest.approx(111_195.0, rel=1e-3)
     # Identical fixture columns → every range column equals the 1-D profile.
-    assert np.allclose(ssp.data[:, 0], ssp.data[:, -1])
+    assert np.allclose(ssp.sound_speed[:, 0], ssp.sound_speed[:, -1])
 
 
 def test_assemble_range_dependent_reorders_unsorted_ranges():
     z = np.array([0.0, 100.0])
-    cols = [SoundSpeedProfile(depths=z, data=np.array([[1500.0], [1510.0]])),
-            SoundSpeedProfile(depths=z, data=np.array([[1490.0], [1500.0]])),
-            SoundSpeedProfile(depths=z, data=np.array([[1480.0], [1490.0]]))]
+    cols = [SoundSpeedProfile(depths=z, sound_speed=np.array([[1500.0], [1510.0]])),
+            SoundSpeedProfile(depths=z, sound_speed=np.array([[1490.0], [1500.0]])),
+            SoundSpeedProfile(depths=z, sound_speed=np.array([[1480.0], [1490.0]]))]
     # Ranges supplied out of order: the result must come back ascending, with
     # each column following its range.
     ssp = ss.assemble_range_dependent(cols, [2000.0, 0.0, 1000.0])
     assert list(ssp.ranges) == [0.0, 1000.0, 2000.0]
-    assert ssp.data[0, 0] == 1490.0              # the 0 m column
-    assert ssp.data[0, 1] == 1480.0              # the 1000 m column
-    assert ssp.data[0, 2] == 1500.0              # the 2000 m column
+    assert ssp.sound_speed[0, 0] == 1490.0              # the 0 m column
+    assert ssp.sound_speed[0, 1] == 1480.0              # the 1000 m column
+    assert ssp.sound_speed[0, 2] == 1500.0              # the 2000 m column
+
+
+def test_assemble_range_dependent_refuses_a_range_dependent_column():
+    """Stacking keeps one column per range, so a column holding several
+    ranges would lose all but its first without a word."""
+    z = np.array([0.0, 100.0])
+    rd = SoundSpeedProfile(depths=z,
+                           sound_speed=np.array([[1500.0, 1510.0],
+                                                 [1490.0, 1480.0]]),
+                           ranges=np.array([0.0, 1000.0]))
+    one = SoundSpeedProfile(depths=z, sound_speed=np.array([[1500.0], [1490.0]]))
+    with pytest.raises(ConfigurationError, match='column 0 has 2 range'):
+        ss.assemble_range_dependent([rd, one], [0.0, 5000.0])
+
+
+def test_the_default_extension_latitude_is_the_core_reference():
+    """One source of truth: the default is core's constant itself, not a
+    literal that agrees with it today."""
+    import inspect
+    from uacpy.core.acoustics.seawater import REFERENCE_LATITUDE_DEG
+    for fn in (ss.extend_ssp_below_data, ss.extend_column_to_seafloor):
+        default = inspect.signature(fn).parameters['latitude'].default
+        assert default is REFERENCE_LATITUDE_DEG
 
 
 def _provenance_columns():
@@ -270,39 +398,41 @@ def _provenance_columns():
     p_g = DataProvenance(source=SOURCES['gebco'])
     return [
         SoundSpeedProfile(depths=[0.0, 50.0, 100.0],
-                          data=[1500.0, 1495.0, 1490.0],
+                          sound_speed=[1500.0, 1495.0, 1490.0],
                           data_sources=(p_c1, p_w)),
-        SoundSpeedProfile(depths=[0.0, 120.0], data=[1501.0, 1488.0],
+        SoundSpeedProfile(depths=[0.0, 120.0], sound_speed=[1501.0, 1488.0],
                           data_sources=(p_c2,)),
-        SoundSpeedProfile(depths=[0.0, 80.0], data=[1502.0, 1492.0],
+        SoundSpeedProfile(depths=[0.0, 80.0], sound_speed=[1502.0, 1492.0],
                           data_sources=()),
-        SoundSpeedProfile(depths=[0.0, 90.0], data=[1503.0, 1491.0],
+        SoundSpeedProfile(depths=[0.0, 90.0], sound_speed=[1503.0, 1491.0],
                           data_sources=(p_g, p_c1)),
     ]
 
 
 def test_assemble_range_dependent_aggregates_through_the_carrier_deduper(
         monkeypatch):
-    """The assembly reaches ``_carrier_validate._dedupe_provenance`` — the
+    """The assembly reaches ``_provenance.dedupe_provenance`` — the
     module that declares itself the single home for this union — rather than
     re-deriving first-seen-order dedupe-by-source-id beside it.
 
     Monkeypatching the helper is what distinguishes delegation from a local
     copy: a re-implementation ignores the patch and returns the real union.
     """
-    from uacpy.core import _carrier_validate
+    from uacpy.core import _provenance
     from uacpy.data.sources import SOURCES, DataProvenance
     # A record no column carries, so the real union can never return it.
     sentinel = (DataProvenance(source=SOURCES['gmrt'],
                                requested_point=(89.0, 179.0)),)
     seen = {}
 
-    def _spy(carriers):
+    def _spy(carriers, ranges=None):
         seen['carriers'] = list(carriers)
+        seen['ranges'] = list(ranges)
         return sentinel
 
-    monkeypatch.setattr(_carrier_validate, '_dedupe_provenance', _spy)
-    monkeypatch.setattr(ss, '_dedupe_provenance', _spy)
+    # The name the assembly calls is the carrier deduper itself, not a copy.
+    assert ss.dedupe_provenance is _provenance.dedupe_provenance
+    monkeypatch.setattr(ss, 'dedupe_provenance', _spy)
     out = ss.assemble_range_dependent(_provenance_columns(),
                                       [3000.0, 0.0, 2000.0, 1000.0])
     assert tuple(out.data_sources) == sentinel
@@ -310,30 +440,33 @@ def test_assemble_range_dependent_aggregates_through_the_carrier_deduper(
     # first-seen record is the one from the nearest column.
     assert [c.depths.max() for c in seen['carriers']] == [120.0, 90.0, 80.0,
                                                           100.0]
+    assert seen['ranges'] == [0.0, 1000.0, 2000.0, 3000.0]
 
 
-def test_assemble_range_dependent_dedupes_provenance_by_source_id():
-    """One record survives per dataset, in first-seen order over the columns
-    sorted by range, and a column without ``data_sources`` contributes none."""
+def test_assemble_range_dependent_keeps_every_columns_record_at_its_range():
+    """A transect's columns each keep their record, stamped with the
+    column's range, in range order; only one source per dataset survived
+    before, so columns 2-4 lost their offsets. A column without
+    ``data_sources`` contributes none."""
     cols = _provenance_columns()
     out = ss.assemble_range_dependent(cols, [3000.0, 0.0, 2000.0, 1000.0])
     assert isinstance(out.data_sources, tuple)
-    assert [p.source.id for p in out.data_sources] == ['copernicus', 'gebco',
-                                                       'woa23']
-    # The surviving copernicus record is the 1000 m column's, not the 3000 m
-    # column's: the union runs over the reordered columns.
+    assert [(p.source.id, p.range_m) for p in out.data_sources] == [
+        ('copernicus', 0.0), ('gebco', 1000.0), ('copernicus', 1000.0),
+        ('copernicus', 3000.0), ('woa23', 3000.0)]
     assert out.data_sources[0].requested_point == (31.0, -40.0)
-    assert out.data_sources[2].requested_point == (32.0, -40.0)
-    # The records are the very objects the columns carried, not copies.
-    assert out.data_sources[0] is cols[1].data_sources[0]
-    assert out.data_sources[2] is cols[0].data_sources[1]
+    # The same record carried by one column twice stays one record.
+    again = ss.assemble_range_dependent([cols[0], cols[0]], [0.0, 10.0])
+    assert [(p.source.id, p.range_m) for p in again.data_sources] == [
+        ('copernicus', 0.0), ('woa23', 0.0), ('copernicus', 10.0),
+        ('woa23', 10.0)]
 
 
 def test_assemble_range_dependent_tolerates_a_column_without_provenance():
     """A carrier lacking the attribute entirely is skipped, not an error."""
     class _NoProvenance:
         depths = np.array([0.0, 10.0])
-        data = np.array([[1500.0], [1499.0]])
+        sound_speed = np.array([[1500.0], [1499.0]])
 
     cols = _provenance_columns()
     out = ss.assemble_range_dependent([cols[0], _NoProvenance()],
@@ -349,12 +482,12 @@ def test_live_woa23_profile():
         pytest.skip(f"WOA23 OPeNDAP unreachable: {exc.message}")
     assert profile.depths[0] == 0.0
     assert profile.depths[-1] > 3000.0           # deep open ocean
-    assert np.all((1440 < profile.data) & (profile.data < 1560))
+    assert np.all((1440 < profile.sound_speed) & (profile.sound_speed < 1560))
 
 
 def _column(depths, speeds):
     return SoundSpeedProfile(depths=np.asarray(depths, dtype=float),
-                             data=np.asarray(speeds, dtype=float))
+                             sound_speed=np.asarray(speeds, dtype=float))
 
 
 def _bathy(pairs):
@@ -375,7 +508,7 @@ def test_column_keeps_its_analysed_levels_under_a_shallower_seafloor():
                                                     [1.0e5, 3381.0]]), 0.0)
     assert out is col
     assert float(out.depths[-1]) == 4800.0
-    assert float(out.data[-1, 0]) == pytest.approx(1540.8)
+    assert float(out.sound_speed[-1, 0]) == pytest.approx(1540.8)
 
 
 def test_column_extends_under_a_deeper_seafloor():
@@ -386,7 +519,7 @@ def test_column_extends_under_a_deeper_seafloor():
     assert float(out.depths[-1]) == pytest.approx(8801.0)
     # TEOS-10 at 8801 m holding the column's own deepest T/S: 1611.68 m/s
     # (UNESCO, the former default, gave 1611.93 — its deep pressure bias).
-    assert float(out.data[-1, 0]) == pytest.approx(1611.68, abs=0.05)
+    assert float(out.sound_speed[-1, 0]) == pytest.approx(1611.68, abs=0.05)
 
 
 def test_transect_holds_no_cut_value_inside_the_water_column(monkeypatch):
@@ -400,7 +533,7 @@ def test_transect_holds_no_cut_value_inside_the_water_column(monkeypatch):
     """
     deep_z = np.array([0.0, 1000.0, 3000.0, 4500.0])
     deep_c = np.array([1540.0, 1484.0, 1497.0, 1530.0])
-    monkeypatch.setattr(ss, 'fetch_ssp',
+    monkeypatch.setattr(ss, '_fetch_ssp_backend',
                         lambda point, **kw: _column(deep_z, deep_c))
     length = 111_195.0                       # 1 degree of latitude
     seafloor = _bathy([[0.0, 3000.0], [length / 2, 5200.0], [length, 3000.0]])
@@ -408,7 +541,7 @@ def test_transect_holds_no_cut_value_inside_the_water_column(monkeypatch):
                                  seafloor=seafloor)
     assert float(prof.depths[-1]) == pytest.approx(4500.0)
     mid = prof.eval(range=length / 2)
-    c_4500 = float(np.interp(4500.0, mid.depths, mid.data[:, 0]))
+    c_4500 = float(np.interp(4500.0, mid.depths, mid.sound_speed[:, 0]))
     assert c_4500 == pytest.approx(1530.0, abs=1e-6), (
         f"{c_4500:.1f} m/s at 4500 m over a 5200 m seafloor — the analysed "
         f"1530.0 was cut and 1497.0 held in its place")
@@ -485,7 +618,7 @@ class TestTheDeepExtensionUsesTheProfilesOwnFormula:
     def _profile(self, formula):
         from uacpy.core.ssp import SoundSpeedProfile
         return SoundSpeedProfile(depths=np.array([0.0, 5500.0]),
-                                 data=np.array([1500.0, 1551.05]),
+                                 sound_speed=np.array([1500.0, 1551.05]),
                                  formula=formula)
 
     def test_each_formula_extends_differently_and_none_means_teos10(self):
@@ -493,7 +626,7 @@ class TestTheDeepExtensionUsesTheProfilesOwnFormula:
         package default, TEOS-10 — not UNESCO, whose pressure term is the
         0.6 m/s-high one below 3000 dbar."""
         from uacpy.data.sound_speed import extend_ssp_below_data
-        deep = {f: float(np.asarray(extend_ssp_below_data(self._profile(f), 8800.0).data)[-1, 0])
+        deep = {f: float(np.asarray(extend_ssp_below_data(self._profile(f), 8800.0).sound_speed)[-1, 0])
                 for f in ('unesco', 'delgrosso', 'teos10', None)}
         assert deep[None] == deep['teos10']
         assert abs(deep['delgrosso'] - deep['unesco']) > 0.1     # verifier: +0.33 m/s at 8.8 km
@@ -516,8 +649,8 @@ def test_extending_a_profile_keeps_its_formula(formula):
     from uacpy.core.environment import SoundSpeedProfile
     from uacpy.data.sound_speed import extend_ssp_below_data
     ssp = SoundSpeedProfile(depths=[0.0, 1000.0, 5500.0],
-                            data=[1540.0, 1485.0, 1551.05],
-                            shape='measured', formula=formula)
+                            sound_speed=[1540.0, 1485.0, 1551.05],
+                            kind='measured', formula=formula)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         assert extend_ssp_below_data(ssp, 8800.0).formula == formula
@@ -533,31 +666,31 @@ def test_a_twice_extended_profile_stays_on_its_own_equation():
     from uacpy.core.environment import SoundSpeedProfile
     from uacpy.data.sound_speed import extend_ssp_below_data
     ssp = SoundSpeedProfile(depths=[0.0, 1000.0, 5500.0],
-                            data=[1540.0, 1485.0, 1551.05],
-                            shape='measured', formula='delgrosso')
+                            sound_speed=[1540.0, 1485.0, 1551.05],
+                            kind='measured', formula='delgrosso')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         once = extend_ssp_below_data(ssp, 8000.0)
         chained = extend_ssp_below_data(once, 9500.0)
-        restamped = SoundSpeedProfile(depths=once.depths, data=once.data,
-                                      shape='measured', formula='delgrosso')
+        restamped = SoundSpeedProfile(depths=once.depths, sound_speed=once.sound_speed,
+                                      kind='measured', formula='delgrosso')
         control = extend_ssp_below_data(restamped, 9500.0)
-        stripped = SoundSpeedProfile(depths=once.depths, data=once.data,
-                                     shape='measured', formula=None)
+        stripped = SoundSpeedProfile(depths=once.depths, sound_speed=once.sound_speed,
+                                     kind='measured', formula=None)
         unesco = extend_ssp_below_data(stripped, 9500.0)
     assert chained.formula == 'delgrosso'
-    assert float(np.asarray(chained.data)[-1, 0]) == pytest.approx(
-        float(np.asarray(control.data)[-1, 0]), abs=1e-9)
+    assert float(np.asarray(chained.sound_speed)[-1, 0]) == pytest.approx(
+        float(np.asarray(control.sound_speed)[-1, 0]), abs=1e-9)
     # and the two equations really do disagree over this hop
-    assert float(np.asarray(control.data)[-1, 0]) != pytest.approx(
-        float(np.asarray(unesco.data)[-1, 0]), abs=1e-6)
+    assert float(np.asarray(control.sound_speed)[-1, 0]) != pytest.approx(
+        float(np.asarray(unesco.sound_speed)[-1, 0]), abs=1e-6)
 
 
 def test_assembling_columns_keeps_a_formula_they_all_agree_on():
     from uacpy.core.environment import SoundSpeedProfile
     from uacpy.data.sound_speed import assemble_range_dependent
-    cols = [SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1490.0],
-                              shape='measured', formula='delgrosso')
+    cols = [SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1490.0],
+                              kind='measured', formula='delgrosso')
             for _ in range(3)]
     assert assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula == 'delgrosso'
 
@@ -567,8 +700,8 @@ def test_assembling_mixed_columns_keeps_no_formula():
     field carries none and a later extension falls back to UNESCO."""
     from uacpy.core.environment import SoundSpeedProfile
     from uacpy.data.sound_speed import assemble_range_dependent
-    cols = [SoundSpeedProfile(depths=[0.0, 100.0], data=[1500.0, 1490.0],
-                              shape='measured', formula=f)
+    cols = [SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1490.0],
+                              kind='measured', formula=f)
             for f in ('delgrosso', 'unesco', 'delgrosso')]
     assert assemble_range_dependent(cols, [0.0, 1e3, 2e3]).formula is None
 
@@ -587,3 +720,43 @@ def test_every_ssp_route_defaults_to_teos10():
               environment.fetch_environment]
     for fn in routes:
         assert inspect.signature(fn).parameters['formula'].default == 'teos10', fn
+
+
+
+@pytest.mark.parametrize('grid, live, cache_only, warns', [
+    ('absent', 'fails', False, True),        # nothing could answer
+    ('absent', 'fails', True, True),         # cache-only: the live one is not asked
+    ('absent', -800.0, False, False),        # OpenTopoData answered: at sea
+    ('installed', None, True, False)])       # the grid answered: at sea
+def test_a_dry_point_check_that_cannot_run_says_so(monkeypatch, grid, live,
+                                                   cache_only, warns):
+    """The check guards a fetch, so when no GEBCO grid is installed and
+    OpenTopoData does not answer the fetch goes on — with one
+    FallbackWarning naming why, not silently."""
+    from uacpy.core.exceptions import FallbackWarning
+    from uacpy.data import gebco_local
+    from uacpy.tests.conftest import recorded_warnings
+
+    class _Grid:
+        def elevation(self, lat, lon):
+            return -1200.0
+
+    def absent():
+        raise ConfigurationError("GEBCO cache not installed")
+
+    def elevations(coords, **kw):
+        if live == 'fails':
+            raise DataFetchError("OpenTopoData unreachable")
+        return np.array([live])
+    monkeypatch.setattr(gebco_local, '_grid',
+                        absent if grid == 'absent' else (lambda: _Grid()))
+    monkeypatch.setattr(bathymetry, '_fetch_elevations', elevations)
+    with recorded_warnings() as rec:
+        _REAL_DRY_POINT_CHECK((45.6, -6.2), who='probe',
+                              cache_only=cache_only)
+    skipped = [w for w in rec if issubclass(w.category, FallbackWarning)
+               and 'was not checked' in str(w.message)]
+    assert len(skipped) == int(warns)
+    if warns:
+        assert ('cache-only' if cache_only else 'did not answer') in \
+            str(skipped[0].message)

@@ -16,6 +16,13 @@ __all__ = [
     'ConfigurationError',
     'DataFetchError',
     'FileFormatError',
+    'OutputContractError',
+    'UACPYWarning',
+    'NumericsWarning',
+    'ValidityWarning',
+    'FallbackWarning',
+    'ProvenanceWarning',
+    'IOWarning',
 ]
 
 
@@ -103,8 +110,10 @@ class ModelExecutionError(UACPYError):
     #: starts every child in its own session, so a terminal hangup cannot reach
     #: one; -1 here is always the sentinel, and is left unnamed for that reason.
     NEVER_LAUNCHED = -1
+    # ``return_code`` is ``None`` when the process ran but its exit code is
+    # unknown — a run_parallel worker the pool lost mid-run.
 
-    def __init__(self, model_name: str, return_code: int,
+    def __init__(self, model_name: str, return_code: Optional[int],
                  stdout: Optional[str] = None,
                  stderr: Optional[str] = None, timed_out: bool = False):
         killed_by = self._killing_signal(return_code)
@@ -112,6 +121,11 @@ class ModelExecutionError(UACPYError):
             message = f"{model_name} execution timed out"
         elif killed_by is not None:
             message = f"{model_name} was killed by signal {killed_by}"
+        elif return_code == 0:
+            # The binary exited cleanly but left no output a reader could
+            # use (a Fortran STOP after an error message, an empty file).
+            message = (f"{model_name} exited with code 0 but its output is "
+                       f"unusable")
         else:
             message = f"{model_name} execution failed (exit code: {return_code})"
 
@@ -171,12 +185,12 @@ class InvalidDepthError(UACPYError):
     (Scooter/SPARC) it includes the sediment column, so the message says
     "resolvable depth" rather than "environment depth"."""
 
-    def __init__(self, depth: float, max_depth: float, context: str):
-        message = f"{context} depth ({depth:.1f}m) exceeds resolvable depth ({max_depth:.1f}m)"
-        remediation = f"Set {context.lower()} depth to ≤ {max_depth:.1f}m"
+    def __init__(self, depth: float, depth_max: float, context: str):
+        message = f"{context} depth ({depth:.1f}m) exceeds resolvable depth ({depth_max:.1f}m)"
+        remediation = f"Set {context.lower()} depth to ≤ {depth_max:.1f}m"
         super().__init__(message, remediation)
         self.depth = depth
-        self.max_depth = max_depth
+        self.depth_max = depth_max
         self.context = context
 
 
@@ -254,3 +268,56 @@ class FileFormatError(UACPYError):
     ``FileFormatError``. Catch via ``except FileFormatError`` or, more
     broadly, ``except UACPYError``."""
     pass
+
+
+class OutputContractError(UACPYError):
+    """Raised when a model's result is not what its run settings
+    declare (``settings.output``): another result class, or another
+    ``kind`` / ``unit`` / ``phase_reference``. The fault is in the
+    engine's wrapper (its ``_to_result``), never in the call, so it is
+    a defect to report. Catch via ``except UACPYError``."""
+    pass
+
+
+class UACPYWarning(UserWarning):
+    """Base class of every warning uacpy emits; uacpy never emits it itself,
+    only one of its subclasses, each naming a cause. A ``UserWarning``
+    subclass, so a filter or ``pytest.warns`` on ``UserWarning`` still catches
+    every uacpy warning; ``warnings.filterwarnings('ignore',
+    category=uacpy.FallbackWarning)`` silences one cause and keeps the
+    others."""
+
+
+class NumericsWarning(UACPYWarning):
+    """The discretisation or the numerical solution limits the answer: a grid,
+    step, window, record or sample count that cannot resolve what is asked of
+    it (aliasing, wrap-around, Nyquist, truncation, leakage, an under-resolved
+    axis, a capacity reached), a solve that did not converge, or a run sized
+    past its budget. The remedy is a finer, longer or smaller computation."""
+
+
+class ValidityWarning(UACPYWarning):
+    """The problem lies outside where the physics, the formula, the fit or the
+    approximation holds, or the quantity is undefined there: an input outside
+    a fitted range, an implausible value, a singular, evanescent or leaky
+    point, an approximation outside its regime. The value is computed as
+    asked; whether it means anything is the caller's call."""
+
+
+class FallbackWarning(UACPYWarning):
+    """uacpy uses something other than what was asked: an input ignored,
+    clamped, rounded, capped or replaced; a default or the nearest available
+    value taken; a feature the model cannot carry dropped or collapsed. The
+    message names what was used instead."""
+
+
+class ProvenanceWarning(UACPYWarning):
+    """The licence, attribution or calibration status of what was used: a
+    dataset or engine with a use restriction, a level with no absolute
+    calibration."""
+
+
+class IOWarning(UACPYWarning):
+    """A file, an engine's own log or output, or a data service delivered
+    something irregular: a file cut short or in an unvalidated encoding, a
+    non-fatal warning the engine reported, a partial reply."""

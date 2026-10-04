@@ -37,14 +37,14 @@ def two_path_field(amplitude=0.7, delay=5e-3, frequencies=None):
                  frequencies=f)
 
 
-def free_field(ranges=(100.0, 200.0), df=25.0, f_max=4000.0):
+def free_field(ranges=(100.0, 200.0), df=25.0, freq_max=4000.0):
     """``H = exp(-i k r) / r`` — spherical spreading, no boundaries.
 
     The NEGATIVE exponent is uacpy's delay convention, the one
     ``Arrivals.transfer_function`` writes; ``exp(+ikr)`` is an
     incoming wave and puts the pulse before its travel time.
     """
-    f = np.arange(df, f_max, df)
+    f = np.arange(df, freq_max, df)
     r = np.asarray(ranges, dtype=float)
     h = np.exp(-2j * np.pi * np.outer(r, f) / SPEED) / r[:, None]
     return Field(data=h[None, ...],
@@ -75,22 +75,22 @@ class TestTheBandAverageIsTheLossABandwidthSees:
         field = two_path_field()
         weights = np.zeros(field.n_frequencies)
         weights[40] = 1.0
-        assert float(field.broadband_loss(spectrum=weights).tl[0, 0]) == \
+        assert float(field.broadband_loss(source_spectrum=weights).tl[0, 0]) == \
             pytest.approx(float(field.tl[0, 0, 40]), abs=1e-9)
 
     def test_the_spectrum_scale_cancels(self):
         field = two_path_field()
         shape = np.hanning(field.n_frequencies) + 0.1
-        one = float(field.broadband_loss(spectrum=shape).tl[0, 0])
-        scaled = float(field.broadband_loss(spectrum=1e6 * shape).tl[0, 0])
+        one = float(field.broadband_loss(source_spectrum=shape).tl[0, 0])
+        scaled = float(field.broadband_loss(source_spectrum=1e6 * shape).tl[0, 0])
         assert one == pytest.approx(scaled, abs=1e-12)
 
     def test_a_complex_spectrum_weighs_by_its_magnitude(self):
         field = two_path_field()
         shape = np.hanning(field.n_frequencies) + 0.1
         phased = shape * np.exp(1j * np.linspace(0.0, 7.0, shape.size))
-        assert float(field.broadband_loss(spectrum=phased).tl[0, 0]) == \
-            pytest.approx(float(field.broadband_loss(spectrum=shape).tl[0, 0]),
+        assert float(field.broadband_loss(source_spectrum=phased).tl[0, 0]) == \
+            pytest.approx(float(field.broadband_loss(source_spectrum=shape).tl[0, 0]),
                           abs=1e-12)
 
     def test_it_averages_whichever_axis_the_frequencies_are_on(self):
@@ -142,9 +142,9 @@ class TestTheBandAverageIsTheLossABandwidthSees:
         magnitude = np.hanning(field.n_frequencies) + 0.05
         phased = magnitude * np.exp(
             1j * rng.uniform(0.0, 2.0 * np.pi, magnitude.size))
-        assert float(field.broadband_loss(spectrum=phased).tl[0, 0]) == \
+        assert float(field.broadband_loss(source_spectrum=phased).tl[0, 0]) == \
             pytest.approx(
-                float(field.broadband_loss(spectrum=magnitude).tl[0, 0]),
+                float(field.broadband_loss(source_spectrum=magnitude).tl[0, 0]),
                 abs=1e-9)
 
     def test_it_converges_to_the_continuous_wave_loss_as_the_band_narrows(self):
@@ -197,14 +197,14 @@ class TestTheBandAverageIsTheLossABandwidthSees:
         field = Field(data=h[None, ...],
                       coords={'depth': [10.0], 'range': r, 'frequency': f},
                       frequencies=f)
-        waveform = tone_burst(1000.0, 20, RATE)[1]
+        waveform = tone_burst(1000.0, 20, sample_rate=RATE)[1]
         for low, high in ((975.0, 1025.0), (800.0, 1200.0)):
             band = field.window(frequency=(low, high))
-            assert band.broadband_loss().metadata['band_hz'] == (low, high)
+            assert band.broadband_loss().band_hz == (low, high)
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 exposure = band.sound_exposure_level(waveform, RATE)
-            assert exposure.metadata['band_hz'] == (low, high)
+            assert exposure.band_hz == (low, high)
             # and the identity really is narrowed, so band_hz is the only
             # place the span survives
             assert band.broadband_loss().n_frequencies == 1
@@ -233,7 +233,7 @@ class TestTheBandAverageIsTheLossABandwidthSees:
                       frequencies=field.coords['frequency'])
         weights = np.ones(field.n_frequencies)
         weights[7] = 0.0
-        assert np.isnan(holed.broadband_loss(spectrum=weights).tl[0, 0])
+        assert np.isnan(holed.broadband_loss(source_spectrum=weights).tl[0, 0])
 
     def test_a_no_data_frequency_is_not_averaged_away(self):
         field = two_path_field()
@@ -258,7 +258,7 @@ class TestTheBandAverageIsTheLossABandwidthSees:
     def test_a_spectrum_off_the_frequency_axis_is_refused(self):
         field = two_path_field()
         with pytest.raises(ConfigurationError, match="frequency axis has"):
-            field.broadband_loss(spectrum=np.ones(field.n_frequencies + 1))
+            field.broadband_loss(source_spectrum=np.ones(field.n_frequencies + 1))
 
     def test_a_spectrum_with_a_hole_in_it_is_refused(self):
         # The one guard the mutation sweep found unpinned: without it a NaN
@@ -269,7 +269,7 @@ class TestTheBandAverageIsTheLossABandwidthSees:
             weights = np.ones(field.n_frequencies)
             weights[3] = bad
             with pytest.raises(ConfigurationError, match="finite"):
-                field.broadband_loss(spectrum=weights)
+                field.broadband_loss(source_spectrum=weights)
 
     def test_the_pinned_frequency_follows_the_spectrum(self):
         # A 500 Hz burst's map is a map of 500 Hz. Labelling it with the
@@ -279,8 +279,8 @@ class TestTheBandAverageIsTheLossABandwidthSees:
         field = Field(data=np.ones((1, 1, f.size), complex),
                       coords={'depth': [0.0], 'range': [1.0],
                               'frequency': f}, frequencies=f)
-        burst = tone_burst(500.0, 5, 8000.0)[1]
-        weighted = field.broadband_loss(waveform=burst, sample_rate=8000.0)
+        burst = tone_burst(500.0, 5, sample_rate=8000.0)[1]
+        weighted = field.broadband_loss(source_waveform=burst, sample_rate=8000.0)
         assert weighted.pinned['frequency'] == pytest.approx(500.0, abs=25.0)
         # and a white source still lands on the band centre
         assert field.broadband_loss().pinned['frequency'] == pytest.approx(
@@ -289,7 +289,7 @@ class TestTheBandAverageIsTheLossABandwidthSees:
     def test_a_spectrum_carrying_no_energy_is_refused(self):
         field = two_path_field()
         with pytest.raises(ConfigurationError, match="no energy"):
-            field.broadband_loss(spectrum=np.zeros(field.n_frequencies))
+            field.broadband_loss(source_spectrum=np.zeros(field.n_frequencies))
 
 
 class TestAnySignalGetsItsOwnTransmissionLoss:
@@ -331,22 +331,22 @@ class TestAnySignalGetsItsOwnTransmissionLoss:
         df = float(np.diff(np.asarray(field.coords['frequency']))[0])
 
         def spread(cycles):
-            waveform = tone_burst(500.0, cycles, self.RATE)[1]
+            waveform = tone_burst(500.0, cycles, sample_rate=self.RATE)[1]
             spectrum = np.fft.rfft(waveform)
             remixed = np.fft.irfft(
                 np.abs(spectrum) * np.exp(
                     1j * rng.uniform(0.0, 2.0 * np.pi, spectrum.size)),
                 n=waveform.size)
-            straight = field.broadband_loss(waveform=waveform,
+            straight = field.broadband_loss(source_waveform=waveform,
                                             sample_rate=self.RATE)
-            phased = field.broadband_loss(waveform=remixed,
+            phased = field.broadband_loss(source_waveform=remixed,
                                           sample_rate=self.RATE)
             return abs(float(straight.tl[0, 0]) - float(phased.tl[0, 0]))
 
         for cycles in (20, 40):                     # T*df = 1.0, 2.0
-            assert (tone_burst(500.0, cycles, self.RATE)[1].size
+            assert (tone_burst(500.0, cycles, sample_rate=self.RATE)[1].size
                     / self.RATE * df) == pytest.approx(round(
-                        tone_burst(500.0, cycles, self.RATE)[1].size
+                        tone_burst(500.0, cycles, sample_rate=self.RATE)[1].size
                         / self.RATE * df))
             assert spread(cycles) == pytest.approx(0.0, abs=1e-9), cycles
         for cycles in (19, 21, 41):                 # 0.95, 1.05, 2.05
@@ -356,10 +356,10 @@ class TestAnySignalGetsItsOwnTransmissionLoss:
         field = self.echoing_channel()
         losses = [
             float(field.broadband_loss(
-                waveform=w, sample_rate=self.RATE).tl[0, 0])
-            for w in (tone_burst(500.0, 5, self.RATE)[1],
-                      tone_burst(625.0, 5, self.RATE)[1],
-                      tone_burst(500.0, 20, self.RATE)[1])]
+                source_waveform=w, sample_rate=self.RATE).tl[0, 0])
+            for w in (tone_burst(500.0, 5, sample_rate=self.RATE)[1],
+                      tone_burst(625.0, 5, sample_rate=self.RATE)[1],
+                      tone_burst(500.0, 20, sample_rate=self.RATE)[1])]
         assert len(set(round(x, 3) for x in losses)) == 3, losses
         assert max(losses) - min(losses) > 1.0
 
@@ -385,14 +385,14 @@ class TestAnySignalGetsItsOwnTransmissionLoss:
         """
         field = self.echoing_channel()
         source_level = 190.0
-        for waveform in (tone_burst(500.0, 5, self.RATE)[1],
-                         tone_burst(625.0, 5, self.RATE)[1],
-                         tone_burst(500.0, 20, self.RATE)[1]):
+        for waveform in (tone_burst(500.0, 5, sample_rate=self.RATE)[1],
+                         tone_burst(625.0, 5, sample_rate=self.RATE)[1],
+                         tone_burst(500.0, 20, sample_rate=self.RATE)[1]):
             duration = waveform.size / self.RATE
             scaled = (waveform / np.sqrt(np.mean(waveform ** 2))
                       * 1e-6 * 10 ** (source_level / 20.0))
             loss = float(field.broadband_loss(
-                waveform=scaled, sample_rate=self.RATE).tl[0, 0])
+                source_waveform=scaled, sample_rate=self.RATE).tl[0, 0])
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 sel = float(field.sound_exposure_level(
@@ -403,11 +403,11 @@ class TestAnySignalGetsItsOwnTransmissionLoss:
 
     def test_the_waveform_scale_cancels(self):
         field = self.echoing_channel()
-        waveform = tone_burst(500.0, 5, self.RATE)[1]
+        waveform = tone_burst(500.0, 5, sample_rate=self.RATE)[1]
         quiet = float(field.broadband_loss(
-            waveform=waveform, sample_rate=self.RATE).tl[0, 0])
+            source_waveform=waveform, sample_rate=self.RATE).tl[0, 0])
         loud = float(field.broadband_loss(
-            waveform=1e7 * waveform, sample_rate=self.RATE).tl[0, 0])
+            source_waveform=1e7 * waveform, sample_rate=self.RATE).tl[0, 0])
         assert quiet == pytest.approx(loud, abs=1e-9)
 
     def test_an_interpolated_rfft_is_not_the_same_weight(self):
@@ -420,40 +420,40 @@ class TestAnySignalGetsItsOwnTransmissionLoss:
         """
         field = self.echoing_channel()
         freqs = np.asarray(field.coords['frequency'])
-        waveform = tone_burst(500.0, 5, self.RATE)[1]
+        waveform = tone_burst(500.0, 5, sample_rate=self.RATE)[1]
         interpolated = np.interp(
             freqs, np.fft.rfftfreq(waveform.size, 1.0 / self.RATE),
             np.abs(np.fft.rfft(waveform)))
-        by_hand = float(field.broadband_loss(spectrum=interpolated).tl[0, 0])
+        by_hand = float(field.broadband_loss(source_spectrum=interpolated).tl[0, 0])
         exact = float(field.broadband_loss(
-            waveform=waveform, sample_rate=self.RATE).tl[0, 0])
+            source_waveform=waveform, sample_rate=self.RATE).tl[0, 0])
         assert abs(by_hand - exact) > 0.1
 
     def test_a_waveform_and_a_spectrum_together_are_refused(self):
         field = self.echoing_channel()
         with pytest.raises(ConfigurationError, match="not both"):
             field.broadband_loss(
-                spectrum=np.ones(field.n_frequencies),
-                waveform=tone_burst(500.0, 5, self.RATE)[1],
+                source_spectrum=np.ones(field.n_frequencies),
+                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
                 sample_rate=self.RATE)
 
     def test_a_waveform_without_a_sample_rate_is_refused(self):
         field = self.echoing_channel()
         with pytest.raises(ConfigurationError, match="sample_rate"):
             field.broadband_loss(
-                waveform=tone_burst(500.0, 5, self.RATE)[1])
+                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1])
 
     def test_the_generators_time_signal_pair_is_refused(self):
         field = self.echoing_channel()
         with pytest.raises(ConfigurationError, match="1-D signal"):
-            field.broadband_loss(waveform=tone_burst(500.0, 5, self.RATE),
+            field.broadband_loss(source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE),
                                  sample_rate=self.RATE)
 
 
 class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
     @staticmethod
     def burst():
-        return tone_burst(500.0, 5, RATE)[1]
+        return tone_burst(500.0, 5, sample_rate=RATE)[1]
 
     @staticmethod
     def quiet(field, waveform, **kw):
@@ -476,7 +476,7 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
         # energy follows its square.
         x = self.burst()
         field = free_field(ranges=(100.0,))
-        flat = float(self.quiet(field, x, window='none').dB[0, 0])
+        flat = float(self.quiet(field, x, window=None).dB[0, 0])
         tapered = float(self.quiet(field, x, window='hann').dB[0, 0])
         assert tapered - flat == pytest.approx(-17.0, abs=0.1)
 
@@ -505,8 +505,8 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
     def test_the_reference_shifts_the_level_by_its_square(self):
         field = free_field(ranges=(100.0,))
         x = self.burst()
-        micro = float(self.quiet(field, x, reference=1e-6).dB[0, 0])
-        pascal = float(self.quiet(field, x, reference=1.0).dB[0, 0])
+        micro = float(self.quiet(field, x, ref=1e-6).dB[0, 0])
+        pascal = float(self.quiet(field, x, ref=1.0).dB[0, 0])
         assert micro - pascal == pytest.approx(120.0, abs=1e-9)
 
     def test_the_source_level_rides_on_the_waveform_amplitude(self):
@@ -549,6 +549,32 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
         assert energy_source_level - path_loss == pytest.approx(
             float(self.quiet(field, scaled).dB[0, 0]), abs=1e-9)
 
+    def test_the_documented_second_route_adds_esl_to_a_unit_energy_result(self):
+        # The recipe the docstring gives: a waveform of unit energy in the
+        # reference units (∫u² dt = 1 µPa²·s) returns the propagation term
+        # alone, and ESL goes on afterwards. An rms-normalised waveform in
+        # its place reads 120 + 10log10(T) dB high (100 dB for 10 ms).
+        source_level = 190.0
+        f = np.arange(25.0, 4000.0, 25.0)
+        r = np.array([100.0])
+        h = (np.exp(-2j * np.pi * np.outer(r, f) / SPEED) / r[:, None])
+        field = Field(data=h[None, ...],
+                      coords={'depth': [10.0], 'range': r, 'frequency': f},
+                      frequencies=f)
+        x = self.burst()
+        duration = x.size / RATE
+        direct = float(self.quiet(
+            field, x / np.sqrt(np.mean(x ** 2)) * 1e-6
+            * 10 ** (source_level / 20.0)).dB[0, 0])
+        u = x / np.sqrt(np.sum(x ** 2) / RATE) * 1e-6
+        loss = float(self.quiet(field, u).dB[0, 0])
+        esl = source_level + 10.0 * np.log10(duration)
+        assert esl + loss == pytest.approx(direct, abs=1e-9)
+        rms_unit = float(self.quiet(
+            field, x / np.sqrt(np.mean(x ** 2))).dB[0, 0])
+        assert rms_unit + esl - direct == pytest.approx(
+            120.0 + 10.0 * np.log10(duration), abs=1e-9)
+
     def test_a_wrapped_record_corrupts_the_exposure(self):
         """A fold is NOT harmless to a level map, and nothing warns.
 
@@ -564,7 +590,7 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
         Swept over many delays rather than one, so it cannot sit on a null
         again.
         """
-        waveform = tone_burst(500.0, 5, RATE)[1]
+        waveform = tone_burst(500.0, 5, sample_rate=RATE)[1]
 
         def level(df, tau):
             f = np.arange(25.0, 4000.0, df)
@@ -641,12 +667,26 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
         field = free_field(ranges=(100.0,))
         for bad in (0.0, -1e-6, np.nan):
             with pytest.raises(ConfigurationError, match="positive pressure"):
-                field.sound_exposure_level(self.burst(), RATE, reference=bad)
+                field.sound_exposure_level(self.burst(), RATE, ref=bad)
 
-    def test_a_field_that_is_not_a_grid_is_refused(self):
-        one_cell = free_field(ranges=(100.0,)).isel(depth=0)
-        with pytest.raises(ConfigurationError, match="canonical"):
-            one_cell.sound_exposure_level(self.burst(), RATE)
+    def test_a_cell_sliced_out_of_the_grid_gives_that_cells_exposure(self):
+        # The sliced depth sits in `pinned`; the synthesis re-inflates it
+        # rather than refusing the slice.
+        grid = free_field(ranges=(100.0,))
+        whole = grid.sound_exposure_level(self.burst(), RATE, t_start=0.0)
+        one_cell = grid.isel(depth=0).sound_exposure_level(
+            self.burst(), RATE, t_start=0.0)
+        assert list(one_cell.coords) == ['range']
+        np.testing.assert_array_equal(one_cell.data, whole.data[0])
+
+    def test_a_field_whose_axes_are_out_of_order_is_refused(self):
+        grid = free_field(ranges=(100.0, 200.0))
+        swapped = Field(data=np.moveaxis(grid.data[0], 0, 1),
+                        coords={'frequency': grid.coords['frequency'],
+                                'range': grid.coords['range']},
+                        frequencies=grid.frequencies)
+        with pytest.raises(ConfigurationError, match="'frequency' axis"):
+            swapped.sound_exposure_level(self.burst(), RATE)
 
 
 class TestThePeakIsTheOtherHalfOfTheDualMetric:
@@ -665,7 +705,7 @@ class TestThePeakIsTheOtherHalfOfTheDualMetric:
 
     @staticmethod
     def burst():
-        return tone_burst(500.0, 5, RATE)[1]
+        return tone_burst(500.0, 5, sample_rate=RATE)[1]
 
     def test_it_is_a_level_of_its_own_kind(self):
         """Not ``'level'``: a peak map and a mean-square received-level map
@@ -728,8 +768,8 @@ class TestThePeakIsTheOtherHalfOfTheDualMetric:
         field = Field(data=h[None, ...],
                       coords={'depth': [10.0], 'range': r, 'frequency': f},
                       frequencies=f)
-        out = self.quiet(field, tone_burst(1000.0, 20, RATE)[1])
-        assert out.metadata['band_hz'] == (800.0, 1200.0)
+        out = self.quiet(field, tone_burst(1000.0, 20, sample_rate=RATE)[1])
+        assert out.band_hz == (800.0, 1200.0)
 
     def test_a_field_that_lost_its_phase_is_refused(self):
         field = free_field(ranges=(100.0,))
@@ -742,7 +782,7 @@ class TestThePeakIsTheOtherHalfOfTheDualMetric:
         for bad in (0.0, -1e-6, np.nan):
             with pytest.raises(ConfigurationError, match="positive pressure"):
                 field.peak_sound_pressure_level(self.burst(), RATE,
-                                                reference=bad)
+                                                ref=bad)
 
 
 class TestTheTwoQuantitiesAnswerDifferentQuestions:

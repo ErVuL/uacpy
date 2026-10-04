@@ -19,14 +19,29 @@ import warnings
 import numpy as np
 from scipy.stats import gamma, norm
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import (
+    ConfigurationError, NumericsWarning, ValidityWarning,
+)
 
 
 def _check_prob(p, name: str) -> float:
     p = float(p)
     if not 0.0 < p < 1.0:
-        raise ConfigurationError(f"{name} must be in (0, 1), got {p}")
+        raise ConfigurationError(f"{name} must be in (0, 1), got {p}.")
     return p
+
+
+def _check_operating_point(pd: float, pf: float, who: str) -> None:
+    """Refuse ``P_D <= P_F``: a detector at or below chance carries no
+    information. The detection index squares the deflection, so a swapped
+    ``(pf, pd)`` would otherwise return exactly the threshold of the
+    intended ``(pd, pf)``."""
+    if not pd > pf:
+        raise ConfigurationError(
+            f"{who}: pd must exceed pf (a detector at P_D <= P_F does no "
+            f"better than chance); got pd={pd:g}, pf={pf:g}. Check the "
+            f"argument order: pd comes first.")
 
 
 def deflection_coefficient(pd: float, pf: float) -> float:
@@ -34,14 +49,34 @@ def deflection_coefficient(pd: float, pf: float) -> float:
 
     The separation (in noise standard deviations) between the signal-present
     and signal-absent decision statistics needed to achieve ``(P_D, P_F)``.
+
+    Parameters
+    ----------
+    pd : float
+        Probability of detection.
+    pf : float
+        Probability of false alarm.
     """
     pd = _check_prob(pd, "pd")
     pf = _check_prob(pf, "pf")
+    _check_operating_point(pd, pf, "deflection_coefficient")
     return float(norm.ppf(pd) - norm.ppf(pf))
 
 
 def detection_index(pd: float, pf: float) -> float:
-    """Urick detection index ``d = (d')^2`` for ``(P_D, P_F)``."""
+    """Urick detection index ``d = (d')^2`` for ``(P_D, P_F)``.
+
+    The square of the deflection: :func:`probability_of_detection` takes
+    ``d'``, so its inverse is :func:`deflection_coefficient`, and a ``d``
+    from here goes back as ``probability_of_detection(np.sqrt(d), pf)``.
+
+    Parameters
+    ----------
+    pd : float
+        Probability of detection.
+    pf : float
+        Probability of false alarm.
+    """
     return deflection_coefficient(pd, pf) ** 2
 
 
@@ -55,10 +90,21 @@ def probability_of_detection(deflection, pf):
     ``deflection`` broadcasts against it.
 
     This is **not** the scalar form of
-    :func:`uacpy.sonar.sonar_equation.probability_of_detection_field` —
+    :func:`uacpy.sonar.sonar_equation.transition_probability_field` —
     that function evaluates a different model, Urick's transition curve
     ``P_D = Phi(SE / sigma_dB)`` (log-normal signal-excess fluctuation,
     ``P_D = 0.5`` pinned at ``SE = 0``, no ``P_F`` argument).
+
+    The inverse of :func:`deflection_coefficient`. A detection index
+    ``d = (d')^2`` from :func:`detection_index` is not a deflection: pass
+    ``np.sqrt(d)``.
+
+    Parameters
+    ----------
+    deflection : float or array_like
+        Deflection ``d'`` (not the detection index ``d``).
+    pf : float or array_like
+        Probability of false alarm.
     """
     pf = np.asarray(pf, dtype=float)
     # Negated admissible interval so NaN is refused: both ``nan <= 0`` and
@@ -69,7 +115,7 @@ def probability_of_detection(deflection, pf):
     if np.any(~admissible):
         raise ConfigurationError(
             f"pf must be in (0, 1); got "
-            f"{np.unique(pf[~admissible]).tolist()}")
+            f"{np.unique(pf[~admissible]).tolist()}.")
     d = np.asarray(deflection, dtype=float)
     # The guard above refuses a NaN ``pf`` because it returned a silent NaN
     # P_D; a NaN ``deflection`` returns that same silent NaN through the other
@@ -81,7 +127,7 @@ def probability_of_detection(deflection, pf):
     if np.any(~np.isfinite(d)):
         raise ConfigurationError(
             f"probability_of_detection: deflection must be finite; got "
-            f"{np.unique(d[~np.isfinite(d)]).tolist()}")
+            f"{np.unique(d[~np.isfinite(d)]).tolist()}.")
     return norm.sf(norm.isf(pf) - d)
 
 
@@ -89,6 +135,13 @@ def roc_curve(deflection: float, n_points: int = 200):
     """ROC ``(P_F, P_D)`` for a Gaussian detector of the given deflection.
 
     Returns two arrays sampling ``P_F`` logarithmically over ``[1e-6, ~1]``.
+
+    Parameters
+    ----------
+    deflection : float
+        Deflection ``d'``.
+    n_points : int, optional
+        Points on the curve. Default 200.
     """
     # Negated admissible condition so a NaN deflection is refused instead of
     # returning an all-NaN curve. ``isfinite`` is the other half of the
@@ -100,7 +153,7 @@ def roc_curve(deflection: float, n_points: int = 200):
     if not np.isfinite(deflection) or not (deflection >= 0.0):
         raise ConfigurationError(
             f"roc_curve: deflection must be >= 0 and finite; got "
-            f"{deflection!r}")
+            f"{deflection!r}.")
     pf = np.logspace(-6.0, np.log10(0.99), int(n_points))
     pd = probability_of_detection(deflection, pf)
     return pf, pd
@@ -116,15 +169,25 @@ def albersheim_snr(pd: float, pf: float, n_pulses: int = 1) -> float:
     ``SNR_dB = -5·log10(N) + (6.2 + 4.54/sqrt(N+0.44))·log10(A + 0.12·A·B + 1.7·B)``
     (Richards 2014, eq. 1). Accurate to ~0.2 dB over ``0.1 <= P_D <= 0.9``,
     ``1e-7 <= P_F <= 1e-3`` and ``1 <= N <= 8096``; outside that envelope a
-    ``UserWarning`` is issued and the value is an unvalidated extrapolation
+    ``ValidityWarning`` is issued and the value is an unvalidated extrapolation
     of the fit.
+
+    Parameters
+    ----------
+    pd : float
+        Probability of detection.
+    pf : float
+        Probability of false alarm.
+    n_pulses : int, optional
+        Samples integrated non-coherently. Default 1.
     """
     pd = _check_prob(pd, "pd")
     pf = _check_prob(pf, "pf")
+    _check_operating_point(pd, pf, "albersheim_snr")
     n = int(n_pulses)
     if n < 1:
         raise ConfigurationError(
-            f"albersheim_snr: n_pulses must be >= 1; got {n}")
+            f"albersheim_snr: n_pulses must be >= 1; got {n}.")
     if not (0.1 <= pd <= 0.9 and 1e-7 <= pf <= 1e-3 and n <= 8096):
         warnings.warn(
             f"albersheim_snr: (pd={pd:g}, pf={pf:g}, n_pulses={n}) is outside "
@@ -132,7 +195,7 @@ def albersheim_snr(pd: float, pf: float, n_pulses: int = 1) -> float:
             f"0.1 <= pd <= 0.9, 1e-7 <= pf <= 1e-3, 1 <= N <= 8096 "
             f"(Richards 2014) — so the ~0.2 dB accuracy bound does not apply "
             f"and the value is an extrapolation of an empirical fit.",
-            UserWarning, stacklevel=2,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     a = np.log(0.62 / pf)
     b = np.log(pd / (1.0 - pd))
@@ -173,12 +236,12 @@ def _exact_detection_threshold_dB(pd: float, pf: float, m: float) -> float:
         return float(10.0 * np.log10(snr))
 
 
-def _check_n_looks(n_looks, caller: str) -> float:
+def _check_n_looks(n_looks, who: str) -> float:
     """Validate a look count: at least one, finite."""
     n = float(np.asarray(n_looks, dtype=float))
     if not np.isfinite(n) or n < 1.0:
         raise ConfigurationError(
-            f"{caller}: n_looks must be a finite count of at least 1; got "
+            f"{who}: n_looks must be a finite count of at least 1; got "
             f"{n_looks!r}. It is the number of INDEPENDENT looks the "
             f"detector maximises over — for a beam scan that is the "
             f"resolution cells in the sector (one beam is lambda/L wide in "
@@ -207,6 +270,13 @@ def per_look_false_alarm(pf_scan: float, n_looks: float) -> float:
     steering grid is sampled. Overlapping (shaded) beams are correlated, so
     using the orthogonal-beam count is the conservative choice: it sets a
     stricter threshold than the true dependence requires.
+
+    Parameters
+    ----------
+    pf_scan : float
+        The scan-level false-alarm probability.
+    n_looks : float
+        Independent looks in the scan.
     """
     pf = _check_prob(pf_scan, "per_look_false_alarm: pf_scan")
     n = _check_n_looks(n_looks, "per_look_false_alarm")
@@ -235,6 +305,13 @@ def scan_false_alarm(pf_look: float, n_looks: float) -> float:
     (*Sonar Performance Modelling*, 7). :func:`independent_beams
     <uacpy.acoustic_signal.independent_beams>` counts only the spatial
     factor.
+
+    Parameters
+    ----------
+    pf_look : float
+        The per-look false-alarm probability.
+    n_looks : float
+        Independent looks in the scan.
     """
     pf = _check_prob(pf_look, "scan_false_alarm: pf_look")
     n = _check_n_looks(n_looks, "scan_false_alarm")
@@ -242,15 +319,20 @@ def scan_false_alarm(pf_look: float, n_looks: float) -> float:
 
 
 def detection_threshold_energy(
-    pd: float, pf: float, bandwidth_hz: float, integration_time_s: float
+    pd: float, pf: float, bandwidth_hz: float, integration_time_s: float,
+    *, exact: bool = True,
 ) -> float:
     """Detection threshold (dB) for an incoherent energy detector.
 
-    ``DT = 5*log10(d / (w * t))`` where ``d`` is the detection index and ``w*t``
-    is the processing time-bandwidth product ``M`` (Abraham, *Underwater
-    Acoustic Signal Processing*, §9.2.3.1 / §9.2.11). The required SNR
-    *decreases* by 5 dB per decade of increase in ``M`` — more incoherent
-    integration relaxes the required SNR.
+    By default the exact threshold of the noise-normalised energy detector,
+    ``DT = 10*log10(S)`` with ``S = Ginv(1-Pf; M)/Ginv(1-Pd; M) - 1``, where
+    ``M = w*t`` is the processing time-bandwidth product and ``Ginv`` the
+    Gamma(M) quantile (Abraham, *Underwater Acoustic Signal Processing*,
+    eq. 2.76). ``exact=False`` returns Abraham's large-``M`` form, eq. (2.77),
+    ``DT = 5*log10(d / M)`` with ``d`` the detection index (§9.2.3.1 /
+    §9.2.11): the textbook line, straight at −5 dB per decade of ``M``, which
+    the exact threshold approaches from above as ``M`` grows. Either way more
+    incoherent integration relaxes the required SNR.
 
     **Which reference to pair it with.** This ``DT`` is the required ratio
     ``S0/N0`` of signal to noise *power spectral density*. A ratio of two PSDs
@@ -267,13 +349,36 @@ def detection_threshold_energy(
     dB re Hz). The two differ by ``10*log10(w)``, which is 20 dB at a 100 Hz
     bandwidth, so the choice matters.
 
-    **Validity envelope.** This is Abraham's eq. (2.77), the large-``M`` limit
-    of eq. (2.76), accurate to ~1 dB only for ``M`` of order 100 and above
-    unless ``Pd ~ 0.5``; it is optimistic (asks for less SNR than the exact
-    noise-normalised energy detector needs) at every operating point. The
-    exact threshold ``S = Ginv(1-Pf; M)/Ginv(1-Pd; M) - 1`` is evaluated at
-    the requested ``(Pd, Pf, M)`` and a ``UserWarning`` names the error when
-    it exceeds 1 dB; the measured error ladder lives in ``test_sonar.py``.
+    **The large-M form's validity envelope** (``exact=False``). Eq. (2.77) is
+    the large-``M`` limit of eq. (2.76). It is optimistic (asks for less SNR than the exact
+    noise-normalised energy detector needs) at every operating point, and
+    accurate to ~1 dB only for ``M`` of order 100 and above — from
+    ``M`` ≈ 20–50 at ``Pd = 0.5``, the least demanding case. At ``Pf = 1e-6``
+    and ``M = 1`` (a single-look short pulse) it is optimistic by 6.0 dB at
+    ``Pd = 0.5``, 13.3 dB at ``Pd = 0.9`` and 22.9 dB at ``Pd = 0.99``; at
+    ``M = 10`` by 2.0, 3.5 and 4.9 dB. With ``exact=False`` the exact
+    threshold is still evaluated at the requested ``(Pd, Pf, M)``, and a
+    ``ValidityWarning`` names the error when, rounded to the 0.01 dB it is
+    printed with, it exceeds 1 dB.
+
+    Both forms are the same Gaussian-fluctuating-signal model and the same
+    unitless power ratio. Where the Gamma quantiles do not resolve a
+    threshold the exact form returns NaN with a warning rather than falling
+    back to the approximation.
+
+    Parameters
+    ----------
+    pd : float
+        Probability of detection.
+    pf : float
+        Probability of false alarm.
+    bandwidth_hz : float
+        Processing bandwidth ``w`` (Hz).
+    integration_time_s : float
+        Integration time ``t`` (s).
+    exact : bool, optional
+        ``True`` (default): the exact threshold. ``False``: eq. (2.77),
+        warning outside its 1 dB envelope.
     """
     # Negated admissible condition so NaN is refused: a NaN bandwidth or
     # integration time otherwise returned a silent NaN threshold.
@@ -287,7 +392,7 @@ def detection_threshold_energy(
         raise ConfigurationError(
             f"detection_threshold_energy: bandwidth_hz and integration_time_s"
             f" must be > 0 and finite; got bandwidth_hz={bandwidth_hz!r}, "
-            f"integration_time_s={integration_time_s!r}"
+            f"integration_time_s={integration_time_s!r}."
         )
     d = detection_index(pd, pf)
     m = float(bandwidth_hz) * float(integration_time_s)
@@ -299,15 +404,27 @@ def detection_threshold_energy(
     # it claims, so it cannot warn on a correct value or stay silent on a
     # wrong one. The fitted `max(10, 7*d)` backs it up only where the exact
     # quantiles do not resolve, so the check never disappears silently.
-    exact = _exact_detection_threshold_dB(pd, pf, m)
+    exact_dB = _exact_detection_threshold_dB(pd, pf, m)
+    if exact:
+        if not np.isfinite(exact_dB):
+            warnings.warn(
+                f"detection_threshold_energy: the exact threshold did not "
+                f"resolve at pd={pd:g}, pf={pf:g}, M={m:g} (the Gamma "
+                f"quantiles give no positive SNR); returning NaN.",
+                NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            )
+            return float("nan")
+        return float(exact_dB)
     with np.errstate(invalid="ignore"):
-        error_dB = value - exact
+        error_dB = value - exact_dB
     if np.isfinite(error_dB):
-        outside = abs(error_dB) >= _DT_APPROXIMATION_TOLERANCE_DB
+        # Compared as printed, so a warning never reads "1.00 dB — more
+        # than the 1 dB it claims".
+        outside = round(abs(error_dB), 2) > _DT_APPROXIMATION_TOLERANCE_DB
         detail = (f"it is optimistic by {-error_dB:.2f} dB here (exact "
-                  f"threshold {exact:.2f} dB)" if error_dB < 0 else
+                  f"threshold {exact_dB:.2f} dB)" if error_dB < 0 else
                   f"it is off by {error_dB:.2f} dB here (exact threshold "
-                  f"{exact:.2f} dB)")
+                  f"{exact_dB:.2f} dB)")
     else:
         outside = m < max(10.0, 7.0 * d)
         detail = (f"the exact threshold did not resolve at this operating "
@@ -322,7 +439,7 @@ def detection_threshold_energy(
             f"{_DT_APPROXIMATION_TOLERANCE_DB:g} dB it claims. The error is "
             f"optimistic at every operating point, so it reports signal "
             f"excess that is not there. Raise the time-bandwidth product, or "
-            f"use the exact threshold.",
-            UserWarning, stacklevel=2,
+            f"pass exact=True for the exact threshold.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
     return float(value)

@@ -1,8 +1,8 @@
 """Canonical SSP shapes and bottom-loss curves.
 
 Two catalogues side by side: the sound-speed profiles uacpy can build from a
-factory — isovelocity, Munk, and one derived from T(z), S(z) through Mackenzie
-— and the plane-wave bottom loss of the sediment and rock presets.
+factory — isovelocity, Munk, and one derived from T(z), S(z) through TEOS-10
+(the default formula) — and the plane-wave bottom loss of the sediment and rock presets.
 
 Granite is left out of the loss panel: its 5750 m/s would sit on top of
 basalt's 5250 m/s. plot_bottom_loss ignores each preset's shear speed by
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.visualization import plot_bottom_loss
+from uacpy.plot import plot_bottom_loss
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -40,8 +40,10 @@ uacpy.SoundSpeedProfile.from_isovelocity(
         ax=axes[0], label='isovelocity', color='C0')
 uacpy.SoundSpeedProfile.from_munk(depth_max=4000.0, n_points=81).plot(
     ax=axes[0], label='Munk', color='C1')
-uacpy.SoundSpeedProfile.from_temperature_salinity(depths, temperature, salinity).plot(
-    ax=axes[0], label='Mackenzie T,S', color='C2')
+# formula=None is TEOS-10; 'mackenzie', 'unesco' and 'delgrosso' are the others.
+uacpy.SoundSpeedProfile.from_temperature_salinity(
+    depths, temperature, salinity).plot(
+        ax=axes[0], label='TEOS-10 T,S', color='C2')
 axes[0].set_title('Canonical SSP shapes')
 
 plot_bottom_loss(['clay', 'silt', 'sand', 'gravel', 'moraine',

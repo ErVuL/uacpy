@@ -10,7 +10,7 @@ from uacpy.acoustic_signal import (
     analytic_signal,
     lfm_chirp,
     matched_filter,
-    processing_gain,
+    processing_gain_dB,
     pulse_compression,
 )
 from uacpy.core.exceptions import ConfigurationError
@@ -20,7 +20,7 @@ FS = 20000.0
 
 
 def _chirp():
-    _, s = lfm_chirp(1000.0, 5000.0, 0.02, FS)
+    _, s = lfm_chirp(1000.0, 5000.0, 0.02, sample_rate=FS)
     return s
 
 
@@ -48,17 +48,31 @@ class TestMatchedFilter:
         assert delays[1] == pytest.approx(1200 / FS, abs=2 / FS)
 
     def test_requires_1d(self):
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError, match='must be 1-D'):
             matched_filter(np.zeros((2, 2)), np.zeros(2))
 
 
 class TestProcessingGain:
     def test_processing_gain_is_10log10_time_bandwidth(self):
-        assert processing_gain(3000.0, 0.02) == pytest.approx(10 * np.log10(60.0))
+        assert processing_gain_dB(3000.0, 0.02) == pytest.approx(10 * np.log10(60.0))
 
     def test_nonpositive_raises(self):
-        with pytest.raises(ConfigurationError):
-            processing_gain(0.0, 1.0)
+        with pytest.raises(ConfigurationError, match=r'B\*T must be > 0'):
+            processing_gain_dB(0.0, 1.0)
+
+    def test_the_two_gain_forms_carry_one_name_each(self):
+        """The BT form is ``acoustic_signal.processing_gain_dB`` and the
+        chip-code form ``comms.spreading_gain_dB``: one public name per
+        function, both carrying the unit suffix, and they agree when
+        ``N = B*T``."""
+        import uacpy.acoustic_signal as sig
+        import uacpy.comms as comms
+        assert not hasattr(sig, 'processing_gain')
+        assert 'processing_gain' not in sig.__all__
+        assert not hasattr(comms, 'processing_gain_dB')
+        assert 'processing_gain_dB' not in comms.__all__
+        assert comms.spreading_gain_dB(np.ones(60)) == pytest.approx(
+            processing_gain_dB(3000.0, 0.02))
 
 
 class TestAmbiguity:
@@ -109,7 +123,7 @@ class TestAmbiguity:
         (range-Doppler coupling: a Doppler-shifted echo is mis-ranged, not
         lost)."""
         fs, T, B = 4000.0, 0.05, 1000.0
-        _, s = lfm_chirp(300.0, 300.0 + B, T, fs)
+        _, s = lfm_chirp(300.0, 300.0 + B, T, sample_rate=fs)
         z = analytic_signal(s)
         doppler = np.linspace(-200.0, 200.0, 41)
         lags, dop, A = ambiguity_function(z, fs, doppler_hz=doppler)
@@ -139,7 +153,7 @@ class TestAmbiguityFunctionCapsItsAllocation:
         # Just over the cap on the default 101-row grid, chosen by arithmetic
         # so the refused surface is never allocated.
         n = _MAX_AMBIGUITY_CELLS // 101 // 2 + 2
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError, match='cell cap') as exc:
             ambiguity_function(np.ones(n), 96000.0)
         message = str(exc.value)
         assert 'ambiguity_function' in message
@@ -162,7 +176,7 @@ class TestAmbiguityFunctionCapsItsAllocation:
     def test_an_ordinary_call_produces_the_full_surface(self):
         from uacpy.acoustic_signal.detect import ambiguity_function
         from uacpy.acoustic_signal.generate import lfm_chirp
-        _, x = lfm_chirp(2000.0, 8000.0, 0.01, 96000.0)
+        _, x = lfm_chirp(2000.0, 8000.0, 0.01, sample_rate=96000.0)
         result = ambiguity_function(x, 96000.0)
         assert result.amplitude.shape == (101, 2 * x.size - 1)
         assert result.amplitude.max() == pytest.approx(1.0)

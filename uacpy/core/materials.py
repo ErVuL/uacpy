@@ -10,7 +10,10 @@ Each preset captures every layer property the rest of uacpy can use:
 Key           Meaning
 ============= ================================================
 sound_speed   Compressional wave speed ``c_p`` (m/s).
-density       Mass density (g/cm³).
+density       Mass density (g/cm³). For the Jensen et al. Table 1.3 rows
+              this is the table's ratio ρ_b/ρ_w times the package's one water
+              density (``DEFAULT_WATER_DENSITY_G_CM3``), so a run in default
+              water sees exactly the tabulated ratio; see the note below.
 attenuation   Compressional attenuation ``α_p`` (dB/λ_p).
 shear_speed   Shear wave speed ``c_s`` (m/s); 0 marks a fluid sediment.
 shear_attenuation
@@ -20,9 +23,12 @@ grain_size_phi
               Mean grain size on the Wentworth ϕ scale (informational metadata,
               and the input to ``BoundaryProperties.from_grain_size``);
               ``None`` for consolidated rocks where ϕ is not defined. Gravel's
-              −1.0 is inside ``model='apl-uw'``'s fitted range and outside the
-              default ``'hamilton'``'s, which answers it with its coarse-sand
-              end row (see :func:`uacpy.core.sediment.grain_size_to_geoacoustics`).
+              −1.0 is the coarse end of both models' sound-speed and density
+              range — the default ``'hamilton'`` evaluates its regressions
+              there on TR 9407's authority, as ``'apl-uw'`` does — and outside
+              ``'hamilton'``'s attenuation data (0 to 9.5 ϕ), which it holds at
+              0 ϕ and reports (see
+              :func:`uacpy.core.sediment.grain_size_to_geoacoustics`).
 roughness     RMS interface roughness (m); 0 unless overridden.
 ============= ================================================
 
@@ -36,8 +42,10 @@ and the depth it stands for is not recorded in the table, so pass an explicit
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from types import MappingProxyType
+from typing import Dict, List, Mapping, Optional
 
+from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -70,7 +78,7 @@ def _entry(
 # class midpoints, p. IV-7 giving the rule: for "the Wentworth and Lane
 # schemes, the M_z value given in Table 2 is the midpoint of the range defined
 # by the sediment name". Gravel is Medwin & Clay, *Fundamentals of Acoustical
-# Oceanography*: "Marine geologists define gravel as being the loose material
+# Oceanography* §14.5 (after Gross 1972): "Marine geologists define gravel as being the loose material
 # that ranges in size from 2 to 256 mm", i.e. −1 to −8 ϕ — seven ϕ wide, so
 # gravel is a range of classes and not one mean grain size, and TR 9407
 # Table 2 accordingly gives its "Cobble, Gravel, Pebble" row no Mz at all.
@@ -143,10 +151,10 @@ def _entry(
 # Q ~ 30 at 100 kHz (Coyner & Martin 1990, read through Olson, Lyons & Saebo,
 # JASA 139(4), 1833-1847 (2016), §II.A, where it sets delta_p ~ 0.02 and
 # delta_s = 2 delta_p), i.e. alpha_p ~ 1.1 and alpha_s ~ 2.2 dB/lambda
-# (54.58 * delta, JKPS eq. 1.47: delta = 1/(2Q)) — about eleven times the
+# (54.58 * delta, JKPS eq. 1.46, with the usual low-loss delta = 1/(2Q)) — about eleven times the
 # tabulated pair. The "Generic Granite" column of that paper's
 # Table II — Bourbie, Coussy & Zinszner (1987) Table 5.2, quoted there —
-# gives 0.27 and 1.36 dB/lambda, 2.7 and 6.8 times it. Pass explicit
+# gives 0.55 and 2.73 dB/lambda, 5.5 and 13.6 times it. Pass explicit
 # attenuations for a granite in the sonar band.
 # The phi column comes from Hamilton & Bachman (1982) Table I — the row whose
 # Table II density and velocity ratio reproduce the JKPS row, within 2.4 %. Those
@@ -158,34 +166,53 @@ def _entry(
 # That the row's Mz is -1.0 does not rest on reading the scan: the report's
 # Eqs. 2-3 evaluated there give nu = 1.3370 and rho = 2.492, which are the
 # digits printed in that row (Mz = -1.5 would give 1.3686 / 2.5873).
-MATERIALS: Dict[str, Dict] = {
+#
+# Table 1.3's density column is the RATIO rho_b/rho_w (headed so in the
+# table), not an absolute density. Every deck divides the seabed density by
+# the water's, so the ratio becomes an absolute density against the same
+# water the decks write: the package's one water density, 1.027 g/cm3.
+# ``water_density=1.0`` in an Environment then shifts the ratio by +2.7 %;
+# a textbook reproduction at rho_w = 1 passes the ratio itself as density.
+# The granite row is Ainslie's absolute 2650 kg/m3 and is not rescaled.
+def _table_1_3_density(ratio: float) -> float:
+    return ratio * DEFAULT_WATER_DENSITY_G_CM3
+
+
+_PRESETS: Dict[str, Dict] = {
     # Unconsolidated sediments (c_s as Table 1.3 gives it: clay from its
     # "< 100", moraine as printed, silt / sand / gravel one value for c_s(z̄))
-    'clay':      _entry(sound_speed=1500.0, density=1.5, attenuation=0.2,
+    'clay':      _entry(sound_speed=1500.0, density=_table_1_3_density(1.5), attenuation=0.2,
                         shear_speed=80.0, shear_attenuation=1.0,
                         porosity=70.0, grain_size_phi=8.80),
-    'silt':      _entry(sound_speed=1575.0, density=1.7, attenuation=1.0,
+    'silt':      _entry(sound_speed=1575.0, density=_table_1_3_density(1.7), attenuation=1.0,
                         shear_speed=80.0, shear_attenuation=1.5,
                         porosity=55.0, grain_size_phi=5.40),
-    'sand':      _entry(sound_speed=1650.0, density=1.9, attenuation=0.8,
+    'sand':      _entry(sound_speed=1650.0, density=_table_1_3_density(1.9), attenuation=0.8,
                         shear_speed=110.0, shear_attenuation=2.5,
                         porosity=45.0, grain_size_phi=3.34),
-    'gravel':    _entry(sound_speed=1800.0, density=2.0, attenuation=0.6,
+    'gravel':    _entry(sound_speed=1800.0, density=_table_1_3_density(2.0), attenuation=0.6,
                         shear_speed=180.0, shear_attenuation=1.5,
                         porosity=35.0, grain_size_phi=-1.0),
-    'moraine':   _entry(sound_speed=1950.0, density=2.1, attenuation=0.4,
+    'moraine':   _entry(sound_speed=1950.0, density=_table_1_3_density(2.1), attenuation=0.4,
                         shear_speed=600.0, shear_attenuation=1.0,
                         porosity=25.0),
     # Rocks (which limestone the row is: see the note above)
-    'chalk':     _entry(sound_speed=2400.0, density=2.2, attenuation=0.2,
+    'chalk':     _entry(sound_speed=2400.0, density=_table_1_3_density(2.2), attenuation=0.2,
                         shear_speed=1000.0, shear_attenuation=0.5),
-    'limestone': _entry(sound_speed=3000.0, density=2.4, attenuation=0.1,
+    'limestone': _entry(sound_speed=3000.0, density=_table_1_3_density(2.4), attenuation=0.1,
                         shear_speed=1500.0, shear_attenuation=0.2),
-    'basalt':    _entry(sound_speed=5250.0, density=2.7, attenuation=0.1,
+    'basalt':    _entry(sound_speed=5250.0, density=_table_1_3_density(2.7), attenuation=0.1,
                         shear_speed=2500.0, shear_attenuation=0.2),
     'granite':   _entry(sound_speed=5750.0, density=2.65, attenuation=0.1,
                         shear_speed=3000.0, shear_attenuation=0.2),
 }
+
+#: The nine presets, read-only: ``MATERIALS['sand']['density'] = 3`` raises
+#: ``TypeError`` rather than changing every later ``from_preset('sand')``.
+#: :func:`get_material` returns an editable copy of one row, and
+#: :func:`materials_table` the whole catalogue as a table.
+MATERIALS: Mapping[str, Mapping] = MappingProxyType(
+    {name: MappingProxyType(entry) for name, entry in _PRESETS.items()})
 
 
 def list_materials() -> List[str]:
@@ -198,14 +225,41 @@ def get_material(name: str) -> Dict:
 
     Raises :class:`ConfigurationError` listing the available names if
     ``name`` is not in the catalog.
+
+    Parameters
+    ----------
+    name : str
+        A preset name of :func:`list_materials`, in any case.
     """
     key = name.strip().lower()
     if key not in MATERIALS:
         raise ConfigurationError(
             f"Unknown material preset {name!r}. "
-            f"Available: {list_materials()}"
+            f"Available: {list_materials()}."
         )
     return dict(MATERIALS[key])
 
 
-__all__ = ["MATERIALS", "list_materials", "get_material"]
+def materials_table():
+    """The presets as a :class:`pandas.DataFrame`: one row per material
+    (the index ``material``, sorted by name) and one column per field of
+    :data:`MATERIALS`, in its units. A copy, free to edit.
+
+    Raises :class:`ConfigurationError` when pandas is not installed; the
+    ``xarray`` extra brings it (``pip install 'uacpy[xarray]'``).
+    """
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ConfigurationError(
+            "materials_table: pandas is not installed.",
+            remediation="pip install 'uacpy[xarray]' (the extra that brings "
+                        "pandas), or read the presets through "
+                        "get_material(name) / MATERIALS.") from exc
+    names = list_materials()
+    return pd.DataFrame([dict(MATERIALS[name]) for name in names],
+                        index=pd.Index(names, name='material'))
+
+
+__all__ = ["MATERIALS", "list_materials", "get_material",
+           "materials_table"]

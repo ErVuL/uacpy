@@ -146,12 +146,11 @@ def _pekeris_fluid() -> Scenario:
 def _pekeris_elastic() -> Scenario:
     """The Pekeris-elastic scenario — the canonical RAMS-vs-krakenc validation.
 
-    Tuning rationale: ``RAM(...)`` defaults to ``np_pade=6`` and
-    ``rams_theta=45`` (see uacpy/models/ram.py:_run_collins). On this
-    scenario the dispatcher routes to rams0.5; with those defaults the
-    RMSE against Kraken (which auto-routes to the krakenc backend for
-    elastic) is ~1.5 dB over the 1-8 km window and TL @ 5 km matches
-    within 0.1 dB.
+    Tuning rationale: ``RAM(...)`` defaults to ``n_pade=6`` and
+    ``rams_rotation_angle=45`` (see uacpy/models/ram/_stability.py:theta_for_freq). On
+    this scenario the dispatcher routes to rams0.5; with those defaults the
+    RMSE against Kraken (which auto-routes to the krakenc backend for elastic)
+    is ~1.5 dB over the 1-8 km window and TL @ 5 km matches within 0.1 dB.
     """
     elastic_layered = SeabedColumn(
         layers=[SedimentLayer(
@@ -189,14 +188,14 @@ def _pekeris_elastic() -> Scenario:
     def reference(env_unused, src, rcv):
         return _kraken_field_tl(env_halfspace, src, rcv)
 
-    # RAMS is sensitive to (dr, dz, np_pade, theta); the values below
+    # RAMS is sensitive to (dr, dz, n_pade, theta); the values below
     # were tuned against the krakenc-backend reference (RMSE ≈ 1.5 dB over
     # 1-8 km, TL@5km within 0.1 dB). The README of the upstream code
     # explicitly notes that RAMS needs hand-tuning per problem; uacpy's
-    # default ``rams_theta=45`` and ``np_pade=6`` come from this scenario.
+    # default ``rams_rotation_angle=45`` and ``n_pade=6`` come from this scenario.
     def rams(env_unused, src, rcv):
-        ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
-                  rams_theta=45.0)
+        ram = RAM(verbose=False, n_pade=6, dr=2.0, dz=0.25, zmax=400.0,
+                  rams_rotation_angle=45.0)
         return ram.run(env_layered, src, rcv, run_mode=RunMode.COHERENT_TL)
 
     return Scenario(
@@ -310,7 +309,7 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
     full BROADBAND path: ``rams0.5`` is driven in a Python frequency
     loop reading the patched ``pcomplex.bin``, yielding an engineering
     travelling-wave H(f). The agreement is checked on the TL slice at
-    the centre frequency — that's where ``rams_theta`` has been tuned
+    the centre frequency — that's where ``rams_rotation_angle`` has been tuned
     and where Kraken's modal sum is best resolved. Per-frequency
     RMSE across the full band is naturally looser (~5 dB) due to RAMS'
     theta sensitivity vs. frequency; the centre-frequency agreement is
@@ -357,8 +356,8 @@ def _pekeris_elastic_broadband_at_fc() -> Scenario:
         # independent PE solve — so sample the band coarsely (Δf=1/T=5 Hz) while
         # keeping fc exactly on the grid (offset to fc = fc·T/Q = 5, integer).
         # 101 → 11 PE marches (~10× faster); the fc-slice TL is unchanged.
-        ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
-                  rams_theta=45.0, Q=2.0, T=0.2)
+        ram = RAM(verbose=False, n_pade=6, dr=2.0, dz=0.25, zmax=400.0,
+                  rams_rotation_angle=45.0, q_factor=2.0, record_duration=0.2)
         hf = ram.run(env_layered, src_, rcv_, run_mode=RunMode.BROADBAND)
         return hf.at(frequency=50.0).to_dB()
 
@@ -415,8 +414,8 @@ def _altimetry_broadband_at_fc() -> Scenario:
         # Only the fc=200 Hz slice is asserted; sample the band coarsely
         # (Δf=1/T=5 Hz) while keeping fc on the grid (offset = fc·T/Q = 20).
         # 401 → 41 PE marches (~10× faster); the fc-slice TL is unchanged.
-        ram = RAM(verbose=False, np_pade=6, dr=2.0, dz=0.25, zmax=400.0,
-                  Q=2.0, T=0.2)
+        ram = RAM(verbose=False, n_pade=6, dr=2.0, dz=0.25, zmax=400.0,
+                  q_factor=2.0, record_duration=0.2)
         hf = ram.run(env_, src_, rcv_, run_mode=RunMode.BROADBAND)
         return hf.at(frequency=200.0).to_dB()
 

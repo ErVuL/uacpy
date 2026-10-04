@@ -1,7 +1,7 @@
 """Grain size (Wentworth ϕ) → bulk geoacoustic properties.
 
 Pure, dependency-light conversion shared by the carrier layer
-(:meth:`uacpy.core.bottom.BoundaryProperties.from_grain_size`) and the on-demand
+(:meth:`uacpy.core.boundary.BoundaryProperties.from_grain_size`) and the on-demand
 data layer (:mod:`uacpy.data.sediment`). It lives in ``core`` so a bottom can be
 built from a grain size without importing ``uacpy.data``.
 
@@ -24,7 +24,7 @@ Two models are provided, and they are not independent:
 
 **The attenuation is one function.** TR 9407 p. IV-8 says so — "Hamilton's
 parameterization of α₂/f is reproduced below" — citing the same Hamilton (1972)
-paper ``_hamilton_kp`` implements — so both models call that one function and
+paper ``hamilton_attenuation`` implements — so both models call that one function and
 there is no second copy to drift from it. **Below 1 ϕ the ρ and ν are one function too**: TR 9407 p. IV-8,
 "The density and sound speed ratios agree with those of Hamilton and Bachman for
 -1 <= M_z < 1", its coarse branch being that regression over c₁ = 1528 m/s and
@@ -40,13 +40,21 @@ declares the *scattering* models its ratios feed "applicable over the frequency
 interval 10-100 kHz", which is a statement about those models, not about the
 grain-size relations; Hamilton's velocities were measured at ~200 kHz and his
 ``k_p`` at 14, 25 and 100 kHz. **A third source states one.** Ainslie,
-*Principles of Sonar Performance Modelling* (2010) Sec. 4.4.1, tabulates both
-sets and attaches a band and a depth to each: his Table 4.17 is "Default HF
-geo-acoustic parameters (10-100 kHz). Near-surface sediment properties",
-APL-UW's, "representative of the average properties of the top few
-centimeters"; his Table 4.18 is "Default MF geo-acoustic parameters
-(1-10 kHz). Bulk sediment properties", Hamilton's and Bachman's,
-"representative of the uppermost few meters of sediment". That is this
+*Principles of Sonar Performance Modelling* (2010) Sec. 4.4.1, tabulates a
+near-surface set and a bulk set and attaches a band and a depth to each: his
+Table 4.17 is "Default HF geo-acoustic parameters (10-100 kHz). Near-surface
+sediment properties", APL-UW's, "representative of the average properties of
+the top few centimeters"; his Table 4.18 is "Default MF geo-acoustic
+parameters (1-10 kHz). Bulk sediment properties", "representative of the
+uppermost few meters of sediment". Table 4.18 is NOT the Hamilton & Bachman
+(1982) regressions ``'hamilton'`` evaluates: Ainslie builds it from "the
+following correlations from (Bachman, 1985)", a separate bulk set (23 degC,
+one atmosphere). Against the same water the two agree to 0.15 % in sound-speed
+ratio over 1-9 phi, but the density ratios part with grain size, from -0.5 %
+at 1 phi to +4.2 % at 9 phi ('hamilton' 1.410 against Table 4.18's 1.353), so
+check ``'hamilton'`` against Hamilton & Bachman's own tables, not Table 4.18.
+What carries over is the band-and-depth rule for bulk relations, which is a
+statement about bulk laboratory values, not about one regression. That is this
 module's ``model=`` selector with a frequency written against each arm:
 ``'apl-uw'`` for a high-frequency sonar reading the first few centimetres,
 ``'hamilton'`` for a
@@ -64,8 +72,10 @@ the AT ``'G'`` bottom uses. The revision reports the better fit to geoacoustic
 the backscatter are the product.
 
 Sediment sound speed and density are computed as **ratios to the overlying
-seawater**, scaled by the in-situ water properties (so fine muds correctly come
-out slower than seawater). Attenuation is returned in dB/wavelength, which is
+seawater**, scaled by the in-situ water properties the caller passes (so fine
+muds correctly come out slower than seawater). ``uacpy.data.fetch_environment``
+passes the in-situ seafloor sound speed but not a density, so on that path the
+density ratio is carried against ``DEFAULT_WATER_DENSITY_G_CM3``. Attenuation is returned in dB/wavelength, which is
 frequency-independent (``α[dB/λ] = (α/f)·c/1000``).
 """
 
@@ -75,17 +85,20 @@ from typing import Dict, Optional
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
+                                  DEFAULT_WATER_DENSITY_G_CM3)
+from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 __all__ = ['DEFAULT_GRAIN_SIZE_ENVIRONMENT', 'DEFAULT_GRAIN_SIZE_MODEL',
            'GRAIN_SIZE_ENVIRONMENTS',
            'GRAIN_SIZE_MODELS', 'GRAIN_SIZE_MODEL_RANGES',
-           'GRAIN_SIZE_SOURCE_RANGES', 'check_grain_size_selection',
-           'grain_size_from_density', 'grain_size_to_geoacoustics']
+           'GRAIN_SIZE_SOURCE_RANGES', 'canonical_grain_size_selection',
+           'check_grain_size_selection',
+           'grain_size_from_density', 'grain_size_to_geoacoustics',
+           'apl_uw_density_ratio', 'apl_uw_sound_speed_ratio',
+           'hamilton_attenuation']
 
-_HB_REF_CW = 1510.0      # m/s   reference seawater sound speed
-_HB_REF_RHOW = 1.030     # g/cm³ reference seawater density
 # Hamilton & Bachman (1982), JASA 72(6), "Continental Terrace (Shelf and Slope)"
 # granular sediments: mean grain size from their Table I, bulk density (g/cm³)
 # and sound-speed ratio (sediment/seawater) from their Table II. Their Table II
@@ -124,9 +137,6 @@ _HB_TABLE = (
     (7.13, 1.484, 1.006),   # clayey silt (median, per their Table II footnote)
     (8.80, 1.480, 0.990),   # silty clay  (ratio < 1: slower than seawater)
 )
-_HB_PHI = np.array([r[0] for r in _HB_TABLE])
-_HB_RHO = np.array([r[1] for r in _HB_TABLE])      # g/cm³ at the reference water
-_HB_VRATIO = np.array([r[2] for r in _HB_TABLE])
 
 # Hamilton & Bachman (1982) Appendix, p. 1902 — read from
 # ``external:hamilton1982.pdf`` page 12 at 500 dpi, the equation blocks being
@@ -160,7 +170,7 @@ _HB_T_DENSITY = (2.374, -0.175, 0.008)       # ρ, g/cm³
 # polynomials rescaled: p. IV-8, "The density and sound speed ratios agree with
 # those of Hamilton and Bachman for -1 <= M_z < 1", and "c₁ = 1.528 m/ms is used
 # in determining δ from Hamilton's expressions". Coefficient by coefficient
-# against ``_apl_velocity_ratio`` and ``_apl_density_ratio``'s first branches:
+# against ``apl_uw_sound_speed_ratio`` and ``apl_uw_density_ratio``'s first branches:
 #   1952.5/1.2778 = 1528.017   -86.26/-0.056452 = 1528.024   4.14/0.002709 = 1528.239
 #   2.374/2.3139  = 1.02597    -0.175/-0.17057  = 1.02597    0.008/0.007797 = 1.02604
 # Three ratios landing on one constant each is what makes the divisor a citation
@@ -183,7 +193,7 @@ _HB_T_PHI_RANGE = (1.0, 9.0)
 #: the (T) polynomials rescaled). Nothing extends the abyssal families: they are
 #: straight lines fitted over 7 to 10 ϕ and describe no sand.
 #:
-#: The **attenuation is not split by environment** — ``_hamilton_kp`` is
+#: The **attenuation is not split by environment** — ``hamilton_attenuation`` is
 #: Hamilton (1972), whose Fig. 3 regressions are "for data off San Diego and
 #: selected literature values recommended for use in similar sediments" — so
 #: all three return the same ``k_p``, over its own 0 to 9.5 ϕ.
@@ -225,22 +235,27 @@ GRAIN_SIZE_MODELS = ('hamilton', 'apl-uw')
 #: code applies it from a frequency, because a grain-size conversion is never
 #: given one. A caller working above 10 kHz passes ``model='apl-uw'``.
 DEFAULT_GRAIN_SIZE_MODEL = 'hamilton'
-# Seawater each model's ratios are referenced to, used when the caller gives no
-# in-situ values. These are uacpy's in-situ defaults, not the conditions the
-# relations were measured at: Hamilton & Bachman's are laboratory values at
-# 23 degC / 1 atm (their Table II footnote a), and the ratio uacpy forms from
-# their regressions is against ``_HB_T_REF_CW`` = 1528 m/s. Their *tabulated*
+# Seawater each model's ratios are carried back to when the caller gives no
+# in-situ values: the package's one water — the nominal DEFAULT_SOUND_SPEED
+# and DEFAULT_WATER_DENSITY_G_CM3 — for both models, so a grain-size seabed
+# in a default Environment presents exactly the published ratio to the deck
+# (every deck divides the seabed density by the same water density). These
+# are uacpy's in-situ defaults, not the conditions the relations were
+# measured at: Hamilton & Bachman's are laboratory values at 23 degC / 1 atm
+# (their Table II footnote a), and the ratio uacpy forms from their
+# regressions is against ``_HB_T_REF_CW`` = 1528 m/s. Their *tabulated*
 # ratios are against no single speed at all — Table II velocity divided by
 # velocity ratio spans 1524.9 to 1532.3 m/s over the nine rows, which is the
 # per-site pore-water salinity the footnote describes, and 1528 sits 0.11 m/s
 # from the mean of it. A ratio is formed precisely so it can be re-applied at
 # in-situ conditions, which is what happens here;
-# APL-UW's ratios are applied against 1500 m/s and a unit density ratio by the
-# Acoustics-Toolbox 'G' bottom (Bellhop/ReadEnvironmentBell.f90:526
-# `alphaR = vr * 1500.0`, and :531 `HS%rho = rhoR` — the ratio used directly as
-# g/cm³).
-_MODEL_WATER_REFERENCE = {'hamilton': (_HB_REF_CW, _HB_REF_RHOW),
-                          'apl-uw': (1500.0, 1.0)}
+# APL-UW's ratios are the ones the Acoustics-Toolbox 'G' bottom applies
+# (Bellhop/ReadEnvironmentBell.f90:526 `alphaR = vr * 1500.0`, and :531
+# `HS%rho = rhoR`, the ratio used directly as g/cm³ against water of density
+# 1): a uacpy 'apl-uw' seabed in default water presents the same ratio.
+_MODEL_WATER_REFERENCE = {
+    'hamilton': (DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3),
+    'apl-uw': (DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3)}
 _HAMILTON_KP_PHI_RANGE = (0.0, 9.5)
 # TR 9407 §IV.A.4: relations (2)-(5) "are defined only for -1 <= Mz <= 9"
 # (p. IV-8). One equation set, so all three quantities share one domain.
@@ -256,12 +271,12 @@ GRAIN_SIZE_ENVIRONMENTS['continental-terrace']['evaluated_range'] = (
     _HB_T_EVALUATED_RANGE)
 
 
-def _source_ranges(model: str, environment: str) -> Dict[str, tuple]:
+def _source_ranges(model: str, hamilton_fit: str) -> Dict[str, tuple]:
     """``{quantity: (lo, hi)}`` for one model and, for ``'hamilton'``, one
-    environment. :data:`GRAIN_SIZE_SOURCE_RANGES` is this for the default."""
+    hamilton_fit. :data:`GRAIN_SIZE_SOURCE_RANGES` is this for the default."""
     if model != 'hamilton':
         return GRAIN_SIZE_SOURCE_RANGES[model]
-    span = GRAIN_SIZE_ENVIRONMENTS[environment]['evaluated_range']
+    span = GRAIN_SIZE_ENVIRONMENTS[hamilton_fit]['evaluated_range']
     return {'sound_speed': span, 'density': span,
             'attenuation': _HAMILTON_KP_PHI_RANGE}
 
@@ -308,7 +323,7 @@ GRAIN_SIZE_MODEL_RANGES = {
 }
 
 
-def _hamilton_kp(phi: float) -> float:
+def hamilton_attenuation(phi: float) -> float:
     """Hamilton (1972) attenuation constant ``k_p`` versus mean grain size.
 
     ``α(dB/m) = k_p · f(kHz)``. The four regressions are the Fig. 3 caption of
@@ -324,24 +339,24 @@ def _hamilton_kp(phi: float) -> float:
     **Both models return this one function**, which is why it is written once:
     TR 9407 p. IV-8 says "Hamilton's parameterization of α₂/f is reproduced
     below" and cites this paper, and ``α₂/f`` is this ``k_p`` under the other
-    report's name, in the same dB m⁻¹ kHz⁻¹. What used to be a second copy
-    differed from this one in three places, all of them presentation:
+    report's name, in the same dB m⁻¹ kHz⁻¹. TR 9407's printed version
+    differs from this one only in presentation:
 
     * its coarse constant, ``Mz < 0 → 0.4556``, which is ``k_p(0)`` exactly;
     * its tail, ``Mz >= 9.5 → 0.0601``, which is ``k_p(9.5) = 0.060075``
       printed to four decimals, on a branch neither model can reach (each
       clamps ϕ below 9.5 first);
-    * the **tie at a branch join**, where it tested ``<`` and this tested
-      ``<=``, so at exactly 2.6, 4.5 or 6.0 ϕ the two returned different
-      values from identical coefficients — 0.5193 against 0.5215 at 2.6 ϕ.
+    * the **tie at a branch join**, which decides the value at exactly 2.6,
+      4.5 or 6.0 ϕ — 0.5193 on one side and 0.5215 on the other at 2.6 ϕ.
 
     Hamilton's caption gives the ranges as "0 to 2.6ϕ", "2.6 to 4.5ϕ" and so
     on, sharing each endpoint between two branches and settling nothing. The
     Acoustics-Toolbox does settle it, and this follows it:
     ``ReadEnvironmentBell.f90:509-518`` reads
     ``ELSE IF( Mz >= 2.6 .AND. Mz < 4.5 )``, so a join belongs to the branch
-    **above** it. ``model='apl-uw'`` has to match that binary, and now
-    ``'hamilton'`` cannot drift from it because there is nothing to drift from.
+    **above** it. ``model='apl-uw'`` has to match that binary, and
+    ``'hamilton'`` agrees with it because both models call this one
+    function.
 
     The four regressions are genuinely discontinuous at their joins — that is
     the published fit, not a seam in this code — but they meet within 0.003.
@@ -375,65 +390,86 @@ def _hamilton_kp(phi: float) -> float:
     return 0.9431 - 0.2041 * m + 0.0117 * m * m
 
 
-def check_grain_size_selection(model: str, environment: str, *,
-                               caller: str = 'grain_size',
+def _canonical_pair(model, hamilton_fit, who, model_argument,
+                    environment_argument):
+    """``(model, hamilton_fit)`` in their canonical spellings."""
+    from uacpy.core._validate import canonical_choice
+    return (canonical_choice(model, GRAIN_SIZE_MODELS, who, model_argument),
+            canonical_choice(hamilton_fit, tuple(GRAIN_SIZE_ENVIRONMENTS),
+                             who, environment_argument))
+
+
+def canonical_grain_size_selection(model, hamilton_fit, *, who: str,
+                                   model_argument: str = 'model',
+                                   environment_argument: str = 'hamilton_fit'):
+    """``(model, hamilton_fit)`` checked by :func:`check_grain_size_selection`
+    and in their canonical spellings (``'Hamilton'`` → ``'hamilton'``), for an
+    entry point to use from then on. ``hamilton_fit=None`` stays ``None``
+    (each caller's own default) and is checked as the default fit."""
+    check_grain_size_selection(
+        model, hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT, who=who,
+        model_argument=model_argument,
+        environment_argument=environment_argument)
+    canonical_model, canonical_fit = _canonical_pair(
+        model, hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT, who,
+        model_argument, environment_argument)
+    return canonical_model, (None if hamilton_fit is None else canonical_fit)
+
+
+def check_grain_size_selection(model: str, hamilton_fit: str, *,
+                               who: str = 'grain_size',
                                model_argument: str = 'model',
-                               environment_argument: str = 'environment'
+                               environment_argument: str = 'hamilton_fit'
                                ) -> None:
-    """Raise :class:`ConfigurationError` for a ``model`` / ``environment`` pair
+    """Raise :class:`ConfigurationError` for a ``model`` / ``hamilton_fit`` pair
     the sources do not publish.
 
     Every entry point that accepts the pair calls this, not only the innermost
-    one: a caller who names an abyssal environment alongside
+    one: a caller who names an abyssal hamilton_fit alongside
     ``model='apl-uw'`` several layers up would otherwise have it quietly
     dropped by a wrapper that never reaches the conversion — a seabed built
     from a class name or a literal ϕ, say. The mismatch is refused where it is
     typed.
     """
-    if model not in GRAIN_SIZE_MODELS:
+    model, hamilton_fit = _canonical_pair(model, hamilton_fit, who,
+                                          model_argument,
+                                          environment_argument)
+    if model != 'hamilton' and hamilton_fit != DEFAULT_GRAIN_SIZE_ENVIRONMENT:
         raise ConfigurationError(
-            f"{caller}: unknown {model_argument} {model!r}.",
-            remediation=f"Use one of {GRAIN_SIZE_MODELS}.",
-        )
-    if environment not in GRAIN_SIZE_ENVIRONMENTS:
-        raise ConfigurationError(
-            f"{caller}: unknown {environment_argument} {environment!r}.",
-            remediation=f"Use one of {tuple(GRAIN_SIZE_ENVIRONMENTS)}.",
-        )
-    if model != 'hamilton' and environment != DEFAULT_GRAIN_SIZE_ENVIRONMENT:
-        raise ConfigurationError(
-            f"{caller}: {model_argument}={model!r} has no {environment!r} form — "
+            f"{who}: {model_argument}={model!r} has no {hamilton_fit!r} form — "
             f"TR 9407 "
-            f"publishes one set of relations, not one per environment.",
+            f"publishes one set of relations, not one per hamilton_fit.",
             remediation="Use model=DEFAULT_GRAIN_SIZE_MODEL for the abyssal fits, or drop "
-                        "the environment.",
+                        "the hamilton_fit.",
         )
 
 
 def grain_size_from_density(
     density: float, water_density: Optional[float] = None,
-    environment: str = DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+    hamilton_fit: str = DEFAULT_GRAIN_SIZE_ENVIRONMENT,
 ) -> float:
     """Mean grain size (ϕ) from a measured bulk density — the inverse of the
     ``'hamilton'`` density relation :func:`grain_size_to_geoacoustics` applies.
 
     ``density`` is in g/cm³ against ``water_density`` (default: the same
-    in-situ reference the forward call uses), and ``environment`` selects the
+    in-situ reference the forward call uses), and ``hamilton_fit`` selects the
     same fit the forward direction would use, so the two are inverses of each
     other whichever one is named.
 
     A density the chosen fit cannot represent is **announced and held at the
     nearer end**, like every other substitution here. That is not a rare edge:
-    the continental-terrace quadratic bottoms out at 1.417 g/cm³ (1.423 against
-    the default water) because its vertex sits at ϕ = 10.94, past the range it
-    is evaluated over — and **45.5 % of the Graw grid's ocean cells are below
-    it**, measured over its 6.2 million finite cells. Those cells are not
+    the continental-terrace quadratic is evaluated over 1 to 9 ϕ, and its
+    density there falls no lower than its 9 ϕ end, 1.448 g/cm³ against the
+    default water (the parabola's own vertex, 1.418, lies past that range at
+    ϕ = 10.94) — and **59.9 % of the Graw grid's ocean cells are below that
+    end**, measured over its 6.2 million finite cells. Those cells are not
     artefacts: their bulk sits at 1.30-1.42 g/cm³, which is what Hamilton &
     Bachman's own Table IV measures for abyssal clay (1.352 and 1.414), and
     only 0.12 % of cells fall below 1.2. They are ordinary deep-ocean mud,
-    which is to say **they are not continental terrace** — the abyssal-plain
-    fit represents 65.3 % of the grid where the terrace fit reaches 40.8 %.
-    So the warning names the environment whose range would cover the value.
+    which is to say **they are not continental terrace** — against the default
+    water the abyssal-plain fit represents 65.7 % of the grid where the
+    terrace fit reaches 40.1 %.
+    So the warning names the hamilton_fit whose range would cover the value.
 
     **What this inverse is, and what its own sources say about it.** Hamilton &
     Bachman's Appendix is directional by construction -- its equations
@@ -455,13 +491,17 @@ def grain_size_from_density(
     measurement; if Bachman (1985) is ever ingested, this is the first thing to
     replace.
     """
-    if environment not in GRAIN_SIZE_ENVIRONMENTS:
+    from uacpy.core._validate import canonical_choice
+    hamilton_fit = canonical_choice(hamilton_fit, tuple(GRAIN_SIZE_ENVIRONMENTS),
+                                    'grain_size_from_density', 'hamilton_fit')
+    if hamilton_fit not in GRAIN_SIZE_ENVIRONMENTS:
         raise ConfigurationError(
-            f"grain_size_from_density: unknown environment {environment!r}.",
+            f"grain_size_from_density: unknown hamilton_fit {hamilton_fit!r}.",
             remediation=f"Use one of {tuple(GRAIN_SIZE_ENVIRONMENTS)}.",
         )
-    fit = GRAIN_SIZE_ENVIRONMENTS[environment]
-    rho_w = _HB_REF_RHOW if water_density is None else float(water_density)
+    fit = GRAIN_SIZE_ENVIRONMENTS[hamilton_fit]
+    rho_w = (DEFAULT_WATER_DENSITY_G_CM3 if water_density is None
+             else float(water_density))
     lab = float(density) / rho_w * _HB_T_REF_RHOW
     lo, hi = fit['evaluated_range']
     coefficients = fit['density']
@@ -485,17 +525,17 @@ def grain_size_from_density(
         span = sorted(np.polyval(coefficients[::-1], np.array([lo, hi]))
                       / _HB_T_REF_RHOW * rho_w)
         elsewhere = [name for name, other in GRAIN_SIZE_ENVIRONMENTS.items()
-                     if name != environment
+                     if name != hamilton_fit
                      and min(_density_span(other, rho_w))
                      <= float(density) <= max(_density_span(other, rho_w))]
         warnings.warn(
             f"grain_size_from_density: ρ={float(density):g} g/cm³ is outside "
             f"the {span[0]:.3f} to {span[1]:.3f} g/cm³ the "
-            f"{environment!r} relation represents, so the grain size is its "
+            f"{hamilton_fit!r} relation represents, so the grain size is its "
             f"ϕ={held:g} end rather than one that reproduces ρ"
             + (f"; {_names_and(elsewhere)} covers this density"
                if elsewhere else "") + ".",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
         return held
     return float(phi)
@@ -509,24 +549,24 @@ def _density_span(fit: Dict, water_density: float):
 
 
 def _hamilton_geoacoustics(phi, water_sound_speed, water_density,
-                           environment=DEFAULT_GRAIN_SIZE_ENVIRONMENT):
-    """``(cp, density, attenuation)`` from one environment's H&B regressions.
+                           hamilton_fit=DEFAULT_GRAIN_SIZE_ENVIRONMENT):
+    """``(cp, density, attenuation)`` from one hamilton_fit's H&B regressions.
 
-    The fits are evaluated at ϕ held to that environment's own range, so none
-    is run past the interval its source declares; ``_hamilton_kp`` holds itself
+    The fits are evaluated at ϕ held to that hamilton_fit's own range, so none
+    is run past the interval its source declares; ``hamilton_attenuation`` holds itself
     to its own range the same way, and is the same regression for all three
     environments. Both ratios are formed against the laboratory reference the
     (T) coefficients imply and then re-scaled to the in-situ water, which is
     what makes a laboratory number usable at depth.
     """
-    fit = GRAIN_SIZE_ENVIRONMENTS[environment]
+    fit = GRAIN_SIZE_ENVIRONMENTS[hamilton_fit]
     lo, hi = fit['evaluated_range']
     m = min(max(float(phi), lo), hi)
     velocity_ratio = np.polyval(fit['velocity'][::-1], m) / _HB_T_REF_CW
     density_ratio = np.polyval(fit['density'][::-1], m) / _HB_T_REF_RHOW
     cp = float(velocity_ratio) * water_sound_speed
     # α(dB/λ) = k_p · f(kHz) · λ = k_p · c / 1000: frequency drops out.
-    attenuation = _hamilton_kp(phi) * cp / 1000.0
+    attenuation = hamilton_attenuation(phi) * cp / 1000.0
     return cp, float(density_ratio) * water_density, attenuation
 
 
@@ -582,7 +622,9 @@ def _hamilton_geoacoustics(phi, water_sound_speed, water_density,
 # that reproduces Table 2's printed nu column at all seven Mz >= 5.3 rows to
 # four decimals (-0.0024224 reproduces two of the seven), and it is what
 # ``ReadEnvironmentBell.f90:504`` uses.
-def _apl_density_ratio(mz: float) -> float:
+def apl_uw_density_ratio(mz: float) -> float:
+    """Sediment-to-water density ratio versus mean grain size ``Mz`` (phi):
+    APL-UW TR 9407 Eq. 2, the three branches the comment above transcribes."""
     if mz < 1.0:
         return 0.007797 * mz ** 2 - 0.17057 * mz + 2.3139
     if mz < 5.3:
@@ -591,7 +633,10 @@ def _apl_density_ratio(mz: float) -> float:
     return -0.0012973 * mz + 1.1565
 
 
-def _apl_velocity_ratio(mz: float) -> float:
+def apl_uw_sound_speed_ratio(mz: float) -> float:
+    """Sediment-to-water sound-speed ratio versus mean grain size ``Mz``
+    (phi): APL-UW TR 9407 Eq. 3, the three branches the comment above
+    transcribes."""
     if mz < 1.0:
         return 0.002709 * mz ** 2 - 0.056452 * mz + 1.2778
     if mz < 5.3:
@@ -602,14 +647,21 @@ def _apl_velocity_ratio(mz: float) -> float:
 
 def _apl_uw_geoacoustics(phi, water_sound_speed, water_density):
     """``(cp, density, attenuation)`` from the APL-UW TR 9407 relations."""
-    cp = _apl_velocity_ratio(phi) * water_sound_speed
+    cp = apl_uw_sound_speed_ratio(phi) * water_sound_speed
     # α(dB/λ) = (α₂/f)[dB/m/kHz]·c[m/s]/1000 — frequency cancels (α ∝ f).
-    attenuation = _hamilton_kp(phi) * cp / 1000.0
-    return cp, _apl_density_ratio(phi) * water_density, attenuation
+    attenuation = hamilton_attenuation(phi) * cp / 1000.0
+    return cp, apl_uw_density_ratio(phi) * water_density, attenuation
 
 
 _GEOACOUSTIC_MODELS = {'hamilton': _hamilton_geoacoustics,
                        'apl-uw': _apl_uw_geoacoustics}
+
+
+#: What each returned quantity's source holds, where it is not the quantity
+#: itself: attenuation's source is the k_p regression, and the dB/λ returned
+#: is k_p·c/1000, which moves with an unclamped sound speed — so it is k_p that
+#: holds its end value.
+_SOURCE_QUANTITY = {'attenuation': "attenuation's k_p"}
 
 
 def _names_and(names) -> str:
@@ -618,7 +670,7 @@ def _names_and(names) -> str:
             else ' and '.join((', '.join(names[:-1]), names[-1])))
 
 
-def _endpoint_quantities(model: str, environment: str, phi: float):
+def _endpoint_quantities(model: str, hamilton_fit: str, phi: float):
     """``[(names, (lo, hi)), ...]`` for the returned quantities whose own
     source does not cover ``phi``, grouped by the source they share.
 
@@ -626,7 +678,7 @@ def _endpoint_quantities(model: str, environment: str, phi: float):
     which is the only case in which nothing has been substituted.
     """
     groups: Dict[tuple, list] = {}
-    for name, span in _source_ranges(model, environment).items():
+    for name, span in _source_ranges(model, hamilton_fit).items():
         if not span[0] <= phi <= span[1]:
             groups.setdefault(span, []).append(name)
     return [(names, span) for span, names in groups.items()]
@@ -634,7 +686,7 @@ def _endpoint_quantities(model: str, environment: str, phi: float):
 
 def grain_size_to_geoacoustics(
     grain_size_phi: float, *, model: str = DEFAULT_GRAIN_SIZE_MODEL,
-    environment: str = DEFAULT_GRAIN_SIZE_ENVIRONMENT,
+    hamilton_fit: str = DEFAULT_GRAIN_SIZE_ENVIRONMENT,
     water_sound_speed: Optional[float] = None,
     water_density: Optional[float] = None,
 ) -> Dict[str, float]:
@@ -656,7 +708,7 @@ def grain_size_to_geoacoustics(
         ``'hamilton'`` (default) — Hamilton & Bachman (1982) / Hamilton (1972).
         ``'apl-uw'`` — APL-UW TR 9407 (1994). What the choice does, and where
         it does nothing, is below.
-    environment : str, optional
+    hamilton_fit : str, optional
         Which of Hamilton & Bachman's three fits ``'hamilton'`` evaluates:
         ``'continental-terrace'`` (default, shelf and slope, 1 to 9 ϕ),
         ``'abyssal-hill'`` or ``'abyssal-plain'`` (both 7 to 10 ϕ, and
@@ -665,17 +717,22 @@ def grain_size_to_geoacoustics(
         coefficients, published σ and range. **Hamilton states no rule for
         choosing**: the environments are named for where the samples came
         from, so the caller has to know their site. Passing a non-default
-        ``environment`` with ``model='apl-uw'`` raises — TR 9407 publishes one
-        set of relations, not one per environment.
+        ``hamilton_fit`` with ``model='apl-uw'`` raises — TR 9407 publishes one
+        set of relations, not one per hamilton_fit.
     water_sound_speed, water_density : float, optional
         In-situ seawater sound speed (m/s) and density (g/cm³) the ratios are
-        scaled by. ``None`` (default) uses the reference the chosen ``model``
-        was tabulated against — Hamilton's 1510 m/s / 1.030 g/cm³, or APL-UW's
-        1500 m/s / 1.0 g/cm³, which reproduces the Acoustics-Toolbox ``'G'``
-        bottom exactly.
+        scaled by. ``None`` (default) uses the package's one water — the
+        nominal 1500 m/s and 1.027 g/cm³ (``DEFAULT_SOUND_SPEED``,
+        ``DEFAULT_WATER_DENSITY_G_CM3``) — for either model, so the seabed
+        presents the published ratio to a deck in default water. These are
+        uacpy's in-situ defaults, not the conditions the relations were
+        measured at: Hamilton & Bachman's values are laboratory measurements
+        at 23 °C / 1 atm, and uacpy forms its Hamilton ratio against
+        1528 m/s (APL-UW TR 9407, p. IV-8). Pass ``1500.0, 1.0`` to
+        reproduce the Acoustics-Toolbox ``'G'`` bottom's absolute numbers.
 
     **Each returned quantity is reported against its own source.** A
-    ``UserWarning`` names the quantities whose source does not hold data at
+    ``ValidityWarning`` names the quantities whose source does not hold data at
     ``grain_size_phi``, together with the ϕ whose value they carry instead —
     because a held endpoint is indistinguishable from an interpolated value
     once returned, and because the answer differs *between quantities of one
@@ -708,8 +765,9 @@ def grain_size_to_geoacoustics(
     vertical variations in porosity ... Rather, the acoustic models were fit to
     data in order to determine the relationship between grain size and
     density" (p. IV-9). So at 4 ϕ its ρ = 1.224 is not a claim about silty
-    sand's density — Hamilton measures 1.783 there on 340 laboratory samples —
-    it is the density that made APL-UW's reflection-loss and backscatter model
+    sand's density — Hamilton & Bachman's silty-sand class (4.24 ϕ, 40
+    samples) averages 1.783, and their (T) regression over all 340 terrace
+    samples gives 1.80 at 4 ϕ — it is the density that made APL-UW's reflection-loss and backscatter model
     match. That is also why the attenuations agree: attenuation was taken from
     Hamilton, only the ratios were refitted.
 
@@ -718,14 +776,14 @@ def grain_size_to_geoacoustics(
     APL-UW scattering model those parameters were fitted for. Past -1 ϕ both stop, and the honest
     answer for gravel is a sediment class from :mod:`uacpy.core.materials`.
 
-    Three places in uacpy answer an out-of-range grain size differently, and
+    Four places in uacpy answer an out-of-range grain size differently, and
     the difference is in what each one is *given* rather than in what each one
     holds to be right.
 
     - **here**, the ϕ is all there is. Clamping and reporting it is the only
       answer available, because nothing at this layer knows where the value
       came from or what else could stand in for it.
-    - :func:`uacpy.data.sediment_db.fetch_bottom_local` is given a DECK41
+    - :func:`uacpy.data.sediment_db.fetch_bottom_grainsize` is given a DECK41
       **lithology word**. ``'gravel'`` has no measurement behind it, so
       nothing is lost by answering it with the ``'gravel'`` material preset,
       whose geoacoustics are sourced — which is what it does, the same way
@@ -736,20 +794,26 @@ def grain_size_to_geoacoustics(
       the percentage route ϕ is continuous, so any rule for when to substitute
       would be a threshold drawn across a continuum. It converts the ϕ it was
       given and warns, naming the sample and the route that produced it.
+    - :func:`uacpy.data.seabed.fetch_bottom_emodnet` (and its offline twin
+      :func:`uacpy.data.emodnet_local.fetch_bottom_emodnet_local`) is given a
+      **Folk 5-class code**. Like MARS's Folk classes it converts through ϕ —
+      class 3, "Coarse-grained sediment", at -1 ϕ, the sand/gravel boundary —
+      so the two surveys stay on one route; only a DECK41 lithology word
+      takes a preset.
     """
-    check_grain_size_selection(model, environment,
-                               caller='grain_size_to_geoacoustics')
+    model, hamilton_fit = canonical_grain_size_selection(
+        model, hamilton_fit, who='grain_size_to_geoacoustics')
     ref_cw, ref_rhow = _MODEL_WATER_REFERENCE[model]
     if water_sound_speed is None:
         water_sound_speed = ref_cw
     if water_density is None:
         water_density = ref_rhow
-    spans = _source_ranges(model, environment).values()
+    spans = _source_ranges(model, hamilton_fit).values()
     lo = min(span[0] for span in spans)
     hi = max(span[1] for span in spans)
     evaluate = _GEOACOUSTIC_MODELS[model]
     if model == 'hamilton':
-        evaluate = partial(evaluate, environment=environment)
+        evaluate = partial(evaluate, hamilton_fit=hamilton_fit)
     phi = float(np.clip(grain_size_phi, lo, hi))
     cp, density, attenuation = evaluate(phi, water_sound_speed, water_density)
     # Report per quantity, against the source each one comes from. Comparing
@@ -764,14 +828,14 @@ def grain_size_to_geoacoustics(
     # being the largest substitution there is.
     if not np.isnan(grain_size_phi):
         notes = [
-            f"{_names_and(names)} "
+            f"{_names_and([_SOURCE_QUANTITY.get(n, n) for n in names])} "
             f"{'come' if len(names) > 1 else 'comes'} from data covering "
             f"{src_lo:g} to {src_hi:g} ϕ, so "
             f"{'they are' if len(names) > 1 else 'it is'} its "
             f"ϕ={min(max(grain_size_phi, src_lo), src_hi):g} "
             f"{'values' if len(names) > 1 else 'value'}"
             for names, (src_lo, src_hi) in _endpoint_quantities(
-                model, environment, grain_size_phi)
+                model, hamilton_fit, grain_size_phi)
         ]
         if notes and phi != grain_size_phi:
             raw = evaluate(float(grain_size_phi), water_sound_speed,
@@ -786,6 +850,6 @@ def grain_size_to_geoacoustics(
             warnings.warn(
                 f"grain_size_to_geoacoustics: at ϕ={grain_size_phi:g}, "
                 + "; ".join(notes) + ".",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
     return {'sound_speed': cp, 'density': density, 'attenuation': attenuation}

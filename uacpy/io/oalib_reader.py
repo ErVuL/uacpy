@@ -12,8 +12,10 @@ Provides:
 * ``.ray`` — :func:`read_ray_file` (Bellhop rays, ASCII)
 * ``.ssp`` — :func:`read_ssp_2d`, :func:`read_ssp_3d`
 * ``.flp`` — :func:`read_flp`, :func:`read_flp3d`
-* ``.rts`` — :func:`read_rts_file`, :func:`rts_to_pressure` (SPARC time series, ASCII)
-* ``.ts``  — :func:`read_ts` (generic time series, ASCII)
+* ``.rts`` — :func:`read_rts_file` (SPARC time series, ASCII; one frequency's
+  pressure from it is :func:`uacpy.models.sparc.rts_to_pressure`)
+* ``.rts`` again — :func:`read_ts` (the same layout and record, the title kept
+  verbatim as OALIB ``read_ts.m`` keeps it)
 
 **The 3-D readers are deliberately retained and are not dead code.**
 :func:`read_ssp_3d` (BELLHOP3D hexahedral SSP) and :func:`read_flp3d`
@@ -30,20 +32,25 @@ dead-code sweep proposing their removal a second time.
 
 import numpy as np
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Union, Tuple, Dict, Any, Optional
+from typing import Union, Tuple, Dict, Any, NamedTuple, Optional
 
 from uacpy._log import log_message
+from uacpy.core._export import ExportRecord
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
-    ConfigurationError, FileFormatError, UnsupportedFeatureError,
+    ConfigurationError, FallbackWarning, FileFormatError, IOWarning,
+    UnsupportedFeatureError,
 )
 from uacpy.core.results import (
     Field, ResultStack, Arrivals, Rays,
 )
+from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.io._fortran_helpers import (
-    _bound_counts,
-    read_vector as _read_vector, detect_endian, require_model_output,
+    DirectAccessFile, _bound_counts,
+    read_vector as _read_vector, require_model_output,
+    require_user_input,
     typed_format_error,
     fortran_float,
     expand_repeat_counts,
@@ -55,37 +62,54 @@ from uacpy.core.units import km_to_m
 
 
 def read_shd_file(filepath: Union[str, Path]):
-    """Read a single-frequency, single-bearing ``.shd`` file as a typed
-    pressure result.
+    """Read a single-bearing ``.shd`` file as a typed pressure result.
 
     Thin wrapper around :func:`read_shd_bin`. Returns:
 
-      * :class:`Field` (complex narrowband pressure) when the file carries a
-        single source depth — the common case.
+      * :class:`Field` (complex pressure) when the file carries a single
+        source depth — the common case. A single-frequency file gives a
+        narrowband field; a multi-frequency file (a broadband Kraken
+        ``field.exe`` or Bellhop run) gives a broadband one with
+        ``'frequency'`` as the last axis, in the file's frequency order.
       * :class:`ResultStack` of single-source :class:`Field` slabs when
         multiple source depths are present.
+
+    **The pressure is the engine's own normalisation, not the package's.**
+    The models bridge each binary onto the package convention (unit point
+    source at 1 m, travelling wave ``e^{+iωt}``) *after* this reader, in the
+    model layer: Kraken multiplies ``field.exe``'s ``.shd`` by −1 (and by
+    ``e^{-iπ/4}·√k0`` for a line source) and divides by ``ρ(z_s)``; Bellhop
+    applies its own sign and line-source factor. So
+    ``read_shd_file(r.metadata['shd_file'])`` can differ from the model
+    result ``r`` in sign, phase and (line source) level. The returned field
+    says so by carrying ``phase_reference=None`` and an empty ``model``.
 
     A rectilinear file (``PlotType == 'rectilin  '``) gives
     ``coords={'depth', 'range'}``. An irregular file (``'irregular '``) gives
     ``coords={'range'}``: its receivers are the paired coordinates
     ``(Rz(i), Rr(i))`` and only one row of ``NRr`` samples is written per
     source depth (``Bellhop/bellhop.f90:202-206``, ``:323-326``), so the
-    paired depths ride on ``metadata['receiver_depths']`` rather than forming
-    a second axis.
+    paired depths ride on ``aux_coords['receiver_depth']`` along ``'range'``
+    rather than forming a second axis.
 
-    Multi-frequency, multi-bearing, multi-source-position (``Nsx``/``Nsy``
+    Multi-bearing, multi-source-position (``Nsx``/``Nsy``
     > 1) and BELLHOP3D irregular-grid ``.shd`` files (Nrz receiver rows per
     source depth, ``bellhop3D.f90:405-410``) raise
     :class:`~uacpy.core.exceptions.UnsupportedFeatureError`: the file is
     well-formed, this wrapper just carries no axis for it. Call
     :func:`read_shd_bin` directly and build the result from its
-    ``(Ntheta, Nsz, Nrz, Nrr)`` cube (with ``xs_km=``/``ys_km=`` per source
-    position).
+    :attr:`ShdFile.pressure` cube ``(Ntheta, Nsz, Nrz, Nrr)`` (with
+    ``xs_m=``/``ys_m=`` per source position).
+
+    Parameters
+    ----------
+    filepath : str or Path
+        The file to read.
     """
     filepath = Path(filepath)
     shd = read_shd_bin(str(filepath))
 
-    freqs = np.asarray(shd['freqVec'], dtype=float)
+    freqs = np.asarray(shd.frequencies, dtype=float)
     nfreq = len(freqs)
     if nfreq == 0:
         raise FileFormatError(
@@ -93,28 +117,12 @@ def read_shd_file(filepath: Union[str, Path]):
             f"file is malformed (every Acoustics-Toolbox writer emits at "
             f"least one frequency record)."
         )
-    if nfreq > 1:
-        # A capability limit of this wrapper, not corruption: the file is a
-        # well-formed broadband .shd, this function just has no frequency
-        # axis to put it on.
-        raise UnsupportedFeatureError(
-            'read_shd_file',
-            f"{filepath} contains {nfreq} frequencies; this wrapper returns "
-            f"single-frequency fields only",
-            alternatives=[
-                "read_shd_bin(filepath) for the full broadband payload, "
-                "then construct a broadband Field from it",
-            ],
-            alternatives_label='readers',
-        )
-
-    pressure = shd['pressure']               # (Ntheta, Nsz, Nrz, Nrr)
-    pos = shd['Pos']
+    pressure = shd.pressure                  # (Ntheta, Nsz, Nrz, Nrr)
     # The receiver-bearing axis is a first-class .shd dimension
     # (misc/RWSHDFile.f90:105,107; BELLHOP3D writes Ntheta record blocks per
     # source, Bellhop/bellhop3D.f90:405-411). A Field carries no bearing axis,
     # so refuse rather than return plane 0 as if it were the whole file.
-    n_theta = np.atleast_1d(np.asarray(pos['theta'], dtype=float)).size
+    n_theta = np.atleast_1d(np.asarray(shd.bearings, dtype=float)).size
     if n_theta > 1:
         # Same capability limit as the multi-frequency case above.
         raise UnsupportedFeatureError(
@@ -123,33 +131,36 @@ def read_shd_file(filepath: Union[str, Path]):
             f"returns single-bearing fields only",
             alternatives=[
                 "read_shd_bin(filepath) for the full "
-                "(Ntheta, Nsz, Nrz, Nrr) cube, then build the result from it",
+                "(Ntheta, Nsz, Nrz, Nrr) pressure cube, then build the result "
+                "from it",
             ],
             alternatives_label='readers',
         )
 
     # A file with several source (x, y) positions holds one pressure cube
-    # per position; read_shd_bin without xs_km=/ys_km= returns only slot (0, 0),
+    # per position; read_shd_bin without xs_m=/ys_m= returns only slot (0, 0),
     # so returning a Field here would silently present one source's field
     # as the whole file.
-    n_sx = np.atleast_1d(np.asarray(pos['s']['x'], dtype=float)).size
-    n_sy = np.atleast_1d(np.asarray(pos['s']['y'], dtype=float)).size
+    n_sx = np.atleast_1d(np.asarray(shd.source_x, dtype=float)).size
+    n_sy = np.atleast_1d(np.asarray(shd.source_y, dtype=float)).size
     if n_sx > 1 or n_sy > 1:
         raise UnsupportedFeatureError(
             'read_shd_file',
             f"{filepath} carries Nsx={n_sx} x Nsy={n_sy} source positions; "
             f"this wrapper returns fields for a single source position only",
             alternatives=[
-                "read_shd_bin(filepath, xs_km=..., ys_km=...) once per source "
+                "read_shd_bin(filepath, xs_m=..., ys_m=...) once per source "
                 "position and build the result from each cube",
             ],
             alternatives_label='readers',
         )
 
-    source_depths = np.atleast_1d(np.asarray(pos['s']['z'], dtype=float))
-    irregular = shd['PlotType'].strip() == 'irregular'
-    receiver_depths = np.atleast_1d(np.asarray(pos['r']['z'], dtype=float))
-    receiver_ranges = np.atleast_1d(np.asarray(pos['r']['r'], dtype=float))
+    source_depths = np.atleast_1d(np.asarray(shd.source_depths, dtype=float))
+    irregular = shd.plot_type.strip() == 'irregular'
+    receiver_depths = np.atleast_1d(np.asarray(shd.receiver_depths,
+                                               dtype=float))
+    receiver_ranges = np.atleast_1d(np.asarray(shd.receiver_ranges,
+                                               dtype=float))
     if irregular and receiver_depths.size != receiver_ranges.size:
         # Bellhop/ReadEnvironmentBell.f90:414 ERROUTs unless NRz == NRr for
         # RunType(5:5)='I', so the two header counts must pair up.
@@ -178,31 +189,41 @@ def read_shd_file(filepath: Union[str, Path]):
             alternatives_label='readers',
         )
 
+    if nfreq > 1:
+        # One read per frequency slab, stacked on a trailing frequency axis:
+        # (Ntheta, Nsz, Nrz, Nrr, Nfreq). The multi-source and bearing
+        # refusals above run first, so every slab is the 2-D layout.
+        pressure = np.stack(
+            [shd.pressure]
+            + [read_shd_bin(str(filepath), frequency=float(f)).pressure
+               for f in freqs[1:]],
+            axis=-1)
+        freq_coords = {'frequency': freqs}
+    else:
+        freq_coords = {}
+
     def _slab(isz: int) -> Field:
         if irregular:
             return Field(
-                data=pressure[0, isz, 0, :],
-                coords={'range': receiver_ranges},
+                data=pressure[0, isz, 0, ...],
+                coords={'range': receiver_ranges, **freq_coords},
                 model='', backend='',
                 source_depths=np.array([float(source_depths[isz])]),
                 frequencies=freqs,
-                metadata={'receiver_depths': receiver_depths.copy()},
+                aux_coords={'receiver_depth': ('range', receiver_depths)},
             )
         return Field(
-            data=pressure[0, isz, :, :],
-            coords={'depth': receiver_depths, 'range': receiver_ranges},
+            data=pressure[0, isz, ...],
+            coords={'depth': receiver_depths, 'range': receiver_ranges,
+                    **freq_coords},
             model='', backend='',
             source_depths=np.array([float(source_depths[isz])]),
             frequencies=freqs,
         )
 
-    if len(source_depths) == 1:
-        return _slab(0)
-    return ResultStack(
-        slabs=[_slab(i) for i in range(len(source_depths))],
-        coordinate=source_depths,
-        coordinate_name='source_depth',
-    )
+    return ResultStack.from_slabs(
+        [_slab(i) for i in range(len(source_depths))], source_depths,
+        coordinate_name='source_depth')
 
 
 #: How much record padding a strided ``.shd`` pressure read may transfer
@@ -265,7 +286,7 @@ def _read_shd_pressure_rows(fid, filename, first_record, n_rows, recl,
                 raise FileFormatError(
                     f"{filename}: truncated pressure data — record "
                     f"{first_record + k} carries {temp.size} of the "
-                    f"{2 * n_range} REAL*4 words its header promises"
+                    f"{2 * n_range} REAL*4 words its header promises."
                 )
             rows[k].real = temp[0::2]
             rows[k].imag = temp[1::2]
@@ -288,7 +309,7 @@ def _read_shd_pressure_rows(fid, filename, first_record, n_rows, recl,
             raise FileFormatError(
                 f"{filename}: truncated pressure data — expected {count} "
                 f"records of {rec_bytes} bytes from record "
-                f"{first_record + start}, got {len(raw)} bytes"
+                f"{first_record + start}, got {len(raw)} bytes."
             )
         iq = np.frombuffer(raw.ljust(count * rec_bytes, b'\x00'),
                            dtype=row_dt, count=count)['iq']
@@ -298,13 +319,119 @@ def _read_shd_pressure_rows(fid, filename, first_record, n_rows, recl,
     return rows
 
 
+class ShdHeader(NamedTuple):
+    """Records 1-3 of a ``.shd``-layout file (``misc/RWSHDFile.f90:103-110``):
+    the title, the 10-character ``PlotType`` as written, the seven counts
+    ``(Nfreq, Ntheta, NSx, NSy, NSz, NRz, NRr)``, ``freq0`` and ``atten``."""
+
+    title: str
+    plot_type: str
+    counts: Tuple[int, int, int, int, int, int, int]
+    freq0: float
+    atten: float
+
+
+@dataclass(frozen=True, eq=False)
+class ShdFile(ExportRecord):
+    """A shade file as :func:`read_shd_bin` and :func:`read_shd_asc` read
+    it: the header (``misc/RWSHDFile.f90:103-114``), the source and receiver
+    axes, and ONE frequency's complex pressure.
+
+    The pressure is the engine's own normalisation, as written; the models
+    bridge it onto the package convention after reading
+    (:func:`read_shd_file` says how).
+
+    Attributes
+    ----------
+    title : str
+        The run title.
+    plot_type : str
+        The ``PlotType`` record as written, blanks kept (``'rectilin  '``,
+        ``'irregular '``, ``'TL'`` ...).
+    frequencies : ndarray
+        Every frequency the file holds (Hz).
+    source_frequency : float
+        The header's ``freq0`` (Hz).
+    stabilizing_attenuation : float
+        The header's ``atten`` (dB/wavelength).
+    bearings : ndarray
+        Receiver bearings (degrees).
+    source_x, source_y : ndarray or None
+        Source x / y positions (m), ``None`` from an ASCII file, which
+        carries none.
+    source_depths, receiver_depths, receiver_ranges : ndarray
+        In metres. On an ``'irregular '`` file the receiver depths pair
+        one-to-one with the ranges.
+    pressure : ndarray, complex
+        Shape ``(n_bearings, n_source_depths, n_rows, n_ranges)``: ``n_rows``
+        is the number of receiver depths on a rectilinear file and 1 on a
+        2-D irregular one. Cells the engine never wrote (exact zeros on
+        disk) are NaN.
+    pressure_frequency : float or None
+        The frequency ``pressure`` holds (Hz); ``None`` for a file that
+        declares no frequency.
+    """
+
+    title: str
+    plot_type: str
+    frequencies: np.ndarray
+    source_frequency: float
+    stabilizing_attenuation: float
+    bearings: np.ndarray
+    source_x: Optional[np.ndarray]
+    source_y: Optional[np.ndarray]
+    source_depths: np.ndarray
+    receiver_depths: np.ndarray
+    receiver_ranges: np.ndarray
+    pressure: np.ndarray
+    pressure_frequency: Optional[float]
+
+    _REPR_FIELDS = ('title', 'frequencies', 'source_depths', 'receiver_depths',
+                    'receiver_ranges', 'pressure')
+    _REPR_UNITS = {'frequencies': 'Hz', 'source_depths': 'm',
+                   'receiver_depths': 'm', 'receiver_ranges': 'm'}
+
+    _ARRAY_FIELDS = ('frequencies', 'bearings', 'source_x', 'source_y',
+                     'source_depths', 'receiver_depths', 'receiver_ranges',
+                     'pressure')
+    _XARRAY_FIELDS = {'pressure': 'pressure', 'bearing': 'bearings',
+                      'source_depth': 'source_depths',
+                      'range': 'receiver_ranges'}
+
+    def _payload(self):
+        return {'pressure': (self.pressure,
+                             ('bearing', 'source_depth', 'row', 'range'),
+                             '')}
+
+    def _coords(self):
+        return {'bearing': (self.bearings, 'deg'),
+                'source_depth': (self.source_depths, 'm'),
+                'range': (self.receiver_ranges, 'm')}
+
+
+def read_shd_header(daf: DirectAccessFile) -> ShdHeader:
+    """The header records of a ``.shd``-layout file open as ``daf``: the
+    ``.shd`` itself and the ``.grn`` SCOOTER and SPARC write through the same
+    ``WriteHeader``. Record 1 holds ``LRecl`` then the 80-character title,
+    record 2 ``PlotType``, record 3 the seven counts and two ``REAL(KIND=8)``.
+    The title is stripped; ``PlotType`` keeps its blanks."""
+    daf.seek(0, offset=4)
+    title = daf.text(80).strip()
+    daf.seek(1)
+    plot_type = daf.text(10)
+    daf.seek(2)
+    counts = tuple(daf.integer() for _ in range(7))
+    return ShdHeader(title, plot_type, counts, daf.real8(), daf.real8())
+
+
 @typed_format_error
 def read_shd_bin(
-    filename: str,
-    xs_km: Optional[float] = None,
-    ys_km: Optional[float] = None,
+    filepath: str,
+    *,
+    xs_m: Optional[float] = None,
+    ys_m: Optional[float] = None,
     frequency: Optional[float] = None,
-) -> Dict[str, Any]:
+) -> ShdFile:
     """
     Read binary shade file (.shd) produced by acoustic models.
 
@@ -314,54 +441,39 @@ def read_shd_bin(
 
     Parameters
     ----------
-    filename : str
+    filepath : str
         Path to binary shade file (.shd extension).
-    xs_km : float, optional
-        Source x-coordinate in **km**, the unit the deck states it in:
-        ``ReadSxSy`` reads Sx/Sy as 'km' and ``ReadVector`` scales them by
-        1000 before the file is written, so the .shd itself holds metres
-        (``misc/SourceReceiverPositions.f90:87-88, :277``). Given with
-        ``ys_km``, reads only the source closest to that point; ``None``
+    xs_m : float, optional
+        Keyword-only, like ``ys_m`` and ``frequency``. Source x-coordinate
+        in metres — the unit the .shd itself holds and
+        :attr:`ShdFile.source_x` returns (the deck states Sx/Sy in km and
+        ``ReadVector`` scales them by 1000 before the file is written,
+        ``misc/SourceReceiverPositions.f90:87-88, :277``). Given with
+        ``ys_m``, reads only the source closest to that point; ``None``
         reads the first source.
-    ys_km : float, optional
-        Source y-coordinate in km. Required when ``xs_km`` is given.
+    ys_m : float, optional
+        Source y-coordinate in metres. Required when ``xs_m`` is given.
     frequency : float, optional
         Frequency in Hz. If provided for broadband runs, selects closest
         frequency. If None, reads first frequency.
 
     Returns
     -------
-    shd_data : dict
-        Dictionary containing:
-        - 'title' : str - Run title
-        - 'PlotType' : str - Plot type ('rectilin', 'irregular', 'TL', etc.)
-        - 'freqVec' : ndarray - Frequency vector in Hz
-        - 'freq0' : float - Reference frequency
-        - 'atten' : float - Attenuation parameter
-        - 'Pos' : dict - Position data
-            - 'theta' : ndarray - Bearing angles in degrees
-            - 's' : dict - Source positions
-                - 'x' : ndarray - X coordinates in meters
-                - 'y' : ndarray - Y coordinates in meters
-                - 'z' : ndarray - Depths in meters
-            - 'r' : dict - Receiver positions
-                - 'z' : ndarray - Depths in meters
-                - 'r' : ndarray - Ranges in meters (Acoustics-Toolbox
-                  converts km → m before WriteHeader; see
-                  SourceReceiverPositions.f90:277)
-        - 'pressure' : ndarray - Complex pressure field for a SINGLE
-            frequency (``pressure_freq``), never a multi-frequency cube.
-            Shape (Ntheta, Nsz, Nrz, Nrr) for rectilinear
-            Shape (Ntheta, Nsz, 1, Nrr) for irregular
-            For a broadband file, pass ``frequency=`` per frequency (or iterate
-            ``freqVec`` calling this once per entry) — do not treat
-            ``pressure`` as spanning ``freqVec``.
-            Cells the engine never wrote (exact zeros on disk — Bellhop's
-            r=0 column and ray shadow zones, an empty KRAKEN modal sum)
-            are returned as NaN, uacpy's no-data convention.
-        - 'pressure_freq' : float - The frequency (Hz) the ``pressure``
-            cube was sliced at (``frequency`` snapped to the nearest ``freqVec``
-            entry, or ``freqVec[0]`` when ``frequency`` is None).
+    shd : ShdFile
+        The header and axes, positions in metres (the Acoustics Toolbox
+        converts km to m before ``WriteHeader``,
+        ``SourceReceiverPositions.f90:277``), and ``pressure`` for a SINGLE
+        frequency, ``pressure_frequency`` (``frequency`` snapped to the
+        nearest of ``frequencies``, or the first when ``frequency`` is
+        None) — never a multi-frequency cube. Its shape is
+        ``(Ntheta, Nsz, Nrz, Nrr)`` on a rectilinear file and
+        ``(Ntheta, Nsz, 1, Nrr)`` on a 2-D irregular one. For a broadband
+        file, pass ``frequency=`` once per entry of ``frequencies``.
+        Cells the engine never wrote (exact zeros on disk — Bellhop's r=0
+        column and ray shadow zones, an empty KRAKEN modal sum) are NaN,
+        uacpy's no-data convention. A receiver on a pressure-release
+        boundary, where Scooter's ``fields.exe`` writes an exact 0, reads
+        as NaN as well.
 
     Notes
     -----
@@ -380,27 +492,23 @@ def read_shd_bin(
     --------
     >>> # Read first source
     >>> shd = read_shd_bin('pekeris.shd')
-    >>> print(f"Title: {shd['title']}")
-    >>> print(f"Pressure shape: {shd['pressure'].shape}")
-    >>> print(f"Ranges: {shd['Pos']['r']['r']} m")
+    >>> print(f"Title: {shd.title}")
+    >>> print(f"Pressure shape: {shd.pressure.shape}")
+    >>> print(f"Ranges: {shd.receiver_ranges} m")
 
     >>> # Read specific source location
-    >>> shd = read_shd_bin('field3d.shd', xs_km=5.0, ys_km=10.0)
+    >>> shd = read_shd_bin('field3d.shd', xs_m=5000.0, ys_m=10000.0)
     >>> # Pressure at first bearing, first source depth, first rcvr depth
-    >>> p = shd['pressure'][0, 0, 0, :]
+    >>> p = shd.pressure[0, 0, 0, :]
 
     >>> # Read specific frequency for broadband run
     >>> shd = read_shd_bin('broadband.shd', frequency=100.0)
     """
-    require_model_output(filename, 'read_shd_bin')
+    require_model_output(filepath, 'read_shd_bin')
 
-    with open(filename, "rb") as fid:
-        head = fid.read(4)
-        fid.seek(0)
-        endian = detect_endian(head, source=f'read_shd_bin:{filename}')
-        i4 = np.dtype(endian + 'i4')
-        f4 = np.dtype(endian + 'f4')
-        f8 = np.dtype(endian + 'f8')
+    with open(filepath, "rb") as fid:
+        daf = DirectAccessFile(fid, source=f'read_shd_bin:{filepath}')
+        f4, f8 = daf.f4, daf.f8
 
         # .shd is a Fortran DIRECT-access file whose logical record length is
         # counted in 4-byte words, not bytes: misc/RWSHDFile.f90:100 sets
@@ -417,29 +525,18 @@ def read_shd_bin(
         # (misc/SourceReceiverPositions.f90:22-27) — which is why those two
         # alone are read as f4 here. Records 11.. hold the pressure, one row of
         # NRr default-kind COMPLEX (two f4 words apiece) per receiver depth.
-        recl = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        title_bytes = fid.read(80)
-        title = title_bytes.decode("ascii", errors="ignore").strip()
-        fid.seek(4 * recl, 0)
-        plot_type_bytes = fid.read(10)
-        PlotType = plot_type_bytes.decode("ascii", errors="ignore")
-        fid.seek(2 * 4 * recl, 0)
-        Nfreq = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        Ntheta = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        Nsx = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        Nsy = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        Nsz = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        Nrz = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        Nrr = int(np.fromfile(fid, dtype=i4, count=1)[0])
-        freq0 = float(np.fromfile(fid, dtype=f8, count=1)[0])
-        atten = float(np.fromfile(fid, dtype=f8, count=1)[0])
+        recl = daf.record_words
+        header = read_shd_header(daf)
+        title, PlotType = header.title, header.plot_type
+        Nfreq, Ntheta, Nsx, Nsy, Nsz, Nrz, Nrr = header.counts
+        freq0, atten = header.freq0, header.atten
         # Receivers per range record. For PlotType 'irregular ' the receivers
         # are the paired coordinates (Rz(i), Rr(i)) and exactly one row of NRr
         # samples is written per source depth (Bellhop/bellhop.f90:202-206,
         # :323-326), so Nrz indexes the same paired list as Nrr and must not
         # enter the on-disk sample count.
         Nrcvrs_per_range = 1 if PlotType.strip() == "irregular" else Nrz
-        file_size = Path(filename).stat().st_size
+        file_size = daf.file_size
         # ...but only 2-D BELLHOP strides an irregular grid that way.
         # BELLHOP3D shares ReadEnvironmentBell, so it writes the same
         # ``'irregular '`` PlotType, sets ``NRz_per_range = 1``
@@ -458,81 +555,72 @@ def read_shd_bin(
                 Nrcvrs_per_range = Nrz
         # Record 9 holds Nrz REAL*4 receiver depths (misc/RWSHDFile.f90:113),
         # so that count alone is bounded by file_size // 4.
-        _bound_counts(filename, file_size, 4, Nrz=Nrz)
+        _bound_counts(filepath, file_size, 4, Nrz=Nrz)
         # The pressure cube is sized straight off the remaining header words;
         # one complex sample occupies 8 bytes on disk, so no count and no
         # product of counts can exceed file_size // 8.
-        _bound_counts(filename, file_size, 8,
+        _bound_counts(filepath, file_size, 8,
                       Nfreq=Nfreq, Ntheta=Ntheta, Nsx=Nsx, Nsy=Nsy,
                       Nsz=Nsz, Nrz_per_range=Nrcvrs_per_range, Nrr=Nrr)
-        fid.seek(3 * 4 * recl, 0)
-        freqVec = np.fromfile(fid, dtype=f8, count=Nfreq)
-        fid.seek(4 * 4 * recl, 0)
-        theta = np.fromfile(fid, dtype=f8, count=Ntheta)
+        freqVec = daf.vector(3, f8, Nfreq)
+        theta = daf.vector(4, f8, Ntheta)
         if PlotType[:2] != "TL":
-            fid.seek(5 * 4 * recl, 0)
-            s_x = np.fromfile(fid, dtype=f8, count=Nsx)
-            fid.seek(6 * 4 * recl, 0)
-            s_y = np.fromfile(fid, dtype=f8, count=Nsy)
+            s_x = daf.vector(5, f8, Nsx)
+            s_y = daf.vector(6, f8, Nsy)
         else:
             # Compressed FIELD3D 'TL' layout: records 6 and 7 carry only the
             # first and last source coordinate (misc/RWSHDFile.f90:126-127),
             # the grid between them being uniform.
-            fid.seek(5 * 4 * recl, 0)
-            s_x_lim = np.fromfile(fid, dtype=f8, count=2)
+            s_x_lim = daf.vector(5, f8, 2)
             s_x = np.linspace(s_x_lim[0], s_x_lim[1], Nsx)
-            fid.seek(6 * 4 * recl, 0)
-            s_y_lim = np.fromfile(fid, dtype=f8, count=2)
+            s_y_lim = daf.vector(6, f8, 2)
             s_y = np.linspace(s_y_lim[0], s_y_lim[1], Nsy)
-        fid.seek(7 * 4 * recl, 0)
-        s_z = np.fromfile(fid, dtype=f4, count=Nsz)
-        fid.seek(8 * 4 * recl, 0)
-        r_z = np.fromfile(fid, dtype=f4, count=Nrz)
-        fid.seek(9 * 4 * recl, 0)
-        r_r = np.fromfile(fid, dtype=f8, count=Nrr)
+        s_z = daf.vector(7, f4, Nsz)
+        r_z = daf.vector(8, f4, Nrz)
+        r_r = daf.vector(9, f8, Nrr)
         # Every (bearing, source depth, receiver depth) of one slab is one
         # record of the gap-free run _read_shd_pressure_rows walks.
         rows_per_slab = Ntheta * Nsz * Nrcvrs_per_range
-        # Select ONE frequency slice. The returned 'pressure' cube is always
-        # single-frequency (the slice 'pressure_freq'); a broadband caller must
-        # pass frequency= per frequency or iterate freqVec, never treat 'pressure' as
-        # a multi-frequency cube. NB: only the standard 2D path (xs_km is None)
+        # Select ONE frequency slice. The returned pressure cube is always
+        # single-frequency (the slice pressure_frequency); a broadband caller
+        # must pass frequency= per frequency, never treat the pressure as a
+        # multi-frequency cube. NB: only the standard 2D path (xs_m is None)
         # carries a frequency axis in the record stream (KrakenField/field.f90
         # stacks frequency
-        # outermost). The 3D / irregular multi-source path (xs_km given) is written
+        # outermost). The 3D / irregular multi-source path (xs_m given) is written
         # one frequency per file (bellhop3D.f90: iRec has no frequency stride),
         # so there is no frequency to select there.
         ifreq = 0
         if frequency is not None:
             ifreq = int(np.argmin(np.abs(freqVec - frequency)))
-        if xs_km is None:
+        if xs_m is None:
             if Nsx > 1 or Nsy > 1:
                 warnings.warn(
                     f"read_shd_bin: file has Nsx={Nsx}, Nsy={Nsy} source "
-                    "positions but no xs_km=/ys_km= selector was given; "
-                    "returning the (0, 0) slot only. Pass xs_km=, ys_km= "
+                    "positions but no xs_m=/ys_m= selector was given; "
+                    "returning the (0, 0) slot only. Pass xs_m=, ys_m= "
                     "to choose another.",
-                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                    FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
             # Records after the 10 header ones run frequency-major, then
             # bearing, then source depth, then receiver depth — the nesting the
             # writers step through one record at a time: KrakenField/field.f90
             # resets iRec to 10 on the first frequency (:179) and bumps it once
             # per (source depth, receiver depth) inside its frequency loop
-            # (:215), and Bellhop/bellhop.f90:323-326 lands on the same index
+            # (:227), and Bellhop/bellhop.f90:323-326 lands on the same index
             # via ``IRec = 10 + NRz_per_range * ( is - 1 )``. The whole
             # frequency slab is therefore one run of ``rows_per_slab``
             # consecutive records starting at the 0-based index below.
             pressure = _read_shd_pressure_rows(
-                fid, filename, 10 + ifreq * rows_per_slab, rows_per_slab,
+                fid, filepath, 10 + ifreq * rows_per_slab, rows_per_slab,
                 recl, Nrr, f4,
             ).reshape(Ntheta, Nsz, Nrcvrs_per_range, Nrr)
             freq_label = float(freqVec[ifreq]) if len(freqVec) else None
 
         else:
-            if ys_km is None:
+            if ys_m is None:
                 raise ConfigurationError(
-                    "ys_km must be provided if xs_km is specified")
+                    "ys_m must be provided if xs_m is specified.")
             # 3D / irregular multi-source files are single-frequency (no frequency
             # stride in the record index), so frequency= cannot select a slice here.
             if frequency is not None and len(freqVec) > 1:
@@ -540,21 +628,21 @@ def read_shd_bin(
                     "read_shd_bin: frequency selection (frequency=) is not supported "
                     "for multi-source-position (3D/irregular) shade files, which "
                     "carry a single frequency; returning freqVec[0].",
-                    UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                    FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
                 )
             # Sx/Sy are metres on disk: ReadSxSy reads them as 'km' and
             # ReadVector scales by 1000 before WriteHeader runs
             # (misc/SourceReceiverPositions.f90:87-88, :277).
-            x_diff = np.abs(s_x - km_to_m(xs_km))
+            x_diff = np.abs(s_x - float(xs_m))
             idxX = np.argmin(x_diff)
-            y_diff = np.abs(s_y - km_to_m(ys_km))
+            y_diff = np.abs(s_y - float(ys_m))
             idxY = np.argmin(y_diff)
 
             # Source x/y replace frequency as the outer strides here:
             # Bellhop/bellhop3D.f90:407-410 builds exactly this index, so the
             # slab of one source position is again one consecutive run.
             pressure = _read_shd_pressure_rows(
-                fid, filename,
+                fid, filepath,
                 10 + (int(idxX) * Nsy + int(idxY)) * rows_per_slab,
                 rows_per_slab, recl, Nrr, f4,
             ).reshape(Ntheta, Nsz, Nrcvrs_per_range, Nrr)
@@ -562,28 +650,23 @@ def read_shd_bin(
 
     # AT engines zero-initialise the pressure grid and never touch cells no
     # energy reached (Bellhop: the r=0 column and ray shadow zones; an empty
-    # KRAKEN modal sum below cutoff), so an exact complex zero on disk means
-    # "no data", not a field value — a computed field is never exactly 0 in
-    # float. Surface those cells as NaN, uacpy's no-data convention (RAM uses
-    # the same for absorbing-layer / outside-PE-grid cells), so TL reductions
-    # and metrics exclude them via np.isfinite instead of reading a huge
-    # pressure-floor dB level as real.
+    # KRAKEN modal sum below cutoff), so an exact complex zero on disk is
+    # read as "not written". Those cells become NaN, uacpy's no-data
+    # convention (RAM uses the same for absorbing-layer / outside-PE-grid
+    # cells), so TL reductions and metrics exclude them via np.isfinite
+    # instead of reading a huge pressure-floor dB level as real. One written
+    # value is also exactly 0: a receiver ON a pressure-release boundary,
+    # where Scooter's fields.exe writes 0+0j (KRAKEN's modal sum gives
+    # ~1e-16 there); such a row reads as NaN too.
     pressure[pressure == 0] = np.nan
 
-    return {
-        "title": title,
-        "PlotType": PlotType,
-        "freqVec": freqVec,
-        "freq0": freq0,
-        "atten": atten,
-        "Pos": {
-            "theta": theta,
-            "s": {"x": s_x, "y": s_y, "z": s_z},
-            "r": {"z": r_z, "r": r_r},
-        },
-        "pressure": pressure,
-        "pressure_freq": freq_label,
-    }
+    return ShdFile(
+        title=title, plot_type=PlotType, frequencies=freqVec,
+        source_frequency=freq0, stabilizing_attenuation=atten,
+        bearings=theta, source_x=s_x, source_y=s_y, source_depths=s_z,
+        receiver_depths=r_z, receiver_ranges=r_r, pressure=pressure,
+        pressure_frequency=freq_label,
+    )
 
 
 #: ``AddArr``'s bracketing-pair tolerance (``Bellhop/ArrMod.f90:8``):
@@ -594,7 +677,7 @@ _ADDARR_PHASE_TOL = 0.05
 
 
 @typed_format_error
-def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
+def read_shd_asc(filepath: Union[str, Path]) -> ShdFile:
     """
     Read an ASCII shade file — the text sibling of the binary ``.shd``
     :func:`read_shd_bin` parses.
@@ -606,20 +689,13 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     Returns
     -------
-    shd_data : dict
-        The same keys :func:`read_shd_bin` returns, so a caller can switch
-        between the two by extension:
-
-        - ``'title'`` : str — run title (line 1, verbatim).
-        - ``'PlotType'`` : str — plot type (line 2, verbatim).
-        - ``'freqVec'`` : ndarray — frequencies in Hz, shape ``(Nfreq,)``.
-        - ``'freq0'`` : float — reference frequency in Hz.
-        - ``'atten'`` : float — stabilising attenuation in dB/wavelength.
-        - ``'Pos'`` : dict — ``{'theta': (Ntheta,) degrees,
-          's': {'z': (Nsd,) m}, 'r': {'z': (Nrd,) m, 'r': (Nrr,) m}}``.
-        - ``'pressure'`` : complex ndarray, shape ``(Ntheta, Nsd, Nrd,
-          Nrr)`` — the same axis order as ``read_shd_bin``'s cube, which is
-          ``(1, 1, Nrd, Nrr)`` here (see Raises).
+    shd : ShdFile
+        The record :func:`read_shd_bin` returns, so a caller can switch
+        between the two by extension: ``title`` and ``plot_type`` are lines
+        1 and 2 verbatim; ``source_x`` and ``source_y`` are ``None`` (the
+        format carries no source x/y); ``pressure`` has the binary cube's
+        axis order, ``(1, 1, Nrd, Nrr)`` here (see Raises), and
+        ``pressure_frequency`` is the file's one frequency.
 
     Raises
     ------
@@ -732,15 +808,13 @@ def read_shd_asc(filepath: Union[str, Path]) -> Dict[str, Any]:
     block = block.reshape(n_rd, n_rr, 2)
     pressure = (block[:, :, 0] + 1j * block[:, :, 1])[None, None, :, :]
 
-    return {
-        "title": title,
-        "PlotType": plot_type,
-        "freqVec": freq_vec,
-        "freq0": freq0,
-        "atten": atten,
-        "Pos": {"theta": theta, "s": {"z": s_z}, "r": {"z": r_z, "r": r_r}},
-        "pressure": pressure,
-    }
+    return ShdFile(
+        title=title, plot_type=plot_type, frequencies=freq_vec,
+        source_frequency=freq0, stabilizing_attenuation=atten,
+        bearings=theta, source_x=None, source_y=None, source_depths=s_z,
+        receiver_depths=r_z, receiver_ranges=r_r, pressure=pressure,
+        pressure_frequency=float(freq_vec[0]),
+    )
 
 
 def _merge_bracketing_pairs(omega, amps, phases, delays_r, delays_i,
@@ -755,7 +829,7 @@ def _merge_bracketing_pairs(omega, amps, phases, delays_r, delays_i,
     records, making the read result backend-invariant with sequential
     Fortran as the reference.
 
-    Records are visited in ``(src_angle, delay)`` order — sequential
+    Records are visited in ``(source_angle, delay)`` order — sequential
     Bellhop traces rays in launch-angle order, so that is the order
     ``AddArr`` received them in — and each record is tested against the
     **last kept** record under :data:`_ADDARR_PHASE_TOL`. A merge adds the
@@ -800,6 +874,58 @@ def _merge_bracketing_pairs(omega, amps, phases, delays_r, delays_i,
             merged[:, 6].astype('int32'), merged[:, 7].astype('int32'))
 
 
+#: The per-arrival columns of a 2-D ASCII ``.arr`` record, in the order of
+#: the single WRITE at ``Bellhop/ArrMod.f90:119-126`` (A, Phase,
+#: REAL(delay), AIMAG(delay), SrcDeclAngle, RcvrDeclAngle, NTopBnc,
+#: NBotBnc), with the dtype each column is kept in.
+_ARR_COLUMNS = (
+    ('amplitudes', 'float64'),
+    ('phases', 'float64'),
+    ('delays', 'float64'),
+    ('delays_imag', 'float64'),
+    ('source_angles', 'float64'),
+    ('receiver_angles', 'float64'),
+    ('n_top_bounces', 'int32'),
+    ('n_bot_bounces', 'int32'),
+)
+
+
+def _arrival_cell(values, narr: int, *, merge: bool, omega: float) -> dict:
+    """One receiver's arrivals from its ``narr`` records of eight values.
+
+    The Phase column is degrees (``Bellhop/ArrMod.f90:120`` writes
+    ``SNGL(RadDeg) * Phase``); every consumer wants ``exp(1j * phase)``, so
+    the unit is converted here, once. The bounce counts are truncated to
+    integers. ``merge`` applies the engine's bracketing-pair merge and sorts
+    the cell on a total key (see :func:`read_arr_file`).
+    """
+    # A count below one is an empty cell, as the engine writes none.
+    rows = np.array(values, dtype=float).reshape(max(narr, 0),
+                                                 len(_ARR_COLUMNS))
+    cell = {}
+    for j, (name, dtype) in enumerate(_ARR_COLUMNS):
+        column = rows[:, j]
+        cell[name] = (np.array([int(v) for v in column], dtype=dtype)
+                      if dtype == 'int32' else np.array(column))
+    cell['phases'] = np.deg2rad(cell['phases'])
+    if merge and narr > 0:
+        merged = _merge_bracketing_pairs(
+            omega, *(cell[name] for name, _dtype in _ARR_COLUMNS))
+        # File record order is a thread/GPU completion permutation on
+        # parallel backends; this total key yields the same Arrivals for any
+        # listing of the same records. (delay, amplitude, phase) alone had
+        # zero triple ties on real fortran and cuda sets; the angle and
+        # bounce suffixes make the key total against exact duplicates.
+        (amps, phases, delays_r, _delays_i, src_angs, rcv_angs, n_tops,
+         n_bots) = merged
+        order = np.lexsort((n_bots, n_tops, rcv_angs, src_angs, phases, amps,
+                            delays_r))
+        cell = {name: column[order]
+                for (name, _dtype), column in zip(_ARR_COLUMNS, merged)}
+    cell['n_arrivals'] = int(len(cell['amplitudes']))
+    return cell
+
+
 @typed_format_error
 def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
                   merge: bool = False):
@@ -831,8 +957,8 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
         so re-running it on the file tests aggregate against aggregate and
         merges neighbours the engine refused to.
         ``True``: apply that merge to each receiver cell, then sort its
-        arrivals on the total key ``(delay, amplitude, phase, src_angle,
-        rcv_angle, n_top_bounces, n_bot_bounces)``. Two records merge iff
+        arrivals on the total key ``(delay, amplitude, phase, source_angle,
+        receiver_angle, n_top_bounces, n_bot_bounces)``. Two records merge iff
         ``omega·|Δdelay| < 0.05`` (complex delay) and ``|Δphase| < 0.05``
         rad, with ``omega = 2π·freq`` from the file header
         (``ArrMod.f90:8`` ``PhaseTol = 0.05``; amplitudes add, delay and
@@ -874,7 +1000,7 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
           carries volume-attenuation loss so that
           ``exp(ω · delays_imag) = exp(-α·r)`` reproduces the standard
           Nepers attenuation when summed by ``delayandsum``.
-        - ``src_angles``, ``rcv_angles`` : ray angles in **degrees**,
+        - ``source_angles``, ``receiver_angles`` : ray angles in **degrees**,
           measured from the horizontal (positive downward).
         - ``n_top_bounces``, ``n_bot_bounces`` : integer bounce counts.
 
@@ -992,111 +1118,15 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
             rd_list = []
             for irr in range(nrr):
                 narr = _next_int(t_iter)
-
-                rcv_arrivals = {
-                    "amplitudes": np.array([], dtype='float64'),
-                    "phases": np.array([], dtype='float64'),
-                    "delays": np.array([], dtype='float64'),
-                    "delays_imag": np.array([], dtype='float64'),
-                    "src_angles": np.array([], dtype='float64'),
-                    "rcv_angles": np.array([], dtype='float64'),
-                    "n_top_bounces": np.array([], dtype='int32'),
-                    "n_bot_bounces": np.array([], dtype='int32'),
-                    "n_arrivals": 0,
-                }
-
-                if narr > 0:
-                    amps = []
-                    phases = []
-                    delays_r = []
-                    delays_i = []
-                    src_angs = []
-                    rcv_angs = []
-                    n_tops = []
-                    n_bots = []
-
-                    # One record per arrival, in the column order of the single
-                    # WRITE at Bellhop/ArrMod.f90:119-126: A, Phase,
-                    # REAL(delay), AIMAG(delay), SrcDeclAngle, RcvrDeclAngle,
-                    # NTopBnc, NBotBnc.
-                    for ia in range(narr):
-                        values = _next_floats(t_iter, 8)
-
-                        amps.append(values[0])
-                        phases.append(values[1])
-                        delays_r.append(values[2])
-                        delays_i.append(values[3])
-                        src_angs.append(values[4])
-                        rcv_angs.append(values[5])
-                        n_tops.append(int(values[6]))
-                        n_bots.append(int(values[7]))
-
-                    amps = np.array(amps)
-                    # The Phase column is degrees (Bellhop/ArrMod.f90:120
-                    # writes ``SNGL(RadDeg) * Phase``); every consumer wants
-                    # exp(1j * phase), so the unit is converted here, once.
-                    phases = np.deg2rad(np.array(phases))
-                    delays_r = np.array(delays_r)
-                    delays_i = np.array(delays_i)
-                    src_angs = np.array(src_angs)
-                    rcv_angs = np.array(rcv_angs)
-                    n_tops = np.array(n_tops, dtype='int32')
-                    n_bots = np.array(n_bots, dtype='int32')
-
-                    if merge:
-                        (amps, phases, delays_r, delays_i, src_angs,
-                         rcv_angs, n_tops, n_bots) = _merge_bracketing_pairs(
-                            omega, amps, phases, delays_r, delays_i,
-                            src_angs, rcv_angs, n_tops, n_bots)
-                        # File record order is a thread/GPU completion
-                        # permutation on parallel backends; this total key
-                        # yields the same Arrivals for any listing of the
-                        # same records. (delay, amplitude, phase) alone had
-                        # zero triple ties on real fortran and cuda sets;
-                        # the angle and bounce suffixes make the key total
-                        # against exact duplicates.
-                        order = np.lexsort((n_bots, n_tops, rcv_angs,
-                                            src_angs, phases, amps,
-                                            delays_r))
-                        amps = amps[order]
-                        phases = phases[order]
-                        delays_r = delays_r[order]
-                        delays_i = delays_i[order]
-                        src_angs = src_angs[order]
-                        rcv_angs = rcv_angs[order]
-                        n_tops = n_tops[order]
-                        n_bots = n_bots[order]
-
-                    rcv_arrivals = {
-                        "amplitudes": amps,
-                        "phases": phases,
-                        "delays": delays_r,
-                        "delays_imag": delays_i,
-                        "src_angles": src_angs,
-                        "rcv_angles": rcv_angs,
-                        "n_top_bounces": n_tops,
-                        "n_bot_bounces": n_bots,
-                        "n_arrivals": int(len(amps)),
-                    }
-
+                rcv_arrivals = _arrival_cell(
+                    _next_floats(t_iter, 8 * narr), narr, merge=merge,
+                    omega=omega)
                 rd_list.append(rcv_arrivals)
             sd_list.append(rd_list)
         arrivals_by_receiver.append(sd_list)
 
-    if nsd == 1:
-        return Arrivals(
-            by_receiver=arrivals_by_receiver,
-            receiver_depths=rz,
-            receiver_ranges=rr,
-            model='', backend='',
-            source_depths=sz,
-            frequencies=float(freq),
-            metadata={},
-        )
-    # Multi-source: one :class:`Arrivals` per source-depth slab,
-    # bundled into a :class:`ResultStack`. Each slab carries the same
-    # receiver grid and frequency; only the source-depth dimension is
-    # split.
+    # One :class:`Arrivals` per source-depth slab, each with the same
+    # receiver grid and frequency; a single source depth is that one slab.
     slabs = [
         Arrivals(
             by_receiver=[arrivals_by_receiver[isd]],
@@ -1109,9 +1139,7 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
         )
         for isd in range(nsd)
     ]
-    return ResultStack(
-        slabs=slabs, coordinate=sz, coordinate_name='source_depth',
-    )
+    return ResultStack.from_slabs(slabs, sz, coordinate_name='source_depth')
 
 
 @typed_format_error
@@ -1147,8 +1175,9 @@ def read_ray_file(filepath: Union[str, Path]):
     n_alpha = 0
 
     # Seven header records, one per line, written by
-    # Bellhop/ReadEnvironmentBell.f90:557-568.
-    with open(filepath, "r") as f:
+    # Bellhop/ReadEnvironmentBell.f90:557-568. The title record holds bytes
+    # the engine cut to width, so undecodable bytes are replaced.
+    with open(filepath, "r", encoding='utf-8', errors='replace') as f:
         f.readline()                  # title
         f.readline()                  # frequency
         # Line 3: NSx NSy NSz — the trailing token is the source-
@@ -1190,7 +1219,10 @@ def read_ray_file(filepath: Union[str, Path]):
                 break
             if not angle_line.strip():
                 continue
-            alpha = float(angle_line.strip())
+            # fortran_float / expand_repeat_counts, as every other AT text
+            # reader: ifort writes list-directed repeats (``2*0.0``) and
+            # drops the ``E`` of a three-digit exponent.
+            alpha = fortran_float(angle_line.split()[0])
             counts_line = f.readline()
             if not counts_line or not counts_line.split():
                 # A ray block is the angle record, the counts record, then
@@ -1221,7 +1253,7 @@ def read_ray_file(filepath: Union[str, Path]):
 
             for _ in range(n_points):
                 line = f.readline().strip()
-                parts = line.split()
+                parts = list(expand_repeat_counts(line.split()))
                 if len(parts) < 2:
                     raise FileFormatError(
                         f"read_ray_file: {filepath} declares {n_points} "
@@ -1235,14 +1267,14 @@ def read_ray_file(filepath: Union[str, Path]):
                 # ray2D(is)%x directly in meters (the MATLAB
                 # plotray.m only divides by 1000 when the user
                 # requests km output). No unit conversion here.
-                ray_r.append(float(parts[0]))
-                ray_z.append(float(parts[1]))
+                ray_r.append(fortran_float(parts[0]))
+                ray_z.append(fortran_float(parts[1]))
 
             rays.append(
                 {
                     "r": np.array(ray_r),
                     "z": np.array(ray_z),
-                    "alpha": alpha,
+                    "launch_angle": alpha,
                     "n_top_bounces": n_top_bounces,
                     "n_bot_bounces": n_bot_bounces,
                 }
@@ -1267,14 +1299,11 @@ def read_ray_file(filepath: Union[str, Path]):
     # The .ray file carries no source depths, only their order, so the
     # coordinate is the index. The Bellhop wrapper substitutes the real
     # depths (and renames the coordinate) once it knows them.
-    return ResultStack(
-        slabs=slabs,
-        coordinate=np.arange(n_sz, dtype=float),
-        coordinate_name='source_index',
-    )
+    return ResultStack.from_slabs(slabs, np.arange(n_sz, dtype=float),
+                                  coordinate_name='source_index')
 
 
-def read_prt(prt_path: Union[str, Path], *, tail_bytes: Optional[int] = None) -> Optional[str]:
+def read_prt(filepath: Union[str, Path], *, tail_bytes: Optional[int] = None) -> Optional[str]:
     """Read an Acoustics-Toolbox ``.prt`` log.
 
     AT binaries (Kraken/Scooter/Sparc/Bounce) dump fatal-error detail and
@@ -1283,13 +1312,13 @@ def read_prt(prt_path: Union[str, Path], *, tail_bytes: Optional[int] = None) ->
 
     Parameters
     ----------
-    prt_path : str or Path
+    filepath : str or Path
         Path to the ``.prt`` file.
     tail_bytes : int, optional
         When given, return only the trailing ``tail_bytes`` of the file —
         used to append a short failure excerpt to error messages.
     """
-    path = Path(prt_path)
+    path = Path(filepath)
     try:
         # Inside the try because ``Path.exists()`` re-raises anything but
         # ENOENT/ENOTDIR/EBADF/ELOOP — an unreadable directory gives EACCES.
@@ -1308,58 +1337,65 @@ def read_prt(prt_path: Union[str, Path], *, tail_bytes: Optional[int] = None) ->
         return None
 
 
+@dataclass(frozen=True, eq=False)
+class SspTable(ExportRecord):
+    """A Bellhop range-dependent ``.ssp`` as :func:`read_ssp_2d` reads it.
+
+    The file carries no depths — they are the env deck's SSP block — so
+    :meth:`to_ssp` takes them.
+
+    Attributes
+    ----------
+    path : str
+        The file read.
+    ranges : ndarray
+        The profiles' ranges (m; km on disk, ``Bellhop/sspMod.f90:417,422``),
+        as the file holds them, negative ranges included.
+    sound_speed : ndarray
+        Shape ``(n_depth, n_profiles)`` (m/s): ``sound_speed[i, j]`` at the
+        deck's depth ``i`` in profile ``j``.
+    """
+
+    path: str
+    ranges: np.ndarray
+    sound_speed: np.ndarray
+
+    _REPR_UNITS = {'ranges': 'm', 'sound_speed': 'm/s'}
+
+    _ARRAY_FIELDS = ('ranges', 'sound_speed')
+
+    def to_ssp(self, depths) -> SoundSpeedProfile:
+        """The range-dependent :class:`~uacpy.core.ssp.SoundSpeedProfile` on
+        ``depths`` (m), one per row of :attr:`sound_speed`.
+
+        Raises
+        ------
+        ConfigurationError
+            ``depths`` does not match the rows, or the table holds what the
+            carrier refuses (a negative or non-increasing range) — naming
+            the file.
+        """
+        try:
+            return SoundSpeedProfile(depths=np.asarray(depths, dtype=float),
+                                     sound_speed=np.array(self.sound_speed),
+                                     ranges=np.array(self.ranges))
+        except ConfigurationError as exc:
+            raise ConfigurationError(
+                f"{self.path}: {exc.message.rstrip('.')}.",
+                remediation="Pass one depth per row of the table, in "
+                            "increasing order; a range-dependent "
+                            "SoundSpeedProfile needs ranges >= 0, strictly "
+                            "increasing, so shift or trim a table that "
+                            "starts before 0.",
+            ) from exc
+
+
 @typed_format_error
-def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
-    """
-    Read 2D sound speed profile file used by BELLHOP.
-
-    Reads range-dependent SSP data where sound speed varies with both
-    depth and range. Used for 2D propagation modeling.
-
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to 2D SSP file (typically .ssp extension).
-
-    Returns
-    -------
-    ssp_data : dict
-        Dictionary containing:
-        - 'n_prof' : int - Number of profiles (ranges)
-        - 'r_prof' : ndarray - Range values in metres, shape (n_prof,).
-          Stored on disk in km (``Bellhop/sspMod.f90:417,422``) and converted here.
-        - 'c_mat' : ndarray - Sound speed matrix in m/s, shape (n_depth, n_prof)
-        - 'n_depth' : int - Number of depth points per profile
-
-    Notes
-    -----
-    - File format:
-        Record 1: NProf (number of range profiles)
-        Record 2: r1 r2 ... rNProf (ranges in km)
-        Then one record of NProf sound speeds per depth (NSSP records).
-        Each record is a whole-vector list-directed READ
-        (``Bellhop/sspMod.f90:417,428``), so its values may wrap across
-        any number of lines; this parser accepts the same.
-
-    - Sound speed matrix c_mat[i, j] gives speed at:
-        - depth index i
-        - range index j (profile j)
-
-    References
-    ----------
-    Based on BELLHOP/readssp2d.m
-
-    Examples
-    --------
-    >>> ssp = read_ssp_2d('range_dependent.ssp')
-    >>> print(f"Number of profiles: {ssp['n_prof']}")
-    >>> print(f"Ranges: {ssp['r_prof']} m")
-    >>> print(f"SSP matrix shape: {ssp['c_mat'].shape}")
-    >>> # Sound speed at depth index 10, range index 5
-    >>> c = ssp['c_mat'][10, 5]
-    """
+def _parse_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
+    """The ``.ssp`` as ``{'n_prof', 'r_prof' (m), 'c_mat' (n_depth,
+    n_prof), 'n_depth'}``, what :func:`read_env` reads."""
     filepath = Path(filepath)
-    require_model_output(filepath, 'read_ssp_2d')
+    require_user_input(filepath, 'read_ssp_2d')
     # Canonical AT/Bellhop layout (Bellhop/sspMod.f90:407,417,428):
     #   READ 1 : NProf (integer)
     #   READ 2 : NProf range values (one whole-vector list-directed READ)
@@ -1390,8 +1426,98 @@ def read_ssp_2d(filepath: Union[str, Path]) -> Dict[str, Any]:
             "n_depth": n_depth}
 
 
+def read_ssp_2d(filepath: Union[str, Path]) -> SspTable:
+    """
+    Read 2D sound speed profile file used by BELLHOP.
+
+    Reads range-dependent SSP data where sound speed varies with both
+    depth and range. Used for 2D propagation modeling.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Path to 2D SSP file (typically .ssp extension).
+
+    Returns
+    -------
+    ssp : SspTable
+        The profiles' ``ranges`` in metres (km on disk,
+        ``Bellhop/sspMod.f90:417,422``) and the ``sound_speed`` matrix in
+        m/s, shape ``(n_depth, n_profiles)``; :meth:`SspTable.to_ssp` builds
+        the carrier on the deck's depths.
+
+    Notes
+    -----
+    - File format:
+        Record 1: NProf (number of range profiles)
+        Record 2: r1 r2 ... rNProf (ranges in km)
+        Then one record of NProf sound speeds per depth (NSSP records).
+        Each record is a whole-vector list-directed READ
+        (``Bellhop/sspMod.f90:417,428``), so its values may wrap across
+        any number of lines; this parser accepts the same.
+
+    - ``sound_speed[i, j]`` is the speed at depth index i in profile j.
+
+    References
+    ----------
+    Based on BELLHOP/readssp2d.m
+
+    Examples
+    --------
+    >>> ssp = read_ssp_2d('range_dependent.ssp')
+    >>> print(f"Ranges: {ssp.ranges} m")
+    >>> print(f"SSP matrix shape: {ssp.sound_speed.shape}")
+    >>> # Sound speed at depth index 10, range index 5
+    >>> c = ssp.sound_speed[10, 5]
+    """
+    parsed = _parse_ssp_2d(filepath)
+    return SspTable(path=str(filepath), ranges=parsed['r_prof'],
+                    sound_speed=parsed['c_mat'])
+
+
+@dataclass(frozen=True, eq=False)
+class Ssp3dFile(ExportRecord):
+    """A BELLHOP3D hexahedral sound-speed file as :func:`read_ssp_3d` reads
+    it (``Bellhop/sspMod.f90:570-612``).
+
+    Attributes
+    ----------
+    n_x, n_y, n_z : int
+        The grid sizes the file declares.
+    x, y : ndarray
+        The horizontal axes in metres (km on disk; the engine scales them
+        by 1000, ``sspMod.f90:621-622``).
+    z : ndarray
+        The depth axis in metres, as the file holds it.
+    sound_speed : ndarray
+        Shape ``(n_z, n_y, n_x)`` (m/s): ``sound_speed[iz, iy, ix]`` is the
+        speed at ``(x[ix], y[iy], z[iz])``.
+    """
+
+    n_x: int
+    n_y: int
+    n_z: int
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
+    sound_speed: np.ndarray
+
+    _REPR_FIELDS = ('x', 'y', 'z', 'sound_speed')
+    _REPR_UNITS = {'x': 'm', 'y': 'm', 'z': 'm', 'sound_speed': 'm/s'}
+
+    _ARRAY_FIELDS = ('x', 'y', 'z', 'sound_speed')
+    _XARRAY_FIELDS = {'sound_speed': 'sound_speed', 'x': 'x', 'y': 'y',
+                      'z': 'z'}
+
+    def _payload(self):
+        return {'sound_speed': (self.sound_speed, ('z', 'y', 'x'), 'm/s')}
+
+    def _coords(self):
+        return {'x': (self.x, 'm'), 'y': (self.y, 'm'), 'z': (self.z, 'm')}
+
+
 @typed_format_error
-def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
+def read_ssp_3d(filepath: Union[str, Path]) -> Ssp3dFile:
     """
     Read the BELLHOP3D hexahedral sound-speed file (``.ssp``) — the 3-D
     sibling of :func:`read_ssp_2d`.
@@ -1411,19 +1537,13 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     Returns
     -------
-    ssp_data : dict
-        - ``'Nx'``, ``'Ny'``, ``'Nz'`` : int — grid sizes.
-        - ``'Segx'`` : ndarray, shape ``(Nx,)`` — x segment coordinates in
-          **metres**. The file holds km and the engine scales by 1000
-          (``Bellhop/sspMod.f90:621``); this reader applies the same
-          conversion, so the axis follows uacpy's metres-unless-suffixed
-          rule.
-        - ``'Segy'`` : ndarray, shape ``(Ny,)`` — same, ``sspMod.f90:622``.
-        - ``'Segz'`` : ndarray, shape ``(Nz,)`` — depths in metres. **Not**
-          converted: the engine scales only x and y.
-        - ``'c_mat'`` : ndarray, shape ``(Nz, Ny, Nx)`` — sound speed in
-          m/s. ``c_mat[iz, iy, ix]`` is the speed at
-          ``(Segx[ix], Segy[iy], Segz[iz])``.
+    ssp : Ssp3dFile
+        ``n_x``, ``n_y``, ``n_z`` (grid sizes); ``x`` and ``y`` in
+        **metres** — the file holds km and the engine scales by 1000
+        (``Bellhop/sspMod.f90:621-622``), and this reader applies the same
+        conversion, so the axes follow uacpy's metres-unless-suffixed rule;
+        ``z`` in metres, **not** converted (the engine scales only x and
+        y); ``sound_speed``, shape ``(n_z, n_y, n_x)`` (m/s).
 
     Raises
     ------
@@ -1443,8 +1563,8 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     4. ``Nz * Ny`` rows of ``Nx`` sound speeds, depth-outermost:
        ``DO iz … DO iy … READ cMat3( :, iy, iz )`` (``:610-612``).
 
-    Every axis needs at least two points — ``sspMod.f90:600-601`` ERROUTs
-    with "user must supply at least two points" otherwise, and
+    Every axis needs at least two points — ``sspMod.f90:600-602`` ERROUTs
+    with "You must have a least two points in x, y, z directions" otherwise, and
     ``misc/FatalError.f90:30`` is ``STOP '<string>'``, so a one-point axis
     ends the run at exit 0 with no field. That is refused here.
 
@@ -1464,17 +1584,17 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
     ...         for row in deck:
     ...             print(row, file=fh)
     ...     ssp = read_ssp_3d(path)
-    >>> ssp['Segx']
+    >>> ssp.x
     array([   0., 1000.])
-    >>> ssp['Segz']
+    >>> ssp.z
     array([  0., 100.])
-    >>> ssp['c_mat'].shape
+    >>> ssp.sound_speed.shape
     (2, 2, 2)
-    >>> float(ssp['c_mat'][1, 0, 1])
+    >>> float(ssp.sound_speed[1, 0, 1])
     1511.0
     """
     filepath = Path(filepath)
-    require_model_output(filepath, 'read_ssp_3d')
+    require_user_input(filepath, 'read_ssp_3d')
 
     with open(filepath, "r") as fid:
         def _axis(label: str) -> Tuple[int, np.ndarray]:
@@ -1506,17 +1626,10 @@ def read_ssp_3d(filepath: Union[str, Path]) -> Dict[str, Any]:
             for iz in range(Nz)
         ])
 
-    return {
-        "Nx": Nx,
-        "Ny": Ny,
-        "Nz": Nz,
-        # x and y are km on disk; z is already metres (sspMod.f90:621-622
-        # scales only the two horizontal axes).
-        "Segx": km_to_m(Segx),
-        "Segy": km_to_m(Segy),
-        "Segz": Segz,
-        "c_mat": c_mat,
-    }
+    # x and y are km on disk; z is already metres (sspMod.f90:621-622
+    # scales only the two horizontal axes).
+    return Ssp3dFile(n_x=Nx, n_y=Ny, n_z=Nz, x=km_to_m(Segx),
+                     y=km_to_m(Segy), z=Segz, sound_speed=c_mat)
 
 
 def _preview(x, fmt='.2f'):
@@ -1527,91 +1640,72 @@ def _preview(x, fmt='.2f'):
     return f"{x[0]:{fmt}} … {x[-1]:{fmt}}"
 
 
-@typed_format_error
-def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any]:
-    """
-    Read field parameters file (.flp) for KRAKEN/FIELD programs.
+@dataclass(frozen=True, eq=False)
+class FlpFile(ExportRecord):
+    """A KRAKEN ``field.exe`` field-parameter deck (``.flp``) as
+    :func:`read_flp` reads it.
 
-    Field parameters files specify how to compute acoustic fields from
-    mode data, including receiver positions, profile ranges, and options.
-
-    Parameters
+    Attributes
     ----------
-    fileroot : str or Path
-        File root name (without .flp extension)
-
-    Returns
-    -------
-    flp_data : dict
-        Dictionary containing:
-        - 'title': str - Title from file
-        - 'opt': str - 4-character field.exe option string. Column
-          semantics per AT ``KrakenField/field.f90:70-99`` /
-          ``KrakenField/ReadModes.f90``:
-
-          * ``opt[0]`` (source type):
-            'R' = cylindrical point source (pressure),
-            'X' = Cartesian line source,
-            'S' = scaled-cylindrical point source.
-          * ``opt[1]`` (profile mode for NProf > 1):
-            'C' = coupled modes, 'A' = adiabatic.
-          * ``opt[2]`` (source beam pattern, doubling as the elastic
-            component selector): ``'*'`` reads a ``.sbp`` file, ``'O'`` or
-            ``' '`` omnidirectional — the only three ``field.exe`` accepts
-            (``KrakenField/field.f90:83-90``). The same character reaches
-            ``ReadModes`` as ``Comp``, which picks one component of the
-            stress-displacement vector in **elastic** media: ``'H'``
-            horizontal displacement, ``'V'`` vertical displacement, ``'T'``
-            tangential stress, ``'N'`` normal stress
-            (``KrakenField/ReadModes.f90:315-324``). Any other letter —
-            ``'P'`` by MATLAB convention — leaves acoustic pressure.
-          * ``opt[3]`` (mode summation):
-            'C' = coherent, 'I' = incoherent.
-        - 'comp': str - Component selector (same as ``opt[2]``).
-        - 'M_limit': int - Maximum number of modes to use
-        - 'N_prof': int - Number of profiles
-        - 'r_prof': ndarray - Profile ranges in meters
-        - 'pos': dict - Position information
-          - 's': dict with 'z' (source depths in m)
-          - 'r': dict with 'z' (receiver depths in m), 'r' (ranges in m),
-                              'ro' (range offsets in m)
-          - 'Nro': int - Number of range offsets
-
-    Notes
-    -----
-    File format (.flp):
-    - Line 1: Title
-    - Line 2: Options (quoted string)
-    - Line 3: MLimit
-    - Line 4+: Profile range vector (using / shorthand)
-    - Receiver ranges
-    - Source and receiver depths
-    - Receiver range offsets (array tilt)
-
-    The .flp file is used by FIELD/FIELDS programs to compute acoustic
-    fields from KRAKEN mode data.
-
-    Translated from OALIB read_flp.m
-
-    Examples
-    --------
-    >>> flp = read_flp('test')
-    >>> print(f"Options: {flp['opt']}")
-    >>> print(f"Receiver depths: {flp['pos']['r']['z']}")
-    >>> print(f"Receiver ranges: {flp['pos']['r']['r']}")
-
-    See Also
-    --------
-    write_fieldflp : Write field parameters file
+    title : str
+        The deck's title.
+    option : str
+        The 4-character option word; column semantics per AT
+        ``KrakenField/field.f90:70-99`` / ``KrakenField/ReadModes.f90``:
+        ``option[0]`` the source type (``'R'`` cylindrical point source,
+        ``'X'`` Cartesian line source, ``'S'`` scaled-cylindrical point
+        source); ``option[1]`` the profile mode for several profiles
+        (``'C'`` coupled, ``'A'`` adiabatic); ``option[2]`` the source beam
+        pattern doubling as the elastic component selector (``'*'`` reads a
+        ``.sbp``, ``'O'`` or ``' '`` omnidirectional — the three
+        ``field.exe`` accepts, ``field.f90:83-90``; ``ReadModes`` reads the
+        same character as ``Comp``: ``'H'``/``'V'`` displacement,
+        ``'T'``/``'N'`` stress in elastic media, ``ReadModes.f90:315-324``);
+        ``option[3]`` the mode summation (``'C'`` coherent, ``'I'``
+        incoherent).
+    component : str
+        ``option[2]``, the component selector.
+    n_modes : int
+        The deck's ``MLimit``, the cap on the modes summed.
+    profile_ranges : ndarray
+        The profiles' ranges (m).
+    source_depths, receiver_depths, receiver_ranges : ndarray
+        In metres.
+    receiver_range_offsets : ndarray
+        The receiver range offsets (m; array tilt), one per receiver depth.
     """
-    fileroot = Path(fileroot)
-    if not fileroot.suffix:
-        filepath = fileroot.with_suffix(".flp")
-    else:
-        filepath = fileroot
-    require_model_output(filepath, 'read_flp')
 
-    with open(filepath, "r") as f:
+    title: str
+    option: str
+    component: str
+    n_modes: int
+    profile_ranges: np.ndarray
+    source_depths: np.ndarray
+    receiver_depths: np.ndarray
+    receiver_ranges: np.ndarray
+    receiver_range_offsets: np.ndarray
+
+    _REPR_FIELDS = ('title', 'option', 'n_modes', 'profile_ranges',
+                    'source_depths', 'receiver_depths', 'receiver_ranges')
+    _REPR_UNITS = {'profile_ranges': 'm', 'source_depths': 'm',
+                   'receiver_depths': 'm', 'receiver_ranges': 'm'}
+
+    _ARRAY_FIELDS = ('profile_ranges', 'source_depths', 'receiver_depths',
+                     'receiver_ranges', 'receiver_range_offsets')
+
+
+@typed_format_error
+def _parse_flp(filepath: Union[str, Path], verbose: Union[bool, str] = False) -> Dict[str, Any]:
+    """The ``.flp`` as the dict ``read_flp.m`` builds (``title``, ``opt``, ``comp``,
+    ``M_limit``, ``N_prof``, ``r_prof``, ``pos``), what :func:`read_env` reads."""
+    filepath = Path(filepath)
+    if not filepath.suffix:
+        filepath = filepath.with_suffix(".flp")
+    require_user_input(filepath, 'read_flp')
+
+    # The title record holds bytes the engine cut to width, so undecodable
+    # bytes are replaced.
+    with open(filepath, "r", encoding='utf-8', errors='replace') as f:
         title = _strip_fortran_quotes(f.readline())
         log_message('oalib_reader', f"Title: {title}", verbose=verbose)
         opt = _strip_fortran_quotes(f.readline())
@@ -1674,7 +1768,7 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
             warnings.warn(
                 "read_flp: receiver range offsets are not zero — "
                 "result includes array-tilt geometry.",
-                UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+                IOWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
     return {
@@ -1692,6 +1786,65 @@ def read_flp(fileroot: Union[str, Path], verbose: bool = False) -> Dict[str, Any
     }
 
 
+def read_flp(filepath: Union[str, Path],
+             verbose: Union[bool, str] = False) -> FlpFile:
+    """
+    Read field parameters file (.flp) for KRAKEN/FIELD programs.
+
+    Field parameters files specify how to compute acoustic fields from
+    mode data, including receiver positions, profile ranges, and options.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        The ``.flp`` file, or its root: ``.flp`` is appended only when the
+        path has no suffix.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``. Default False.
+
+    Returns
+    -------
+    flp : FlpFile
+        The title, the 4-character option word (its columns are documented
+        on :class:`FlpFile`), the mode limit, the profile ranges (m), and
+        the source depths, receiver depths, ranges and range offsets (m).
+
+    Notes
+    -----
+    File format (.flp):
+    - Line 1: Title
+    - Line 2: Options (quoted string)
+    - Line 3: MLimit
+    - Line 4+: Profile range vector (using / shorthand)
+    - Receiver ranges
+    - Source and receiver depths
+    - Receiver range offsets (array tilt)
+
+    The .flp file is used by FIELD/FIELDS programs to compute acoustic
+    fields from KRAKEN mode data.
+
+    Translated from OALIB read_flp.m
+
+    Examples
+    --------
+    >>> flp = read_flp('test')
+    >>> print(f"Options: {flp.option}")
+    >>> print(f"Receiver depths: {flp.receiver_depths}")
+    >>> print(f"Receiver ranges: {flp.receiver_ranges}")
+
+    See Also
+    --------
+    write_fieldflp : Write field parameters file
+    """
+    d = _parse_flp(filepath, verbose=verbose)
+    return FlpFile(title=d['title'], option=d['opt'], component=d['comp'],
+                   n_modes=d['M_limit'], profile_ranges=d['r_prof'],
+                   source_depths=d['pos']['s']['z'],
+                   receiver_depths=d['pos']['r']['z'],
+                   receiver_ranges=d['pos']['r']['r'],
+                   receiver_range_offsets=d['pos']['r']['ro'])
+
+
 def _read_sz_rz(fid) -> Dict[str, np.ndarray]:
     """
     Read source and receiver depths.
@@ -1707,101 +1860,76 @@ def _read_sz_rz(fid) -> Dict[str, np.ndarray]:
     return {"sz": np.sort(sz), "rz": np.sort(rz)}
 
 
-@typed_format_error
-def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
-    """
-    Read the FIELD3D field-parameter deck (``.flp``) — the 3-D sibling of
-    :func:`read_flp`.
+@dataclass(frozen=True, eq=False)
+class Flp3dFile(ExportRecord):
+    """A FIELD3D field-parameter deck (``.flp``) as :func:`read_flp3d`
+    reads it; every axis in metres or degrees.
 
-    **Retained for planned 3-D support — this is not dead code.** No uacpy
-    model runs ``field3d``, so nothing in the 2-D public API reaches this
-    reader; it is the deck parser a future 3-D implementer builds on, and
-    the round-trip partner of
-    :func:`~uacpy.io.oalib_writer.write_field3dflp`.
-
-    Parameters
+    Attributes
     ----------
-    fileroot : str or Path
-        File root, or a path carrying its own suffix. ``.flp`` is appended
-        only when the path has none — the convention :func:`read_flp` and
-        :func:`~uacpy.io.oalib_writer.write_fieldflp` share.
-
-    Returns
-    -------
-    flp3d_data : dict
-        - ``'title'`` : str — the quoted title, unquoted.
-        - ``'opt'`` : str — the option word, unquoted and verbatim.
-        - ``'method'`` : str — option columns 1-3, the evaluator FIELD3D
-          selects on (``field3d.f90:96``): ``'STD'`` adiabatic/standard,
-          ``'PAR'`` parabolic, ``'GBT'`` Gaussian beams.
-        - ``'tesselation_check'`` : bool — option column 4 is ``'T'``
-          (``field3d.f90:210``).
-        - ``'sbp_flag'`` : str — option column 7, the source-beam-pattern
-          flag (``field3d.f90:54``).
-        - ``'M_limit'`` : int — mode-count cap.
-
-        There is deliberately **no** ``'comp'`` key here, unlike
-        :func:`read_flp`: FIELD3D's ``Option`` is ``CHARACTER(LEN=7)`` with
-        no elastic-component column, so column 3 is the third letter of
-        ``'STD'`` and means nothing on its own.
-        - ``'pos'`` : dict — every axis in uacpy units:
-
-          * ``'s'``: ``{'x': (Nsx,) m, 'y': (Nsy,) m, 'z': (Nsz,) m}``
-          * ``'r'``: ``{'z': (Nrz,) m, 'r': (Nrr,) m,
-            'theta': (Ntheta,) degrees}``
-
-        - ``'nodes'`` : dict — ``{'x': (NNodes,) m, 'y': (NNodes,) m,
-          'mode_file': list[str]}``, the triangulation's node table.
-        - ``'elements'`` : int ndarray, shape ``(NElts, 3)`` — the node
-          indices of each triangle, **1-based, exactly as the file holds
-          them** (``field3d.f90:207`` reads them straight into a Fortran
-          array indexed from 1).
-
-    Raises
-    ------
-    ~uacpy.core.exceptions.FileFormatError
-        The file is absent, a declared count is non-positive, or the deck
-        ends inside the node or element table.
-
-    Notes
-    -----
-    Record order, from ``KrakenField/field3d.f90:163-207`` — this is the
-    order the binary reads, and it is **not** the 2-D ``.flp`` order:
-
-    1. title, 2. option word, 3. ``Mlimit``;
-    4. ``ReadVector`` source x in km (``:174``);
-    5. ``ReadVector`` source y in km (``:175``);
-    6. ``ReadSzRz`` — source depths then receiver depths, both in metres
-       (``:176`` -> ``misc/SourceReceiverPositions.f90:107-108``);
-    7. ``ReadRcvrRanges`` — receiver ranges in km (``:177`` -> ``:156``);
-    8. ``ReadRcvrBearings`` — receiver bearings in degrees (``:178`` ->
-       ``:173``);
-    9. ``NNodes``, then one ``x y 'modefile'`` record per node, x/y in km
-       (``:184-196``);
-    10. ``NElts``, then one three-integer record per triangle
-        (``:199-207``).
-
-    Every vector goes through ``ReadVector``, i.e. ``SubTab`` expansion of
-    the ``first last /`` shorthand followed by ``Sort``
-    (``SourceReceiverPositions.f90:224-225``), so the axes returned here are
-    sorted the way the solver computes on them — the same treatment
-    :func:`read_flp` gives the 2-D deck.
-
-    Two behaviours of the Fortran are deliberately **not** mirrored, because
-    they change the data rather than its order, and a reader's job is to
-    report what the deck holds: ``ReadRcvrBearings`` drops the last bearing
-    of a full 360-degree sweep (``SourceReceiverPositions.f90:176-180``),
-    and ``ReadSzRz`` clamps depths into ``[0, 1e6]`` (``:120-139``).
-
-    Examples
-    --------
-    See :func:`~uacpy.io.oalib_writer.write_field3dflp`, whose example
-    writes a deck this reads back.
+    title, option : str
+        The title and the option word, unquoted and verbatim.
+    method : str
+        Option columns 1-3, the evaluator FIELD3D selects on
+        (``field3d.f90:96``): ``'STD'``, ``'PAR'`` or ``'GBT'``.
+    tesselation_check : bool
+        Option column 4 is ``'T'`` (``field3d.f90:210``).
+    sbp_flag : str
+        Option column 7, the source-beam-pattern flag (``field3d.f90:54``).
+    n_modes : int
+        The mode-count cap. There is no ``component``: FIELD3D's option has
+        no elastic-component column.
+    source_x, source_y, source_depths : ndarray
+        The source positions (m).
+    receiver_depths, receiver_ranges : ndarray
+        In metres.
+    bearings : ndarray
+        Receiver bearings (degrees).
+    node_x, node_y : ndarray
+        The triangulation's node coordinates (m).
+    node_mode_files : tuple of str
+        Each node's mode file.
+    elements : ndarray
+        Integer, shape ``(n_elements, 3)``: the node indices of each
+        triangle, **1-based, exactly as the file holds them**
+        (``field3d.f90:207``).
     """
-    fileroot = Path(fileroot)
-    filepath = (fileroot if fileroot.suffix
-                else fileroot.with_suffix(".flp"))
-    require_model_output(filepath, 'read_flp3d')
+
+    title: str
+    option: str
+    method: str
+    tesselation_check: bool
+    sbp_flag: str
+    n_modes: int
+    source_x: np.ndarray
+    source_y: np.ndarray
+    source_depths: np.ndarray
+    receiver_depths: np.ndarray
+    receiver_ranges: np.ndarray
+    bearings: np.ndarray
+    node_x: np.ndarray
+    node_y: np.ndarray
+    node_mode_files: Tuple[str, ...]
+    elements: np.ndarray
+
+    _REPR_FIELDS = ('title', 'option', 'n_modes', 'source_depths',
+                    'receiver_depths', 'receiver_ranges', 'bearings')
+    _REPR_UNITS = {'source_depths': 'm', 'receiver_depths': 'm',
+                   'receiver_ranges': 'm', 'bearings': '°'}
+
+    _ARRAY_FIELDS = ('source_x', 'source_y', 'source_depths',
+                     'receiver_depths', 'receiver_ranges', 'bearings',
+                     'node_x', 'node_y', 'elements')
+
+
+@typed_format_error
+def _parse_flp3d(filepath: Union[str, Path]) -> Dict[str, Any]:
+    """The FIELD3D ``.flp`` as a dict (``title``, ``opt``, ``method``, ``tesselation_check``,
+    ``sbp_flag``, ``M_limit``, ``pos``, ``nodes``, ``elements``)."""
+    filepath = Path(filepath)
+    if not filepath.suffix:
+        filepath = filepath.with_suffix(".flp")
+    require_user_input(filepath, 'read_flp3d')
 
     def _sorted_vector(fid, label):
         values, n = _read_vector(fid)
@@ -1815,7 +1943,9 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
             )
         return np.sort(values), n
 
-    with open(filepath, "r") as f:
+    # The title record holds bytes the engine cut to width, so undecodable
+    # bytes are replaced.
+    with open(filepath, "r", encoding='utf-8', errors='replace') as f:
         title = _strip_fortran_quotes(f.readline())
         opt = _strip_fortran_quotes(f.readline())
         # Fortran blank-pads the record into CHARACTER(LEN=7)
@@ -1897,7 +2027,7 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
             "r": {"z": pos_temp["rz"], "r": km_to_m(r_rcv),
                   "theta": theta},
         },
-        # field3d.f90:196-197 converts the node coordinates km -> m too.
+        # field3d.f90:195-196 converts the node coordinates km -> m too.
         "nodes": {"x": km_to_m(np.array(node_x)),
                   "y": km_to_m(np.array(node_y)),
                   "mode_file": mode_files},
@@ -1905,9 +2035,169 @@ def read_flp3d(fileroot: Union[str, Path]) -> Dict[str, Any]:
     }
 
 
+def read_flp3d(filepath: Union[str, Path]) -> Flp3dFile:
+    """
+    Read the FIELD3D field-parameter deck (``.flp``) — the 3-D sibling of
+    :func:`read_flp`.
+
+    **Retained for planned 3-D support — this is not dead code.** No uacpy
+    model runs ``field3d``, so nothing in the 2-D public API reaches this
+    reader; it is the deck parser a future 3-D implementer builds on, and
+    the round-trip partner of
+    :func:`~uacpy.io.oalib_writer.write_field3dflp`.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        The ``.flp`` file, or its root. ``.flp`` is appended
+        only when the path has none — the convention :func:`read_flp` and
+        :func:`~uacpy.io.oalib_writer.write_fieldflp` share.
+
+    Returns
+    -------
+    flp3d : Flp3dFile
+        The title and option word (unquoted, verbatim), the option's
+        ``method`` / ``tesselation_check`` / ``sbp_flag`` columns, the mode
+        limit, every axis in uacpy units (source x/y/z and receiver
+        depths/ranges in m, bearings in degrees), the triangulation's node
+        table and its **1-based** element table, exactly as the file holds
+        it.
+
+    Raises
+    ------
+    ~uacpy.core.exceptions.FileFormatError
+        The file is absent, a declared count is non-positive, or the deck
+        ends inside the node or element table.
+
+    Notes
+    -----
+    Record order, from ``KrakenField/field3d.f90:163-207`` — this is the
+    order the binary reads, and it is **not** the 2-D ``.flp`` order:
+
+    1. title, 2. option word, 3. ``Mlimit``;
+    4. ``ReadVector`` source x in km (``:174``);
+    5. ``ReadVector`` source y in km (``:175``);
+    6. ``ReadSzRz`` — source depths then receiver depths, both in metres
+       (``:176`` -> ``misc/SourceReceiverPositions.f90:108-109``);
+    7. ``ReadRcvrRanges`` — receiver ranges in km (``:177`` -> ``:156``);
+    8. ``ReadRcvrBearings`` — receiver bearings in degrees (``:178`` ->
+       ``:173``);
+    9. ``NNodes``, then one ``x y 'modefile'`` record per node, x/y in km
+       (``:184-196``);
+    10. ``NElts``, then one three-integer record per triangle
+        (``:199-207``).
+
+    Every vector goes through ``ReadVector``, i.e. ``SubTab`` expansion of
+    the ``first last /`` shorthand followed by ``Sort``
+    (``SourceReceiverPositions.f90:223-224``), so the axes returned here are
+    sorted the way the solver computes on them — the same treatment
+    :func:`read_flp` gives the 2-D deck.
+
+    Two behaviours of the Fortran are deliberately **not** mirrored, because
+    they change the data rather than its order, and a reader's job is to
+    report what the deck holds: ``ReadRcvrBearings`` drops the last bearing
+    of a full 360-degree sweep (``SourceReceiverPositions.f90:176-180``),
+    and ``ReadSzRz`` clamps depths into ``[0, 1e6]`` (``:120-139``).
+
+    Examples
+    --------
+    See :func:`~uacpy.io.oalib_writer.write_field3dflp`, whose example
+    writes a deck this reads back.
+    """
+    d = _parse_flp3d(filepath)
+    pos = d['pos']
+    return Flp3dFile(
+        title=d['title'], option=d['opt'], method=d['method'],
+        tesselation_check=d['tesselation_check'], sbp_flag=d['sbp_flag'],
+        n_modes=d['M_limit'], source_x=pos['s']['x'],
+        source_y=pos['s']['y'], source_depths=pos['s']['z'],
+        receiver_depths=pos['r']['z'], receiver_ranges=pos['r']['r'],
+        bearings=pos['r']['theta'], node_x=d['nodes']['x'],
+        node_y=d['nodes']['y'],
+        node_mode_files=tuple(d['nodes']['mode_file']),
+        elements=d['elements'])
+
+
+def _read_time_series_stream(filepath: Path, who: str):
+    """The one parser of the SPARC ``.rts`` layout, shared by
+    :func:`read_rts_file` and :func:`read_ts`.
+
+    The title record (``Scooter/sparc.f90:331``/``:335``), then a free token stream
+    in which line breaks carry no meaning (the rows are ``12G15.6`` writes
+    that wrap every 12 values, and ``read_ts.m`` reads them with
+    ``fscanf``): the position count, the positions, then
+    ``1 + n``-value blocks ``t, p(1), …, p(n)`` (``:294``/``:299``). A
+    trailing partial block — a run killed mid-write — is dropped. The
+    title holds bytes the engine cut to width, so undecodable bytes are
+    replaced.
+
+    Returns ``(title_line, positions, time, values)``, ``values`` of shape
+    ``(nt, n)``; the title record is returned as read.
+    """
+    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+        title_line = f.readline()
+        tokens = list(expand_repeat_counts(f.read().split()))
+    if not tokens:
+        raise FileFormatError(
+            f"{who}: {filepath} carries no data after the title line.")
+    n = int(fortran_float(tokens[0]))
+    if n <= 0:
+        raise FileFormatError(
+            f"{who}: {filepath} declares {n} range/depth positions.")
+    pos_tokens, cursor = take_tokens(
+        tokens, 1, n, f"{n} range/depth positions", filepath)
+    positions = np.array([fortran_float(t) for t in pos_tokens])
+    rest = tokens[cursor:]
+    block = 1 + n
+    nt = len(rest) // block
+    data = np.array([fortran_float(t) for t in rest[:nt * block]],
+                    dtype=float).reshape(nt, block)
+    return (title_line, positions, np.ascontiguousarray(data[:, 0]),
+            np.ascontiguousarray(data[:, 1:]))
+
+
+@dataclass(frozen=True, eq=False)
+class RtsFile(ExportRecord):
+    """A SPARC ``.rts`` time-series file as :func:`read_rts_file` and
+    :func:`read_ts` read it (``Scooter/sparc.f90:329-336`` header,
+    ``:294``/``:299`` rows).
+
+    Attributes
+    ----------
+    title : str
+        The title line: quotes stripped by :func:`read_rts_file`, verbatim
+        from :func:`read_ts`.
+    positions : ndarray
+        The receiver axis the file declares (m): ranges for SPARC's
+        horizontal-array ``'R'`` output, depths for the vertical-array
+        ``'D'`` output (``sparc.f90:329``).
+    times : ndarray
+        The output times (s), shape ``(nt,)``.
+    pressure : ndarray
+        Shape ``(nt, n_positions)``: ``pressure[it, i]`` at ``times[it]``
+        and ``positions[i]``.
+    """
+
+    title: str
+    positions: np.ndarray
+    times: np.ndarray
+    pressure: np.ndarray
+
+    _REPR_UNITS = {'times': 's'}
+
+    _ARRAY_FIELDS = ('positions', 'times', 'pressure')
+    _XARRAY_FIELDS = {'pressure': 'pressure', 'time': 'times',
+                      'position': 'positions'}
+
+    def _payload(self):
+        return {'pressure': (self.pressure, ('time', 'position'), '')}
+
+    def _coords(self):
+        return {'time': (self.times, 's'), 'position': (self.positions, 'm')}
+
 
 @typed_format_error
-def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
+def read_rts_file(filepath: Union[str, Path]) -> RtsFile:
     """
     Read SPARC time series file (.rts).
 
@@ -1921,22 +2211,17 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     Returns
     -------
-    rts_data : dict
-        Dictionary containing:
-        - 'title': Run title
-        - 'dt': Time step in seconds
-        - 'nt': Number of time samples
-        - 'nr': Number of ranges/depths
-        - 'ranges': Range/depth vector (m)
-        - 'time': Time vector (s)
-        - 'p': Pressure time series, shape (nt, nr)
+    rts : RtsFile
+        The title with its quotes stripped, the receiver ``positions``
+        (ranges or depths, m), the output ``times`` (s) and the
+        ``pressure`` time series, shape ``(nt, n_positions)``.
 
     Notes
     -----
     SPARC outputs time-domain pressure fields which must be FFT'd
     to extract a frequency-domain pressure. The RTS file does NOT
     store the analysis frequency; callers must pass it explicitly to
-    :func:`rts_to_pressure`.
+    :func:`uacpy.models.sparc.rts_to_pressure`.
 
     File format is Fortran ASCII (FORMATTED), written by SPARC's output
     routine (``Scooter/sparc.f90``):
@@ -1954,198 +2239,23 @@ def read_rts_file(filepath: Union[str, Path]) -> Dict[str, Any]:
     """
     filepath = Path(filepath)
     require_model_output(filepath, 'read_rts_file')
-
-    # Tokenize the entire file. Fortran's 12G15.6 format wraps at 12
-    # values per line, so NRr > 12 causes the range vector to span
-    # multiple lines. Flattening the whole stream and walking token by
-    # token makes parsing independent of line wrapping.
-    with open(filepath, "r") as f:
-        title = _strip_fortran_quotes(f.readline())
-        raw_tokens = []
-        for line in f:
-            raw_tokens.extend(expand_repeat_counts(line.strip().split()))
-
-    if not raw_tokens:
-        raise FileFormatError(f"RTS file {filepath} appears empty after the title line")
-
-    # First token is NRr/NRz, then exactly NRr range/depth floats.
-    nr = int(raw_tokens[0])
-    if nr <= 0:
-        raise FileFormatError(
-            f"RTS file {filepath} declares {nr} range/depth values."
-        )
-    if len(raw_tokens) < 1 + nr:
-        raise FileFormatError(
-            f"RTS file {filepath} truncated: expected {nr} range/depth values, "
-            f"only {len(raw_tokens) - 1} tokens available after count."
-        )
-    # fortran_float, not float(): the payload is a Fortran real write, so a
-    # 'D' exponent or a letterless three-digit one (1.0D-02, 0.123457-118)
-    # is a spelling a list-directed READ accepts and float() rejects. This is
-    # the same parse read_ts applies to the same token stream.
-    ranges = np.array([fortran_float(x) for x in raw_tokens[1:1 + nr]])
-
-    # Remaining tokens are time-series records: (1 time + nr pressures) per step
-    # (Scooter/sparc.f90:294,299 write ``tout( Itout ), values( 1 : nr )``).
-    # Floor-divide so a run killed mid-record contributes no partial time step,
-    # which would otherwise shift every later sample by one column.
-    rest = raw_tokens[1 + nr:]
-    values_per_timestep = 1 + nr
-    nt = len(rest) // values_per_timestep
-
-    time_list = []
-    pressure_list = []
-    for i in range(nt):
-        start_idx = i * values_per_timestep
-        time_list.append(fortran_float(rest[start_idx]))
-        pressure_list.append([fortran_float(x)
-                              for x in rest[start_idx + 1:start_idx + 1 + nr]])
-
-    time = np.array(time_list)
-    p = np.array(pressure_list)  # shape (nt, nr)
-    if nt > 1:
-        dt = time[1] - time[0]
-    else:
-        dt = 0.0
-
-    return {
-        "title": title,
-        "dt": dt,
-        "nt": nt,
-        "nr": nr,
-        "ranges": ranges,
-        "time": time,
-        "p": p,
-    }
-
-
-def rts_to_pressure(
-    rts_data: Dict[str, Any], frequency: float, method: str = "fft",
-    *, pulse_type: Optional[str] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Project SPARC time-series data onto complex pressure at one frequency.
-
-    ``method='fft'`` (the only method) evaluates the Hanning-windowed
-    transform **at** ``frequency`` — :func:`~uacpy.acoustic_signal.tone_phasor`,
-    the same estimator :meth:`~uacpy.Field.extract_tone` uses — and returns
-    ``(p_at_freq, ranges)`` where ``p_at_freq`` is the model-native,
-    source-normalised complex pressure suitable for wrapping in a complex
-    narrowband :class:`Field` (``coords={'depth', 'range'}``,
-    ``phase_reference='travelling_wave'``).
-
-    It used to take the nearest rfft bin instead. A ``.rts`` picks its own
-    ``nt`` and ``dt``, so the frequency of interest is essentially never on
-    a bin, and off one that answer is wrong by a growing amount — measured
-    against this estimator, -0.056 dB and 18 deg at a tenth of a bin,
-    -1.418 dB and 89.8 deg at half of one. The phase passes 90 deg while
-    the level is still inside 1.5 dB, which is why the error went unnoticed.
-    ``pulse_type=`` below still takes the bin, and correctly: see the note
-    there.
-
-    A post-processing utility for a ``.rts`` read by :func:`read_rts_file`;
-    :class:`uacpy.models.SPARC` returns ``p(t)`` and does not call it. The
-    projection is not a calibrated substitute for Kraken/Scooter TL — see the
-    module docstring of ``uacpy/tests/test_sparc_output_modes.py``.
-    """
-    p = rts_data["p"]
-    dt = rts_data["dt"]
-    ranges = rts_data["ranges"]
-
-    nt = p.shape[0]
-
-    # Every branch below transforms along the time axis and asks
-    # ``np.fft.rfftfreq(nt, dt)`` which bin ``frequency`` falls in.
-    # :func:`read_rts_file` reports ``dt = 0.0`` for a run that wrote a single
-    # output time (there is no second sample to difference against), which
-    # makes that call a bare ZeroDivisionError out of the middle of a public
-    # function.
-    if nt < 2 or not float(dt) > 0.0:
-        raise ConfigurationError(
-            f"rts_to_pressure: the .rts holds {nt} time step(s) at dt={dt!r}, "
-            f"so it has no frequency axis to project onto — rfftfreq needs a "
-            f"positive sample interval, which read_rts_file can only report "
-            f"from two or more output times.",
-            remediation="Re-run SPARC with more than one output time (a "
-                        "larger n_t_out / shorter output interval).",
-        )
-
-    if pulse_type is not None:
-        # Deconvolve the known source spectrum (convolution theorem): the range
-        # time-series r(t) = s(t) ⊛ h(t), so rfft(r)/rfft(s) = h(w0) — the CW
-        # transfer function ≈ absolute TL re 1 m (Jensen COA Eq. 8.1). uacpy
-        # generated the pulse, so s(t) is known. The estimate is physical and
-        # window/grid-independent once the output Nyquist clears the pulse band
-        # (the SPARC model sizes n_t_out for this), but SPARC's discretised
-        # pulse and band-pass leave a frequency-dependent bias of a few dB vs
-        # Kraken/Scooter — it is not a calibrated replacement for them.
-        # Use the RECTANGULAR DFT (no taper): a window breaks the convolution
-        # theorem and would null the transient source pulse (first few samples).
-        # Imported here rather than at module level: sparc_pulse pulls scipy
-        # in, and only this deconvolution path needs it.
-        from uacpy.acoustic_signal.generate import sparc_pulse
-        from uacpy.acoustic_signal.estimate import tone_phasor
-        t = np.asarray(rts_data["time"], dtype=float)
-        s_t, _ = sparc_pulse(t, 2.0 * np.pi * frequency, pulse_type[0])
-        # Both sides evaluated AT ``frequency``, with NO taper: the
-        # rectangular transform is what the convolution theorem needs (a
-        # window would null the transient source pulse in the first few
-        # samples), and evaluating at the frequency rather than at the
-        # nearest bin makes the ratio exact off-bin.
-        #
-        # Taking the same bin on both sides does NOT cancel the leakage,
-        # although it nearly does and a constant H cannot show the
-        # difference — on a constant H the ratio is exact at every offset
-        # by construction. Against a three-path 60 ms channel the bin
-        # ratio drifts to +0.06 dB and +6.0 deg at half a bin, while the
-        # pair below stays at 0.0000 dB and 0.000 deg.
-        S_at_f0 = tone_phasor(s_t, t, frequency, window='none',
-                              who="rts_to_pressure")
-        if S_at_f0 == 0:
-            raise ConfigurationError(
-                "rts_to_pressure: source spectrum is zero at "
-                f"{frequency} Hz for pulse_type={pulse_type!r}; cannot "
-                "deconvolve (check pulse / frequency).")
-        return (tone_phasor(p, t, frequency, window='none', axis=0,
-                            who="rts_to_pressure") / S_at_f0), ranges
-
-    if method == "fft":
-        # Steady-tone amplitude from one rfft bin: the 2.0 restores the half of
-        # the tone's energy that sits in the negative-frequency bin rfft drops,
-        # and dividing by the window's coherent gain sum(w) undoes both the
-        # 1/N of the unnormalised transform and the taper's amplitude loss. On
-        # a pure tone at bin centre the pair returns the tone's own amplitude
-        # and phase, whatever nt and whatever window.
-        # Evaluated AT `frequency`, not at the nearest rfft bin. This
-        # took the bin, which is the defect Field.extract_tone was fixed
-        # for and which never reached here: measured against the sum,
-        # -0.056 dB / 18 deg at a tenth of a bin and -1.418 dB / 89.8 deg
-        # at half of one, and a .rts picks its own nt and dt so the
-        # frequency is essentially never on a bin.
-        # Deferred: acoustic_signal pulls scipy, and uacpy's public
-        # surface is imported without it (test_lazy_imports).
-        from uacpy.acoustic_signal.estimate import tone_phasor
-        p_at_freq = tone_phasor(p, np.arange(nt) * dt, frequency,
-                                window='hann', axis=0,
-                                who="rts_to_pressure")
-    else:
-        raise ConfigurationError(
-            f"rts_to_pressure: unknown method {method!r}; only 'fft' is "
-            f"supported (the 'goertzel' single-bin DFT was removed — it "
-            f"reproduced the rfft bin to machine precision but skipped the "
-            f"window, so its answer was not comparable)."
-        )
-
-    return p_at_freq, ranges
+    title_line, ranges, time, p = _read_time_series_stream(
+        filepath, 'read_rts_file')
+    return RtsFile(title=_strip_fortran_quotes(title_line), positions=ranges,
+                   times=time, pressure=p)
 
 
 @typed_format_error
-def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
+def read_ts(filepath: Union[str, Path]) -> RtsFile:
     """
-    Read time-series file from acoustic models.
+    Read an ASCII time-series file the way OALIB's ``read_ts.m`` does.
 
-    This is a simple ASCII time series format, different from the RTS
-    format used by SPARC. Used by some AT models for time-domain output.
+    The layout — a title line, a position count and its positions, then
+    ``(1 + n)``-value time blocks — is the one SPARC writes to ``.rts``
+    (``Scooter/sparc.f90:329-336`` header, ``:294``/``:299`` rows), so this
+    and :func:`read_rts_file` read the same file, through one parser, into
+    one :class:`RtsFile`. This one keeps ``read_ts.m``'s title verbatim
+    (quotes included); :func:`read_rts_file` strips the quotes.
 
     Parameters
     ----------
@@ -2154,13 +2264,13 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
 
     Returns
     -------
-    ts_data : dict
-        Dictionary containing:
-        - 'PlotTitle': str - Plot title
-        - 'pos': dict with 'r': {'z': receiver depths (m)}
-        - 'tout': ndarray - Time vector (s), shape (nt,)
-        - 'RTS': ndarray - Time series data, shape (nt, nrd)
-          RTS[it, ird] is pressure at time tout[it], depth pos['r']['z'][ird]
+    ts : RtsFile
+        ``title`` verbatim; ``positions``, the axis the file declares —
+        ``read_ts.m`` calls it depths, which it is for SPARC's
+        vertical-array ``'D'`` output; for the horizontal-array ``'R'``
+        output (``sparc.f90:329``) the same slot holds receiver ranges;
+        ``times`` (s), shape ``(nt,)``; and ``pressure``, shape
+        ``(nt, n_positions)``.
 
     Notes
     -----
@@ -2177,23 +2287,21 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
     way. A trailing partial time-step block (a run killed mid-write) is
     dropped, matching the MATLAB column-major fill.
 
-    This format is simpler than the .rts format used by SPARC.
-
     Translated from OALIB read_ts.m
 
     Examples
     --------
     >>> ts = read_ts('timeseries.txt')
-    >>> print(f"Time range: {ts['tout'][0]:.3f} to {ts['tout'][-1]:.3f} s")
-    >>> print(f"Receiver depths: {ts['pos']['r']['z']}")
-    >>> print(f"Time series shape: {ts['RTS'].shape}")
+    >>> print(f"Time range: {ts.times[0]:.3f} to {ts.times[-1]:.3f} s")
+    >>> print(f"Receiver depths: {ts.positions}")
+    >>> print(f"Time series shape: {ts.pressure.shape}")
 
     >>> # Plot time series at first depth
     >>> import matplotlib.pyplot as plt
-    >>> plt.plot(ts['tout'], ts['RTS'][:, 0])
+    >>> plt.plot(ts.times, ts.pressure[:, 0])
     >>> plt.xlabel('Time (s)')
     >>> plt.ylabel('Pressure')
-    >>> plt.title(f"Depth = {ts['pos']['r']['z'][0]} m")
+    >>> plt.title(f"Depth = {ts.positions[0]} m")
 
     See Also
     --------
@@ -2208,42 +2316,13 @@ def read_ts(filepath: Union[str, Path]) -> Dict[str, Any]:
             f"time-series format only, and no Acoustics-Toolbox program "
             f"uacpy runs writes a .mat time series.",
             remediation="Load the file with scipy.io.loadmat and assemble "
-                        "the dict yourself, or pass the ASCII file.",
+                        "the arrays yourself, or pass the ASCII file.",
         )
     require_model_output(filepath, 'read_ts')
     # Everything after the title line is a free fscanf-style token stream
-    # (read_ts.m:33-35): line breaks carry no meaning at all.
-    with open(filepath, 'r') as f:
-        plot_title = f.readline().strip()
-        tokens = list(expand_repeat_counts(f.read().split()))
-
-    if not tokens:
-        raise FileFormatError(
-            f"read_ts: {filepath} carries no data after the title line."
-        )
-    nrd = int(fortran_float(tokens[0]))
-    if nrd <= 0:
-        raise FileFormatError(
-            f"read_ts: {filepath} declares {nrd} receiver depths."
-        )
-    rd_toks, cursor = take_tokens(tokens, 1, nrd,
-                                  f"{nrd} receiver depths", filepath)
-    rd = np.array([fortran_float(t) for t in rd_toks])
-
-    # Repeating (1 + nrd)-value time-step blocks; a partial trailing block
-    # (run killed mid-write) contributes nothing, as in the MATLAB
-    # column-major [nrz + 1, inf] fill.
-    rest = tokens[cursor:]
-    block = 1 + nrd
-    nt = len(rest) // block
-    data = np.array([fortran_float(t) for t in rest[:nt * block]],
-                    dtype=float).reshape(nt, block)
-    tout = data[:, 0]
-    RTS = data[:, 1:]
-
-    return {
-        'PlotTitle': plot_title,
-        'pos': {'r': {'z': rd}},
-        'tout': tout,
-        'RTS': RTS
-    }
+    # (read_ts.m:33-35); a partial trailing block contributes nothing, as in
+    # the MATLAB column-major [nrz + 1, inf] fill.
+    title_line, positions, times, pressure = _read_time_series_stream(
+        filepath, 'read_ts')
+    return RtsFile(title=title_line.strip(), positions=positions,
+                   times=times, pressure=pressure)

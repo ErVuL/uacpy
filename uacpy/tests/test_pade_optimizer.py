@@ -15,18 +15,22 @@ import numpy as np
 import pytest
 
 from uacpy.models import RAM
-from uacpy.models._pade_optimizer import (
+from uacpy.models.pe_grid import (
+    GridInfeasibleError,
     combined_error,
     grid_error,
     optimal_c0,
     numerov_error,
     optimize_grid,
     rams_dz_shear_cap,
+    rams_growth_margin,
+    seabed_leak_rate,
     _ladder,
     _propagator_pade,
     DZ_MAX,
     DZ_MIN,
 )
+from uacpy.models.ram import grid as ram_grid
 
 
 class TestOptimalC0:
@@ -59,8 +63,8 @@ class TestOptimalC0:
         path RAM consumes, not a re-derived formula."""
         c0 = optimal_c0(1480.0, 1750.0, 35.0)
         res = optimize_grid(
-            freq=100.0, c_min=1480.0, c_max=1750.0, x_max=2000.0,
-            c0=c0, theta_max=35.0, eps=5e-2, p=4, alpha=0.0,
+            frequency=100.0, c_min=1480.0, c_max=1750.0, x_max=2000.0,
+            c0=c0, angle_max=35.0, eps=5e-2, p=4, alpha=0.0,
         )
         assert res['xi_min'] == pytest.approx(-res['xi_max'], abs=1e-12)
         assert res['xi_max'] > 0
@@ -81,7 +85,7 @@ class TestPadeError:
     THETA = np.deg2rad(30.0)
 
     def _pade_only(self, **kwargs):
-        return combined_error(dz=self.TINY_DZ, theta_max=self.THETA, **kwargs)
+        return combined_error(dz=self.TINY_DZ, angle_max=self.THETA, **kwargs)
 
     def test_zero_at_origin(self):
         """The Padé approximation is exact at ξ = 0."""
@@ -111,14 +115,14 @@ class TestNumerovError:
     def test_4th_order_beats_2nd_order(self):
         """At small Δz the Numerov correction (α=1/12) is much more accurate."""
         k0 = 2 * np.pi * 500 / 1500
-        h2 = numerov_error(dz=0.1, k0=k0, theta_max=np.deg2rad(30), alpha=0.0)
-        h4 = numerov_error(dz=0.1, k0=k0, theta_max=np.deg2rad(30), alpha=1 / 12)
+        h2 = numerov_error(dz=0.1, k0=k0, angle_max=np.deg2rad(30), alpha=0.0)
+        h4 = numerov_error(dz=0.1, k0=k0, angle_max=np.deg2rad(30), alpha=1 / 12)
         assert h4 < h2 / 100  # 4th-order is at least 100× tighter at this dz
 
     def test_grows_with_dz(self):
         k0 = 2 * np.pi * 500 / 1500
         errs = [
-            numerov_error(dz=dz, k0=k0, theta_max=np.deg2rad(30), alpha=0.0)
+            numerov_error(dz=dz, k0=k0, angle_max=np.deg2rad(30), alpha=0.0)
             for dz in [0.05, 0.1, 0.5, 1.0]
         ]
         assert all(errs[i] < errs[i + 1] for i in range(len(errs) - 1))
@@ -130,8 +134,8 @@ class TestOptimizeGrid:
     def test_table1_5km_default_c0(self):
         """Paper Table 1, x_max=5 km, c0=1500: dx≈10, dz≈0.08 (within ladder)."""
         res = optimize_grid(
-            freq=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
-            c0=1500.0, theta_max=30.0, eps=1e-3, p=8, alpha=1 / 12,
+            frequency=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+            c0=1500.0, angle_max=30.0, eps=1e-3, p=8, alpha=1 / 12,
         )
         # Allow some slack — geometric ladder won't land exactly on paper values.
         assert 8 <= res['dr'] <= 30
@@ -140,8 +144,8 @@ class TestOptimizeGrid:
 
     def test_optimal_c0_gives_better_grid(self):
         """Eq. (15) c₀ permits a coarser dx than the suboptimal c0=1500."""
-        kw = dict(freq=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
-                  theta_max=30.0, eps=1e-3, p=8, alpha=1 / 12)
+        kw = dict(frequency=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+                  angle_max=30.0, eps=1e-3, p=8, alpha=1 / 12)
         res_default = optimize_grid(c0=1500.0, **kw)
         res_optimal = optimize_grid(c0=optimal_c0(1500.0, 1500.0, 30.0), **kw)
         assert res_optimal['dr'] >= res_default['dr']
@@ -150,8 +154,8 @@ class TestOptimizeGrid:
         """``c0`` is echoed back unchanged."""
         for c0 in [1480.0, 1500.0, 1545.0, 1600.0]:
             res = optimize_grid(
-                freq=500.0, c_min=1500.0, c_max=1500.0, x_max=2000.0,
-                c0=c0, theta_max=30.0, eps=1e-2, p=6, alpha=1 / 12,
+                frequency=500.0, c_min=1500.0, c_max=1500.0, x_max=2000.0,
+                c0=c0, angle_max=30.0, eps=1e-2, p=6, alpha=1 / 12,
             )
             assert res['c0'] == c0
 
@@ -177,24 +181,33 @@ class TestOptimizeGrid:
         """
         import inspect
         params = set(inspect.signature(optimize_grid).parameters)
-        assert params - {'tau_cache'} == {'freq', 'c_min', 'c_max', 'x_max',
-                                          'c0', 'theta_max', 'eps', 'p',
+        assert params - {'tau_cache'} == {'frequency', 'c_min', 'c_max', 'x_max',
+                                          'c0', 'angle_max', 'eps', 'p',
                                           'alpha', 'c_min_all', 'c_max_all',
                                           'grid'}
 
     def test_infeasible_raises(self):
         """No grid satisfies ε at this combination of inputs."""
-        with pytest.raises(RuntimeError, match="No"):
+        with pytest.raises(GridInfeasibleError, match="No"):
             optimize_grid(
-                freq=10000.0, c_min=1500.0, c_max=1500.0, x_max=1000000.0,
-                c0=1500.0, theta_max=60.0, eps=1e-12, p=2,
+                frequency=10000.0, c_min=1500.0, c_max=1500.0, x_max=1000000.0,
+                c0=1500.0, angle_max=60.0, eps=1e-12, p=2,
                 alpha=0.0,
             )
+
+    @pytest.mark.parametrize('frequency, end', [
+        (750.0, 0.01), (751.0, 1500.0 / (751.0 * 200.0)),
+        (5000.0, 0.0015), (10000.0, 0.00075)])
+    def test_the_dz_ladder_reaches_lambda_over_200_above_750_hz(
+            self, frequency, end):
+        from uacpy.models.pe_grid import dz_ladder_end
+        assert dz_ladder_end(frequency, 1500.0) == pytest.approx(end,
+                                                                 rel=1e-12)
 
     def test_the_depth_ladder_spans_the_module_bounds(self):
         """The Δz ladder runs between ``DZ_MIN`` and ``DZ_MAX``, so it is
         never empty and the search cannot fail for want of a candidate."""
-        from uacpy.models._pade_optimizer import DZ_MIN, DZ_MAX, _ladder
+        from uacpy.models.pe_grid import DZ_MIN, DZ_MAX, _ladder
         rungs = _ladder(DZ_MIN, DZ_MAX)
         assert rungs
         assert min(rungs) == pytest.approx(DZ_MIN)
@@ -207,8 +220,8 @@ class TestGridError:
     not choose — the adjustments RAM applies afterwards (stability floors,
     array caps, seafloor snapping) leave ``predicted_error`` stale."""
 
-    _KW = dict(freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
-               c0=1600.0, theta_max=30.0, p=6)
+    _KW = dict(frequency=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+               c0=1600.0, angle_max=30.0, p=6)
 
     def test_reproduces_the_optimizers_own_number(self):
         res = optimize_grid(eps=1e-3, **self._KW)
@@ -222,20 +235,22 @@ class TestGridError:
         ``predicted_error`` no longer applies and has to be recomputed.
         """
         res = optimize_grid(eps=1e-3, **self._KW)
-        cap = rams_dz_shear_cap(c_shear_min=400.0, freq=50.0)
+        cap = rams_dz_shear_cap(c_shear_min=400.0, frequency=50.0)
         shipped = grid_error(dr=res['dr'], dz=cap, **self._KW)
         assert cap != pytest.approx(res['dz'])
         assert shipped != pytest.approx(res['predicted_error'], rel=1e-6)
 
 
+@pytest.mark.requires_binary
 class TestInfeasibleGridRelaxationLadder:
-    """RAM's ``_optimize_grid_relaxing`` (ram.py) wraps the optimiser in two
-    nested fallbacks (ram.md §5): ε is tripled until it passes 0.5, then
+    """RAM's ``ram.grid.optimize_grid_relaxing`` wraps the optimiser in two
+    nested fallbacks (ram.md §5): ε is tripled while it stays below
+    ``EPS_LADDER_CEILING`` (1), then
     θ_max steps 30° → 20° → 15° restarting the ε ladder, and only then a
     ``ConfigurationError`` is raised. The optimiser itself is stubbed, so no
     grid search (and no binary) runs."""
 
-    _KW = dict(freq=100.0, c_min=1500.0, c_max=1700.0, max_range=5000.0,
+    _KW = dict(frequency=100.0, c_min=1500.0, c_max=1700.0, max_range=5000.0,
                c0_pe=1600.0, eps0=1e-2, theta0=30.0, kind='ramgeo')
 
     @staticmethod
@@ -246,28 +261,28 @@ class TestInfeasibleGridRelaxationLadder:
     def _record_calls(self, monkeypatch, succeed_when):
         """Stub ``optimize_grid`` to record every (θ_max, ε) trial and
         succeed only when ``succeed_when(theta, eps)`` says so."""
-        import uacpy.models.ram as ram_module
         calls = []
 
         def fake(**kw):
-            calls.append((kw['theta_max'], kw['eps']))
-            if succeed_when(kw['theta_max'], kw['eps']):
+            calls.append((kw['angle_max'], kw['eps']))
+            if succeed_when(kw['angle_max'], kw['eps']):
                 return {'dr': 10.0, 'dz': 1.0, 'c0': kw['c0'],
                         'predicted_error': kw['eps']}
-            raise RuntimeError('infeasible')
+            raise GridInfeasibleError('infeasible')
 
-        monkeypatch.setattr(ram_module, 'optimize_grid', fake)
+        monkeypatch.setattr(ram_grid, 'optimize_grid', fake)
         return calls
 
     def test_fully_infeasible_walks_the_whole_ladder_then_raises(
             self, monkeypatch):
         from uacpy.core.exceptions import ConfigurationError
         calls = self._record_calls(monkeypatch, lambda t, e: False)
-        with pytest.raises(ConfigurationError, match=r'0\.5'):
-            self._model()._optimize_grid_relaxing(**self._KW)
-        # ε triples from 1e-2 until it passes 0.5 (4 trials), restarting at
-        # each θ rung 30 → 20 → 15.
-        eps_ladder = [1e-2, 3e-2, 9e-2, 0.27]
+        with pytest.raises(ConfigurationError, match=r'0\.81'):
+            ram_grid.optimize_grid_relaxing(**self._KW,
+                                            knobs=self._model()._knob_record())
+        # ε triples from 1e-2 while it stays below 1 (5 trials), restarting
+        # at each θ rung 30 → 20 → 15.
+        eps_ladder = [1e-2, 3e-2, 9e-2, 0.27, 0.81]
         expected = [(t, e) for t in (30.0, 20.0, 15.0) for e in eps_ladder]
         assert [(t, pytest.approx(e)) for t, e in expected] == calls
 
@@ -275,8 +290,8 @@ class TestInfeasibleGridRelaxationLadder:
             self, monkeypatch):
         self._record_calls(monkeypatch,
                            lambda t, e: e >= 0.1)
-        res, eps_used, theta_used = self._model()._optimize_grid_relaxing(
-            **self._KW)
+        res, eps_used, theta_used = ram_grid.optimize_grid_relaxing(
+            **self._KW, knobs=self._model()._knob_record())
         assert theta_used == 30.0
         assert eps_used == pytest.approx(0.27)
         assert res['dr'] == 10.0
@@ -285,15 +300,16 @@ class TestInfeasibleGridRelaxationLadder:
             self, monkeypatch):
         self._record_calls(monkeypatch,
                            lambda t, e: t <= 20.0)
-        res, eps_used, theta_used = self._model()._optimize_grid_relaxing(
-            **self._KW)
+        res, eps_used, theta_used = ram_grid.optimize_grid_relaxing(
+            **self._KW, knobs=self._model()._knob_record())
         assert theta_used == 20.0
         assert eps_used == pytest.approx(1e-2)
 
     def test_a_narrow_caller_aperture_is_never_widened(self, monkeypatch):
         calls = self._record_calls(monkeypatch, lambda t, e: True)
         kw = dict(self._KW, theta0=18.0)
-        _, _, theta_used = self._model()._optimize_grid_relaxing(**kw)
+        _, _, theta_used = ram_grid.optimize_grid_relaxing(
+            **kw, knobs=self._model()._knob_record())
         assert theta_used == 18.0
         assert calls == [(18.0, pytest.approx(1e-2))]
 
@@ -301,11 +317,11 @@ class TestInfeasibleGridRelaxationLadder:
 class TestRamsDzShearCap:
 
     def test_zero_for_fluid(self):
-        assert rams_dz_shear_cap(c_shear_min=0.0, freq=100.0) == 0.0
+        assert rams_dz_shear_cap(c_shear_min=0.0, frequency=100.0) == 0.0
 
     def test_resolves_lambda_s(self):
         """Cap = λ_s / 14 = c_s / (14 f), Collins (1991)'s coarsest own grid."""
-        dz = rams_dz_shear_cap(c_shear_min=400.0, freq=100.0)
+        dz = rams_dz_shear_cap(c_shear_min=400.0, frequency=100.0)
         assert abs(dz - 4.0 / 14.0) < 1e-9
 
     def test_is_far_finer_than_a_fraction_of_the_shear_wavelength(self):
@@ -328,9 +344,9 @@ class TestPadeBuildIsHoistedOutOfTheDepthLadder:
     @pytest.mark.parametrize('dz', [0.01, 0.1, 1.0, 5.0])
     def test_a_prebuilt_approximant_scores_identically(self, dx, dz):
         theta = np.deg2rad(30.0)
-        built_here = combined_error(dx, dz, self._K0, 6, theta_max=theta,
+        built_here = combined_error(dx, dz, self._K0, 6, angle_max=theta,
                                     **self._XI)
-        passed_in = combined_error(dx, dz, self._K0, 6, theta_max=theta,
+        passed_in = combined_error(dx, dz, self._K0, 6, angle_max=theta,
                                    pade=_propagator_pade(dx, self._K0, 6),
                                    **self._XI)
         assert repr(passed_in) == repr(built_here)
@@ -338,7 +354,7 @@ class TestPadeBuildIsHoistedOutOfTheDepthLadder:
     def test_one_build_per_range_step_not_one_per_pair(self, monkeypatch):
         """The approximant depends on ``(dx, k0, p)`` alone, so the Δz ladder
         must not multiply the build count."""
-        import uacpy.models._pade_optimizer as popt
+        import uacpy.models.pe_grid as popt
 
         calls = []
         real = popt._propagator_taylor
@@ -348,8 +364,8 @@ class TestPadeBuildIsHoistedOutOfTheDepthLadder:
             return real(dx, k0, n_terms)
 
         monkeypatch.setattr(popt, '_propagator_taylor', counted)
-        kwargs = dict(freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
-                      c0=1600.0, theta_max=30.0, eps=1e-3, p=6, alpha=0.0)
+        kwargs = dict(frequency=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+                      c0=1600.0, angle_max=30.0, eps=1e-3, p=6, alpha=0.0)
         optimize_grid(**kwargs)
 
         n_dx = len([dx for dx in _ladder(max(0.5, 1600.0 / 50.0 / 8.0),
@@ -369,21 +385,21 @@ def _pop_band_keys(result, kwargs):
     the accuracy band (nothing outside it to grow) and the aperture end
     binds, so the depth-operator band ends at ``k₀ sin θ``."""
     c0, c_min, c_max = kwargs['c0'], kwargs['c_min'], kwargs['c_max']
-    sin_t = np.sin(np.deg2rad(kwargs['theta_max']))
+    sin_t = np.sin(np.deg2rad(kwargs['angle_max']))
     assert result.pop('xi_stab_min') == pytest.approx(
         -sin_t ** 2 + (c0 / c_max) ** 2 - 1)
     assert result.pop('xi_stab_max') == pytest.approx((c0 / c_min) ** 2 - 1)
     assert result.pop('kz_max') == pytest.approx(
-        2 * np.pi * kwargs['freq'] / c0 * sin_t)
+        2 * np.pi * kwargs['frequency'] / c0 * sin_t)
     assert result.pop('trapped_end_binds') is False
     assert result.pop('growth') == 0.0
 
 
-def _bands_of(c0, c_max_all=None, c_min=1500.0, c_max=1500.0, theta_max=30.0):
+def _bands_of(c0, c_max_all=None, c_min=1500.0, c_max=1500.0, angle_max=30.0):
     """The bands ``optimize_grid`` scores at ``c0``, read off a scored pair;
     ``kz_max_over_k0`` is its rad/m ``kz_max`` over ``k₀``."""
-    r = optimize_grid(grid=(10.0, 0.25), freq=200.0, c_min=c_min, c_max=c_max,
-                      x_max=5000.0, c0=c0, theta_max=theta_max, p=6,
+    r = optimize_grid(grid=(10.0, 0.25), frequency=200.0, c_min=c_min, c_max=c_max,
+                      x_max=5000.0, c0=c0, angle_max=angle_max, p=6,
                       c_max_all=c_max_all)
     r['kz_max_over_k0'] = r['kz_max'] / (2 * np.pi * 200.0 / c0)
     return r
@@ -397,27 +413,27 @@ class TestOptimizerReturnsItsRecordedGrids:
     functions and dropped before the comparison."""
 
     _CASES = [
-        (dict(freq=100.0, c_min=1480.0, c_max=1750.0, x_max=5000.0,
-              c0=1600.0, theta_max=30.0, eps=1e-2, p=6, alpha=0.0),
+        (dict(frequency=100.0, c_min=1480.0, c_max=1750.0, x_max=5000.0,
+              c0=1600.0, angle_max=30.0, eps=1e-2, p=6, alpha=0.0),
          {'alpha': '0.0', 'c0': '1600.0', 'dr': '34.171875',
           'dz': '0.0759375', 'p': '6',
           'predicted_error': '0.00627106990659567',
           'xi_max': '0.16873630387143912',
           'xi_min': '-0.4140816326530612'}),
-        (dict(freq=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
-              c0=1500.0, theta_max=30.0, eps=1e-3, p=8, alpha=1 / 12),
+        (dict(frequency=500.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+              c0=1500.0, angle_max=30.0, eps=1e-3, p=8, alpha=1 / 12),
          {'alpha': '0.08333333333333333', 'c0': '1500.0',
           'dr': '19.2216796875', 'dz': '0.0759375', 'p': '8',
           'predicted_error': '0.0008222153646561707',
           'xi_max': '0.0', 'xi_min': '-0.25'}),
-        (dict(freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
-              c0=1600.0, theta_max=30.0, eps=1e-3, p=6, alpha=0.0),
+        (dict(frequency=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+              c0=1600.0, angle_max=30.0, eps=1e-3, p=6, alpha=0.0),
          {'alpha': '0.0', 'c0': '1600.0', 'dr': '68.34375', 'dz': '0.050625',
           'p': '6', 'predicted_error': '0.000548694759595582',
           'xi_max': '0.13777777777777778',
           'xi_min': '-0.36418685121107264'}),
-        (dict(freq=500.0, c_min=1500.0, c_max=1700.0, x_max=20000.0,
-              c0=1600.0, theta_max=30.0, eps=0.081, p=6, alpha=0.0),
+        (dict(frequency=500.0, c_min=1500.0, c_max=1700.0, x_max=20000.0,
+              c0=1600.0, angle_max=30.0, eps=0.081, p=6, alpha=0.0),
          {'alpha': '0.0', 'c0': '1600.0', 'dr': '8.54296875', 'dz': '0.01',
           'p': '6', 'predicted_error': '0.05666487620543339',
           'xi_max': '0.13777777777777778',
@@ -449,7 +465,7 @@ class TestTauMemoAcrossTheRelaxationLadder:
     candidate set on every retry — but the memo must not be able to answer
     from the wrong medium either."""
 
-    _KW = dict(freq=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
+    _KW = dict(frequency=50.0, c_min=1500.0, c_max=1700.0, x_max=8000.0,
                c0=1600.0, p=6, alpha=0.0)
 
     @staticmethod
@@ -459,9 +475,9 @@ class TestTauMemoAcrossTheRelaxationLadder:
     def test_a_shared_memo_cannot_change_the_selected_grid(self):
         shared = {}
         for eps in (1e-4, 3e-4, 9e-4, 2.7e-3, 8.1e-3):
-            with_memo = optimize_grid(eps=eps, theta_max=30.0,
+            with_memo = optimize_grid(eps=eps, angle_max=30.0,
                                       tau_cache=shared, **self._KW)
-            alone = optimize_grid(eps=eps, theta_max=30.0, **self._KW)
+            alone = optimize_grid(eps=eps, angle_max=30.0, **self._KW)
             assert self._rendered(with_memo) == self._rendered(alone)
         assert shared                            # it really was populated
 
@@ -471,38 +487,41 @@ class TestTauMemoAcrossTheRelaxationLadder:
         steps down to."""
         shared = {}
         for theta in (30.0, 20.0, 15.0):
-            with_memo = optimize_grid(eps=1e-3, theta_max=theta,
+            with_memo = optimize_grid(eps=1e-3, angle_max=theta,
                                       tau_cache=shared, **self._KW)
-            alone = optimize_grid(eps=1e-3, theta_max=theta, **self._KW)
+            alone = optimize_grid(eps=1e-3, angle_max=theta, **self._KW)
             assert self._rendered(with_memo) == self._rendered(alone), theta
 
+    @pytest.mark.requires_binary
     def test_the_relaxation_ladder_returns_its_recorded_values(self):
-        """Pinned to the values the ladder produced before the memo existed,
-        on a case that walks the full ε ladder at 30° and succeeds at 20°."""
+        """Pinned to the values the ladder produces, on a case that walks the
+        full ε ladder at 30° and succeeds at 20°; the Δz ladder reaches
+        λ/200 = 7.5 mm at 1 kHz (``dz_ladder_end``)."""
         model = RAM(verbose=False)
-        result, eps_used, theta_used = model._optimize_grid_relaxing(
-            freq=1000.0, c_min=1500.0, c_max=1700.0, max_range=50000.0,
-            c0_pe=1600.0, eps0=1e-4, theta0=30.0, kind='ramgeo')
-        _pop_band_keys(result, dict(freq=1000.0, c_min=1500.0, c_max=1700.0,
-                                    c0=1600.0, theta_max=theta_used, p=6))
+        result, eps_used, theta_used = ram_grid.optimize_grid_relaxing(
+            frequency=1000.0, c_min=1500.0, c_max=1700.0, max_range=50000.0,
+            c0_pe=1600.0, eps0=1e-4, theta0=30.0, kind='ramgeo',
+            knobs=model._knob_record())
+        _pop_band_keys(result, dict(frequency=1000.0, c_min=1500.0, c_max=1700.0,
+                                    c0=1600.0, angle_max=theta_used, p=6))
         assert repr(theta_used) == '20.0'
         assert repr(eps_used) == '0.21869999999999998'
         rendered = self._rendered(result)
         assert float(rendered.pop('predicted_error')) == pytest.approx(
-            0.1981215757911043, rel=1e-6)
+            0.2051259854172274, rel=1e-6)
         assert float(rendered.pop('xi_min')) == pytest.approx(
             -0.23116462965158358, rel=1e-6)
         assert rendered == {
-            'alpha': '0.0', 'c0': '1600.0', 'dr': '5.6953125', 'dz': '0.01',
+            'alpha': '0.0', 'c0': '1600.0', 'dr': '8.54296875', 'dz': '0.0075',
             'p': '6',
             'xi_max': '0.13777777777777778',
         }
 
 
-def _spectrum(c_min, c_max, theta_max_deg=30.0, freq=100.0):
+def _spectrum(c_min, c_max, angle_max_deg=30.0, freq=100.0):
     """``(k0, xi_min, xi_max, theta_rad)`` for a water/seabed speed pair."""
-    c0 = optimal_c0(c_min, c_max, theta_max_deg)
-    theta = np.deg2rad(theta_max_deg)
+    c0 = optimal_c0(c_min, c_max, angle_max_deg)
+    theta = np.deg2rad(angle_max_deg)
     return (2.0 * np.pi * freq / c0,
             -np.sin(theta) ** 2 + (c0 / c_max) ** 2 - 1.0,
             (c0 / c_min) ** 2 - 1.0,
@@ -511,7 +530,7 @@ def _spectrum(c_min, c_max, theta_max_deg=30.0, freq=100.0):
 
 class TestPadeErrorSurvivesAnEvanescentSpectrum:
     """``xi`` drops below -1 — the evanescent part of the angular spectrum —
-    once ``sin(theta_max) > sqrt(2)*c_min/c_max``, which at the shipped 30°
+    once ``sin(angle_max) > sqrt(2)*c_min/c_max``, which at the shipped 30°
     default is any seabed faster than about 2.83x the water speed. A real
     ``sqrt`` returns NaN there; ``abs(NaN - pq)`` is NaN and ``NaN > err_max``
     is False, so the accumulator kept its ``0.0`` initialiser and every
@@ -660,8 +679,8 @@ class TestTheScoreRanksAFastSeabedsGrids:
     Kraken for the first three grids below)."""
 
     C0 = 2046.5731207219399
-    KW = dict(freq=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
-              theta_max=30.0, p=6, c_min_all=1500.0, c_max_all=5500.0)
+    KW = dict(frequency=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+              angle_max=30.0, p=6, c_min_all=1500.0, c_max_all=5500.0)
     LADDER = [(10.0, 0.25), (2.25, 0.25), (2.0, 0.1), (0.5, 0.05),
               (2.25, 0.03)]
 
@@ -677,9 +696,9 @@ class TestTheScoreRanksAFastSeabedsGrids:
     def test_the_one_hull_score_saturates_on_every_rung(self):
         """The old interval (seabed included in the accuracy band) cannot
         rank these grids: every rung scores a saturated τ·n ≫ 1."""
-        hull = [grid_error(dr=dr, dz=dz, freq=200.0, c_min=1500.0,
+        hull = [grid_error(dr=dr, dz=dz, frequency=200.0, c_min=1500.0,
                            c_max=5500.0, x_max=5000.0, c0=self.C0,
-                           theta_max=30.0, p=6)
+                           angle_max=30.0, p=6)
                 for dr, dz in self.LADDER]
         assert min(hull) > 40.0
 
@@ -689,19 +708,20 @@ class TestTheScoreRanksAFastSeabedsGrids:
 
     def test_hard_rock_gets_a_grid_where_the_one_hull_model_refused(self):
         c0 = optimal_c0(1500.0, 1500.0, 30.0, c_max_all=5500.0)
-        kw = dict(freq=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
-                  c0=c0, theta_max=30.0, p=6)
+        kw = dict(frequency=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+                  c0=c0, angle_max=30.0, p=6)
         found = None
         for eps in (1e-3, 3e-3, 9e-3, 2.7e-2, 8.1e-2, 0.243):
             try:
                 found = optimize_grid(eps=eps, c_min_all=1500.0,
                                       c_max_all=5500.0, **kw)
                 break
-            except RuntimeError:
+            except GridInfeasibleError:
                 continue
         assert found is not None and found['dr'] > 0
         for eps in (1e-3, 3e-3, 9e-3, 2.7e-2, 8.1e-2, 0.243):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(GridInfeasibleError,
+                               match=r'No \(Δx, Δz\) candidate satisfies'):
                 optimize_grid(eps=eps, **dict(kw, c_max=5500.0))
 
 
@@ -723,7 +743,7 @@ class TestTheStabilityBandIsHeldNonAmplifyingOnly:
         """The growth test is what keeps the split honest: an operator that
         grew the evanescent stability band would blow the march up, so it
         scores as unusable (``inf``) rather than as accurate."""
-        import uacpy.models._pade_optimizer as mod
+        import uacpy.models.pe_grid as mod
         k0 = 2 * np.pi * 200.0 / 2047.0
         real_eval = mod._eval_poly
 
@@ -753,14 +773,27 @@ class TestTheStabilityBandIsHeldNonAmplifyingOnly:
 
 
 class TestTheRefusalStatesTheSearch:
-    """``optimize_grid``'s ``RuntimeError`` is RAM's control-flow signal:
-    it names the band and the ladders searched and carries no remedy, so
-    it cannot contradict the ``ConfigurationError`` RAM wraps it in."""
+    """``optimize_grid``'s ``GridInfeasibleError`` is RAM's control-flow
+    signal: it names the band and the ladders searched and carries no
+    remedy, so it cannot contradict the ``ConfigurationError`` RAM raises
+    when its relaxation ladder fails. It is itself a ``ConfigurationError``
+    (and so a ``UACPYError``), as §4 promises of every uacpy check; not a
+    bare ``RuntimeError``."""
+
+    def test_the_refusal_is_a_uacpy_configuration_error(self):
+        from uacpy.core.exceptions import ConfigurationError, UACPYError
+        assert issubclass(GridInfeasibleError, ConfigurationError)
+        assert issubclass(GridInfeasibleError, UACPYError)
+        assert not issubclass(GridInfeasibleError, RuntimeError)
+        import uacpy.models
+        assert uacpy.models.GridInfeasibleError is GridInfeasibleError
 
     def test_the_message_names_the_band_and_ladders_and_no_remedy(self):
-        with pytest.raises(RuntimeError) as excinfo:
-            optimize_grid(freq=10000.0, c_min=1500.0, c_max=1500.0,
-                          x_max=1000000.0, c0=1500.0, theta_max=60.0,
+        with pytest.raises(
+                GridInfeasibleError,
+                match=r'No \(Δx, Δz\) candidate satisfies') as excinfo:
+            optimize_grid(frequency=10000.0, c_min=1500.0, c_max=1500.0,
+                          x_max=1000000.0, c0=1500.0, angle_max=60.0,
                           eps=1e-12, p=2, alpha=0.0)
         text = str(excinfo.value)
         assert 'accuracy band' in text and 'Δz ladder' in text
@@ -768,7 +801,69 @@ class TestTheRefusalStatesTheSearch:
         assert 'Try' not in text
 
     def test_grid_error_is_the_scored_pairs_predicted_error(self):
-        kw = dict(freq=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
-                  c0=1799.0, theta_max=30.0, p=6, c_max_all=2400.0)
+        kw = dict(frequency=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+                  c0=1799.0, angle_max=30.0, p=6, c_max_all=2400.0)
         assert grid_error(dr=20.0, dz=0.2, **kw) == \
             optimize_grid(grid=(20.0, 0.2), **kw)['predicted_error']
+
+
+_GRID_KW = dict(frequency=200.0, c_min=1500.0, c_max=1500.0, x_max=5000.0,
+                c0=1500.0, angle_max=30.0)
+_MARGIN_KW = dict(frequency=100.0, c0=1591.0, water_sound_speed=1500.0,
+                  water_density=1.0, seabed_speed=1600.0, seabed_density=1.5,
+                  seabed_attenuation_dB_lambda=0.5, depth=100.0, n_pade=6,
+                  theta_deg=45.0)
+
+
+def _renamed(kw, new, old):
+    out = dict(kw)
+    out[old] = out.pop(new)
+    return out
+
+
+@pytest.mark.parametrize('call', [
+    pytest.param(lambda: RAM(np_pade=6, verbose=False), id='RAM-np_pade'),
+    pytest.param(lambda: RAM(ns_stability=1, verbose=False),
+                 id='RAM-ns_stability'),
+    pytest.param(lambda: RAM(rs_stability=1000.0, verbose=False),
+                 id='RAM-rs_stability'),
+    pytest.param(lambda: optimize_grid(**_renamed(_GRID_KW, 'frequency',
+                                                  'freq')),
+                 id='optimize_grid-freq'),
+    pytest.param(lambda: grid_error(dr=10.0, dz=0.5,
+                                    **_renamed(_GRID_KW, 'frequency', 'freq')),
+                 id='grid_error-freq'),
+    pytest.param(lambda: rams_dz_shear_cap(400.0, freq=100.0),
+                 id='rams_dz_shear_cap-freq'),
+    pytest.param(lambda: rams_growth_margin(
+        1.0, **_renamed(_MARGIN_KW, 'frequency', 'freq')),
+        id='rams_growth_margin-freq'),
+    pytest.param(lambda: rams_growth_margin(
+        1.0, **_renamed(_MARGIN_KW, 'water_sound_speed', 'water_speed')),
+        id='rams_growth_margin-water_speed'),
+    pytest.param(lambda: rams_growth_margin(
+        1.0, **_renamed(_MARGIN_KW, 'n_pade', 'np_pade')),
+        id='rams_growth_margin-np_pade'),
+    pytest.param(lambda: seabed_leak_rate(
+        np.array([-0.1]), c0=1591.0, water_speed=1500.0, water_density=1.0,
+        seabed_speed=1600.0, seabed_density=1.5,
+        seabed_attenuation_dB_lambda=0.5, depth=100.0),
+        id='seabed_leak_rate-water_speed'),
+])
+def test_the_pre_rename_keywords_are_refused(call):
+    """The renames are hard: each old keyword is an unknown argument."""
+    with pytest.raises(TypeError, match='unexpected keyword'):
+        call()
+
+
+@pytest.mark.requires_binary
+@pytest.mark.parametrize('call', [
+    pytest.param(lambda: optimize_grid(**_GRID_KW), id='optimize_grid'),
+    pytest.param(lambda: rams_growth_margin(1.0, **_MARGIN_KW),
+                 id='rams_growth_margin'),
+    pytest.param(lambda: RAM(n_pade=6, n_stability=1,
+                             stability_range_m=1000.0, verbose=False),
+                 id='RAM'),
+])
+def test_the_renamed_keywords_are_accepted(call):
+    call()

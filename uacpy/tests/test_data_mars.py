@@ -7,7 +7,6 @@ hits the live service.
 """
 
 import json
-import warnings
 
 import numpy as np
 import pytest
@@ -17,6 +16,7 @@ from uacpy.core.exceptions import DataFetchError
 from uacpy.data import mars
 from uacpy.data.environment import _AUTO_BOTTOM_ORDER
 from uacpy.tests._cache_builders import _skip_or_fail
+from uacpy.tests.conftest import recorded_warnings
 
 
 def _feature(lat, lon, *, grain_um=None, mud=None, sand=None, gravel=None,
@@ -54,8 +54,9 @@ def test_grain_size_um_to_phi(monkeypatch):
     _install(monkeypatch, _collection(
         _feature(-34.0, 151.31, grain_um=500.0, mud=100.0, folk='M')))
     s = mars.fetch_mars_sediment(_P)
-    assert s['phi'] == pytest.approx(1.0)
-    assert s['via'] == 'grain_size'
+    assert s.grain_size_phi == pytest.approx(1.0)
+    assert s.details['via'] == 'grain_size'
+    assert (s.folk_class, s.folk_class_scheme) == ('M', 'folk')
 
 
 def test_percentages_fallback(monkeypatch):
@@ -63,8 +64,9 @@ def test_percentages_fallback(monkeypatch):
     _install(monkeypatch, _collection(
         _feature(-34.0, 151.31, mud=50.0, sand=50.0, gravel=0.0)))
     s = mars.fetch_mars_sediment(_P)
-    assert s['phi'] == pytest.approx(0.5 * 1.5 + 0.5 * 7.5)
-    assert s['via'] == 'percentages'
+    assert s.grain_size_phi == pytest.approx(0.5 * 1.5 + 0.5 * 7.5)
+    assert s.details['via'] == 'percentages'
+    assert (s.folk_class, s.folk_class_scheme) == (None, None)
 
 
 def test_folk_class_fallback(monkeypatch):
@@ -73,8 +75,8 @@ def test_folk_class_fallback(monkeypatch):
     # 2e-4 slack is the class's own band, which reaches 0.01 % gravel.
     _install(monkeypatch, _collection(_feature(-34.0, 151.31, folk='S')))
     s = mars.fetch_mars_sediment(_P)
-    assert s['phi'] == pytest.approx(0.95 * 1.5 + 0.05 * 7.5, abs=1e-3)
-    assert s['via'] == 'folk_class'
+    assert s.grain_size_phi == pytest.approx(0.95 * 1.5 + 0.05 * 7.5, abs=1e-3)
+    assert s.details['via'] == 'folk_class'
 
 
 def test_every_folk_class_phi_is_its_centroid_through_the_percentage_route():
@@ -217,8 +219,8 @@ def test_picks_nearest_usable(monkeypatch):
         _feature(-34.5, 151.8, grain_um=62.5),           # farther
     ))
     s = mars.fetch_mars_sediment(_P)
-    assert s['phi'] == pytest.approx(0.0)
-    assert s['distance_km'] < 10.0
+    assert s.grain_size_phi == pytest.approx(0.0)
+    assert s.distance_km < 10.0
 
 
 def test_no_coverage_raises(monkeypatch):
@@ -249,7 +251,7 @@ def test_radius_ladder_expands(monkeypatch):
     _install(monkeypatch, responder)
     s = mars.fetch_mars_sediment(_P)
     assert len(calls) > 1
-    assert s['phi'] == pytest.approx(2.0)
+    assert s.grain_size_phi == pytest.approx(2.0)
 
 
 # ── bottom builders ─────────────────────────────────────────────────────────
@@ -292,8 +294,7 @@ def test_a_sample_inside_the_relations_is_not_announced(
     reports its *attenuation* separately — ``k_p`` starts at 0 ϕ — which is the
     per-quantity statement pinned in test_sediment.py, not this one.)"""
     _install(monkeypatch, _collection(_feature(-34.0, 151.31, folk=folk)))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
+    with recorded_warnings() as caught:
         bp = mars.fetch_bottom_mars(_P, model=model)
     assert not [w for w in caught if 'fitted over' in str(w.message)]
     assert bp.grain_size_phi == pytest.approx(mars._FOLK_TO_PHI[folk])
@@ -309,8 +310,7 @@ def test_the_announcement_turns_over_at_the_models_own_edge(
     convert from the ones they answer with an edge value."""
     _install(monkeypatch, _collection(
         _feature(-34.0, 151.31, gravel=gravel, sand=sand, mud=0.0)))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
+    with recorded_warnings() as caught:
         mars.fetch_bottom_mars(_P)
     announced = [w for w in caught if 'fitted over' in str(w.message)]
     assert bool(announced) is warns
@@ -327,8 +327,7 @@ def test_one_sample_can_be_announced_by_one_model_and_not_the_other(
     ``k_p`` regression still runs and TR 9407's equations have stopped. A
     measured 1.7 µm grain — the third conversion route — lands there."""
     _install(monkeypatch, _collection(_feature(-34.0, 151.31, grain_um=1.7)))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
+    with recorded_warnings() as caught:
         bp = mars.fetch_bottom_mars(_P, model=model)
     assert bp.grain_size_phi == pytest.approx(9.2, abs=0.01)
     assert bool([w for w in caught if 'fitted over' in str(w.message)]) is warns
@@ -350,8 +349,8 @@ def test_bottom_from_mars_stamps_sample_provenance(monkeypatch):
 
 def test_bottom_transect(monkeypatch):
     _install(monkeypatch, _collection(_feature(-34.0, 151.31, grain_um=500.0)))
-    bottom = mars.fetch_bottom_mars_transect(
-        (-34.0, 151.3), (-34.0, 151.8), n_points=3)
+    bottom = data.fetch_bottom_transect(
+        (-34.0, 151.3), (-34.0, 151.8), source='mars', n_points=3)
     assert np.allclose(bottom.halfspace_sound_speed,
                        bottom.halfspace_sound_speed[0])
     # Each rebuilt column carries the sample's provenance stamp.
@@ -398,7 +397,7 @@ def test_auto_chain_reaches_no_mars_request_outside_australia(monkeypatch,
     def boom(url, **kw):
         raise AssertionError(f"MARS issued a request: {url}")
 
-    monkeypatch.setattr(seabed_mod, 'fetch_bottom', no_emodnet)
+    monkeypatch.setattr(seabed_mod, 'fetch_bottom_emodnet', no_emodnet)
     monkeypatch.setattr(pelagic_mod, '_water_depth', lambda *a, **k: 5000.0)
     monkeypatch.setattr(mars, 'http_get', boom)
     env = data.fetch_environment((43.2, 7.5), bathymetry=2000.0, ssp=1500.0,
@@ -423,7 +422,7 @@ def test_live_mars_point():
         s = mars.fetch_mars_sediment((-34.0, 151.5))     # off Sydney
     except DataFetchError as exc:
         _skip_or_fail(exc, 'AusSeabed WFS')
-    assert -5.0 < s['phi'] < 13.0
+    assert -5.0 < s.grain_size_phi < 13.0
 
 
 # ── OFFLINE stubs: nearest-sample correctness ───────────────────────────────
@@ -445,8 +444,8 @@ def test_radius_ladder_corner_sample_keeps_expanding(monkeypatch):
     _install(monkeypatch, responder)
     s = mars.fetch_mars_sediment(_P)
     assert len(calls) > 1
-    assert s['phi'] == pytest.approx(2.0)
-    assert s['distance_km'] == pytest.approx(11.0, abs=0.2)
+    assert s.grain_size_phi == pytest.approx(2.0)
+    assert s.distance_km == pytest.approx(11.0, abs=0.2)
 
 
 def test_corner_sample_confirmed_by_wider_rung(monkeypatch):
@@ -461,8 +460,8 @@ def test_corner_sample_confirmed_by_wider_rung(monkeypatch):
     _install(monkeypatch, responder)
     s = mars.fetch_mars_sediment(_P)
     assert len(calls) == 2                       # 13.8 km ≤ 30 km ends rung 2
-    assert s['phi'] == pytest.approx(0.0)
-    assert s['distance_km'] == pytest.approx(13.76, abs=0.1)
+    assert s.grain_size_phi == pytest.approx(0.0)
+    assert s.distance_km == pytest.approx(13.76, abs=0.1)
 
 
 def test_capped_response_warns_not_nearest(monkeypatch):
@@ -476,7 +475,7 @@ def test_capped_response_warns_not_nearest(monkeypatch):
     _install(monkeypatch, body)
     with pytest.warns(UserWarning, match='nearest'):
         s = mars.fetch_mars_sediment(_P)
-    assert s['phi'] == pytest.approx(1.0)
+    assert s.grain_size_phi == pytest.approx(1.0)
 
 
 def _mars_payload(properties):

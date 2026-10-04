@@ -23,15 +23,20 @@ dead-code sweep proposing their removal a second time.
 
 import warnings
 import numpy as np
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 from uacpy._log import log_message
+from uacpy.core._export import ExportRecord
+from uacpy.core.altimetry import Altimetry
+from uacpy.core.bathymetry import Bathymetry
 from uacpy.core.exceptions import (
-    ConfigurationError, FileFormatError,
+    ConfigurationError, FallbackWarning, FileFormatError, IOWarning,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.units import km_to_m, m_to_km
+from uacpy.io.at_codes import GEOMETRY_INTERP_CODES
 from uacpy.io.input_checks import _collapsed_pair_index
 from uacpy.io._fortran_helpers import (
     list_directed_int, read_list_directed_values, read_vector,
@@ -50,7 +55,7 @@ def _summarize_axis(arr, head: int = 10, fmt: str = "{:9.5g}") -> str:
 
 
 def _read_boundary_2d(
-    filepath: Union[str, Path], suffix: str, kind: str, verbose: bool,
+    filepath: Union[str, Path], suffix: str, kind: str, verbose: Union[bool, str],
 ) -> Tuple[np.ndarray, str]:
     """Read a BELLHOP 2-D boundary file (``.bty`` or ``.ati``).
 
@@ -70,7 +75,7 @@ def _read_boundary_2d(
     # that provenance (see :class:`~uacpy.core.exceptions.FileFormatError`).
     if not filepath.exists():
         raise ConfigurationError(
-            f"{kind.capitalize()} file not found: {filepath}",
+            f"{kind.capitalize()} file not found: {filepath}.",
             remediation=f"Check the path passed for the {kind} file; a bare "
                         f"root name without an extension resolves to "
                         f"<root>{suffix}.",
@@ -89,6 +94,12 @@ def _read_boundary_2d(
         # letter that parsed here would still abort the binary.
         interp_type = type_str[:1]
         format_char = type_str[1:2].strip()
+        if interp_type == "R":
+            raise FileFormatError(
+                f"{filepath}: TYPE 'R' is the BELLHOP3D regular (x, y) grid "
+                f"(Bellhop/bdry3DMod.f90:76, :242), not a 2-D range-depth {kind} file.",
+                remediation="Read it with uacpy.io.read_boundary_3d.",
+            )
         if interp_type not in ("L", "C"):
             raise FileFormatError(
                 f"Unknown {kind} type: {interp_type!r} (must be 'L' or 'C'; "
@@ -167,13 +178,186 @@ def _read_boundary_2d(
     return out, interp_type
 
 
+#: The long-format columns of a 2-D boundary file (``bdryMod.f90:200-201``):
+#: file column -> BoundaryTable field.
+_GEOACOUSTIC_COLUMNS = {2: 'sound_speed', 3: 'shear_speed', 4: 'density',
+                        5: 'attenuation', 6: 'shear_attenuation'}
+
+
+@dataclass(frozen=True, eq=False)
+class BoundaryTable(ExportRecord):
+    """A 2-D ``.bty`` or ``.ati`` as the file holds it, as
+    :func:`read_bathymetry` and :func:`read_altimetry` read it.
+
+    Every file Bellhop reads is a table: negative or repeated ranges, a
+    zero depth and the curvilinear ``'C'`` interpolation included.
+    :meth:`to_bathymetry` / :meth:`to_altimetry` build the carrier and refuse
+    whatever it cannot hold.
+
+    Attributes
+    ----------
+    kind : {'bathymetry', 'altimetry'}
+        Which boundary the file describes.
+    path : str
+        The file read.
+    interpolation : {'L', 'C'}
+        ``TYPE(1:1)``: piecewise-linear or curvilinear (``bdryMod.f90``).
+    ranges : ndarray
+        The points' ranges (m; km on disk).
+    depths : ndarray
+        The points' depths (m), positive down on Bellhop's z axis, for both
+        kinds: on an ``.ati`` +2 is a surface 2 m below mean sea level.
+    sound_speed, shear_speed, density, attenuation, shear_attenuation : ndarray or None
+        A long-format file's (``TYPE(2:2) == 'L'``) per-point geoacoustics,
+        as written: speeds in m/s, density in g/cm³, attenuations in the
+        unit the env deck's ``TopOpt(3)`` names. ``None`` on a short file.
+    """
+
+    kind: str
+    path: str
+    interpolation: str
+    ranges: np.ndarray
+    depths: np.ndarray
+    sound_speed: Optional[np.ndarray] = None
+    shear_speed: Optional[np.ndarray] = None
+    density: Optional[np.ndarray] = None
+    attenuation: Optional[np.ndarray] = None
+    shear_attenuation: Optional[np.ndarray] = None
+
+    _REPR_UNITS = {'ranges': 'm', 'depths': 'm', 'sound_speed': 'm/s',
+                   'shear_speed': 'm/s', 'density': 'g/cm³',
+                   'attenuation': 'dB/λ', 'shear_attenuation': 'dB/λ'}
+
+    _ARRAY_FIELDS = ('ranges', 'depths') + tuple(_GEOACOUSTIC_COLUMNS.values())
+
+    @classmethod
+    def _from_parsed(cls, parsed, kind: str, path) -> 'BoundaryTable':
+        """The table of a parser's padded ``(rows, interpolation)``."""
+        rows, interpolation = parsed
+        rows = rows[:, 1:-1]
+        long_format = ({name: rows[column]
+                        for column, name in _GEOACOUSTIC_COLUMNS.items()}
+                       if rows.shape[0] > 2 else {})
+        return cls(kind=kind, path=str(path), interpolation=interpolation,
+                   ranges=rows[0], depths=rows[1], **long_format)
+
+    @property
+    def is_long_format(self) -> bool:
+        return self.sound_speed is not None
+
+    def _table(self):
+        """One row per point: ``range``, ``depth`` and, on a long-format
+        file, the five geoacoustic columns."""
+        table = {'range': np.asarray(self.ranges),
+                 'depth': np.asarray(self.depths)}
+        if self.is_long_format:
+            table.update({name: np.asarray(getattr(self, name))
+                          for name in _GEOACOUSTIC_COLUMNS.values()})
+        return table
+
+    def _refuse_what_the_carrier_cannot_hold(self, kind: str) -> None:
+        carrier = kind.capitalize()
+        if self.kind != kind:
+            raise ConfigurationError(
+                f"{self.path} is a {self.kind} table, not {kind}.",
+                remediation=f"Call to_{self.kind}() on it, or read the "
+                            f"{kind} file with read_{kind}.")
+        if self.interpolation == 'C':
+            raise ConfigurationError(
+                f"{self.path}: interpolation 'C' (curvilinear). "
+                f"{carrier} holds a piecewise-linear profile; building one "
+                f"from these points would replace the file's curvilinear "
+                f"interpolation with straight segments.",
+                remediation=f"If straight segments between the file's points "
+                            f"are what you want, build the carrier from the "
+                            f"table yourself: {carrier}(ranges=table.ranges, "
+                            f"...) from table.depths.")
+        if self.is_long_format:
+            raise ConfigurationError(
+                f"{self.path} is a long-format {kind} file: it carries "
+                f"per-range geoacoustics, which {carrier} does not hold.",
+                remediation="Read the deck with read_env, which builds the "
+                            "boundary from these columns in the deck's "
+                            "attenuation unit; or build the carrier from "
+                            "table.ranges and table.depths for the "
+                            "geometry alone.")
+
+    def to_bathymetry(self) -> Bathymetry:
+        """The :class:`~uacpy.core.bathymetry.Bathymetry` of a short,
+        piecewise-linear ``.bty``.
+
+        Raises
+        ------
+        ConfigurationError
+            The table is an altimetry file, uses the curvilinear ``'C'``
+            interpolation, carries long-format geoacoustics, or holds points
+            the carrier refuses (a negative or non-increasing range, a depth
+            <= 0) — each naming the file.
+        """
+        self._refuse_what_the_carrier_cannot_hold('bathymetry')
+        try:
+            return Bathymetry(ranges=np.array(self.ranges),
+                              depths=np.array(self.depths))
+        except ConfigurationError as exc:
+            raise ConfigurationError(
+                f"{self.path}: {exc.message.rstrip('.')}.",
+                remediation="Bathymetry needs ranges >= 0, strictly "
+                            "increasing at the deck resolution, and depths "
+                            "> 0; shift or trim the table into that domain "
+                            "and build the carrier from the result.",
+            ) from exc
+
+    def to_altimetry(self) -> Altimetry:
+        """The :class:`~uacpy.core.altimetry.Altimetry` of a short,
+        piecewise-linear ``.ati``: heights positive up, the file's
+        positive-down values negated.
+
+        Raises
+        ------
+        ConfigurationError
+            As :meth:`to_bathymetry`, for an altimetry file.
+        """
+        self._refuse_what_the_carrier_cannot_hold('altimetry')
+        try:
+            return Altimetry(ranges=np.array(self.ranges),
+                             heights=-np.array(self.depths))
+        except ConfigurationError as exc:
+            raise ConfigurationError(
+                f"{self.path}: {exc.message.rstrip('.')}.",
+                remediation="Altimetry needs ranges >= 0, strictly "
+                            "increasing at the deck resolution, and finite "
+                            "heights; shift or trim the table into that "
+                            "domain and build the carrier from the result.",
+            ) from exc
+
+
 @typed_format_error
-def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
+def _parse_bathymetry(filepath: Union[str, Path],
+                      verbose: Union[bool, str] = False) -> Tuple[np.ndarray, str]:
+    """The ``.bty`` as ``(rows, interpolation)``, in the layout of AT's
+    ``readbty.m`` that :func:`read_env` reads: one row per file column
+    (range in m, depth, and on a long-format file the five geoacoustic
+    columns), padded with a copy of the first and last point at ranges
+    ∓1e50 so a segment search brackets any range.
+    """
+    return _read_boundary_2d(filepath, ".bty", "bathymetry", verbose)
+
+
+@typed_format_error
+def _parse_altimetry(filepath: Union[str, Path],
+                     verbose: Union[bool, str] = False) -> Tuple[np.ndarray, str]:
+    """The ``.ati`` as :func:`_parse_bathymetry` lays out a ``.bty``; the
+    surface column positive down, as the file carries it."""
+    return _read_boundary_2d(filepath, ".ati", "altimetry", verbose)
+
+
+def read_bathymetry(filepath: Union[str, Path],
+                    verbose: Union[bool, str] = False) -> BoundaryTable:
     """
     Read bathymetry data from BELLHOP .bty file.
 
-    Reads 2D range-depth bathymetry profile with optional interpolation type.
-    Extends the bathymetry to ±infinity for computational purposes.
+    Reads the 2-D range-depth bathymetry profile, its interpolation type
+    and, on a long-format file, its per-point geoacoustics.
 
     Parameters
     ----------
@@ -181,36 +365,23 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
         Path to bathymetry file. An existing path is read exactly as
         given, whatever its extension; a bare root without an extension
         resolves to ``<root>.bty``.
-    verbose : bool, optional
+    verbose : bool or str, optional
         If True, print bathymetry information. Default is False.
 
     Returns
     -------
-    bty : ndarray
-        Bathymetry data array of shape (n_cols, N+2) where:
-        - bty[0, :] = range in meters (extended to ±1e50 at endpoints)
-        - bty[1, :] = depth in meters
-
-        A long-format file (``TYPE(2:2) == 'L'``, written by
-        :func:`write_bty_long_format`) carries per-range geoacoustics in the
-        remaining rows, in ``bdryMod.f90:200-201`` column order:
-        - bty[2, :] = compressional speed (m/s)
-        - bty[3, :] = shear speed (m/s)
-        - bty[4, :] = density (g/cm³)
-        - bty[5, :] = compressional attenuation
-        - bty[6, :] = shear attenuation
-
-        First and last points are extended to -infinity and +infinity, every
-        row held constant across the extension.
-    bty_type : str
-        Interpolation type:
-        - 'L' : Piecewise-linear
-        - 'C' : Curvilinear (cubic spline)
+    bty : BoundaryTable
+        ``kind='bathymetry'``, the file's ``interpolation`` (``'L'``
+        piecewise-linear, ``'C'`` curvilinear), the points' ``ranges`` (m)
+        and ``depths`` (m), and on a long-format file
+        (``TYPE(2:2) == 'L'``, written by :func:`write_bty_long_format`) the
+        five geoacoustic columns. :meth:`BoundaryTable.to_bathymetry` builds
+        the carrier; ``np.column_stack([bty.ranges, bty.depths])`` is the
+        ``(N, 2)`` array :func:`write_bty_file` takes.
 
     Notes
     -----
     - Input file ranges are in km, converted to meters on output
-    - Bathymetry is extended to ±infinity using constant extrapolation
     - File format:
         Line 1: TYPE in quotes — position 1 is 'L' or 'C' (interpolation),
         position 2 is 'S' (short) or 'L' (long, with geoacoustics)
@@ -221,16 +392,17 @@ def read_bathymetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[
     ----------
     Based on BELLHOP/readbty.m
     """
-    return _read_boundary_2d(filepath, ".bty", "bathymetry", verbose)
+    return BoundaryTable._from_parsed(
+        _parse_bathymetry(filepath, verbose), 'bathymetry', filepath)
 
 
-@typed_format_error
-def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[np.ndarray, str]:
+def read_altimetry(filepath: Union[str, Path],
+                   verbose: Union[bool, str] = False) -> BoundaryTable:
     """
     Read altimetry data from BELLHOP .ati file.
 
-    Reads 2D range-depth altimetry (surface) profile with optional
-    interpolation type. Extends the altimetry to ±infinity.
+    Reads the 2-D range-depth altimetry (surface) profile and its
+    interpolation type.
 
     Parameters
     ----------
@@ -238,48 +410,41 @@ def read_altimetry(filepath: Union[str, Path], verbose: bool = False) -> Tuple[n
         Path to altimetry file. An existing path is read exactly as
         given, whatever its extension; a bare root without an extension
         resolves to ``<root>.ati``.
-    verbose : bool, optional
+    verbose : bool or str, optional
         If True, print altimetry information. Default is False.
 
     Returns
     -------
-    ati : ndarray
-        Altimetry data array of shape (n_cols, N+2) where:
-        - ati[0, :] = range in meters (extended to ±1e50 at endpoints)
-        - ati[1, :] = surface position in meters, **positive-down** on
-          Bellhop's z axis exactly as the file carries it (+2 means the
-          surface is 2 m *below* MSL — a wave trough). This is the same
-          convention :func:`write_ati_file` documents on its input, so the
-          pair round-trips as an identity; callers that own the public
-          positive-up convention (``Environment(altimetry=…)``, whose
-          heights ``bellhop_writer`` negates on the way out) must negate
-          this column on the way back in.
+    ati : BoundaryTable
+        ``kind='altimetry'``, the ``interpolation``, the ``ranges`` (m) and
+        the surface positions as ``depths`` (m), **positive-down** on
+        Bellhop's z axis exactly as the file carries it (+2 means the
+        surface is 2 m *below* MSL — a wave trough), the convention
+        :func:`write_ati_file` documents on its input, so
+        ``np.column_stack([ati.ranges, ati.depths])`` round-trips unchanged.
+        :meth:`BoundaryTable.to_altimetry` builds the positive-up carrier.
 
         ``ReadATI`` accepts the same long format as ``ReadBTY``
         (``bdryMod.f90:80-110``), so a ``TYPE(2:2) == 'L'`` file carries
-        per-range top geoacoustics — an ice cover, typically — in rows 2..6
-        with the column order documented on :func:`read_bathymetry`.
-    ati_type : str
-        Interpolation type:
-        - 'L' : Piecewise-linear
-        - 'C' : Curvilinear (cubic spline)
+        per-range top geoacoustics — an ice cover, typically — in the five
+        geoacoustic columns.
 
     Notes
     -----
     - Input file ranges are in km, converted to meters on output
-    - Altimetry is extended to ±infinity using constant extrapolation
     - File format identical to bathymetry (.bty) files
 
     References
     ----------
     Based on BELLHOP/readati.m
     """
-    return _read_boundary_2d(filepath, ".ati", "altimetry", verbose)
+    return BoundaryTable._from_parsed(
+        _parse_altimetry(filepath, verbose), 'altimetry', filepath)
 
 
 @typed_format_error
 def read_boundary_3d(
-    filepath: Union[str, Path], verbose: bool = False
+    filepath: Union[str, Path], verbose: Union[bool, str] = False
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
     """
     Read a BELLHOP3D 3-D boundary grid (``.bty`` bathymetry / ``.ati``
@@ -301,7 +466,7 @@ def read_boundary_3d(
         ``bdry3DMod.f90:216`` and ``ReadATI3D`` at ``:54``). The path is
         used as given; no suffix is guessed, because the same grid is
         legal under either name.
-    verbose : bool, optional
+    verbose : bool or str, optional
         Log the grid size and axis previews. Default False.
 
     Returns
@@ -384,7 +549,7 @@ def read_boundary_3d(
     # ConfigurationError (see FileFormatError's own docstring for the rule).
     if not filepath.exists():
         raise ConfigurationError(
-            f"3-D boundary file not found: {filepath}",
+            f"3-D boundary file not found: {filepath}.",
             remediation="Pass the path with its extension (.bty bathymetry "
                         "or .ati altimetry); this reader guesses neither, "
                         "because the same 3-D grid is legal under both.",
@@ -471,7 +636,7 @@ def read_boundary_3d(
             f"{z_bot.size}; bellhop3d only warns about these "
             f"(bdry3DMod.f90:310-312) and then carries them into every "
             f"boundary tangent and normal derived from the grid.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP,
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
     return km_to_m(x_bot), km_to_m(y_bot), z_bot, n_x, n_y
@@ -487,11 +652,34 @@ def _validate_interp_type(interp_type: str) -> str:
     (see ``write_bty_file`` vs ``write_bty_long_format``).
     """
     t = str(interp_type).strip().upper()
-    if t not in ("L", "C"):
+    if t not in GEOMETRY_INTERP_CODES.values():
         raise ConfigurationError(
             f"Invalid interpolation type {interp_type!r}; expected 'L' or 'C'."
         )
     return t
+
+
+def _boundary_rows(label: str, data) -> np.ndarray:
+    """``data`` as a float ``(N, 2)`` array of ``(range_m, value)`` rows, or
+    raise :class:`~uacpy.core.exceptions.ConfigurationError` naming the shape.
+
+    Runs before the file is opened, so a wrong orientation leaves nothing on
+    disk. A :class:`BoundaryTable` goes back as
+    ``np.column_stack([table.ranges, table.depths])``.
+    """
+    rows = np.array(data, dtype=float)
+    if rows.ndim != 2 or rows.shape[1] != 2:
+        hint = (" A (2, N) array has its rows and columns swapped: pass "
+                "its transpose." if rows.ndim == 2 and rows.shape[0] == 2
+                else "")
+        raise ConfigurationError(
+            f"{label}: expected an (N, 2) array of (range_m, value) rows, "
+            f"got shape {rows.shape}.{hint}",
+            remediation="Stack the columns: np.column_stack([ranges_m, "
+                        "values]). A read_bathymetry/read_altimetry table "
+                        "goes back as np.column_stack([table.ranges, "
+                        "table.depths]).")
+    return rows
 
 
 def _validate_boundary_axis(label: str, axis: np.ndarray) -> None:
@@ -499,20 +687,20 @@ def _validate_boundary_axis(label: str, axis: np.ndarray) -> None:
 
     Bellhop brackets a coordinate by searching the axis in ascending order
     and interpolates within the bracketing segment
-    (``bdryMod.f90 GetTopSeg/GetBotSeg``, :256-282); a repeated value makes
-    a zero-length segment whose tangent normalisation divides by zero, and
+    (``bdryMod.f90`` ``GetTopSeg``/``GetBotSeg``, :344-388); a repeated
+    value makes a zero-length segment whose tangent normalisation
+    (``ComputeBdryTangentNormal``, :256-282) divides by zero, and
     a decreasing value breaks the segment search silently. Non-finite
     values pass straight into the geometry and poison every tangent/normal
     derived from it.
     """
     axis = np.asarray(axis, dtype=float)
-    # An empty axis is not a boundary. `write_bty_file(path, np.zeros((0, 2)))`
-    # otherwise emitted a well-formed file declaring 0 points, which uacpy's
-    # own `read_bathymetry` rejects but `bellhop.exe` accepts: it prints
-    # "Number of bathymetry points = 0", terminates every beam, and writes an
-    # all-zero .shd at exit 0. One point is legal — bdryMod.f90:174,224-225
-    # extends a boundary to +/- infinity itself — so only the empty case is
-    # refused here.
+    # An empty axis is not a boundary. A file declaring 0 points is refused
+    # by uacpy's own `read_bathymetry` but accepted by `bellhop.exe`, which
+    # prints "Number of bathymetry points = 0", terminates every beam, and
+    # writes an all-zero .shd at exit 0. One point is legal — bdryMod.f90:174
+    # reserves two extra points and :266-271 extends a file boundary to
+    # +/- infinity — so only the empty case is refused here.
     if axis.size == 0:
         raise ConfigurationError(
             f"{label}: no points. A boundary file declaring 0 points is read "
@@ -610,7 +798,7 @@ def _write_boundary_2d(
 
     if hasattr(data, "to_pairs"):
         data = data.to_pairs()
-    rows = np.asarray(data, dtype=float).copy()
+    rows = _boundary_rows(filepath.suffix or '.bty/.ati', data)
     _validate_boundary_axis(f"{filepath.suffix or '.bty/.ati'} range column",
                             rows[:, 0])
     rows[:, 0] = m_to_km(rows[:, 0])
@@ -666,7 +854,7 @@ def write_bty_file(filepath: Union[str, Path], bathymetry: np.ndarray, interp_ty
 def write_bty_long_format(
     filepath: Union[str, Path],
     bathymetry: np.ndarray,
-    bottom_rd,
+    bottom,
     interp_type: str = "L",
 ) -> None:
     """
@@ -683,7 +871,7 @@ def write_bty_long_format(
         Output .bty path.
     bathymetry : ndarray
         Shape (N, 2): range (m), depth (m).
-    bottom_rd : Bottom
+    bottom : Bottom
         Range-dependent ``Bottom`` carrying per-range halfspace geoacoustics:
         ``ranges`` (metres) plus the ``halfspace_sound_speed`` /
         ``halfspace_density`` / ``halfspace_attenuation`` /
@@ -723,7 +911,7 @@ def write_bty_long_format(
     if interp_char == 'C':
         # The long format has no curvilinear spelling in this AT version.
         # Position 2 must be 'L' to select the geoacoustic columns
-        # (``bdryMod.f90:183``), but Bellhop's curvilinear test compares the
+        # (``bdryMod.f90:184``), but Bellhop's curvilinear test compares the
         # whole LEN=2 string against 'C' (``bellhop.f90:552``), which 'CL'
         # cannot equal. So the reflection geometry is flat whatever is asked
         # for here, while the node normals are still built curvilinearly
@@ -737,16 +925,16 @@ def write_bty_long_format(
             "flat segment normals. Use the short format (write_bty_file) for "
             "a genuinely curvilinear bottom, or pass interp_type='L' here to "
             "ask for what the deck will actually do.",
-            UserWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
     if hasattr(bathymetry, "to_pairs"):
         bathymetry = bathymetry.to_pairs()
-    bathy_km = np.asarray(bathymetry, dtype=float).copy()
+    bathy_km = _boundary_rows('.bty (long)', bathymetry)
     _validate_boundary_axis(".bty (long) range column", bathy_km[:, 0])
     bathy_km[:, 0] = m_to_km(bathy_km[:, 0])
     _check_km_column_resolves('.bty (long) range column', bathy_km[:, 0])
 
-    rd_r_km = np.atleast_1d(np.asarray(m_to_km(bottom_rd.ranges), dtype=float))
+    rd_r_km = np.atleast_1d(np.asarray(m_to_km(bottom.ranges), dtype=float))
     # Column switches sit midway between consecutive bottom nodes. Each
     # switch is a row, so Bellhop's hold-to-the-right rule reproduces the
     # nearest-column step exactly; the first node anchors the first column.
@@ -778,11 +966,11 @@ def write_bty_long_format(
     # the number of switches at or left of that point is the column index.
     seg_centre = np.append(0.5 * (r_km[:-1] + r_km[1:]), r_km[-1])
     col = np.searchsorted(switches_km, seg_centre, side='right')
-    cp = np.asarray(bottom_rd.halfspace_sound_speed, dtype=float)[col]
-    rho = np.asarray(bottom_rd.halfspace_density, dtype=float)[col]
-    alpha = np.asarray(bottom_rd.halfspace_attenuation, dtype=float)[col]
-    cs = np.asarray(bottom_rd.halfspace_shear_speed, dtype=float)[col]
-    alpha_s = np.asarray(bottom_rd.halfspace_shear_attenuation,
+    cp = np.asarray(bottom.halfspace_sound_speed, dtype=float)[col]
+    rho = np.asarray(bottom.halfspace_density, dtype=float)[col]
+    alpha = np.asarray(bottom.halfspace_attenuation, dtype=float)[col]
+    cs = np.asarray(bottom.halfspace_shear_speed, dtype=float)[col]
+    alpha_s = np.asarray(bottom.halfspace_shear_attenuation,
                          dtype=float)[col]
     n_pts = r_km.size
 

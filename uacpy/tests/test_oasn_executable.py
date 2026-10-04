@@ -63,18 +63,17 @@ class TestExecutableSearchOrder:
 
     def test_bash_wrapper_outranks_the_bare_binary_across_dirs(
             self, monkeypatch):
-        import pathlib
-        import uacpy.models.base as base_mod
+        import uacpy.models._launch as launch_mod
 
-        base_dir = pathlib.Path(base_mod.__file__).parent.parent
+        base_dir = launch_mod._PACKAGE_DIR
         bash_oases = base_dir / 'bin' / 'oases' / 'oasn2_bin_bash'
         bare_oalib = base_dir / 'bin' / 'oalib' / 'oasn2_bin'
         runnable = set()
         # The search selects a candidate the OS would actually exec, so the
         # stub stands in for that predicate rather than for bare existence.
-        monkeypatch.setattr(base_mod, '_is_runnable',
+        monkeypatch.setattr(launch_mod, '_is_runnable',
                             lambda path: str(path) in runnable)
-        monkeypatch.setattr(base_mod.shutil, 'which', lambda name: None)
+        monkeypatch.setattr(launch_mod.shutil, 'which', lambda name: None)
 
         model = OASN.__new__(OASN)      # only the search helper is exercised
         model.model_name = 'OASN'
@@ -98,7 +97,9 @@ class TestExecutableSearchOrder:
         # Nothing anywhere: the error lists the candidates in search order,
         # _bash first.
         runnable.clear()
-        with pytest.raises(ExecutableNotFoundError) as err:
+        with pytest.raises(
+                ExecutableNotFoundError,
+                match='executable not found: oasn2_bin_bash') as err:
             find()
         msg = str(err.value)
         assert msg.index(str(bash_oases)) < msg.index(str(bare_oalib))

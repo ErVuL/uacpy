@@ -24,6 +24,7 @@ import pytest
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Arrivals, Field
 from uacpy.acoustic_signal import lfm_chirp, tone_burst
+from uacpy.tests.conftest import recorded_warnings
 
 DF, N_FREQ, F0 = 5.0, 128, 1000.0
 FREQS = F0 + DF * np.arange(N_FREQ)
@@ -91,8 +92,7 @@ class TestTheFoldWarningIsPinnedOnBothSides:
 
     @staticmethod
     def warned(field, duration=0.005, **kw):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             field.truncate_response(duration, **kw)
         return any('furthest from the window' in str(w.message)
                    for w in caught)
@@ -119,18 +119,18 @@ class TestTheFoldWarningIsPinnedOnBothSides:
 
         ``argmax`` on a boxcar returns its left edge, so a centre re-derived
         inside the warning rotates the far-half mask by the window's
-        half-width for 'boxcar' and not at all for 'hann' — the same
+        half-width for None and not at all for 'hann' — the same
         channel and cut then disagree by window shape.
         """
         # The first two are comfortably either side and would agree even
         # with a rotated mask — they are here as controls. The THIRD sits
         # where the rotation matters: under a centre taken from
-        # ``argmax(taper)`` it reads boxcar=False, hann=True, and it was
+        # ``argmax(taper)`` it reads none=False, hann=True, and it was
         # found by sweeping for a split rather than guessed.
         for field, cut in ((self.two_paths(2.0, 0.100), 0.005),
                            (self.two_paths(20.0, 0.100), 0.005),
                            (self.two_paths(5.0, 0.150, amplitude=0.5), 0.020)):
-            assert (self.warned(field, window='boxcar', duration=cut)
+            assert (self.warned(field, window=None, duration=cut)
                     == self.warned(field, window='hann', duration=cut))
 
 
@@ -254,7 +254,8 @@ class TestAPulseOnlyInterferesWithWhatItOverlaps:
     @pytest.mark.parametrize('kwargs,message', [
         ({'duration': 0.0}, 'positive'),
         ({'duration': RECORD}, 'no-op'),
-        ({'duration': 0.02, 'window': 'blackman'}, 'boxcar'),
+        ({'duration': 0.02, 'window': 'blackman'}, 'must be None'),
+        ({'duration': 0.02, 'window': 'boxcar'}, 'must be None'),
         ({'duration': 0.02, 'origin': 'first'}, 'origin'),
         ({'duration': 0.02, 'origin': 5.0}, 'outside'),
     ])
@@ -317,7 +318,7 @@ class TestArrivalsAnswerForTheirOwnPaths:
         """Dropping the far path by hand gives the first path alone — the
         path-domain statement of the same criterion."""
         arr = _two_path_arrivals()
-        near = arr.in_delay_window(None, 1 * DT + 0.020)
+        near = arr.window(delay=(None, 1 * DT + 0.020))
         assert len(near) == 1
         H = np.abs(np.asarray(near.transfer_function(FREQS).data).ravel())
         assert H.max() - H.min() == pytest.approx(0.0, abs=1e-12)
@@ -337,7 +338,7 @@ class TestArrivalsAnswerForTheirOwnPaths:
 class TestTheTwoRoutesToAPulseChannelAgree:
     """The cross-check that licenses the model-independent route.
 
-    ``in_delay_window(...).transfer_function(...)`` knows the paths and drops
+    ``window(delay=...).transfer_function(...)`` knows the paths and drops
     them exactly. ``transfer_function(...).truncate_response(...)`` sees only
     ``H(f)`` and has to find them in the response. On a set where both apply,
     they must land on the same channel — that is what says the second may be
@@ -348,7 +349,7 @@ class TestTheTwoRoutesToAPulseChannelAgree:
         arr = _two_path_arrivals()
         pulse = 0.020
         by_path = np.asarray(
-            arr.in_delay_window(None, 1 * DT + pulse)
+            arr.window(delay=(None, 1 * DT + pulse))
             .transfer_function(FREQS).data).ravel()
         by_response = np.asarray(
             arr.transfer_function(FREQS).truncate_response(pulse).data
@@ -406,8 +407,9 @@ class TestTheSumOverPathsIsTheModelsOwnBroadbandRun:
     def test_it_reproduces_the_broadband_run_to_floating_point(self):
         arrivals, broadband, grid = self._run()
         # A one-path cell agrees under any phase convention; this guide has
-        # hundreds, so their sum is what is being compared.
-        assert len(arrivals) > 100, len(arrivals)
+        # dozens of distinct paths at the cell (78 with the default hat
+        # beams), so their sum is what is being compared.
+        assert len(arrivals) > 30, len(arrivals)
         mine = np.asarray(arrivals.transfer_function(grid).data).ravel()
         theirs = np.asarray(broadband.data).ravel()
         level = float(np.abs(
@@ -450,7 +452,7 @@ class TestAGridThatCannotBePlacedOnADftIsRefused:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             return float(self.two_paths(df).sound_exposure_level(
-                tone_burst(500.0, 5, RATE)[1], RATE).dB[0, 0])
+                tone_burst(500.0, 5, sample_rate=RATE)[1], RATE).dB[0, 0])
 
     def test_a_grid_on_the_rounding_boundary_is_refused(self):
         for df in (2.0 / 3.0, 25.0 / 40.5):       # freqs[0]/df = 37.5, 40.5
@@ -467,7 +469,7 @@ class TestAGridThatCannotBePlacedOnADftIsRefused:
 
 
 class TestOneSignalAtOneReceiver:
-    """``to_time_trace(waveform=...)`` — the received signal at a position.
+    """``to_time_trace(source_waveform=...)`` — the received signal at a position.
 
     ``synthesize_time_series`` convolves every cell; this is the one-receiver
     form, and it took a ``source_spectrum`` the caller had to sample onto the
@@ -490,13 +492,13 @@ class TestOneSignalAtOneReceiver:
     def trace(self, field, **kw):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            return field.to_time_trace(window='none', **kw)
+            return field.to_time_trace(window=None, **kw)
 
     def test_the_pulse_arrives_at_the_geometric_travel_time(self):
         field = self.spreading_field()
-        waveform = lfm_chirp(300.0, 900.0, 0.020, self.RATE)[1]
+        waveform = lfm_chirp(300.0, 900.0, 0.020, sample_rate=self.RATE)[1]
         out = self.trace(field, depth=50.0, range=500.0,
-                         waveform=waveform, sample_rate=self.RATE)
+                         source_waveform=waveform, sample_rate=self.RATE)
         pressure = np.asarray(out.data).real
         times = np.asarray(out.coords['time'])
         power = pressure ** 2
@@ -511,11 +513,11 @@ class TestOneSignalAtOneReceiver:
 
     def test_the_amplitude_follows_one_over_range(self):
         field = self.spreading_field()
-        waveform = tone_burst(500.0, 5, self.RATE)[1]
+        waveform = tone_burst(500.0, 5, sample_rate=self.RATE)[1]
         near = self.trace(field, depth=50.0, range=100.0,
-                          waveform=waveform, sample_rate=self.RATE)
+                          source_waveform=waveform, sample_rate=self.RATE)
         far = self.trace(field, depth=50.0, range=500.0,
-                         waveform=waveform, sample_rate=self.RATE)
+                         source_waveform=waveform, sample_rate=self.RATE)
         ratio = (np.abs(np.asarray(near.data).real).max()
                  / np.abs(np.asarray(far.data).real).max())
         assert ratio == pytest.approx(5.0, rel=0.05)
@@ -523,7 +525,7 @@ class TestOneSignalAtOneReceiver:
     def test_the_cell_it_used_is_recorded(self):
         field = self.spreading_field()
         out = self.trace(field, depth=50.0, range=500.0,
-                         waveform=tone_burst(500.0, 5, self.RATE)[1],
+                         source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
                          sample_rate=self.RATE)
         assert out.pinned['depth'] == 50.0
         assert out.pinned['range'] == 500.0
@@ -538,8 +540,8 @@ class TestOneSignalAtOneReceiver:
         field = self.spreading_field()
         with pytest.warns(UserWarning, match="outside the grid"):
             out = field.to_time_trace(
-                depth=50.0, range=5000.0, window='none',
-                waveform=tone_burst(500.0, 5, self.RATE)[1],
+                depth=50.0, range=5000.0, window=None,
+                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
                 sample_rate=self.RATE)
         assert out.pinned['range'] == 500.0
 
@@ -550,21 +552,51 @@ class TestOneSignalAtOneReceiver:
         # an 'error' filter over all UserWarnings would pass for the wrong
         # reason. 300 m is BETWEEN stored ranges, which is a snap and not an
         # off-grid request.
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             field.to_time_trace(
-                depth=50.0, range=300.0, window='none',
-                waveform=tone_burst(500.0, 5, self.RATE)[1],
+                depth=50.0, range=300.0, window=None,
+                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
                 sample_rate=self.RATE)
         assert not [w for w in caught
                     if 'outside the grid' in str(w.message)]
+
+    def off_grid_notices(self, field, range_m):
+        with recorded_warnings() as caught:
+            field.to_time_trace(
+                depth=50.0, range=range_m, window=None,
+                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
+                sample_rate=self.RATE)
+        return [w for w in caught if 'outside the grid' in str(w.message)]
+
+    @pytest.mark.parametrize('range_m,outside', [
+        # The 100-500 m axis matches within 1e-6 of max(span, |value|, 1):
+        # 0.5 mm at the 500 m end, 0.4 mm at the 100 m end.
+        (500.0 + 4.5e-4, False), (500.0 + 5.5e-4, True),
+        (100.0 - 3.5e-4, False), (100.0 - 4.5e-4, True),
+    ])
+    def test_the_grid_edge_carries_the_axis_match_tolerance(
+            self, range_m, outside):
+        assert bool(self.off_grid_notices(self.spreading_field(),
+                                          range_m)) is outside
+
+    def test_a_range_read_back_through_a_deck_is_on_its_own_grid(self):
+        """The defect this guards: Bellhop's deck stored 4975.879396984925 m
+        as 4975.879 m, and asking for the Receiver's own range drew "range=
+        4975.88 is outside the grid (4975.88 to 4975.88)"."""
+        f = np.arange(25.0, 4000.0, 25.0)
+        field = Field(data=np.ones((2, 1, f.size), dtype=complex),
+                      coords={'depth': np.array([10.0, 50.0]),
+                              'range': np.array([4975.879]),
+                              'frequency': f},
+                      frequencies=f)
+        assert self.off_grid_notices(field, 4975.879396984925) == []
 
     def test_a_waveform_and_a_spectrum_together_are_refused(self):
         field = self.spreading_field()
         with pytest.raises(ConfigurationError, match="not both"):
             field.to_time_trace(
                 depth=50.0, range=500.0,
-                waveform=tone_burst(500.0, 5, self.RATE)[1],
+                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1],
                 sample_rate=self.RATE,
                 source_spectrum=np.ones(field.n_frequencies))
 
@@ -573,11 +605,85 @@ class TestOneSignalAtOneReceiver:
         with pytest.raises(ConfigurationError, match="sample_rate"):
             field.to_time_trace(
                 depth=50.0, range=500.0,
-                waveform=tone_burst(500.0, 5, self.RATE)[1])
+                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE)[1])
 
     def test_the_generators_time_signal_pair_is_refused(self):
         field = self.spreading_field()
         with pytest.raises(ConfigurationError, match="1-D signal"):
             field.to_time_trace(depth=50.0, range=500.0,
-                                waveform=tone_burst(500.0, 5, self.RATE),
+                                source_waveform=tone_burst(500.0, 5, sample_rate=self.RATE),
                                 sample_rate=self.RATE)
+
+
+# ── A channel statistic is one receiver's, like the channel itself ──────────
+
+def _two_cell_arrivals():
+    from uacpy.core.results import Arrivals
+    recs = []
+    for r_idx, (t0, rng) in enumerate(((0.667, 1000.0), (3.667, 10000.0))):
+        for k, (dt, a) in enumerate(((0.0, 1.0), (1e-3, 0.5))):
+            recs.append({'delay': t0 + dt, 'amplitude': a, 'phase': 0.0,
+                         'src_idx': 0, 'depth_idx': 0, 'range_idx': r_idx})
+    return Arrivals(arrivals=recs, receiver_depths=[50.0],
+                    receiver_ranges=[1000.0, 10000.0], model='two-cell',
+                    frequencies=1000.0)
+
+
+class TestChannelStatisticsAreOneReceivers:
+    """Pooled, the 1 km and 10 km cells read a 3 s "delay spread" where each
+    receiver's channel is 0.4 ms wide."""
+
+    @pytest.mark.parametrize('call', [
+        lambda a, **kw: a.rms_delay_spread(**kw),
+        lambda a, **kw: a.energy_support(**kw),
+        lambda a, **kw: a.coherence_bandwidth(**kw),
+        lambda a, **kw: a.channel_regime(1000.0, **kw),
+    ])
+    def test_several_cells_need_a_receiver(self, call):
+        with pytest.raises(ConfigurationError, match="receiver"):
+            call(_two_cell_arrivals())
+
+    def test_a_chosen_cell_is_that_receivers_channel(self):
+        arr = _two_cell_arrivals()
+        spread = arr.rms_delay_spread(receiver=(50.0, 10000.0))
+        # Two paths 1 ms apart, powers 1 and 0.25: sqrt(0.2)*1 ms = 0.4 ms.
+        assert spread == pytest.approx(0.4e-3, rel=1e-6)
+        assert arr.coherence_bandwidth(receiver=(50.0, 1000.0)) == \
+            pytest.approx(1.0 / 0.4e-3, rel=1e-6)
+
+    def test_the_synthesis_band_holds_every_cell(self):
+        """``synthesis_band`` sizes ONE record shared by the whole grid, so
+        it has to span the cells: pooled on purpose."""
+        arr = _two_cell_arrivals()
+        f = arr.synthesis_band(bandwidth=200.0, centre=1000.0)
+        assert 1.0 / (f[1] - f[0]) > 3.0
+
+
+@pytest.mark.parametrize('gap, none, hann', [
+    (5e-3, -4.049, -3.527), (10e-3, -3.407, -1.680),
+    (15e-3, -2.650, -0.260), (30e-3, 0.001, 0.001)])
+def test_the_truncate_response_table_reproduces(gap, none, hann):
+    """The table in ``Field.truncate_response``'s docstring, under the
+    configuration it records: two paths (1, 0.7), 25 Hz-4 kHz at 1 Hz, a
+    rectangular 20-cycle 1 kHz burst, the gate centred on the first path."""
+    fs = 48000.0
+    _, burst = tone_burst(1000.0, 20, sample_rate=fs, window=None)
+    duration = burst.size / fs
+    f = np.arange(25.0, 4000.0, 1.0)
+    H = np.exp(-2j * np.pi * f * 0.1) + 0.7 * np.exp(-2j * np.pi * f * (0.1 + gap))
+    field = Field(data=H.reshape(1, 1, -1),
+                  coords={'depth': [10.0], 'range': [150.0], 'frequency': f},
+                  frequencies=f)
+
+    def loss(x):
+        return float(x.broadband_loss(source_waveform=burst,
+                                      sample_rate=fs).data[0, 0])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got_none = loss(field.truncate_response(duration, origin=0.1,
+                                                window=None))
+        got_hann = loss(field.truncate_response(duration, origin=0.1,
+                                                window='hann'))
+    assert got_none == pytest.approx(none, abs=1e-3)
+    assert got_hann == pytest.approx(hann, abs=1e-3)

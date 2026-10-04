@@ -17,7 +17,9 @@ import numpy as np
 
 from uacpy._log import log_message
 from uacpy.data import _cache
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import (
+    ConfigurationError, DataFetchError, FallbackWarning, IOWarning,
+)
 from uacpy.data._http import http_get
 from uacpy.visualization.plots._common import _plot_warn
 
@@ -74,6 +76,16 @@ def _rings(data):
     return rings or None
 
 
+def _check_resolution(who, resolution):
+    """Refuse a resolution Natural Earth does not publish, before any I/O: the
+    URL built from it is a 404 that the backdrop's fallback would report as a
+    network failure after its retries."""
+    if resolution not in COASTLINE_RESOLUTIONS:
+        raise ConfigurationError(
+            f"{who}: resolution {resolution!r} is not one Natural Earth "
+            f"publishes; use one of {COASTLINE_RESOLUTIONS}.")
+
+
 def _local_path(resolution):
     return _cache.dataset_root('coastline') / f'ne_{resolution}_land.geojson'
 
@@ -84,8 +96,26 @@ def land_polygons(resolution='50m', *, url=None, timeout=40.0, verbose=False):
     Returns a list of ``(N, 2)`` ``(lon, lat)`` exterior rings, or ``None`` if
     no source is available. ``resolution`` is ``'110m'`` (coarse), ``'50m'``
     (default) or ``'10m'`` (detailed, large). Reads the install-time cache first,
-    then the live GeoJSON. No attribution is required.
+    then the live GeoJSON. No attribution is required. Any other
+    ``resolution`` raises :class:`~uacpy.core.exceptions.ConfigurationError`.
+
+    The cache read is ``<cache root>/coastline/``, the directory
+    :func:`download_coastline` fills by default; the cache root is
+    ``$UACPY_DATA_CACHE`` when that is set, as for every ``uacpy.data`` reader.
+
+    Parameters
+    ----------
+    resolution : {'110m', '50m', '10m'}, optional
+        Natural Earth scale. Default ``'50m'``.
+    url : str, optional
+        Live address with a ``{resolution}`` field; given, the cache is not
+        read. ``None`` is :data:`NATURAL_EARTH_URL`.
+    timeout : float, optional
+        Network timeout in seconds. Default 40.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
     """
+    _check_resolution('land_polygons', resolution)
     local = _local_path(resolution)
     cache_fault = None
     if url is None and local.exists():
@@ -102,7 +132,7 @@ def land_polygons(resolution='50m', *, url=None, timeout=40.0, verbose=False):
             _plot_warn(
                 f"{cache_fault}; reading the live source instead. Delete that "
                 f"file and re-run `./install.sh --data coastline` to repair "
-                f"the offline cache.")
+                f"the offline cache.", IOWarning)
     src = (url or NATURAL_EARTH_URL).format(resolution=resolution)
     try:
         data = json.loads(http_get(src, timeout=timeout, verbose=verbose,
@@ -124,7 +154,7 @@ def land_polygons(resolution='50m', *, url=None, timeout=40.0, verbose=False):
                   f"or pass basemap=False.")
         _plot_warn(
             f"coastline backdrop unavailable ({type(exc).__name__}); the "
-            f"map renders without land. {remedy}")
+            f"map renders without land. {remedy}", FallbackWarning)
         return None
     return _rings(data)
 
@@ -139,11 +169,34 @@ def download_coastline(cache_dir=None, *, url=None,
     dataset root (public domain — no attribution). Returns the list of written
     paths.
 
+    ``cache_dir`` names the dataset directory itself, as ``cache_dir`` does
+    for every ``uacpy.data`` downloader. The map plotters read only
+    ``<cache root>/coastline/``, so files written anywhere else are staged
+    for copying there: to keep the cache in a directory of your own, set
+    ``UACPY_DATA_CACHE=<root>`` and leave ``cache_dir`` unset (or pass
+    ``<root>/coastline``).
+
     ``url`` fetches that address instead of :data:`NATURAL_EARTH_URL` — a
     mirror, or a copy staged on an http server of your own. It carries the
     same ``{resolution}`` field, so one address serves every resolution, and
     :func:`land_polygons` takes the same override when it reads live.
+
+    Parameters
+    ----------
+    cache_dir : str or Path, optional
+        The dataset directory to write into (see above).
+    url : str, optional
+        Address with a ``{resolution}`` field; ``None`` is
+        :data:`NATURAL_EARTH_URL`.
+    resolutions : sequence of str, optional
+        Natural Earth scales to fetch. Default all three.
+    timeout : float, optional
+        Network timeout in seconds. Default 120.
+    verbose : bool or str, optional
+        Logging gate passed through to ``log_message``.
     """
+    for res in resolutions:
+        _check_resolution('download_coastline', res)
     dest = Path(cache_dir) if cache_dir else _cache.dataset_root('coastline')
     dest.mkdir(parents=True, exist_ok=True)
     written = []

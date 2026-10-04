@@ -18,6 +18,17 @@ from uacpy.data import bathymetry
 from uacpy.data.bathymetry import bathy_transect_plan, fetch_bathy_transect
 
 
+@pytest.fixture(autouse=True)
+def _no_installed_cache(monkeypatch, tmp_path):
+    """The per-layer fetchers are cache-first; the stubbed network paths
+    these tests check must not be pre-empted by the workspace's installed
+    grids. A test that wants a cache points UACPY_DATA_CACHE at its own."""
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'no_cache'))
+    from uacpy.data import _cache
+    _cache.invalidate_grids()
+
+
+
 def _ok(elevations):
     """Build an OpenTopoData-shaped OK payload from elevation values."""
     return {
@@ -108,7 +119,7 @@ def test_transect_shape_and_range_axis(stub_http):
     np.testing.assert_allclose(bathy[:, 1], [-e for e in elevs])
     # Directly consumable as range-dependent bathymetry.
     env = uacpy.Environment(name='slope', bathymetry=bathy, ssp=1500)
-    assert env.has_range_dependent_bathymetry
+    assert env.bathymetry.varies_with_range
 
 
 def test_transect_range_matches_known_distance(stub_http):
@@ -149,10 +160,27 @@ def test_fetch_bathy_grid(stub_http):
     stub_http['elevations'] = [-1000, -1100, -1200,
                                -900, 50.0, -1300,
                                -800, -850, -950]
-    lats, lons, depth = bathymetry.fetch_bathy_grid((40, 42), (7, 9), n_lat=3, n_lon=3)
+    grid = bathymetry.fetch_bathy_grid((40, 42), (7, 9), n_lat=3, n_lon=3)
+    lats, lons, depth = grid.lats, grid.lons, grid.depths
+    assert grid.provenance.source.id == 'gebco'
     assert lats.shape == (3,) and lons.shape == (3,) and depth.shape == (3, 3)
     assert depth[0, 0] == 1000.0
     assert np.isnan(depth[1, 1])       # land cell → NaN (point fetchers would raise)
+
+
+def test_the_bathy_grid_is_labelled_on_its_lat_lon_axes(stub_http):
+    pytest.importorskip('xarray')
+    stub_http['elevations'] = [-1000, -1100, -1200,
+                               -900, 50.0, -1300,
+                               -800, -850, -950]
+    grid = bathymetry.fetch_bathy_grid((40, 42), (7, 9), n_lat=3, n_lon=3)
+    ds = grid.to_xarray()
+    assert ds['depth'].dims == ('lat', 'lon')
+    assert ds['depth'].attrs['units'] == 'm'
+    assert float(ds['depth'].sel(lat=40.0, lon=7.0)) == 1000.0
+    back = bathymetry.BathyGrid.from_xarray(ds)
+    np.testing.assert_array_equal(back.depths, grid.depths)
+    assert back.provenance.source.id == 'gebco'
 
 
 def test_fetch_bathy_grid_warns_when_the_eastward_lon_span_exceeds_180(
@@ -183,8 +211,8 @@ def test_fetch_bathy_grid_latitudes_ascend_for_descending_range(stub_http):
     stub_http['elevations'] = [-1000, -1100, -1200,
                                -900, -950, -1300,
                                -800, -850, -975]
-    lats, lons, depth = bathymetry.fetch_bathy_grid((42, 40), (7, 9),
-                                                    n_lat=3, n_lon=3)
+    grid = bathymetry.fetch_bathy_grid((42, 40), (7, 9), n_lat=3, n_lon=3)
+    lats, depth = grid.lats, grid.depths
     assert np.all(np.diff(lats) > 0)
     assert lats[0] == 40.0 and lats[-1] == 42.0
     assert depth[0, 0] == 1000.0          # first fetched row = southernmost
@@ -198,8 +226,8 @@ def test_fetch_grid_too_small_raises():
 def test_fetch_grid_allows_50x50(stub_http):
     # 50×50 = 2500 points (25 requests) is within budget; just check it runs.
     stub_http['elevations'] = [-1000.0] * 100   # any 100-long chunk reply
-    lats, lons, depth = bathymetry.fetch_bathy_grid((36, 44), (0, 10))   # defaults 50×50
-    assert depth.shape == (50, 50)
+    grid = bathymetry.fetch_bathy_grid((36, 44), (0, 10))   # defaults 50×50
+    assert grid.depths.shape == (50, 50)
 
 
 def test_fetch_grid_too_many_requests_raises():

@@ -15,13 +15,17 @@ import pytest
 import uacpy
 from uacpy.core import BoundaryProperties, Environment, Receiver, Source
 from uacpy.core.results import Field
+from uacpy.io.oases_writer import OasnNoise, OasnReplicaGrid
 from uacpy.models import Bellhop, OASN, OASP, OASR
-from uacpy.models.base import RunMode
-from uacpy.models.oases import _oases_resample_frequencies
+from uacpy.core.run_settings import RunMode
+from uacpy.models.oases._sampling import _oases_resample_frequencies
 from uacpy.core.environment import SoundSpeedProfile
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, UnsupportedFeatureError,
 )
+from uacpy.tests.conftest import make_halfspace
+from uacpy.tests.conftest import recorded_warnings
+from uacpy.tests.conftest import make_pekeris
 
 
 class _FakeProc:
@@ -70,13 +74,13 @@ class TestOasesKeepsTheFullSSP:
             f"the duct peak {peak:.2f} m/s never reached the deck — the SSP "
             f"was subsampled")
 
-    @pytest.mark.requires_binary
+    @pytest.mark.requires_oases
     def test_tl_tracks_kraken_on_a_finely_sampled_profile(self):
         """Kraken meshes the full profile, so a large disagreement means
         OASES was handed a different ocean."""
         import uacpy
         import warnings as _w
-        from uacpy.models.base import RunMode
+        from uacpy.core.run_settings import RunMode
         env = self._duct_env(201)
         src = uacpy.Source(depths=30.0, frequencies=500.0)
         rcv = uacpy.Receiver(depths=[30.0, 60.0],
@@ -204,7 +208,9 @@ class TestOasesSSPDecimationAtTheRealLimit:
     def test_the_seabed_share_is_required_not_assumed(self):
         """Omitting it would bound the SSP alone and overrun NL."""
         from uacpy.io.oases_writer import _check_ssp_layer_count
-        with pytest.raises(TypeError):
+        with pytest.raises(
+                TypeError,
+                match="required positional argument: 'n_other_layers'"):
             _check_ssp_layer_count(self._ssp(10))
 
     def test_warn_false_decimates_without_saying_so(self):
@@ -213,8 +219,7 @@ class TestOasesSSPDecimationAtTheRealLimit:
         from uacpy.io.oases_writer import (_check_ssp_layer_count,
                                            _OASES_MAX_LAYERS)
         data = self._ssp(5000)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             out = _check_ssp_layer_count(data, self.N_OTHER, warn=False)
         assert [str(w.message) for w in caught] == []
         assert out.shape[0] <= _OASES_MAX_LAYERS - self.N_OTHER
@@ -232,7 +237,7 @@ class TestOassInterfaceLookupLeavesGlobalWarningStateAlone:
 
     @staticmethod
     def _env(n_ssp_rows=None):
-        from uacpy.core.bottom import BoundaryProperties
+        from uacpy.core.boundary import BoundaryProperties
         ssp = 1500.0
         if n_ssp_rows is not None:
             z = np.linspace(0.0, 100.0, n_ssp_rows)
@@ -247,8 +252,7 @@ class TestOassInterfaceLookupLeavesGlobalWarningStateAlone:
     def test_a_decimated_ssp_draws_no_warning_from_the_lookup(self):
         from uacpy.io.oases_writer import oass_bottom_interfaces
         env = self._env(n_ssp_rows=5000)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             first_bottom, _ = oass_bottom_interfaces(env)
         assert [str(w.message) for w in caught] == []
         assert first_bottom > 2
@@ -297,14 +301,14 @@ class TestOassInterfaceLookupLeavesGlobalWarningStateAlone:
         assert delivered == ['probe from another thread']
 
 
-@pytest.mark.requires_binary
+@pytest.mark.requires_oases
 def test_oast_short_range_run_returns_a_field_not_nan():
     """OAST Block VIII XLEFT/XRIGHT set the FFT output grid, not just a plot
     window. They are in km, so at %.1f any run shorter than ~50 m would round
     XRIGHT to 0.0 and hand back an all-NaN TL field with no exception."""
     import uacpy
     import warnings as _w
-    from uacpy.models.base import RunMode
+    from uacpy.core.run_settings import RunMode
     env = uacpy.Environment(
         bathymetry=200.0,
         ssp=uacpy.SoundSpeedProfile.from_pairs([(0.0, 1500.0), (200.0, 1500.0)]),
@@ -322,7 +326,7 @@ def test_oast_short_range_run_returns_a_field_not_nan():
     assert finite.min() > 0.0 and finite.max() < 200.0
 
 
-@pytest.mark.requires_binary
+@pytest.mark.requires_oases
 def test_a_single_frequency_contour_option_is_refused_before_the_run():
     """``unoast31.f:138-140`` ends at ``STOP '*** CONTOURS REQUIRE NRFR>1 …'``
     when option ``'o'`` meets ``NFREQ <= 1``. That is a character stop, so the
@@ -330,7 +334,7 @@ def test_a_single_frequency_contour_option_is_refused_before_the_run():
     The deck is refusable on inspection, so refuse it."""
     import uacpy
     from uacpy.core.exceptions import ConfigurationError
-    from uacpy.models.base import RunMode
+    from uacpy.core.run_settings import RunMode
     env = uacpy.Environment(
         bathymetry=200.0,
         ssp=uacpy.SoundSpeedProfile.from_pairs([(0.0, 1500.0), (200.0, 1500.0)]),
@@ -344,6 +348,7 @@ def test_a_single_frequency_contour_option_is_refused_before_the_run():
                   uacpy.Receiver(depths=[100.0], ranges=[1000.0, 2000.0]))
 
 
+@pytest.mark.requires_oases
 @pytest.mark.parametrize('banner', [
     'STOP *** CMIN/CMAX CONFLICT ***',
     'STOP >>>> ERROR: INPUT FILE NOT FOUND <<<<',
@@ -357,10 +362,11 @@ def test_an_oases_stop_banner_does_not_point_at_a_prt(tmp_path, banner):
     import uacpy
     from types import SimpleNamespace
     from uacpy.core.exceptions import ModelExecutionError
-    from uacpy.models.base import RunMode
+    from uacpy.core.run_settings import RunMode
     model = uacpy.OASES.for_mode(RunMode.COHERENT_TL)
     result = SimpleNamespace(stdout='', stderr=banner, returncode=0)
-    with pytest.raises(ModelExecutionError) as ei:
+    with pytest.raises(ModelExecutionError,
+                       match=r'Error output:\nSTOP ') as ei:
         model._raise_on_fortran_fatal(result, tmp_path, 'nonexistent')
     msg = str(ei.value)
     assert banner.split('STOP', 1)[1].strip()[:12] in msg, (
@@ -376,9 +382,9 @@ def _pekeris_env():
         density=1.7)
 
 
-@pytest.mark.requires_binary
+@pytest.mark.requires_oases
 def test_oasp_run_frequencies_honours_the_lower_band_edge():
-    """``frequencies=`` sets an (fmin, fmax, N) triple; dropping fmin leaves
+    """``frequencies=`` sets an (freq_min, freq_max, N) triple; dropping freq_min leaves
     OASP sweeping from DC and costing several times the requested bins.
 
     The band edges land on OASP's own FFT bin grid, not on the request:
@@ -390,7 +396,7 @@ def test_oasp_run_frequencies_honours_the_lower_band_edge():
     import uacpy
     import warnings as _w
     from uacpy.models import OASP
-    from uacpy.models.base import RunMode
+    from uacpy.core.run_settings import RunMode
     with _w.catch_warnings():
         _w.simplefilter('ignore')
         field = OASP(n_time_samples=512).run(
@@ -404,7 +410,7 @@ def test_oasp_run_frequencies_honours_the_lower_band_edge():
     assert f.max() <= 201.0
 
 
-@pytest.mark.requires_binary
+@pytest.mark.requires_oases
 def test_oasp_multi_frequency_source_centres_the_sweep_on_the_band():
     """A multi-element ``source.frequencies`` names a band; its centre — not
     its first element — sets the deck fc and the derived ``2.5×fc`` sweep
@@ -414,7 +420,7 @@ def test_oasp_multi_frequency_source_centres_the_sweep_on_the_band():
     import uacpy
     import warnings as _w
     from uacpy.models import OASP
-    from uacpy.models.base import RunMode
+    from uacpy.core.run_settings import RunMode
     with _w.catch_warnings():
         _w.simplefilter('ignore')
         field = OASP(n_time_samples=512).run(
@@ -431,31 +437,31 @@ def test_oasp_multi_frequency_source_centres_the_sweep_on_the_band():
     assert field.metadata['center_frequency'] == pytest.approx(200.0, abs=1.0)
 
 
-@pytest.mark.requires_binary
-def test_oasp_pinned_freq_max_below_the_band_top_raises():
-    """A pinned sweep edge that cannot reach the top of the requested band
-    names the conflict instead of silently truncating the sweep."""
+@pytest.mark.requires_oases
+def test_oasp_pinned_freq_max_below_a_source_band_is_named_and_overridden():
+    """A multi-element Source band sets the sweep as ``run(frequencies=)``
+    does, so a pinned sweep edge below its top is overridden — named in a
+    warning — rather than truncating the band."""
     import uacpy
-    from uacpy.core.exceptions import ConfigurationError
     from uacpy.models import OASP
-    from uacpy.models.base import RunMode
-    with pytest.raises(ConfigurationError, match="freq_max"):
-        OASP(n_time_samples=512, freq_max=250.0).run(
+    from uacpy.core.run_settings import RunMode
+    with recorded_warnings() as caught:
+        field = OASP(n_time_samples=512, freq_max=250.0).run(
             _pekeris_env(),
             uacpy.Source(depths=25.0, frequencies=[100.0, 200.0, 300.0]),
             uacpy.Receiver(depths=np.array([50.0]),
                            ranges=np.array([1000.0])),
             run_mode=RunMode.BROADBAND)
+    assert any('freq_max=250' in str(w.message) for w in caught)
+    assert np.asarray(field.coords['frequency'], dtype=float).max() >= 300.0
 
 
-@pytest.mark.requires_binary
+@pytest.mark.requires_oases
 def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_min():
     import uacpy
-    import warnings as _w
     from uacpy.models import OASP
-    from uacpy.models.base import RunMode
-    with _w.catch_warnings(record=True) as w:
-        _w.simplefilter('always')
+    from uacpy.core.run_settings import RunMode
+    with recorded_warnings() as w:
         OASP(n_time_samples=512, freq_min=10.0).run(
             _pekeris_env(), uacpy.Source(depths=25.0, frequencies=150.0),
             uacpy.Receiver(depths=np.array([50.0]),
@@ -466,16 +472,14 @@ def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_min():
         "silently overrode the constructor's freq_min"
 
 
-@pytest.mark.requires_binary
+@pytest.mark.requires_oases
 def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_max():
     """``frequencies=`` overrides both band edges; the upper one warns
     symmetrically with the lower."""
     import uacpy
-    import warnings as _w
     from uacpy.models import OASP
-    from uacpy.models.base import RunMode
-    with _w.catch_warnings(record=True) as w:
-        _w.simplefilter('always')
+    from uacpy.core.run_settings import RunMode
+    with recorded_warnings() as w:
         OASP(n_time_samples=512, freq_max=400.0).run(
             _pekeris_env(), uacpy.Source(depths=25.0, frequencies=150.0),
             uacpy.Receiver(depths=np.array([50.0]),
@@ -486,7 +490,7 @@ def test_oasp_run_frequencies_warns_when_it_overrides_a_pinned_freq_max():
         "silently overrode the constructor's freq_max"
 
 
-@pytest.mark.requires_binary
+@pytest.mark.requires_oases
 def test_oasp_coherent_tl_carries_the_same_phase_reference_as_broadband():
     """COHERENT_TL is one frequency slice of the same .trf array, so it
     must not come back with the phase reference dropped. ``travelling_wave``
@@ -496,7 +500,7 @@ def test_oasp_coherent_tl_carries_the_same_phase_reference_as_broadband():
     import uacpy
     import warnings as _w
     from uacpy.models import OASP
-    from uacpy.models.base import RunMode
+    from uacpy.core.run_settings import RunMode
     env = _pekeris_env()
     src = uacpy.Source(depths=25.0, frequencies=150.0)
     rcv = uacpy.Receiver(depths=np.array([50.0]),
@@ -531,6 +535,7 @@ class TestStaleOutputsAreCleared:
             uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
         )
 
+    @pytest.mark.requires_oases
     def test_oast_stale_plt_is_not_returned(self, tmp_path, monkeypatch):
         from uacpy.models.oases import OAST
         from uacpy.core.exceptions import ModelExecutionError
@@ -542,6 +547,7 @@ class TestStaleOutputsAreCleared:
             model.run(*self._env())
         assert not (tmp_path / 'oast_run.plt').exists()
 
+    @pytest.mark.requires_oases
     def test_oasp_stale_trf_is_not_returned(self, tmp_path, monkeypatch):
         from uacpy.models.oases import OASP
         from uacpy.core.exceptions import ModelExecutionError
@@ -572,8 +578,10 @@ class TestStaleOutputsAreCleared:
         stop the declaration meaning anything.
         """
         import ast
+        import importlib
         import inspect
-        from uacpy.models import oases as oases_mod
+        import pkgutil
+        from uacpy.models import oases as package
         from uacpy.models.oases import (
             OASES, OAST, OASN, OASR, OASP, OASS, OASSP)
         clears = {cls.__name__ for cls in
@@ -586,9 +594,13 @@ class TestStaleOutputsAreCleared:
         # a tuple literal here is where the five-line explanation drifts one
         # copy at a time. Read from the source, because CPython folds equal
         # literal tuples in one module to one object, so ``is`` cannot see it.
-        tree = ast.parse(inspect.getsource(oases_mod))
-        spelled_out = []
-        for node in ast.walk(tree):
+        spelled_out, declaring = [], set()
+        nodes = [node
+                 for info in pkgutil.iter_modules(package.__path__)
+                 for node in ast.walk(ast.parse(inspect.getsource(
+                     importlib.import_module(
+                         f'{package.__name__}.{info.name}'))))]
+        for node in nodes:
             if not isinstance(node, ast.ClassDef):
                 continue
             for stmt in node.body:
@@ -598,22 +610,26 @@ class TestStaleOutputsAreCleared:
                 names = [t.id for t in targets if isinstance(t, ast.Name)]
                 if '_OUTPUT_FORT_FILES' not in names:
                     continue
+                declaring.add(node.name)
                 value = stmt.value
                 if (isinstance(value, ast.Tuple)
                         and any(getattr(e, 'value', None) == 'fort.46'
                                 for e in value.elts)):
                     spelled_out.append(node.name)
+        # The scan reached every class that declares the list.
+        assert {'OAST', 'OASR', 'OASP'} <= declaring
         assert not spelled_out, (
             f"{spelled_out} spell the shared fort.46 list out again instead "
             f"of naming _SCTOUT_BARE_FORT46")
 
 
+@pytest.mark.requires_oases
 class TestOasnWhiteNoiseDefaultThroughTheModel:
     """OASES adds ``10**(WNLEVDB/10)`` to every covariance diagonal with no
     off switch (oasnun22.f:228, :1157). The OASN model therefore defaults
     ``white_noise_level`` to ``None`` — written as -200 dB, whose 1e-20
     linear power is numerically nil — while an explicit 0.0 reaches the
-    deck as a literal 0 dB (unit linear power per sensor)."""
+    deck as a literal 0 dB re 1 µPa²/Hz per sensor."""
 
     @staticmethod
     def _deck(tmp_path, monkeypatch, **kw):
@@ -645,11 +661,12 @@ class TestOasnWhiteNoiseDefaultThroughTheModel:
         assert '70.0 0.0 0.0 0' in text
 
 
+@pytest.mark.requires_oases
 class TestContourOffsetUnderAutomaticSampling:
     """``unoast31.f:429`` sets ``OFFDB=0E0`` inside the ``NWVNOin < 0``
     branch (``unoasp22.f:323`` for OASP), so the binary discards a
     user-supplied contour offset and prints "THE DEFAULT CONTOUR OFFSET IS
-    APPLIED". Since ``nw_samples=-1`` is uacpy's own default, a documented
+    APPLIED". Since ``n_wavenumbers=None`` is uacpy's own default, a documented
     constructor argument silently had no effect in the default configuration.
     The manual does not say so — ``oast.tex:547-550`` names only IC1/IC2 —
     which is why the warning has to come from uacpy."""
@@ -662,15 +679,15 @@ class TestContourOffsetUnderAutomaticSampling:
 
     @pytest.mark.parametrize('cls_name', ['OAST', 'OASP'])
     @pytest.mark.parametrize('kwargs', [
-        {'integration_offset': 2.0, 'nw_samples': 4096},   # offset is honoured
-        {'nw_samples': -1},                                # no offset to lose
+        {'integration_offset': 2.0, 'n_wavenumbers': 4096},   # offset is honoured
+        {'n_wavenumbers': None},                                # no offset to lose
     ])
     def test_no_warning_when_the_offset_reaches_the_kernel_or_is_unset(
             self, cls_name, kwargs):
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             # The OASES licence notice is emitted once per source per process
-            # (base.py::_warn_restricted_source), so whichever test builds the
+            # (base.py::_warn_restricted_provenance), so whichever test builds the
             # first OASES model in this worker absorbs it. Under xdist that is
             # a coin toss, which would make a strict block flaky for a warning
             # it does not assert on.
@@ -688,9 +705,10 @@ class TestContourOffsetUnderAutomaticSampling:
             uacpy.OASN(integration_offset=2.0)
 
 
+@pytest.mark.requires_oases
 class TestLicenceWarningIsOncePerProcess:
     """Constructing any OASES sub-model emits a one-time licence/citation
-    UserWarning (oases.md §9; ``base.py`` ``_warn_restricted_source`` dedupes
+    UserWarning (oases.md §9; ``base.py`` ``_warn_restricted_provenance`` dedupes
     per provenance id per process). This suite's config filters UserWarnings
     and any earlier test in the worker may already have absorbed the one
     emission, so the once-and-only-once contract is only observable in a
@@ -716,62 +734,96 @@ class TestLicenceWarningIsOncePerProcess:
             f"expected exactly one licence warning; stdout={proc.stdout!r}")
 
 
+@pytest.mark.requires_oases
 class TestOASPSweepDerivation:
-    """The (freq_max, n_time_samples) pair the deck receives (oases.md §10):
-    ``freq_max=None`` derives ``2.5 × fc``, and an explicit ``frequencies=``
-    vector rounds ``n_time_samples`` up to the power of two OASP requires
-    (``NT = 2^M``, oasp.tex:129). The writer is stubbed, so no deck is
-    written and no binary runs."""
+    """The Block III/VIII sweep the deck is written from (oases.md §10), read
+    from ``run_settings(...).engine`` — the settings the writer receives:
+    the default sweep of a one-carrier BROADBAND run is ``0 .. 2.5·fc`` on
+    4096 samples; a requested band (``frequencies=``, a TIME_SERIES pulse,
+    the source frequency of a COHERENT_TL run) sets ``FR1``/``FR2`` and the
+    smallest power of two ``NX`` whose bins are as fine as the requested
+    spacing, floored at a pinned ``n_time_samples`` (``NT = 2^M``,
+    oasp.tex:129). No binary runs."""
 
-    class _DeckCaptured(Exception):
-        pass
-
-    def _capture(self, monkeypatch, model, **run_kwargs):
-        import uacpy.models.oases as oases_module
-        seen = {}
-
-        def fake(*args, **kwargs):
-            seen.update(kwargs)
-            raise self._DeckCaptured
-
-        monkeypatch.setattr(oases_module, 'write_oasp_input', fake)
+    @staticmethod
+    def _settings(model, **run_kwargs):
         env = uacpy.Environment(
             bathymetry=100.0, ssp=1500.0,
             bottom=uacpy.BoundaryProperties(
                 acoustic_type='half-space', sound_speed=1800.0,
                 density=1.8, attenuation=0.5))
-        with pytest.raises(self._DeckCaptured):
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                model.run(env, uacpy.Source(depths=25.0, frequencies=100.0),
-                          uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
-                          **run_kwargs)
-        return seen
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return model.run_settings(
+                env, uacpy.Source(depths=25.0, frequencies=100.0),
+                uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+                **run_kwargs)
 
-    def test_freq_max_none_derives_two_and_a_half_fc(self, monkeypatch):
-        from uacpy.models import OASP
-        seen = self._capture(monkeypatch, OASP(verbose=False))
-        assert seen['freq_max'] == pytest.approx(2.5 * 100.0)
-        assert seen['n_time_samples'] == 4096
+    def test_freq_max_none_derives_two_and_a_half_fc(self):
+        engine = self._settings(OASP(verbose=False),
+                                run_mode=RunMode.BROADBAND).engine
+        assert engine.freq_max == pytest.approx(2.5 * 100.0)
+        assert engine.n_time_samples == 4096
 
-    def test_pinned_freq_max_reaches_the_deck_verbatim(self, monkeypatch):
-        from uacpy.models import OASP
-        seen = self._capture(monkeypatch,
-                             OASP(freq_max=300.0, verbose=False))
-        assert seen['freq_max'] == pytest.approx(300.0)
+    def test_pinned_freq_max_reaches_the_deck_verbatim(self):
+        engine = self._settings(OASP(freq_max=300.0, verbose=False),
+                                run_mode=RunMode.BROADBAND).engine
+        assert engine.freq_max == pytest.approx(300.0)
 
-    def test_explicit_frequencies_round_nt_up_to_a_power_of_two(
-            self, monkeypatch):
-        from uacpy.models import OASP
-        from uacpy.models.base import RunMode
-        # df = 5 Hz up to 200 Hz needs ceil(2·200/5) = 80 samples; the
-        # caller's 100 rules, rounded up to the next power of two.
-        seen = self._capture(
-            monkeypatch, OASP(n_time_samples=100, verbose=False),
+    def test_explicit_frequencies_round_nt_up_to_a_power_of_two(self):
+        # df = 5 Hz up to 200 Hz needs ceil(2·200/5) + 2 = 82 samples; the
+        # caller's 100 rules, rounded up to the next power of two. The
+        # Nyquist is lifted by NX/(NX-2) so OASP's top bin, DLFREQ*(NX/2-1),
+        # sits on the 200 Hz edge (unoasp22.f:237-246).
+        engine = self._settings(
+            OASP(n_time_samples=100, verbose=False),
             run_mode=RunMode.BROADBAND,
-            frequencies=np.linspace(50.0, 200.0, 31))
-        assert seen['n_time_samples'] == 128
-        assert seen['freq_max'] == pytest.approx(200.0)
+            frequencies=np.linspace(50.0, 200.0, 31)).engine
+        assert engine.n_time_samples == 128
+        assert engine.freq_max == pytest.approx(200.0 * 128 / 126, rel=1e-5)
+        top_bin = 2.0 * engine.freq_max / 128 * (128 // 2 - 1)
+        assert 200.0 <= top_bin < 200.0 + 200.0 / 126
+
+    def test_coherent_tl_runs_the_sweep_frequencies_f_would_run(self):
+        """OASES-1: a COHERENT_TL run asks for its source frequency, so its
+        sweep is the one ``frequencies=[f]`` gives — ``FR1 = f`` and the bin
+        at ``f`` (``unoasp22.f:237-248``) — not the 2047-bin default sweep
+        whose nearest bin sat at 99.976 Hz (29 deg of phase at 5 km)."""
+        model = OASP(verbose=False)
+        default = self._settings(model)
+        pinned = self._settings(model, frequencies=[100.0])
+        assert default.engine == pinned.engine
+        assert default.engine.freq_min == 100.0
+        assert default.frequencies.size == 1
+        assert abs(default.frequencies[0] - 100.0) <= 2e-6 * 100.0
+        assert default.engine.marched_frequencies.size <= 2
+
+    def test_an_unpinned_nx_gives_the_record_the_duration_asks_for(self):
+        """OASES-6: without ``n_time_samples``, a TIME_SERIES run sizes NX
+        from the pulse grid's ``Δf = 1/output_duration`` alone, so the
+        record ``1/DLFREQ`` is ``output_duration`` rounded up to a power of
+        two of samples — not the 4096-sample floor that made a 1 s request
+        a 7.5 s record."""
+        fs = 1000.0
+        t = np.arange(200) / fs
+        pulse = np.hanning(200) * np.sin(2 * np.pi * 100.0 * t)
+        settings = self._settings(
+            OASP(verbose=False), run_mode=RunMode.TIME_SERIES,
+            source_waveform=pulse, sample_rate=fs, output_duration=1.0)
+        engine = settings.engine
+        record = engine.n_time_samples / (2.0 * engine.freq_max)
+        assert 1.0 <= record < 2.0, (engine.n_time_samples, record)
+        assert engine.n_time_samples < 4096
+
+    def test_a_pinned_nx_floors_the_requested_band(self):
+        fs = 1000.0
+        t = np.arange(200) / fs
+        pulse = np.hanning(200) * np.sin(2 * np.pi * 100.0 * t)
+        engine = self._settings(
+            OASP(n_time_samples=4096, verbose=False),
+            run_mode=RunMode.TIME_SERIES, source_waveform=pulse,
+            sample_rate=fs, output_duration=1.0).engine
+        assert engine.n_time_samples == 4096
 
 
 class TestOASRShearReflectionTypesAreRefused:
@@ -787,6 +839,7 @@ class TestOASRShearReflectionTypesAreRefused:
         with pytest.raises(UnsupportedFeatureError, match='zeros'):
             uacpy.OASR(reflection_type=reflection_type)
 
+    @pytest.mark.requires_oases
     @pytest.mark.parametrize('reflection_type', [None, 'P-P', 'transmission'])
     def test_usable_reflection_types_are_untouched(self, reflection_type):
         # The discriminating half — measured max|R| 0.999947 (P-P) and
@@ -794,6 +847,22 @@ class TestOASRShearReflectionTypesAreRefused:
         kwargs = ({} if reflection_type is None
                   else {'reflection_type': reflection_type})
         uacpy.OASR(**kwargs)
+
+    def test_the_docstrings_list_the_refused_types_as_refused(self):
+        # help(OASR) and the §18 table must not offer 'P-SV'/'P-Slow' as
+        # values that run: every paragraph naming them names the refusal.
+        import inspect
+        import re
+        # Each engine documents its constructor once (class or __init__).
+        docs = [d for d in (uacpy.OASR.__doc__, uacpy.OASR.__init__.__doc__)
+                if d and 'reflection_type :' in d]
+        assert docs, 'no docstring documents reflection_type'
+        for doc in docs:
+            section = inspect.cleandoc(doc).split('reflection_type :')[1]
+            # The entry ends at the next unindented parameter line.
+            section = re.split(r'\n\S', section)[0]
+            assert "'P-SV'" in section
+            assert 'UnsupportedFeatureError' in section
 
 
 @pytest.mark.requires_oases  # runs OASP
@@ -806,11 +875,7 @@ class TestOASPFrequencyGridSubstitution:
 
     @staticmethod
     def _env():
-        return uacpy.Environment(
-            bathymetry=100.0, ssp=1500.0,
-            bottom=uacpy.BoundaryProperties(
-                acoustic_type='half-space', sound_speed=1800.0,
-                density=1.8, attenuation=0.5))
+        return make_pekeris(sound_speed=1800.0)
 
     def test_run_frequencies_substitution_warns(self):
         with pytest.warns(UserWarning, match='FFT ladder'):
@@ -828,6 +893,19 @@ class TestOASPFrequencyGridSubstitution:
                 uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
                 run_mode=uacpy.RunMode.BROADBAND)
 
+    @pytest.mark.parametrize('run_mode', ['BROADBAND', 'COHERENT_TL'])
+    def test_the_complex_field_is_complex128_like_every_engine(self,
+                                                               run_mode):
+        # The .trf payload is COMPLEX*8; Kraken, Scooter and Bellhop return
+        # complex128, and so does OASP on both complex routes.
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            field = uacpy.OASP().run(
+                self._env(), uacpy.Source(depths=25.0, frequencies=200.0),
+                uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+                run_mode=getattr(uacpy.RunMode, run_mode))
+        assert field.data.dtype == np.complex128
+
     def test_single_frequency_names_nothing_and_is_silent(self):
         with warnings.catch_warnings():
             warnings.simplefilter('error', UserWarning)
@@ -839,6 +917,7 @@ class TestOASPFrequencyGridSubstitution:
                 run_mode=uacpy.RunMode.BROADBAND)
 
 
+@pytest.mark.requires_oases
 class TestOASRContourOptionIsLogSwept:
     """`oasr.tex:135` documents option 'C' as a *plot* option ("Loss contours
     plotted in frequency and grazing angle"), but `unoasr21.f:123-125`
@@ -854,11 +933,7 @@ class TestOASRContourOptionIsLogSwept:
 
     @staticmethod
     def _env():
-        return uacpy.Environment(
-            bathymetry=100.0, ssp=1500.0,
-            bottom=uacpy.BoundaryProperties(
-                acoustic_type='half-space', sound_speed=1600.0,
-                density=1.8, attenuation=0.5))
+        return make_pekeris(sound_speed=1600.0)
 
     def _run(self, options, freqs):
         kwargs = {} if options is None else {'options': options}
@@ -900,11 +975,7 @@ class TestOptionLineFitsGETOPT:
 
     @staticmethod
     def _env():
-        return uacpy.Environment(
-            bathymetry=100.0, ssp=1500.0,
-            bottom=uacpy.BoundaryProperties(
-                acoustic_type='half-space', sound_speed=1600.0,
-                density=1.8, attenuation=0.5))
+        return make_pekeris(sound_speed=1600.0)
 
     def _write(self, options, tmp_path):
         from uacpy.io.oases_writer import write_oast_input
@@ -939,21 +1010,20 @@ class TestContourOffsetIsWarnedOnBothDiscardPaths:
 
     @staticmethod
     def _offset_warnings(fn):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             fn()
         return [str(w.message) for w in caught
                 if 'integration_offset' in str(w.message)]
 
     def test_oast_without_j_warns(self):
         got = self._offset_warnings(
-            lambda: uacpy.OAST(integration_offset=0.5, nw_samples=1024,
+            lambda: uacpy.OAST(integration_offset=0.5, n_wavenumbers=1024,
                                complex_contour=False))
         assert got and 'option line' in got[0], got
 
     def test_oast_with_j_and_pinned_sampling_is_quiet(self):
         assert not self._offset_warnings(
-            lambda: uacpy.OAST(integration_offset=0.5, nw_samples=1024))
+            lambda: uacpy.OAST(integration_offset=0.5, n_wavenumbers=1024))
 
     def test_oast_warns_under_automatic_sampling(self):
         got = self._offset_warnings(
@@ -962,14 +1032,14 @@ class TestContourOffsetIsWarnedOnBothDiscardPaths:
 
     def test_oasp_raw_options_without_j_warns(self):
         got = self._offset_warnings(
-            lambda: uacpy.OASP(integration_offset=0.5, nw_samples=1024,
+            lambda: uacpy.OASP(integration_offset=0.5, n_wavenumbers=1024,
                                options='N'))
         assert got and 'option line' in got[0], got
 
     def test_oasp_default_option_line_is_quiet(self):
         # The writer's default is 'N J', so nothing is discarded.
         assert not self._offset_warnings(
-            lambda: uacpy.OASP(integration_offset=0.5, nw_samples=1024))
+            lambda: uacpy.OASP(integration_offset=0.5, n_wavenumbers=1024))
 
     def test_no_offset_never_warns(self):
         assert not self._offset_warnings(lambda: uacpy.OAST())
@@ -989,7 +1059,9 @@ class TestReflectionTypeProvenance:
 
     @staticmethod
     def _rt(**kw):
-        return uacpy.OASR(**kw)._resolve_reflection_type()
+        from uacpy.models.oases.oasr import _resolve_reflection_type
+        model = uacpy.OASR(**kw)
+        return _resolve_reflection_type(model.options, model.reflection_type)
 
     def test_the_transmission_letter_wins_over_the_parameter_letter(self):
         assert self._rt(options='N T t') == 'transmission'
@@ -1031,6 +1103,96 @@ def test_slowness_sampling_is_refused_after_a_post_construction_mutation():
                   uacpy.Receiver(depths=[50.0], ranges=[1000.0]))
 
 
+def _registered_carriers(key):
+    """The 100 m guide the registered OASES engine ``key`` runs over."""
+    from uacpy.models._registry import ENGINES
+    bottom = dict(ENGINES[key].example_bottom) or dict(
+        acoustic_type='half-space', sound_speed=1700.0, density=1.8,
+        attenuation=0.5)
+    return (uacpy.Environment(bathymetry=100.0, ssp=1500.0,
+                              bottom=uacpy.BoundaryProperties(**bottom)),
+            uacpy.Source(depths=50.0, frequencies=100.0),
+            uacpy.Receiver(depths=[20.0, 50.0], ranges=[200.0, 400.0]))
+
+
+def _registered_engine(key, **kwargs):
+    from uacpy.models._registry import ENGINES
+    entry = ENGINES[key]
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return entry.load()(**{**dict(entry.example_kwargs), **kwargs})
+
+
+@pytest.mark.requires_oases
+class TestAReassignedKnobIsCheckedByEveryRun:
+    """A knob the constructor refuses is refused again when it is assigned
+    after construction: ``validate_inputs`` and ``run`` both re-run the
+    constructor's checks in stage 2 (``_check_knobs``), with the
+    constructor's message, before any deck is written."""
+
+    @pytest.mark.parametrize('key,ctor,name,bad,match', [
+        ('oast', {}, 'vrec', 5.0, "cannot reach the binary"),
+        ('oasr', {}, 'reflection_type', 'P-SV', 'column of zeros'),
+        ('oasp', {'freq_max': 200.0}, 'freq_min', 300.0, 'is not below'),
+        ('oassp', {}, 'correlation_length', 0.0, 'degenerate'),
+        ('oassp', {}, 'roughness_spectrum', 'Pink',
+         r"OASSP\(roughness_spectrum='Pink'\)"),
+        ('oass', {}, 'roughness_spectrum', 'Pink',
+         r"OASS\(roughness_spectrum='Pink'\)"),
+    ])
+    def test_the_run_refuses_what_the_constructor_refuses(
+            self, key, ctor, name, bad, match):
+        env, src, rcv = _registered_carriers(key)
+        model = _registered_engine(key, **ctor)
+        setattr(model, name, bad)
+        with pytest.raises((ConfigurationError, UnsupportedFeatureError),
+                           match=match):
+            model.validate_inputs(env, src, rcv)
+        with pytest.raises((ConfigurationError, UnsupportedFeatureError),
+                           match=match):
+            model.run(env, src, rcv)
+        with pytest.raises((ConfigurationError, UnsupportedFeatureError),
+                           match=match):
+            _registered_engine(key, **{**ctor, name: bad})
+
+    @pytest.mark.parametrize('key', ['oassp', 'oass'])
+    def test_a_reassigned_spectrum_is_compared_case_folded(self, key):
+        """A mixed-case spelling assigned after construction passes the
+        check and reaches the deck as the letter it names."""
+        env, src, rcv = _registered_carriers(key)
+        model = _registered_engine(key)
+        model.roughness_spectrum = 'Goff-Jordan'
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            model.validate_inputs(env, src, rcv)
+        from uacpy.models.oases.oass import _oass_options
+        from uacpy.models.oases.oassp import _oassp_options
+        options = (_oassp_options(model.options, model.scattered_only,
+                                  model.roughness_spectrum)
+                   if key == 'oassp' else
+                   _oass_options(model.options, RunMode.REVERBERATION,
+                                 model.roughness_spectrum,
+                                 model.multiple_scattering))
+        assert 'g' in options.split()
+
+
+@pytest.mark.requires_oases
+def test_the_oast_plotted_frequencies_survive_an_xarray_export():
+    """OAST records the ``Freq:`` labels of its ``.plp`` curves as
+    ``metadata['plotted_frequencies']``, a key ``to_xarray`` keeps; under the
+    identity attribute's name ``frequencies`` the export dropped it."""
+    pytest.importorskip('xarray')
+    env, src, rcv = _registered_carriers('oast')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        field = _registered_engine('oast').run(env, src, rcv)
+        exported = field.to_xarray()
+    np.testing.assert_array_equal(field.metadata['plotted_frequencies'],
+                                  [100.0])
+    np.testing.assert_array_equal(exported.attrs['plotted_frequencies'],
+                                  [100.0])
+
+
 # ─── A derived sweep edge needs the same band check as a pinned one ────────
 
 
@@ -1044,11 +1206,7 @@ class TestOaspBandMustFitUnderTheSweepEdge:
 
     @staticmethod
     def _env():
-        return uacpy.Environment(
-            bathymetry=100.0, ssp=1500.0,
-            bottom=uacpy.BoundaryProperties(acoustic_type='half-space',
-                                            sound_speed=1800.0, density=1.8,
-                                            attenuation=0.3))
+        return make_pekeris(sound_speed=1800.0, attenuation=0.3)
 
     @staticmethod
     def _run(**kw):
@@ -1068,12 +1226,32 @@ class TestOaspBandMustFitUnderTheSweepEdge:
             self._run(f=1000.0, center_frequency=100.0, freq_max=200.0)
 
     def test_the_band_centre_default_always_clears_its_own_band(self):
-        # fc is the midpoint, so 2.5*fc > f_max by construction — the derived
+        # fc is the midpoint, so 2.5*fc > freq_max by construction — the derived
         # edge must not start refusing ordinary runs.
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             field = self._run(f=np.linspace(50.0, 150.0, 5))
         assert np.max(np.asarray(field.coords['frequency'])) > 150.0
+
+
+@pytest.mark.parametrize('factor', [2.5, 3.0])
+def test_the_sweep_edge_refusals_state_the_factor_the_edge_is_derived_with(
+        monkeypatch, factor):
+    """``OASP_FREQ_MAX_PER_CENTER`` decides the derived edge and the text of
+    both refusals that name it."""
+    from uacpy.models.oases import oasp
+    monkeypatch.setattr(oasp, 'OASP_FREQ_MAX_PER_CENTER', factor)
+    env = TestOaspBandMustFitUnderTheSweepEdge._env()
+    call = (env, uacpy.Source(depths=50.0, frequencies=1000.0),
+            uacpy.Receiver(depths=[50.0], ranges=[1000.0]),
+            uacpy.RunMode.BROADBAND)
+    with pytest.raises(ConfigurationError, match=re.escape(
+            f'freq_max={factor:g}×fc={factor * 10.0:.1f} Hz')):
+        uacpy.OASP(center_frequency=10.0).run_settings(*call)
+    with pytest.raises(ConfigurationError, match=re.escape(
+            f'leave it None to derive {factor:g}×fc')):
+        uacpy.OASP(center_frequency=100.0, freq_max=200.0).run_settings(
+            *call)
 
 
 # ─── A pinned work_dir must not hand on a previous run's kernels ───────────
@@ -1084,7 +1262,7 @@ class TestOptionSKernelFilesAreClearedBeforeLaunch:
     """``_oases_subprocess_env`` gives every run FOR045, and option 's''s
     SCTOUT dump fills it; OASP additionally writes the ``.046`` companion
     (``unoasp22.f:253``). Both are *inputs* to the OASS/OASSP chain — its
-    ``_run_mean_field`` accepts whatever ``<stem>.045`` it finds — so a pair
+    mean-field launch accepts whatever ``<stem>.045`` it finds — so a pair
     left by an earlier run in a pinned ``work_dir`` can be handed on as this
     run's kernels whenever the producer stops before it opens the units.
     Neither suffix was in ``_OUTPUT_SUFFIXES``, so neither was cleared.
@@ -1113,6 +1291,27 @@ class TestOptionSKernelFilesAreClearedBeforeLaunch:
                 f"{cls_name} carried {stem}{suffix} forward from an earlier "
                 f"run")
 
+    @pytest.mark.parametrize('cls_name,kw', [
+        ('OAST', {}), ('OASR', {}), ('OASP', {}), ('OASN', {}),
+        ('OASSP', dict(correlation_length=5.0, spectral_exponent=2.5))])
+    def test_a_previous_runs_bare_fort_files_are_removed(self, cls_name, kw,
+                                                        tmp_path,
+                                                        monkeypatch):
+        """The files a program writes under a bare unit name (``fort.46``
+        for option 's', OASSP's scratch units) are not named after the
+        stem, so the launch clears them by name
+        (``_OUTPUT_FORT_FILES``)."""
+        model = getattr(uacpy, cls_name)(work_dir=tmp_path, cleanup=False,
+                                         **kw)
+        monkeypatch.setattr(type(model), '_run_subprocess',
+                            lambda *a, **k: _FakeProc())
+        names = type(model)._OUTPUT_FORT_FILES
+        assert names
+        for name in names:
+            (tmp_path / name).write_bytes(b'PREVIOUS RUN')
+        model._execute('x_run', tmp_path)
+        assert [n for n in names if (tmp_path / n).exists()] == []
+
     @pytest.mark.parametrize('cls_name,stem,suffixes', _PRODUCERS)
     def test_the_suffixes_are_declared(self, cls_name, stem, suffixes):
         declared = getattr(uacpy, cls_name)._OUTPUT_SUFFIXES
@@ -1133,11 +1332,8 @@ class TestPhaseSpeedWindowReachesTheDeck:
 
     @staticmethod
     def _env():
-        return uacpy.Environment(
-            bathymetry=100.0, ssp=1500.0,
-            bottom=uacpy.BoundaryProperties(
-                acoustic_type='half-space', sound_speed=1800.0, density=1.8,
-                attenuation=0.3, shear_speed=600.0))
+        return make_pekeris(sound_speed=1800.0, attenuation=0.3,
+                            shear_speed=600.0)
 
     @staticmethod
     def _block_vii(tmp_path, **kw):
@@ -1178,7 +1374,7 @@ class TestPhaseSpeedWindowReachesTheDeck:
     def test_the_writer_advertises_nothing_unreachable(self, cls_name,
                                                        keys_name):
         import uacpy.io.oases_writer as w
-        from uacpy.models.base import _collect_init_params
+        from uacpy.models._introspect import _collect_init_params
         params = {n for n, _ in _collect_init_params(getattr(uacpy, cls_name))}
         assert {'c_low', 'c_high'} <= params, sorted(getattr(w, keys_name))
 
@@ -1208,7 +1404,9 @@ class TestOastRefusesAFrequencySweep:
 
     def test_a_sweep_is_refused_and_names_oasp(self):
         env, rcv = self._rig()
-        with pytest.raises(UnsupportedFeatureError) as ei:
+        with pytest.raises(
+                UnsupportedFeatureError,
+                match=r'does not support: a \d+-frequency source') as ei:
             uacpy.OAST().run(
                 env, uacpy.Source(depths=50.0, frequencies=[100.0, 400.0]),
                 rcv)
@@ -1216,6 +1414,18 @@ class TestOastRefusesAFrequencySweep:
         # which OAST does not implement — following it dead-ends. OAST's own
         # refusal has to name a model that computes the sweep.
         assert 'OASP' in str(ei.value), str(ei.value)
+
+    def test_every_entry_point_raises_the_refusal_naming_oasp(self):
+        """The base decides that a sweep is refused on COHERENT_TL and OAST
+        phrases it (``_multi_frequency_refusal``), so ``validate_inputs`` and
+        ``run_settings`` raise the same UnsupportedFeatureError ``run`` does,
+        not the shared one pointing at a BROADBAND mode OAST lacks."""
+        env, rcv = self._rig()
+        src = uacpy.Source(depths=50.0, frequencies=[100.0, 400.0])
+        model = uacpy.OAST()
+        for name in ('validate_inputs', 'run_settings'):
+            with pytest.raises(UnsupportedFeatureError, match='OASP'):
+                getattr(model, name)(env, src, rcv)
 
     def test_a_single_frequency_returns_a_one_dimensional_range_axis(self):
         env, rcv = self._rig()
@@ -1227,11 +1437,11 @@ class TestOastRefusesAFrequencySweep:
         assert np.asarray(field.data).ndim == 2
 
     def test_the_declared_modes_keep_the_refusal_reachable(self):
-        # If COHERENT_TL ever leaves _SINGLE_FREQUENCY_MODES, or a sweeping
+        # If COHERENT_TL ever leaves the single-frequency modes, or a sweeping
         # mode joins OAST's spec, the 2-D range axis reaches Field() again.
         assert uacpy.OAST.spec.modes == (uacpy.RunMode.COHERENT_TL,)
         assert (uacpy.RunMode.COHERENT_TL
-                in uacpy.OAST._SINGLE_FREQUENCY_MODES)
+                in uacpy.OAST.spec.traits.single_frequency_modes)
 
 
 class TestOasnReplicaDepthAxis:
@@ -1283,7 +1493,8 @@ class TestOasnReplicaDepthAxis:
 
     def test_an_explicit_end_is_written_verbatim(self, tmp_path):
         with pytest.warns(UserWarning, match='too thin for the default 10 m'):
-            axis = self._axis(tmp_path, 5.0, replica_zmin=1.0, replica_nz=3)
+            axis = self._axis(tmp_path, 5.0,
+                              replica=OasnReplicaGrid(z=(1.0, None, 3)))
         assert axis == (1.0, 4.5, 3)
 
 
@@ -1368,8 +1579,9 @@ class TestOasesArrayBoundsArePreflighted:
                              uacpy.Source(depths=50.0, frequencies=100.0),
                              uacpy.Receiver(depths=np.linspace(40, 60, 5),
                                             ranges=[1000.0]),
-                             options='N J', surface_noise_level=70.0,
-                             discrete_sources=sources)
+                             options='N J', noise=OasnNoise(
+                                 surface_level=70.0,
+                                 discrete_sources=sources))
 
     def test_exactly_nsmax_discrete_sources_is_accepted(self, tmp_path):
         from uacpy.io.oases_writer import write_oasn_input
@@ -1379,8 +1591,8 @@ class TestOasesArrayBoundsArePreflighted:
                          uacpy.Source(depths=50.0, frequencies=100.0),
                          uacpy.Receiver(depths=np.linspace(40, 60, 5),
                                         ranges=[1000.0]),
-                         options='N J', surface_noise_level=70.0,
-                         discrete_sources=sources)
+                         options='N J', noise=OasnNoise(
+                             surface_level=70.0, discrete_sources=sources))
         assert ' 201\n' in out.read_text()
 
     def test_n_time_samples_above_the_transform_bound(self, tmp_path):
@@ -1398,10 +1610,30 @@ class TestOasesArrayBoundsArePreflighted:
                              uacpy.Source(depths=50.0, frequencies=100.0),
                              _flat_receiver(), n_time_samples=3000)
 
+    def test_the_range_axis_starts_at_the_first_receiver_range(
+            self, tmp_path):
+        """OASES-4: the Receiver is the one place a run's ranges come from.
+        Block VIII's R0 is the first receiver range, and a ``range_start=``
+        that would shift every range is a keyword the deck does not read."""
+        from uacpy.io.oases_writer import write_oasp_input, write_oassp_input
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[50.0], ranges=[700.0, 800.0, 900.0])
+        out = tmp_path / 'oasp_run.dat'
+        write_oasp_input(out, _pekeris(), src, rcv)
+        r0_km, rspace_km, nplots = out.read_text().splitlines()[-1].split()[4:7]
+        assert (float(r0_km), float(rspace_km), int(nplots)) == (0.7, 0.1, 3)
+        with pytest.raises(TypeError, match="'range_start'"):
+            write_oasp_input(out, _pekeris(), src, rcv, range_start=500.0)
+        with pytest.raises(TypeError, match="'range_start'"):
+            write_oassp_input(out, _pekeris(), src, rcv,
+                              interface=4, correlation_length=10.0,
+                              n_time_samples=256, freq_min=60.0,
+                              freq_max=100.0, time_step=0.005,
+                              range_start=500.0)
+
     def test_a_power_of_two_transform_length_is_silent(self, tmp_path):
         from uacpy.io.oases_writer import write_oasp_input
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             write_oasp_input(tmp_path / 'oasp_run.dat', _pekeris(),
                              uacpy.Source(depths=50.0, frequencies=100.0),
                              _flat_receiver(), n_time_samples=4096)
@@ -1413,7 +1645,7 @@ class TestOasrTakesOneFieldParameter:
     """``N``, ``S`` and ``B`` each raise ``NOUT`` (``unoasr21.f:350-372``)
     and OASR STOPs ``'*** ONLY ONE FIELD PARAMETER ALLOWED***'`` above one
     (``:429``). ``'t'`` is not one of them — it flips ``transmit`` and leaves
-    ``NOUT`` alone (``:373``)."""
+    ``NOUT`` alone (``:374-376``)."""
 
     @staticmethod
     def _write(tmp_path, options):
@@ -1537,22 +1769,23 @@ class TestOasnReplicaGridResolution:
         return out.read_text().splitlines()
 
     def test_a_sub_metre_replica_step_survives_the_deck(self, tmp_path):
-        lines = self._deck(tmp_path, replica_xmin=0.5000005,
-                           replica_xmax=2.0000005, replica_nx=3)
+        # Metres in (0.5 mm steps), km on disk.
+        lines = self._deck(tmp_path, replica=OasnReplicaGrid(
+            x=(500.0005, 2000.0005, 3)))
         assert '0.500000500 2.000000500 3' in lines
 
     def test_the_depth_axis_stays_in_metres(self, tmp_path):
         """``ZSMIN``/``ZSMAX`` are metres, not km, so %.2f is already a
         centimetre — the km columns are the ones that needed widening."""
-        lines = self._deck(tmp_path, replica_zmin=20.0,
-                           replica_zmax=80.0, replica_nz=3)
+        lines = self._deck(tmp_path, replica=OasnReplicaGrid(
+            z=(20.0, 80.0, 3)))
         assert '20.00 80.00 3' in lines
 
 
 def _env(depths=(0.0, 50.0, 100.0), speeds=(1500.0, 1490.0, 1510.0)):
     return uacpy.Environment(
         bathymetry=100.0,
-        ssp=SoundSpeedProfile(depths=list(depths), data=list(speeds)),
+        ssp=SoundSpeedProfile(depths=list(depths), sound_speed=list(speeds)),
         bottom=BoundaryProperties(sound_speed=1700.0, density=1.8,
                                   attenuation=0.5))
 
@@ -1593,7 +1826,8 @@ class TestWaterLayersNeverCollapseToZeroThickness:
     def test_the_error_names_both_samples_at_their_own_precision(self,
                                                                  tmp_path):
         from uacpy.io.oases_writer import write_oast_input
-        with pytest.raises(ConfigurationError) as exc:
+        with pytest.raises(ConfigurationError,
+                           match='in the OASES layer record') as exc:
             write_oast_input(str(tmp_path / 'c.dat'), _env(*self.COLLIDING),
                              _source(), _receiver())
         # The whole point is telling the caller WHICH pair to separate, so
@@ -1613,7 +1847,7 @@ class TestWaterLayersNeverCollapseToZeroThickness:
         write_oast_input(str(out), _env([0.0, 30.0, 30.004, 100.0],
                                         [1500.0, 1480.0, 1480.002, 1500.0]),
                          _source(), _receiver())
-        assert out.read_text().count('\n30.00 1480.00 ') == 2
+        assert out.read_text().count('\n30.00 1480.00') == 2
 
     def test_the_seafloor_record_may_share_its_depth_with_the_seabed(self,
                                                                     tmp_path):
@@ -1626,8 +1860,8 @@ class TestWaterLayersNeverCollapseToZeroThickness:
         out = tmp_path / 'e.dat'
         write_oast_input(str(out), _env(), _source(), _receiver())
         lines = out.read_text().splitlines()
-        assert '100.00 1510.00 0.00 0.0 0 1.027 0.0000 0' in lines
-        assert any(l.startswith('100.00 1700.00 ') for l in lines)
+        assert '100.00 1510.000000 0.000000 1.000000e-08 0 1.027000 0.0000 0' in lines
+        assert any(l.startswith('100.00 1700.000000 ') for l in lines)
 
     def test_no_half_written_layer_block_survives_the_refusal(self, tmp_path):
         """The depth column is checked before the first record goes out, so
@@ -1635,16 +1869,17 @@ class TestWaterLayersNeverCollapseToZeroThickness:
         integrate."""
         from uacpy.io.oases_writer import write_oast_input
         out = tmp_path / 'f.dat'
-        with pytest.raises(ConfigurationError):
+        with pytest.raises(ConfigurationError,
+                           match='in the OASES layer record'):
             write_oast_input(str(out), _env(*self.COLLIDING),
                              _source(), _receiver())
-        assert '30.00 1480.00' not in out.read_text()
+        assert '30.00 1480.000000' not in out.read_text()
 
 
 class TestCmaxReachesOasesAtFullPrecision:
     """CMAX sets the lower edge of the wavenumber integration,
     ``WK0 = 2*pi*f/CMAX`` (unoast31.f:461), and under automatic sampling it
-    is ``WN1 = 2*pi*FREQ/C2`` in AUTSAM (unoast31.f:1208), which places
+    is ``WN1 = 2*pi*FREQ/C2`` in AUTSAM (unoast31.f:1209), which places
     ICW1/ICW2 and WNMIN. Written ``%.1e`` it kept two significant digits, so
     ``c_high=1550`` reached OASES as 1600. Measured: the two CMAX values
     give different ``.plt`` tables from the same deck, so the rounding moved
@@ -1755,12 +1990,15 @@ class TestEveryDiscreteNoiseSourceReachesTheDeck:
             bottom=BoundaryProperties(acoustic_type='half-space',
                                       sound_speed=1700.0, density=1.8,
                                       attenuation=0.5))
-        sources = [{'depth': 80.0, 'x': 1.0 + i, 'y': 2.0, 'level': 120.0 + i}
+        # x/y in metres; the deck holds km.
+        sources = [{'depth': 80.0, 'x': 1000.0 * (1 + i), 'y': 2000.0,
+                    'level': 120.0 + i}
                    for i in range(n_sources)]
         path = tmp_path / f'n{n_sources}.dat'
         write_oasn_input(path, env, Source(depths=50.0, frequencies=100.0),
                          Receiver(depths=[30.0, 60.0], ranges=[1000.0]),
-                         surface_noise_level=70.0, discrete_sources=sources)
+                         noise=OasnNoise(surface_level=70.0,
+                                         discrete_sources=sources))
         return [ln for ln in path.read_text().splitlines()
                 if ln.startswith('80.00 ')]
 
@@ -1779,61 +2017,136 @@ class TestEveryDiscreteNoiseSourceReachesTheDeck:
 
 class TestTheOasesWaterColumnStartsAtTheSurface:
     """Each OASES layer record carries its own layer's TOP depth
-    (``oaseun31.f:54``), and INENVI then places the vacuum upper half-space at
-    the FIRST water record's depth — ``if (m.le.2) then / v(1,1)=v(2,1)``
-    (``oaseun31.f:56-57``). Emitting a sampled profile verbatim therefore moved
-    the pressure-release surface down to the profile's shallowest sample and
-    modelled a shorter waveguide than ``env.depth`` describes: measured on a
-    100 m Pekeris guide at 100 Hz with an SSP starting at 10 m, median |dTL|
-    4.23 dB and max 39.97 dB against the same profile anchored at 0, both at
-    exit 0 with no warning.
+    (``oaseun31.f:54``), and INENVI places the vacuum upper half-space at the
+    FIRST water record's depth (``oaseun31.f:56-57``), so every deck's water
+    column opens with a record at z = 0 even when the profile's shallowest
+    sample lies deeper.
 
-    ``oalib_writer`` documents and avoids the same hazard for the AT decks,
-    and OAST's and OASS's isovelocity branches already hardcode ``"0.00"`` — so
-    z = 0 was always the intended anchor, and only the sampled-profile path
-    missed it. That inconsistency meant one Environment produced two different
-    waveguides depending on which OASES program wrote it, which is why this is
-    pinned across both writers.
+    INENVI reads exactly NL layer records (``oaseun31.f:43, :53-54``) and the
+    next READ takes the source record, so the deck's NL must equal the number
+    of layer records it writes: one record too many shifts every later record
+    and the binary dies on the misread deck (measured: SIGFPE in OAST and
+    OASP, "Bad integer" in OASN). Each writer is checked for both counts,
+    with the profile starting at the surface, 10 m below it, and with only
+    two samples.
     """
 
+    WRITERS = ('write_oast_input', 'write_oasn_input', 'write_oasp_input',
+               'write_oass_input', 'write_oassp_input')
+
     @staticmethod
-    def _env(first_depth):
+    def _env(depths, speeds):
         from uacpy.core import BoundaryProperties, Environment
         from uacpy.core.ssp import SoundSpeedProfile
-        depths = [first_depth, 55.0, 100.0] if first_depth > 0 else \
-            [0.0, 55.0, 100.0]
         return Environment(
             bathymetry=100.0,
-            ssp=SoundSpeedProfile(depths=depths, data=[1500.0, 1490.0, 1485.0]),
+            ssp=SoundSpeedProfile(depths=depths, sound_speed=speeds),
             bottom=BoundaryProperties(acoustic_type='half-space',
                                       sound_speed=1700.0, density=1.8,
-                                      attenuation=0.5))
+                                      attenuation=0.5, roughness=0.5))
 
-    @staticmethod
-    def _first_water_depth(path):
-        for line in path.read_text().splitlines():
-            parts = line.split()
-            # the vacuum row is all zeros; the first water row follows it
-            if len(parts) >= 6 and parts[0] != '0' and parts[1] not in ('0',):
-                try:
-                    return float(parts[0])
-                except ValueError:
-                    continue
-        raise AssertionError('no water record found')
+    PROFILES = {
+        'surface': ([0.0, 55.0, 100.0], [1500.0, 1490.0, 1485.0]),
+        'ten_metres_down': ([10.0, 55.0, 100.0], [1500.0, 1490.0, 1485.0]),
+        'two_samples': ([10.0, 100.0], [1500.0, 1485.0]),
+    }
 
-    @pytest.mark.parametrize('writer_name', ['write_oast_input',
-                                             'write_oasp_input'])
-    @pytest.mark.parametrize('first_depth', [10.0, 0.0])
-    def test_the_first_water_record_sits_at_zero(self, writer_name,
-                                                 first_depth, tmp_path):
+    def _write(self, writer_name, env, path):
         from uacpy.core import Receiver, Source
         from uacpy.io import oases_writer
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=[30.0, 70.0], ranges=[1000.0, 2000.0])
+        writer = getattr(oases_writer, writer_name)
+        if writer_name == 'write_oass_input':
+            first_bottom, _ = oases_writer.oass_bottom_interfaces(env)
+            writer(path, env, src, rcv, 'r', interface=first_bottom,
+                   correlation_length=100.0, spectral_exponent=1.9)
+        elif writer_name == 'write_oassp_input':
+            geom = oases_writer._oasp_layer_geometry(env)
+            first_bottom = 1 + geom['n_water_layers'] + 1
+            writer(path, env, src, rcv, interface=first_bottom,
+                   correlation_length=100.0, spectral_exponent=1.9,
+                   n_time_samples=1024, freq_min=50.0, freq_max=150.0,
+                   time_step=1e-3)
+        else:
+            first_bottom = None
+            writer(path, env, src, rcv)
+        return first_bottom
+
+    @staticmethod
+    def _layer_block(path):
+        """``(NL, the NL records INENVI reads, the record after them)``,
+        located by the vacuum upper half-space that opens the block."""
+        lines = [ln for ln in path.read_text().splitlines() if ln.strip()]
+        top = next(i for i, ln in enumerate(lines)
+                   if ln.split()[:6] == ['0'] * 6)
+        n_layers = int(lines[top - 1].split()[0])
+        records = [ln.split() for ln in lines[top:top + n_layers]]
+        return n_layers, records, lines[top + n_layers].split()
+
+    @pytest.mark.parametrize('writer_name', WRITERS)
+    @pytest.mark.parametrize('profile', sorted(PROFILES))
+    def test_nl_counts_every_layer_record_written(self, writer_name, profile,
+                                                  tmp_path):
+        env = self._env(*self.PROFILES[profile])
         path = tmp_path / 'deck.dat'
-        getattr(oases_writer, writer_name)(
-            path, self._env(first_depth),
-            Source(depths=50.0, frequencies=100.0),
-            Receiver(depths=[30.0, 70.0], ranges=[1000.0, 2000.0]))
-        assert self._first_water_depth(path) == pytest.approx(0.0)
+        first_bottom = self._write(writer_name, env, path)
+        n_layers, records, after = self._layer_block(path)
+        # Upper half-space, water from z = 0, then the seabed half-space as
+        # the NL-th record: 1700 m/s at the 100 m seafloor.
+        assert float(records[1][0]) == pytest.approx(0.0)
+        assert float(records[-1][0]) == pytest.approx(100.0)
+        assert float(records[-1][1]) == pytest.approx(1700.0)
+        # The record INENVI's caller reads next is not another layer.
+        assert not (len(after) >= 7 and float(after[0]) == pytest.approx(100.0))
+        if first_bottom is not None:
+            # The roughness override lands on the seabed record: deck layer
+            # ``first_bottom`` (1-based) carries the -|RG| scattering form.
+            seabed = records[first_bottom - 1]
+            assert float(seabed[0]) == pytest.approx(100.0)
+            assert float(seabed[6]) == pytest.approx(-0.5)
+
+    @pytest.mark.requires_oases
+    @pytest.mark.parametrize('model_name', ['OAST', 'OASP', 'OASN', 'OASS',
+                                            'OASSP'])
+    def test_each_binary_runs_a_profile_starting_below_the_surface(
+            self, model_name):
+        import uacpy
+        factories = {
+            'OAST': lambda: uacpy.OAST(),
+            'OASP': lambda: uacpy.OASP(),
+            'OASN': lambda: uacpy.OASN(),
+            'OASS': lambda: uacpy.OASS(correlation_length=10.0,
+                                       rms_roughness=0.5),
+            'OASSP': lambda: uacpy.OASSP(correlation_length=5.0),
+        }
+        env = self._env(*self.PROFILES['ten_metres_down'])
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[30.0, 70.0],
+                             ranges=np.linspace(500.0, 2000.0, 4))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = factories[model_name]().run(env, src, rcv)
+        # OASN returns a Covariance, the others a field.
+        values = (result.covariance if model_name == 'OASN' else result.data)
+        assert np.isfinite(np.asarray(values)).any()
+
+    @pytest.mark.requires_oases
+    def test_oast_tl_matches_the_surface_anchored_profile(self):
+        """The 10 m profile differs from the surface one only in its top
+        10 m (a 1500 m/s layer against a 1500->1498.2 m/s gradient), so the
+        two TL fields agree to well under a decibel."""
+        import uacpy
+        src = uacpy.Source(depths=50.0, frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[30.0, 70.0],
+                             ranges=np.linspace(500.0, 2000.0, 4))
+        tl = {}
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            for name in ('surface', 'ten_metres_down'):
+                tl[name] = np.asarray(uacpy.OAST().run(
+                    self._env(*self.PROFILES[name]), src, rcv).tl)
+        assert np.median(np.abs(tl['surface'] - tl['ten_metres_down'])) < 1.0
 
 
 def _oast_pekeris_env():
@@ -1940,9 +2253,8 @@ class TestOasnDiscreteBandHonoursItsDocumentedFloor:
     def test_a_small_count_is_raised_to_the_floor_with_a_warning(
             self, pinned, expected_discrete):
         from uacpy.io.oases_writer import _noise_nw
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
-            got = _noise_nw({'nw_samples': pinned})
+        with recorded_warnings() as rec:
+            got = _noise_nw(pinned)
         assert int(got.split()[1]) == expected_discrete
         hits = [w for w in rec if 'NWSD' in str(w.message)]
         assert len(hits) == 1
@@ -1952,15 +2264,14 @@ class TestOasnDiscreteBandHonoursItsDocumentedFloor:
     def test_a_count_at_or_above_the_floor_is_untouched_and_silent(
             self, pinned):
         from uacpy.io.oases_writer import _noise_nw
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
-            got = _noise_nw({'nw_samples': pinned})
+        with recorded_warnings() as rec:
+            got = _noise_nw(pinned)
         assert got.split()[:2] == [str(pinned), str(pinned)]
         assert [w for w in rec if 'NWSD' in str(w.message)] == []
 
     def test_the_default_counts_are_the_manuals(self):
         from uacpy.io.oases_writer import _noise_nw
-        assert _noise_nw({'nw_samples': None}) == '400 400 100'
+        assert _noise_nw(None) == '400 400 100'
 
 
 class TestOasesDeckTitleFitsTheBinarysBuffer:
@@ -2007,16 +2318,14 @@ class TestOasesDeckTitleFitsTheBinarysBuffer:
         assert oases_writer._OAST_TITLE_CHARS == 77
 
     def test_a_title_at_the_limit_is_written_whole_and_silently(self, tmp_path):
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
+        with recorded_warnings() as rec:
             line = self._title_line(self._env(77), tmp_path)
         assert len(line) == 77
         assert [w for w in rec if 'deck title' in str(w.message)] == []
 
     @pytest.mark.parametrize('n', [78, 140])
     def test_a_longer_title_is_truncated_with_a_warning(self, n, tmp_path):
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
+        with recorded_warnings() as rec:
             line = self._title_line(self._env(n), tmp_path)
         assert len(line) == 77
         hits = [w for w in rec if 'deck title' in str(w.message)]
@@ -2025,8 +2334,7 @@ class TestOasesDeckTitleFitsTheBinarysBuffer:
 
     def test_the_other_writers_keep_the_manuals_eighty(self, tmp_path):
         # OASP has no ' - ' append, so it takes the full 80 the manual allows.
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter('always')
+        with recorded_warnings() as rec:
             line = self._title_line(self._env(80), tmp_path,
                                     writer='write_oasp_input')
         assert len(line) == 80
@@ -2067,14 +2375,15 @@ class TestOasesDeckTitleIsTheEnvironmentName:
 
 @pytest.mark.requires_binary
 class TestOaspBroadbandStampsThePhysicalCMax:
-    """OASP writes the stamp on its transfer-function result (``oases.py``,
+    """OASP writes the stamp on its transfer-function result (``oasp.py``,
     beside ``_mask_source_axis``). Its frequency axis is the ``.trf``'s own
     FFT ladder rather than the frequencies asked for, so the stamp is
     asserted on its own here."""
 
+    @pytest.mark.requires_oases
     def test_the_stamp_is_the_seabed_speed(self):
         env = Environment(name='cmax_bb', bathymetry=100.0, ssp=1500.0,
-                          bottom=_halfspace(3000.0, density=2.0,
+                          bottom=make_halfspace(3000.0, density=2.0,
                                             attenuation=0.1))
         src = Source(depths=50.0, frequencies=100.0)
         rcv = Receiver(depths=np.array([50.0]), ranges=np.array([2000.0]))
@@ -2082,30 +2391,54 @@ class TestOaspBroadbandStampsThePhysicalCMax:
             env, src, rcv, run_mode=RunMode.BROADBAND,
             frequencies=np.linspace(80.0, 120.0, 5))
 
-        assert result.metadata['c_max'] == pytest.approx(3000.0)
+        assert result.run_settings.waveguide.c_max == pytest.approx(3000.0)
+        assert 'c_max' not in result.metadata
+
+
+class TestOaspTracesSpanItsTimeSampleCount:
+    """OASP states its FFT length NX as ``Field.synthesis_floor``, the
+    length the synthesis floors its grid at, so a trace synthesised from its
+    transfer function has at least NX samples: OASP's own record of NX
+    samples at DT, ``DLFREQ = 1/(DT*NX)`` (unoasp22.f:237)."""
+
+    @pytest.mark.requires_oases
+    def test_a_trace_has_at_least_the_stamped_sample_count(self):
+        env = Environment(name='nt_floor', bathymetry=100.0, ssp=1500.0,
+                          bottom=make_halfspace(1700.0, density=1.8,
+                                            attenuation=0.5))
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=np.array([50.0]),
+                       ranges=np.array([200.0, 400.0]))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            tf = OASP(n_time_samples=256, verbose=False).run(
+                env, src, rcv, run_mode=RunMode.BROADBAND)
+            trace = tf.to_time_trace(depth=50.0, range=400.0)
+        assert tf.synthesis_floor == 256
+        assert trace.coords['time'].size >= 256
 
 
 class TestLogSweptFrequenciesRequireAPositiveLowerBound:
     """OASR option 'C' makes the kernel sweep logarithmic and takes
-    ``F1LOG = LOG(FREQ1)`` (``unoasr21.f:124``). A zero bound aborts the
+    ``F1LOG = LOG(FREQ1)`` (``unoasr21.f:123``). A zero bound aborts the
     binary one line earlier (``:116-118``) and a negative one reaches ``LOG``
     unchecked, so the resampler refused neither yet warned that the vector
     "will be evaluated at np.geomspace(0.0, ...)" — a grid it had not built.
     """
 
-    @pytest.mark.parametrize('fmin', [0.0, -50.0, float('nan')])
-    def test_a_non_positive_lower_bound_is_refused(self, fmin):
+    @pytest.mark.parametrize('freq_min', [0.0, -50.0, float('nan')])
+    def test_a_non_positive_lower_bound_is_refused(self, freq_min):
         with pytest.raises(ConfigurationError, match='strictly positive'):
             _oases_resample_frequencies(
-                np.array([fmin, 100.0, 200.0]), 'OASR', log_spaced=True)
+                np.array([freq_min, 100.0, 200.0]), 'OASR', log_spaced=True)
 
     def test_a_log_spaced_vector_passes_unresampled(self):
         freqs = np.geomspace(50.0, 400.0, 8)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            fmin, fmax, n = _oases_resample_frequencies(
+            freq_min, freq_max, n = _oases_resample_frequencies(
                 freqs, 'OASR', log_spaced=True)
-        assert (fmin, fmax, n) == (50.0, 400.0, 8)
+        assert (freq_min, freq_max, n) == (50.0, 400.0, 8)
 
     def test_a_linear_vector_is_regridded_with_a_warning(self):
         with pytest.warns(UserWarning, match='not log-spaced'):
@@ -2115,9 +2448,9 @@ class TestLogSweptFrequenciesRequireAPositiveLowerBound:
     def test_a_zero_lower_bound_survives_a_linear_sweep(self):
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            fmin, fmax, n = _oases_resample_frequencies(
+            freq_min, freq_max, n = _oases_resample_frequencies(
                 np.linspace(0.0, 400.0, 9), 'OASR', log_spaced=False)
-        assert (fmin, fmax, n) == (0.0, 400.0, 9)
+        assert (freq_min, freq_max, n) == (0.0, 400.0, 9)
 
 
 @pytest.mark.requires_binary
@@ -2129,7 +2462,10 @@ class TestCovarianceIsOfferedByBothOasesProducers:
 
     def test_the_unsupported_message_lists_oass_as_well_as_oasn(self):
         from uacpy.core.exceptions import UnsupportedFeatureError
-        with pytest.raises(UnsupportedFeatureError) as excinfo:
+        with pytest.raises(
+                UnsupportedFeatureError,
+                match='does not support: covariance-matrix computation'
+                ) as excinfo:
             Bellhop(verbose=False).compute_covariance(
                 Environment(name='flat', bathymetry=100.0, ssp=1500.0),
                 Source(depths=25.0, frequencies=200.0),
@@ -2148,15 +2484,10 @@ class TestOasrIsTheOnlyLogSweptCaller:
     so the refusal cannot fire on a linear-sweep model.
     """
 
+    @pytest.mark.requires_oases
     def test_a_bare_oasr_is_not_log_swept(self):
-        assert OASR(verbose=False)._oasr_is_log_swept() is False
-
-
-def _halfspace(sound_speed, **kwargs):
-    return BoundaryProperties(
-        acoustic_type='half-space', sound_speed=sound_speed,
-        density=kwargs.pop('density', 1.8),
-        attenuation=kwargs.pop('attenuation', 0.3), **kwargs)
+        from uacpy.models.oases.oasr import _oasr_is_log_swept
+        assert _oasr_is_log_swept(OASR(verbose=False).options) is False
 
 
 class TestOasnContourOffsetNeedsItsLetter:
@@ -2167,17 +2498,17 @@ class TestOasnContourOffsetNeedsItsLetter:
     it — silently, where every sibling model warns.
 
     OASN is exempt from the *other* discard: ``:283`` tests ``OFFDBIN``
-    itself, so automatic wavenumber sampling (``nw_samples = -1``, the
+    itself, so automatic wavenumber sampling (``n_wavenumbers=None``, the
     default) does not zero it here and must not be reported as if it did."""
 
     @staticmethod
     def _offset_warnings(**kwargs):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter('always')
+        with recorded_warnings() as caught:
             OASN(verbose=False, **kwargs)
         return [str(w.message) for w in caught
                 if 'integration_offset' in str(w.message)]
 
+    @pytest.mark.requires_oases
     @pytest.mark.parametrize('options', ['N R', 'R', 'N'])
     def test_a_custom_line_without_J_is_reported(self, options):
         messages = self._offset_warnings(options=options,
@@ -2185,20 +2516,40 @@ class TestOasnContourOffsetNeedsItsLetter:
         assert messages, f"options={options!r} dropped the offset in silence"
         assert "'J'" in messages[0]
 
+    @pytest.mark.requires_oases
     @pytest.mark.parametrize('options', [None, 'J', 'N J R'])
     def test_a_line_that_carries_J_is_silent(self, options):
         assert not self._offset_warnings(options=options,
                                          integration_offset=3.0)
 
+    @pytest.mark.requires_oases
     def test_automatic_sampling_alone_is_not_reported(self):
-        # nw_samples <= 0 zeroes the offset in OAST / OASP / OASSP, not here.
+        # n_wavenumbers <= 0 zeroes the offset in OAST / OASP / OASSP, not here.
         assert not self._offset_warnings(options='J', integration_offset=3.0,
-                                         nw_samples=-1)
+                                         n_wavenumbers=None)
 
+    @pytest.mark.requires_oases
     def test_no_offset_is_never_reported(self):
         assert not self._offset_warnings(options='R', integration_offset=0.0)
 
+    def test_integration_offset_is_the_one_contour_offset_knob(self):
+        # OFFDBIN has one spelling: integration_offset, as on every other
+        # OASES model.
+        with pytest.raises(TypeError, match='offdB'):
+            OASN(verbose=False, offdB=3.0)
 
+    def test_the_writer_refuses_the_removed_offset_spelling(self, tmp_path):
+        from uacpy.io.oases_writer import write_oasn_input
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+        with pytest.raises(TypeError, match='offdB'):
+            write_oasn_input(
+                tmp_path / 'oasn.dat', env,
+                uacpy.Source(depths=50.0, frequencies=100.0),
+                uacpy.Receiver(depths=[20.0, 40.0], ranges=[0.0]),
+                'N J', offdB=3.0)
+
+
+@pytest.mark.requires_oases
 class TestOasesMasksTheSourceAxis:
     """OASES evaluates its wavenumber integral under the asymptotic Hankel
     carrier, whose ``1/sqrt(r)`` cylindrical spreading is singular at ``r = 0``,
@@ -2242,42 +2593,39 @@ class TestOasesMasksTheSourceAxis:
         assert np.isfinite(out.data).all()
 
 
-class TestOasnPinnedWavenumberCountWidensTheIntegrationWindow:
-    """A pinned ``nw_samples`` on OASN is not a density knob.
+@pytest.mark.requires_oases
+class TestOasnPinnedWavenumberCountIntegratesTheWholeWindow:
+    """A pinned ``n_wavenumbers`` on OASN is not only a density knob.
 
     Automatic sampling calls AUTSMN (``oasnun22.f:432``), which returns
     IC1/IC2 bracketing the propagating band ``[2*pi*f/C2, 2*pi*f/C1]`` with
     10% margins (``:1701-1712``). The deck writer emits ``NW 1 NW`` for a
-    pinned count and ``:438-440`` takes ICUT1=1, ICUT2=NW verbatim; since
-    ``:853-857`` zeroes only samples OUTSIDE ``[ICUT1, ICUT2]``, the pinned
-    deck integrates the whole axis while the automatic deck integrates the
-    propagating band alone. Measured on a 100 m Pekeris guide at 150 Hz,
-    replica magnitudes then track NW instead of converging: mean level
-    -18.13, -14.67, -7.41, 0.00 dB at NW = 2048, 4096, 8192, 16384.
-
-    The default (-1) is the cross-validated path — it matches an independent
-    Kraken modal bank in ``test_matched_field_from_field.py``.
+    pinned count and ``:438-440`` takes ICUT1=1, ICUT2=NW verbatim, so the
+    pinned deck integrates the whole window. Measured against Scooter on a
+    100 m Pekeris guide at 150 Hz (OASES-2), the replicas' level at the
+    10 km edge of the replica grid converges as NW grows: -8.45, -1.95,
+    -0.49, -0.14 dB at NW = 2048, 4096, 8192, 16384, where the automatic
+    default reads -3.32 dB. The replica-vs-Scooter pin is
+    ``test_cross_model_conventions.py::
+    test_oasn_replicas_are_scooters_pressure_on_the_same_geometry``.
     """
 
-    def test_a_pinned_count_warns_that_the_window_changes(self):
-        import warnings
+    def test_a_pinned_count_warns_that_levels_converge_with_it(self):
         from uacpy.models.oases import OASN
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter("always")
-            OASN(zmin=10.0, zmax=90.0, nz=12, xmin=0.2, xmax=4.0, nx=18,
-                 ny=1, nw_samples=4096, verbose=False)
-        hits = [w for w in rec if 'integration window' in str(w.message)]
+        with recorded_warnings() as rec:
+            OASN(replica_zmin=10.0, replica_zmax=90.0, replica_nz=12, replica_xmin=200.0, replica_xmax=4000.0,
+                 replica_nx=18, replica_ny=1, n_wavenumbers=4096, verbose=False)
+        hits = [w for w in rec if 'wavenumber window' in str(w.message)]
         assert len(hits) == 1
         assert 'ICUT2=NW' in str(hits[0].message)
+        assert 'converge as NW grows' in str(hits[0].message)
 
     def test_the_default_is_silent(self):
-        import warnings
         from uacpy.models.oases import OASN
-        with warnings.catch_warnings(record=True) as rec:
-            warnings.simplefilter("always")
-            OASN(zmin=10.0, zmax=90.0, nz=12, xmin=0.2, xmax=4.0, nx=18,
-                 ny=1, verbose=False)
-        assert [w for w in rec if 'integration window' in str(w.message)] == []
+        with recorded_warnings() as rec:
+            OASN(replica_zmin=10.0, replica_zmax=90.0, replica_nz=12, replica_xmin=200.0, replica_xmax=4000.0,
+                 replica_nx=18, replica_ny=1, verbose=False)
+        assert [w for w in rec if 'wavenumber window' in str(w.message)] == []
 
 
 def _oasp(**kwargs):
@@ -2334,20 +2682,11 @@ class TestOaspDeclaresItsBandEdgesInDeckOrder:
         assert (fr1, fr2) == (10.0, 200.0)
 
     def test_the_band_edges_cannot_be_bound_positionally(self):
-        """The reorder alone would have rebound every positional
-        ``OASP(exe, n, a, b)`` to the opposite physics in silence. Positions
-        3 and 4 must raise instead."""
-        with pytest.raises(TypeError):
+        """A positional ``OASP(exe, n, a, b)`` cannot bind the band edges
+        (min-first or max-first) to the wrong physics in silence: every
+        constructor knob is keyword-only, so it raises."""
+        with pytest.raises(TypeError, match='positional argument but'):
             uacpy.OASP(None, 4096, 100.0, 2000.0)
-
-    def test_the_two_leading_parameters_stay_positional(self):
-        """The bare ``*`` sits after ``n_time_samples``: existing
-        ``OASP(exe)`` / ``OASP(exe, n)`` calls are untouched."""
-        params = inspect.signature(uacpy.OASP.__init__).parameters
-        assert params['executable'].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-        assert params['n_time_samples'].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-        assert params['freq_min'].kind is inspect.Parameter.KEYWORD_ONLY
-        assert params['freq_max'].kind is inspect.Parameter.KEYWORD_ONLY
 
     @pytest.mark.parametrize('freq_min,freq_max', [(2000.0, 100.0),
                                                    (100.0, 100.0)])
@@ -2406,3 +2745,160 @@ class TestOaspRequiresATransferFunctionNotAPlotFile:
                                     run_mode=RunMode.BROADBAND)
         assert 'PULSETRF' not in str(ei.value)
         assert '.plt' not in str(ei.value)
+
+
+@pytest.mark.requires_oases
+class TestBareStopFatalsOnStdoutRaise:
+    """OASES fatals that end in a bare ``STOP`` exit 0 with nothing on stderr
+    after the output header is written (measured: an OASP deck with a
+    zero-thickness gradient layer printed ``EXECUTION TERMINATED`` and left a
+    383-byte header-only ``.trf``). The diagnosis is on stdout only."""
+
+    @staticmethod
+    def _completed(stdout):
+        import subprocess
+        return subprocess.CompletedProcess(['oasp2'], 0, stdout, '')
+
+    def test_execution_terminated_raises_with_the_oases_message(self):
+        from uacpy.core.exceptions import ModelExecutionError
+        stdout = ('\n **** EXECUTION TERMINATED ***\n\n'
+                  ' **** ERROR NUMBER :   1\n')
+        with pytest.raises(ModelExecutionError,
+                           match='EXECUTION TERMINATED'):
+            uacpy.OASP()._raise_on_stdout_fatal(self._completed(stdout))
+
+    def test_progress_traces_pass(self):
+        stdout = (' >>> Entering SOLDIS <<<\n >>> Done, CPU=   0.1\n'
+                  ' >>>>>WARNING: UNPHYSICAL SPEED RATIO\n')
+        uacpy.OASP()._raise_on_stdout_fatal(self._completed(stdout))
+
+
+class TestOaspRangeAxisFitsIntgr3:
+    """INTGR3 stops with ``NP TOO SMALL`` once ``NPLOTS*MBMAXI > NPHALF``
+    (16384 ranges for the point source) or ``NOUT*IR*NPLOTS > NP3``
+    (458752 depth-range values per output component), after the ``.trf``
+    header is written (``oasiun23.f:494-509``). The writer refuses both,
+    and passes both boundaries exactly."""
+
+    @staticmethod
+    def _write(tmp_path, n_depths, n_ranges):
+        from uacpy.core import BoundaryProperties, Environment, Receiver, Source
+        from uacpy.io.oases_writer import write_oasp_input
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(
+                              acoustic_type='half-space', sound_speed=1700.0,
+                              density=1.8, attenuation=0.5))
+        rcv = Receiver(depths=np.linspace(5.0, 95.0, n_depths),
+                       ranges=np.linspace(100.0, 100.0 + 0.1 * n_ranges, n_ranges))
+        write_oasp_input(tmp_path / 'p.dat', env,
+                         Source(depths=50.0, frequencies=100.0), rcv)
+
+    def test_the_largest_range_axis_is_written(self, tmp_path):
+        self._write(tmp_path, 1, 16384)
+
+    def test_one_range_more_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError, match='NPHALF'):
+            self._write(tmp_path, 1, 16385)
+
+    def test_the_largest_depth_range_product_is_written(self, tmp_path):
+        self._write(tmp_path, 28, 16384)
+
+    def test_one_depth_more_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError, match='NP3'):
+            self._write(tmp_path, 29, 16384)
+
+
+@pytest.mark.requires_oases
+@pytest.mark.parametrize('model_name, name', [
+    ('OASP', 'x' + 'é' * 79), ('OASN', 'x' + 'é' * 79),
+    ('OASR', 'x' + 'é' * 79), ('OAST', 'é' * 79),
+])
+def test_an_accented_environment_name_runs(model_name, name):
+    """Measured before titles were folded to ASCII: OASP/OASN/OASR raised
+    ``UnicodeDecodeError`` on the half character their stdout echoed, and
+    OAST overflowed its character*80 title buffer (unoast31.f:119)."""
+    env = uacpy.Environment(name=name, bathymetry=100.0, ssp=1500.0)
+    src = uacpy.Source(depths=30.0, frequencies=100.0)
+    rcv = uacpy.Receiver(depths=[20.0, 50.0],
+                         ranges=np.linspace(500.0, 2000.0, 4))
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        result = getattr(uacpy, model_name)().run(env, src, rcv)
+    assert result is not None
+
+
+@pytest.mark.requires_oases
+def test_oasp_source_band_and_frequencies_argument_give_one_axis():
+    """A multi-element ``Source.frequencies`` names the BROADBAND band as
+    ``run(frequencies=)`` does (measured before: the Source spelling swept
+    0.12-249.9 Hz in 2047 bins, the argument spelling 89.97-109.95 Hz in 373
+    for the same 90-110 Hz band)."""
+    env = uacpy.Environment(bathymetry=100.0, ssp=1500.0)
+    rcv = uacpy.Receiver(depths=[50.0], ranges=[1000.0, 2000.0])
+    band = np.linspace(90.0, 110.0, 9)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        by_source = uacpy.OASP().run(
+            env, uacpy.Source(depths=50.0, frequencies=band), rcv,
+            run_mode=RunMode.BROADBAND)
+        by_argument = uacpy.OASP().run(
+            env, uacpy.Source(depths=50.0, frequencies=100.0), rcv,
+            run_mode=RunMode.BROADBAND, frequencies=band)
+    f_source = np.asarray(by_source.frequencies, dtype=float)
+    f_argument = np.asarray(by_argument.frequencies, dtype=float)
+    np.testing.assert_allclose(f_source, f_argument)
+    assert f_source.min() > 85.0 and f_source.max() < 115.0
+
+
+@pytest.mark.requires_oases
+class TestOasnSaysHowItWillRunBeforeLaunching:
+    """OASN's two notices of how a run will go — the receiver ranges it does
+    not read, and a covariance with no noise field — are decided in stage 3,
+    so ``run_settings()`` records and says them before anything is written;
+    ``validate_inputs()`` says nothing."""
+
+    @staticmethod
+    def _call(model, method, **kw):
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        src = Source(depths=50.0, frequencies=100.0)
+        rcv = Receiver(depths=[20.0, 40.0], ranges=[1000.0])
+        with recorded_warnings() as caught:
+            out = getattr(model, method)(env, src, rcv,
+                                         run_mode=RunMode.COVARIANCE, **kw)
+        return out, [str(w.message) for w in caught]
+
+    def test_the_preview_records_and_says_both(self):
+        settings, said = self._call(OASN(verbose=False), 'run_settings')
+        notices = [n.message for n in settings.engine.notices]
+        assert any('receiver.ranges is ignored' in n for n in notices)
+        assert any('no noise source is configured' in n for n in notices)
+        for notice in notices:
+            assert said.count(notice) == 1, said
+
+    def test_a_noise_field_leaves_only_the_ranges_notice(self):
+        settings, _ = self._call(
+            OASN(verbose=False, surface_noise_level=70.0), 'run_settings')
+        assert not any('no noise source' in n
+                       for n in (x.message for x in settings.engine.notices))
+        assert any('receiver.ranges is ignored' in n
+                   for n in (x.message for x in settings.engine.notices))
+
+    @pytest.mark.parametrize('ranges, ignored', [
+        ([0.0], False), ([1000.0], True), ([0.0, 500.0], True)])
+    def test_the_ranges_notice_is_for_any_range_off_the_array(
+            self, ranges, ignored):
+        """The array sits at x = y = 0: one range at 0 is the array itself
+        and is not a notice; one positive range, or two ranges of which the
+        first is 0, is."""
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        settings = OASN(verbose=False, surface_noise_level=70.0).run_settings(
+            env, Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=[20.0, 40.0], ranges=ranges),
+            run_mode=RunMode.COVARIANCE)
+        assert any('receiver.ranges is ignored' in n
+                   for n in (x.message for x in settings.engine.notices)) is ignored
+
+    def test_validation_says_neither(self):
+        _, said = self._call(OASN(verbose=False), 'validate_inputs')
+        assert not [m for m in said if 'receiver.ranges is ignored' in m
+                    or 'no noise source' in m], said

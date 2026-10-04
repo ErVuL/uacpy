@@ -13,7 +13,7 @@ from figure_scripts._common import SQUARE, WIDE, layered_elastic, shallow_water
 
 import uacpy
 from uacpy.models import OAST, OASN, OASP, OASR, RunMode
-from uacpy.visualization.plots import shared_colorbar
+from uacpy.plot import shared_colorbar
 
 
 def elastic_stack():
@@ -99,7 +99,7 @@ def shear_loss():
                                    (True, 'C3', 'Elastic (shear kept)')):
         env = rock_seabed(elastic=elastic)
         rc = OASR(angles=angles).run(env, source, receiver)
-        axes[0].plot(rc.theta, -20.0 * np.log10(np.maximum(rc.R, 1e-6)),
+        axes[0].plot(rc.angles, -20.0 * np.log10(np.maximum(rc.magnitude, 1e-6)),
                      color=colour, label=label)
         tl = OAST().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
         smoothed = _range_average(tl.dB.ravel())
@@ -148,9 +148,10 @@ def oasr_reflection():
 def oasr_broadband():
     """|R(θ, f)| over the elastic stack — the sand layer's resonances."""
     _, source, receiver = layered_elastic()
+    band = uacpy.Source(depths=source.depths,
+                        frequencies=np.linspace(20.0, 2000.0, 120))
     rc = OASR(angles=np.linspace(0.0, 90.0, 181)).run(
-        elastic_stack(), source, receiver, run_mode=RunMode.REFLECTION,
-        frequencies=np.linspace(20.0, 2000.0, 120))
+        elastic_stack(), band, receiver, run_mode=RunMode.REFLECTION)
     fig, ax = rc.plot(
         figsize=WIDE,
         title='OASR — |R(θ, f)| for an 8 m sand layer over elastic granite')
@@ -211,17 +212,19 @@ def oasn_mfp():
                            'level': 100.0}],
     ).compute_covariance(env, source, array)
     replicas = OASN(
-        xmin=500.0, xmax=6000.0, nx=111,
-        zmin=5.0, zmax=95.0, nz=46,
+        replica_xmin=500.0, replica_xmax=6000.0, replica_nx=111,
+        replica_zmin=5.0, replica_zmax=95.0, replica_nz=46,
     ).compute_replicas(env, source, array)
 
-    surfaces = ((cov.bartlett(replicas)[0, :, :, 0], 'Bartlett'),
-                (cov.mvdr(replicas)[0, :, :, 0], 'MVDR (Capon)'))
+    # Each processor returns an ambiguity Field on (frequency, depth, x, y),
+    # in dB re its peak; this run has one frequency and one y plane.
+    surfaces = ((cov.bartlett(replicas).data[0, :, :, 0], 'Bartlett'),
+                (cov.mvdr(replicas).data[0, :, :, 0], 'MVDR (Capon)'))
 
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), sharey=True)
     for ax, (surface, label) in zip(axes, surfaces):
-        im = ax.pcolormesh(replicas.replica_x / 1000.0, replicas.replica_z,
-                           10.0 * np.log10(surface / surface.max()),
+        im = ax.pcolormesh(replicas.candidates['x'] / 1000.0,
+                           replicas.candidates['depth'], surface,
                            shading='nearest', cmap='inferno',
                            vmin=-15.0, vmax=0.0)
         ax.plot(3.0, 40.0, marker='*', ms=15, mfc='none', mec='cyan', mew=1.5)

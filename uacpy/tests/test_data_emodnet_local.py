@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip('shapely')
 
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data import emodnet_local
+from uacpy.data import emodnet_local, fetch_bottom_transect
 
 
 def _poly_feature(folk, box):
@@ -40,26 +40,26 @@ def test_download_builds_wkb_index(tmp_path, monkeypatch):
 
 def test_query_after_download(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    emodnet_local._INDEX.clear()
+    emodnet_local._index.memo.clear()
     feats = [_poly_feature(2, (-41, 30, -40, 31))]      # Sand
     monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
     emodnet_local.download_emodnet_db()                 # → <cache>/emodnet/
 
-    bp = emodnet_local.fetch_bottom_local((30.5, -40.5))
+    bp = emodnet_local.fetch_bottom_emodnet_local((30.5, -40.5))
     assert bp.acoustic_type == 'half-space' and bp.grain_size_phi == 2.0
     with pytest.raises(DataFetchError, match='European seas only'):
-        emodnet_local.fetch_seabed_local((0.0, -140.0))   # mid-Pacific, no polygon
+        emodnet_local.fetch_emodnet_substrate_local((0.0, -140.0))   # mid-Pacific, no polygon
 
 
 def test_transect_holds_and_varies(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    emodnet_local._INDEX.clear()
+    emodnet_local._index.memo.clear()
     feats = [_poly_feature(2, (-41, 30, -40, 31)),
              _poly_feature(1, (-41, 31, -40, 32))]      # Sand then Mud band
     monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
     emodnet_local.download_emodnet_db()
-    rdb = emodnet_local.fetch_bottom_local_transect(
-        (30.5, -40.5), (31.5, -40.5), n_points=3)
+    rdb = fetch_bottom_transect(
+        (30.5, -40.5), (31.5, -40.5), source='emodnet', n_points=3)
     assert rdb.halfspace_sound_speed.shape == (3,)
     assert (rdb.halfspace_sound_speed > 1500).all()
     # Sand (ϕ 2.0) at the start, Mud to muddy Sand (ϕ 5.0) at the end: the
@@ -72,19 +72,19 @@ def test_unknown_folk_class_refuses_default(tmp_path, monkeypatch):
     # An out-of-range Folk-5 code must raise rather than fabricate a default
     # 'mixed sediment' bottom.
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    emodnet_local._INDEX.clear()
+    emodnet_local._index.memo.clear()
     feats = [_poly_feature(99, (-41, 30, -40, 31))]     # bogus class
     monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
     emodnet_local.download_emodnet_db()
     with pytest.raises(DataFetchError, match='unrecognised Folk-5'):
-        emodnet_local.fetch_bottom_local((30.5, -40.5))
+        emodnet_local.fetch_bottom_emodnet_local((30.5, -40.5))
 
 
 def test_missing_cache_names_install_flag(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
-    emodnet_local._INDEX.clear()
+    emodnet_local._index.memo.clear()
     with pytest.raises(ConfigurationError, match='install.sh --data emodnet'):
-        emodnet_local.fetch_bottom_local((56.0, 3.0))
+        emodnet_local.fetch_bottom_emodnet_local((56.0, 3.0))
 
 
 def test_a_shared_boundary_point_resolves_to_the_lowest_polygon_index(
@@ -92,11 +92,29 @@ def test_a_shared_boundary_point_resolves_to_the_lowest_polygon_index(
     pytest.importorskip('shapely')
     from uacpy.data import emodnet_local
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
-    emodnet_local._INDEX.clear()
+    emodnet_local._index.memo.clear()
     feats = [_poly_feature(2, (-41, 30, -40, 31)),
              _poly_feature(1, (-41, 31, -40, 32))]   # share the lat=31 edge
     fc = json.dumps({'type': 'FeatureCollection', 'features': feats})
     monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: fc)
     emodnet_local.download_emodnet_db()
-    sub = emodnet_local.fetch_seabed_local((31.0, -40.5))  # on the shared edge
-    assert sub['folk_5cl'] == 2                            # polygon index 0
+    sub = emodnet_local.fetch_emodnet_substrate_local((31.0, -40.5))  # on the shared edge
+    assert sub.folk_class == 2                            # polygon index 0
+    assert sub.folk_class_scheme == 'folk5'
+
+
+def test_the_package_level_bottom_names_are_the_source_dispatchers():
+    """``uacpy.data`` exports one seabed fetcher per shape, taking the source
+    as an argument; each provider's own fetchers live in its module only, so
+    the offline EMODnet polygons and the NCEI grain-size samples are never
+    told apart by a name suffix."""
+    from uacpy import data
+    from uacpy.data import environment, sediment_db
+    assert data.fetch_bottom is environment.fetch_bottom
+    assert data.fetch_bottom_transect is environment.fetch_bottom_transect
+    for name in ('fetch_bottom_emodnet_local', 'fetch_bottom_grainsize'):
+        assert name not in data.__all__
+        assert not hasattr(data, name), name
+    assert callable(emodnet_local.fetch_bottom_emodnet_local)
+    assert callable(sediment_db.fetch_bottom_grainsize)
+    assert not hasattr(emodnet_local, 'fetch_bottom_grainsize')
