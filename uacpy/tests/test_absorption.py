@@ -1985,3 +1985,49 @@ class TestAProfileOutsideTheEnvelopeWarnsOnce:
             salinity=self._salinity(np.linspace(41.1, 42.4, 12)))
         assert 'temperature=31 at 5 of 40 depths' in msg
         assert 'salinity=41.1–42.4 at 12 of 40 depths' in msg
+
+
+class TestAbsorptionCoefficientFromPairs:
+    """``AbsorptionCoefficient.from_pairs`` builds a measured table from
+    ``(frequency, value)`` rows, the counterpart of
+    ``SoundSpeedProfile.from_pairs``, under the measured-table rules."""
+
+    def test_one_spectrum_becomes_a_one_dimensional_measured_table(self):
+        from uacpy.core.absorption import AbsorptionCoefficient
+        table = AbsorptionCoefficient.from_pairs(
+            [(1e3, 0.06), (1e4, 0.95), (1e5, 33.0)])
+        assert table.model is None and table.depths is None
+        assert table.units == 'dB/km'
+        np.testing.assert_array_equal(table.frequencies, [1e3, 1e4, 1e5])
+        np.testing.assert_array_equal(table.data, [0.06, 0.95, 33.0])
+
+    def test_a_depth_mapping_is_sorted_by_depth_depth_first(self):
+        from uacpy.core.absorption import AbsorptionCoefficient
+        table = AbsorptionCoefficient.from_pairs(
+            {1000.0: [(1e3, 0.05), (1e4, 0.80)],
+             0.0: [(1e3, 0.07), (1e4, 1.10)]}, units='dB/m')
+        np.testing.assert_array_equal(table.depths, [0.0, 1000.0])
+        np.testing.assert_array_equal(table.data, [[0.07, 1.10],
+                                                   [0.05, 0.80]])
+        assert table.units == 'dB/m'
+
+    def test_an_environment_takes_it_as_its_absorption(self):
+        from uacpy.core.absorption import AbsorptionCoefficient
+        table = AbsorptionCoefficient.from_pairs([(1e3, 0.06), (1e4, 0.95)])
+        from uacpy import Environment
+        env = Environment(bathymetry=100.0, ssp=1500.0, absorption=table)
+        alpha = env.absorption.alpha_dB_per_m(1e3, np.array([0.0, 50.0]))
+        np.testing.assert_allclose(alpha, 0.06e-3)
+
+    @pytest.mark.parametrize('pairs, match', [
+        ([1.0, 2.0, 3.0], r'shape \(N, 2\)'),
+        ([(1e4, 1.0), (1e3, 0.5)], 'strictly increasing'),
+        ([(1e3, -1.0)], 'non-negative'),
+        ({0.0: [(1e3, 1.0)], 10.0: [(2e3, 1.0)]}, 'same frequencies'),
+        ({}, 'empty'),
+        ({-5.0: [(1e3, 1.0)]}, r'>= 0 m'),
+    ])
+    def test_it_refuses_what_a_measured_table_cannot_be(self, pairs, match):
+        from uacpy.core.absorption import AbsorptionCoefficient
+        with pytest.raises(ConfigurationError, match=match):
+            AbsorptionCoefficient.from_pairs(pairs)

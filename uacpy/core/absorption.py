@@ -223,6 +223,72 @@ class AbsorptionCoefficient(CarrierExport):
     def n_depths(self) -> int:
         return 0 if self.depths is None else int(np.size(self.depths))
 
+    @classmethod
+    def from_pairs(cls, pairs, *, units: str = 'dB/km'
+                   ) -> "AbsorptionCoefficient":
+        """A measured table from ``[(frequency, value), ...]`` pairs, the
+        absorption counterpart of :meth:`SoundSpeedProfile.from_pairs`.
+
+        ``pairs`` is either one spectrum, shape ``(N, 2)`` as ``(frequency
+        in Hz, value)`` rows, which applies at every depth; or a mapping
+        ``{depth_m: pairs}`` with one spectrum per depth, all on the same
+        frequencies (a depth on other frequencies is refused rather than
+        interpolated, which would invent data). The result is a measured
+        table (``model=None``), the one table ``Environment(absorption=...)``
+        takes, and is checked by the same rules: frequencies positive and
+        strictly increasing, values finite and non-negative, a known unit.
+
+        Parameters
+        ----------
+        pairs : array_like or mapping
+            ``(frequency, value)`` rows, or ``{depth: rows}``.
+        units : str, optional
+            The values' unit: ``'dB/km'`` (default), ``'dB/m'``,
+            ``'dB/wavelength'``, ``'Nepers/m'``, ``'Q'`` or ``'L'``.
+        """
+        who = "AbsorptionCoefficient.from_pairs"
+
+        def rows(value, where):
+            arr = np.asarray(value, dtype=float)
+            if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] < 1:
+                raise ConfigurationError(
+                    f"{who}: {where}pairs must have shape (N, 2) as "
+                    f"(frequency, value); got shape {arr.shape}.",
+                    remediation="Pass [(frequency_Hz, value), ...].")
+            return arr[:, 0], arr[:, 1]
+
+        if isinstance(pairs, dict):
+            if not pairs:
+                raise ConfigurationError(
+                    f"{who}: the depth mapping is empty.",
+                    remediation="Pass {depth_m: [(frequency_Hz, value), ...]}.")
+            depths = np.array(sorted(float(z) for z in pairs), dtype=float)
+            by_depth = {float(z): v for z, v in pairs.items()}
+            freqs, data = None, []
+            for z in depths:
+                f, v = rows(by_depth[z], f"the depth {z:g} m ")
+                if freqs is None:
+                    freqs = f
+                elif f.shape != freqs.shape or not np.array_equal(f, freqs):
+                    raise ConfigurationError(
+                        f"{who}: the depth {z:g} m uses other frequencies "
+                        f"than the depth {depths[0]:g} m; every depth must "
+                        f"list the same frequencies.",
+                        remediation="Give every depth the same frequency "
+                                    "column, or build one table per depth.")
+                data.append(v)
+            if np.any(depths < 0.0):
+                raise ConfigurationError(
+                    f"{who}: depths must be >= 0 m; got {depths.min():g}.")
+            table = cls(frequencies=freqs, data=np.vstack(data),
+                        units=units, depths=depths)
+        else:
+            f, v = rows(pairs, "")
+            table = cls(frequencies=f, data=v, units=units)
+        # The same rules the table meets when an environment takes it.
+        _TabulatedAbsorption(measured=table)
+        return table
+
     def to_units(self, units: str, *,
                  sound_speed: float = DEFAULT_SOUND_SPEED
                  ) -> "AbsorptionCoefficient":

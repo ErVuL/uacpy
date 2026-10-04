@@ -656,7 +656,7 @@ in frequency, warned when the one depth costs 0.05 dB/km or more). **One object 
 environment takes the law; `law.table(f)` is its α for looking at and is
 refused as an absorption (pass the law). The one table an environment takes
 is a measured α(f, z) with no law behind it,
-`AbsorptionCoefficient(frequencies=, data=, units=, depths=)` (`model=None`),
+`AbsorptionCoefficient(frequencies=, data=, units=, depths=)` (`model=None`), or from `(frequency, value)` pairs with `AbsorptionCoefficient.from_pairs([...])` / `from_pairs({depth: [...]})`,
 used as tabulated — linear in depth and in log f, refusing a frequency
 outside it ([environment guide](docs/guide/environment.md#absorption-from-real-water-a-profile-or-a-table)).
 

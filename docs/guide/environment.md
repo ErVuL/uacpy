@@ -840,6 +840,19 @@ What the environment does with a table:
   environment says so (`ValidityWarning`). `env.absorption` prints as the
   table, and the environment's repr shows `absorption=tabulated`.
 
+A measured table also comes from `(frequency, value)` pairs, the counterpart
+of `SoundSpeedProfile.from_pairs`:
+
+```python
+from uacpy import AbsorptionCoefficient, Environment
+# one measured spectrum, applied at every depth (dB/km by default)
+table = AbsorptionCoefficient.from_pairs([(1e3, 0.06), (1e4, 0.95), (1e5, 33.0)])
+# one spectrum per depth, all on the same frequencies
+table = AbsorptionCoefficient.from_pairs({0.0:    [(1e3, 0.07), (1e4, 1.10)],
+                                          1000.0: [(1e3, 0.05), (1e4, 0.80)]})
+env = Environment(bathymetry=100.0, ssp=1500.0, absorption=table)
+```
+
 How each engine carries Francois–Garrison (one row or a profile) or a table
 (no Fortran change):
 
