@@ -256,6 +256,14 @@ filterwarnings = [
     # matches every `uacpy.tests.*` test module. Remove once netCDF4 ships a
     # NumPy-2.5-compatible release.
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:uacpy.tests",
+    # The same netCDF4 deprecation, attributed to xarray's netCDF4 backend
+    # (xarray/backends/netCDF4_.py, the frame that calls into netCDF4) when
+    # xarray writes through it: any variable with a length-1 dimension, even
+    # data of exactly the variable's shape. Outside pytest Python already
+    # hides a library's DeprecationWarning, so users never see it; this keeps
+    # the test summary to warnings uacpy can act on. Scoped to the message
+    # and to that one module. Remove with the line above.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:xarray.backends.netCDF4_",
     # Same NumPy 2.5 deprecation, second emitter: reading a masked netCDF
     # variable reaches `MaskedArray.shape.__set__` (numpy/ma/core.py), which
     # assigns `ndarray.shape` internally. NumPy attributes it to numpy's own
