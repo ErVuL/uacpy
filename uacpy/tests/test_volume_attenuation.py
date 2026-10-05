@@ -3,6 +3,7 @@
 import pytest
 import numpy as np
 
+from uacpy.core.exceptions import ExecutableNotFoundError
 from uacpy.models import Bellhop, Kraken, Scooter
 from uacpy import Field
 from uacpy.core.results import Modes
@@ -191,14 +192,20 @@ class TestVolumeAttenuation:
         ref = increment('fortran')
         # medians over 1-5 km: Thorp 1.2 dB, Francois-Garrison 1.0 dB
         assert ref > 0.5, f"Fortran {law} increment {ref:.2f} dB is not measurable"
+        # Each port is checked if it is built on this host; only a missing
+        # executable is a reason not to check it, and any other error fails.
+        missing = []
         for backend in ('cxx', 'cuda'):
             try:
                 inc = increment(backend)
-            except Exception as exc:          # port not built on this host
-                pytest.skip(f"{backend}: {type(exc).__name__}")
+            except ExecutableNotFoundError:
+                missing.append(backend)
+                continue
             assert abs(inc / ref - 1.0) < 0.03, (
                 f"Bellhop {backend} {law} increment {inc:.3f} dB vs Fortran "
                 f"{ref:.3f} dB")
+        if len(missing) == 2:
+            pytest.skip("neither the cxx nor the cuda Bellhop port is built")
 
     @pytest.mark.requires_binary
     def test_frequency_dependent_attenuation(self, shallow_env_thorp,

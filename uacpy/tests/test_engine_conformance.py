@@ -89,6 +89,59 @@ def _carriers(key):
     return env, src, rcv
 
 
+class _Declared:
+    """What the registered engine ``key`` declares on its class — its
+    modes, traits, field modes and default mode — read without constructing
+    it, so a parameter list is filtered at collection with no binary
+    installed. It answers through the engine's own methods, which read only
+    ``_supported_modes`` and ``_traits``;
+    ``test_the_declared_engine_answers_what_the_built_engine_answers`` holds
+    the two alike."""
+
+    def __init__(self, key):
+        self._cls = ENGINES[key].load()
+        self.spec = self._cls.spec
+        self._traits = self.spec.traits
+        self._supported_modes = list(self.spec.modes)
+        self.supported_modes = self._supported_modes
+        self._FIELD_MODES = self._cls._FIELD_MODES
+
+    def _default_run_mode(self):
+        return self._cls._default_run_mode(self)
+
+    def _default_run_mode_for(self, frequencies):
+        return self._cls._default_run_mode_for(self, frequencies)
+
+    def _run_keywords_never_consumed(self):
+        return self._cls._run_keywords_never_consumed(self)
+
+
+def _default_mode_runs_a_field(model):
+    """Whether ``run(run_mode=None)`` on ``model`` runs a field mode."""
+    return model._default_run_mode_for(None) in model._FIELD_MODES
+
+
+#: The engines with a TIME_SERIES mode.
+_TIME_SERIES_KEYS = [key for key in _KEYS
+                     if RunMode.TIME_SERIES in _Declared(key).supported_modes]
+
+#: The engines whose default mode runs a field.
+_FIELD_DEFAULT_KEYS = [key for key in _KEYS
+                       if _default_mode_runs_a_field(_Declared(key))]
+
+
+def _declares_a_field_default(key):
+    """Whether the default mode of engine ``key`` declares a ``Field``."""
+    declared = _Declared(key)
+    mode = declared._default_run_mode_for(None)
+    return declared._cls.outputs[mode].result_type == 'Field'
+
+
+#: The engines whose default mode returns a ``Field``: a depth-range field
+#: on :func:`_carriers`.
+_FIELD_RESULT_KEYS = [key for key in _KEYS if _declares_a_field_default(key)]
+
+
 # ── registry ────────────────────────────────────────────────────────────
 
 
@@ -282,18 +335,21 @@ def _outcome(call):
     return 'accepted'
 
 
-@pytest.mark.parametrize('label', _ILLEGAL_CALLS)
-@pytest.mark.parametrize('key', _KEYS)
+#: The (engine, call) pairs where the call is illegal: a call legal on an
+#: engine is not collected for it.
+_ILLEGAL_CASES = [pytest.param(key, label, id=f'{key}-{label}')
+                  for label in _ILLEGAL_CALLS for key in _KEYS
+                  if _illegal_call(key, _Declared(key), label) is not None]
+
+
+@pytest.mark.parametrize('key,label', _ILLEGAL_CASES)
 def test_the_three_entry_points_answer_a_call_alike(key, label, launch_spy):
     """ARCH-9 / RA-CONTRACT-18: ``validate_inputs`` is the checking stage of
     ``run``, and ``run_settings`` runs it too, so for each of these calls
     the three raise the same exception with the same message — or all
     three accept it — and a refused ``run`` launches no binary."""
     model = _engine(key)
-    spec = _illegal_call(key, model, label)
-    if spec is None:
-        pytest.skip(f"legal on {type(model).__name__}")
-    mode, kw, carriers = spec
+    mode, kw, carriers = _illegal_call(key, model, label)
     launch_spy(model)
     outcomes = [_outcome(lambda c=call: getattr(model, c)(*carriers, mode,
                                                           **kw))
@@ -475,7 +531,7 @@ def test_a_result_its_slices_and_its_reload_carry_the_run_settings(key):
         result.run_settings = None
 
 
-@pytest.mark.parametrize('key', _KEYS)
+@pytest.mark.parametrize('key', _TIME_SERIES_KEYS)
 def test_a_time_series_and_every_snapshot_of_it_answer_coherence_alike(
         key):
     """A TIME_SERIES trace takes the ``coherent`` its engine declares
@@ -483,8 +539,6 @@ def test_a_time_series_and_every_snapshot_of_it_answer_coherence_alike(
     it; re-decided from the axes left, an instant read as coherent
     frequency-domain pressure (ARCH-4)."""
     model = _engine(key)
-    if RunMode.TIME_SERIES not in model.supported_modes:
-        pytest.skip(f"{type(model).__name__} has no TIME_SERIES mode")
     env, src, rcv = _carriers(key)
     n = np.arange(64)
     pulse = np.hanning(64) * np.sin(2 * np.pi * 100.0 * n / 800.0)
@@ -683,7 +737,7 @@ def test_a_result_names_the_engine_and_the_source_it_ran(key):
             np.testing.assert_array_equal(slab.source_depths, [50.0])
 
 
-@pytest.mark.parametrize('key', _KEYS)
+@pytest.mark.parametrize('key', _FIELD_DEFAULT_KEYS)
 def test_a_two_depth_source_stacks_the_single_depth_runs(key):
     """In a field mode a two-depth Source returns a stack over
     ``source_depth`` whose every slab is the single-depth run at that depth,
@@ -692,8 +746,6 @@ def test_a_two_depth_source_stacks_the_single_depth_runs(key):
     from uacpy.core.results import ResultStack
     model = _engine(key)
     mode = model._default_run_mode_for(None)
-    if mode not in model._FIELD_MODES:
-        pytest.skip(f"{type(model).__name__} runs no field by default")
     env, _, rcv = _carriers(key)
     depths, weights = [30.0, 70.0], [1.0, -1.0]
     with warnings.catch_warnings():
@@ -718,15 +770,13 @@ def test_a_two_depth_source_stacks_the_single_depth_runs(key):
                                singles[0].data - singles[1].data) < tolerance
 
 
-@pytest.mark.parametrize('key', _KEYS)
+@pytest.mark.parametrize('key', _FIELD_DEFAULT_KEYS)
 def test_a_single_depth_weight_scales_the_unit_run(key):
     """``Source(weights=w)`` on one depth returns ``w`` times the unit
     field and records the depth and weight; a dB field has lost the phase a
     weight multiplies, so it is refused."""
     model = _engine(key)
     mode = model._default_run_mode_for(None)
-    if mode not in model._FIELD_MODES:
-        pytest.skip(f"{type(model).__name__} runs no field by default")
     unit = _run(key)
     env, _, rcv = _carriers(key)
     w = -0.5 + 0.25j if unit.is_complex else -2.0
@@ -753,9 +803,7 @@ _MASK_RUNS = {}
 
 def _mask_run(key):
     """The default-mode run of the registered engine on the receiver grid
-    of ``_MASK_DEPTHS`` × ``_MASK_RANGES``, and the messages it warned; a
-    skip for an engine that returns no depth-range field."""
-    from uacpy.core.results import Field
+    of ``_MASK_DEPTHS`` × ``_MASK_RANGES``, and the messages it warned."""
     if key not in _MASK_RUNS:
         model = _engine(key)
         env, src, _ = _carriers(key)
@@ -765,23 +813,19 @@ def _mask_run(key):
             warnings.simplefilter('always')
             field = model.run(env, src, rcv, mode, **_mode_kwargs(mode))
         _MASK_RUNS[key] = field, [str(w.message) for w in caught]
-    field, messages = _MASK_RUNS[key]
-    if not (isinstance(field, Field)
-            and {'depth', 'range'} <= set(field.coords)):
-        pytest.skip(f"{ENGINES[key].class_name} returns no depth-range field")
-    return field, messages
+    return _MASK_RUNS[key]
 
 
 @pytest.mark.parametrize('key', [
     pytest.param(key, marks=_known_break('requested_grid', key))
-    for key in _KEYS])
+    for key in _FIELD_RESULT_KEYS])
 def test_a_field_keeps_the_requested_depth_and_range_axes(key):
     field, _ = _mask_run(key)
     np.testing.assert_array_equal(field.coords['depth'], _MASK_DEPTHS)
     np.testing.assert_array_equal(field.coords['range'], _MASK_RANGES)
 
 
-@pytest.mark.parametrize('key', _KEYS)
+@pytest.mark.parametrize('key', _FIELD_RESULT_KEYS)
 def test_a_field_masks_the_cells_no_engine_can_fill(key):
     """source-receiver.md §7 "The source is at range zero": a point-source
     field is singular on its own axis, so the r = 0 column is NaN, with a
@@ -795,6 +839,49 @@ def test_a_field_masks_the_cells_no_engine_can_fill(key):
     assert any(re.search(r'r\s*<?=\s*0', m) for m in messages)
     assert finite[0, 1:].all()
     assert finite[1, 1:].all() or not finite[1, 1:].any(), finite[1]
+
+
+# ── filtered parameter lists ────────────────────────────────────────────
+
+
+def test_every_filtered_parameter_list_holds_a_case():
+    """A filter that drops every engine, or a call illegal on none, would
+    leave a test with nothing to run."""
+    for cases in (_TIME_SERIES_KEYS, _FIELD_DEFAULT_KEYS, _FIELD_RESULT_KEYS):
+        assert cases
+    assert {p.values[1] for p in _ILLEGAL_CASES} == set(_ILLEGAL_CALLS)
+
+
+@pytest.mark.parametrize('key', _KEYS)
+def test_the_declared_engine_answers_what_the_built_engine_answers(key):
+    """``_Declared`` answers every question the filters ask as the built
+    engine does, and each filtered list holds the engine exactly where the
+    built engine says the case applies."""
+    model, declared = _engine(key), _Declared(key)
+    assert declared.supported_modes == model.supported_modes
+    assert declared._traits == model._traits
+    assert declared._FIELD_MODES == model._FIELD_MODES
+    assert (declared._default_run_mode_for(None)
+            == model._default_run_mode_for(None))
+    assert (declared._run_keywords_never_consumed()
+            == model._run_keywords_never_consumed())
+    assert (key in _TIME_SERIES_KEYS) == (
+        RunMode.TIME_SERIES in model.supported_modes)
+    assert (key in _FIELD_DEFAULT_KEYS) == _default_mode_runs_a_field(model)
+    illegal = {p.values[1] for p in _ILLEGAL_CASES if p.values[0] == key}
+    assert illegal == {label for label in _ILLEGAL_CALLS
+                       if _illegal_call(key, model, label) is not None}
+
+
+@pytest.mark.parametrize('key', _KEYS)
+def test_an_engine_declaring_a_field_default_returns_a_depth_range_field(
+        key):
+    """``_FIELD_RESULT_KEYS`` holds the engines whose default run returns a
+    Field over depth and range, and no other."""
+    from uacpy.core.results import Field
+    field, _ = _mask_run(key)
+    assert (key in _FIELD_RESULT_KEYS) == (
+        isinstance(field, Field) and {'depth', 'range'} <= set(field.coords))
 
 
 @pytest.mark.parametrize('key', _KEYS)
