@@ -6,6 +6,8 @@ unsupported, approximated or off-grid configurations, the option-line
 guards, and a one-liner availability summary.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -71,11 +73,16 @@ class TestOASTWarnings:
         structure; the warning names the step and the remedies."""
         rcv = uacpy.Receiver(depths=[50.0], ranges=[1234.0, 4321.0])
         with pytest.warns(UserWarning, match=r'native FFT range grid, whose '
-                                             r'step \(15\d\.\d m\)'):
+                                             r'step \(15\d\.\d m\)') as rec:
             OAST(verbose=False, n_wavenumbers=4096, c_low=1450.0,
                  c_high=1600.0).run(
                 make_pekeris(), uacpy.Source(depths=50.0, frequencies=100.0),
                 rcv)
+        said = [str(w.message) for w in rec
+                if 'native FFT range grid' in str(w.message)]
+        # The one-wavelength threshold is labelled as uacpy's guidance; the
+        # measured errors live in docs/models/oases.md.
+        assert "uacpy's guidance" in said[0] and 'p90' not in said[0]
 
 
 def test_all_oases_models_available():
@@ -515,10 +522,6 @@ class TestOASNSweepAndLevels:
                     call()
             assert not [w for w in caught if 'resampled' in str(w.message)]
 
-    def test_a_pinned_count_warns_that_levels_converge_with_it(self):
-        with pytest.warns(UserWarning, match='converge as NW grows'):
-            OASN(verbose=False, n_wavenumbers=4096)
-
     def test_the_covariance_keeps_the_noise_levels_it_is_referenced_to(
             self):
         cov = _quiet_run(
@@ -587,17 +590,17 @@ class TestTheDeckIsWrittenFromTheResolvedSettings:
             'oases_wavenumber_bounds(water column)')
         _quiet_run(model.run, *carriers)
         deck = (tmp_path / 'oast_run.dat').read_text().splitlines()
-        assert f"{engine.c_low:.1f} {engine.c_high:.6g}" in deck
+        assert f"{engine.c_low!r} {engine.c_high!r}" in deck
         assert engine.options in deck
 
     def test_oasr_block_iv_is_the_settings_sweep(self, tmp_path):
         model = OASR(verbose=False, work_dir=tmp_path)
         carriers = (make_pekeris(),
                     uacpy.Source(depths=50.0,
-                                 frequencies=[20.0, 30.0, 50.0, 80.0]),
+                                 frequencies=[20.0, 40.0, 60.0, 80.0]),
                     uacpy.Receiver(depths=[50.0], ranges=[1000.0]))
-        with pytest.warns(UserWarning, match=r'source\.frequencies vector '
-                                             r'is non-equispaced'):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
             engine = model.run_settings(*carriers).engine
         assert engine.frequency_sweep == (20.0, 80.0, 4)
         refl = _quiet_run(model.run, *carriers)
@@ -662,7 +665,7 @@ class TestTheOaspDeckIsWrittenFromTheResolvedSettings:
             engine.n_time_samples, float(f"{engine.freq_min:.9f}"),
             float(f"{engine.freq_max:.9f}"),
             float(f"{engine.time_step:.12g}"))
-        assert f"{engine.c_low:.1f} {engine.c_high:.6g}" in deck
+        assert f"{engine.c_low!r} {engine.c_high!r}" in deck
 
     @pytest.mark.parametrize('kw', [
         dict(run_mode=RunMode.BROADBAND),

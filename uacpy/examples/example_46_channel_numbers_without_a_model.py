@@ -150,7 +150,11 @@ depth_m, c0, freq = 100.0, 1500.0, 100.0
 z = np.linspace(0.0, depth_m, 201)
 kz = (np.arange(4) + 0.5) * np.pi / depth_m
 k = np.sqrt((2 * np.pi * freq / c0) ** 2 - kz ** 2).astype(complex)
-psi = np.sin(np.outer(z, kz))
+# Normalised as a solver's modes are, integral(psi^2 / rho) dz = 1 (Jensen et
+# al., Computational Ocean Acoustics, Eq. 5.169): sqrt(2/D) for rho = 1 g/cm3.
+# The modal sum below is then the field of a unit source, a true loss.
+rho = 1.0
+psi = np.sqrt(2.0 * rho / depth_m) * np.sin(np.outer(z, kz))
 
 # kz = (m + 1/2) pi / D puts a pressure release at the surface and a
 # RIGID seabed at D, so these shapes have no evanescent tail and the
@@ -160,11 +164,11 @@ psi = np.sin(np.outer(z, kz))
 # visible over 20 km: real seawater at 100 Hz is near 1e-6 dB/m, which would
 # cost 0.02 dB across the whole panel. The perturbation is linear in alpha,
 # so the shape of the answer does not depend on the value.
-alpha_m = modal_attenuation(k, psi, z, 1e-4, frequency=freq,
+alpha_m = modal_attenuation(k, psi, z, 1e-4, frequency=freq, density_z=rho,
                             bottom=BoundaryProperties(acoustic_type='rigid'))
 print(f"\nE. modal attenuation (Np/m): "
       f"{np.array2string(alpha_m, precision=8)}")
-# The four are within 3.5% of each other: these shapes all fill the same
+# The four are within 3.6% of each other: these shapes all fill the same
 # water column, so they see the same alpha(z). A guide whose modes reach
 # different depths — a duct, a sediment-loaded bottom — is where the spread
 # becomes mode stripping.
@@ -177,8 +181,9 @@ print(f"   excess loss at 20 km: "
 ranges_m = np.linspace(100.0, 20000.0, 400)
 psi_zs = np.array([np.interp(25.0, z, psi[:, m]) for m in range(4)])
 psi_zr = np.column_stack([np.interp([50.0], z, psi[:, m]) for m in range(4)])
-p_lossless = modal_field(k, psi_zs, psi_zr, ranges_m)
-p_lossy = modal_field(k + 1j * alpha_m, psi_zs, psi_zr, ranges_m)
+p_lossless = modal_field(k, psi_zs, psi_zr, ranges_m, source_density=rho)
+p_lossy = modal_field(k + 1j * alpha_m, psi_zs, psi_zr, ranges_m,
+                      source_density=rho)
 
 # ── F. A wavenumber-domain kernel ─────────────────────────────────────────
 # What a spectral code hands back before the range transform: G(k) on a
@@ -215,11 +220,11 @@ for pole in (0.38, 0.30):
 # these two runs agree". Comparing MODELS means different axes by nature.
 coarse_r = np.linspace(500.0, 6000.0, 12)
 fine_r = np.linspace(500.0, 6000.0, 300)
-model_a = uacpy.core.results.Field(
+model_a = uacpy.Field(
     data=(np.interp(fine_r, r_out, np.abs(p_full[0]))
           ).astype(complex).reshape(1, -1),
     coords={'depth': np.array([50.0]), 'range': fine_r}, frequencies=freq)
-model_b = uacpy.core.results.Field(
+model_b = uacpy.Field(
     data=(np.interp(coarse_r, r_out, np.abs(p_cut[0]))
           ).astype(complex).reshape(1, -1),
     coords={'depth': np.array([50.0]), 'range': coarse_r}, frequencies=freq)

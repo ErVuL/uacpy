@@ -3,6 +3,7 @@ adopts and cleans it, the claim a pinned directory takes against a second
 thread or process, and the per-depth redirect of a pinned directory into its
 subdirectory."""
 
+import contextlib
 import gc
 import os
 import shutil
@@ -19,11 +20,11 @@ from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 
 # Pinned work dirs currently claimed by a running model: resolved path ->
 # [owning thread, claim depth, directory fd holding the cross-process lock
-# (or None)]. The models write fixed scratch filenames
+# (or None), whether a run holding it cleans it up]. The models write fixed scratch filenames
 # (``bounce.env``, ``field.flp``, ``tl.grid``), so two runs sharing one
 # directory overwrite each other's decks and both read back whatever the last
 # binary left: two Bounce runs on different bottoms, started from two threads
-# on one pinned work_dir, returned bit-identical answers with nothing raised.
+# on one pinned work_dir, return bit-identical answers with nothing raised.
 # ``run_parallel`` refuses that configuration across its own jobs; this is the
 # same refusal for every other way two runs can start at once. A second
 # PROCESS on the same directory is refused through an advisory ``flock`` on
@@ -39,7 +40,7 @@ _PINNED_WORK_DIRS: dict = {}
 _PINNED_WORK_DIRS_LOCK = threading.Lock()
 
 
-def _claim_work_dir(work_dir, model_name: str):
+def _claim_work_dir(work_dir, model_name: str, *, cleans_up: bool):
     """Claim a pinned ``work_dir`` for the calling thread.
 
     Returns the claim to hand to :func:`_release_work_dir`: the resolved path
@@ -49,7 +50,14 @@ def _claim_work_dir(work_dir, model_name: str):
 
     Re-entrant per thread: one thread running twice into a directory, in
     sequence or nested, is the sequential reuse a pinned work_dir is *for*, so
-    it is counted rather than refused. Only a second *thread* is a collision.
+    it is counted rather than refused. Only a second *thread* is a collision:
+    on the directory itself, or on one inside or around it when the run on
+    the outer directory cleans up (``cleans_up``), since that cleanup removes
+    the inner directory a run created there meanwhile
+    (:func:`_overlapping_claim`). Without a cleanup, two nested directories
+    hold disjoint scratch files — a multi-depth run writes into a
+    subdirectory of its pinned directory while another thread's run writes
+    into the directory itself.
     """
     key = str(Path(work_dir).resolve())
     # current_thread() rather than get_ident(): it is reuse-proof, and it
@@ -57,7 +65,7 @@ def _claim_work_dir(work_dir, model_name: str):
     # what the liveness test below needs.
     me = threading.current_thread()
     with _PINNED_WORK_DIRS_LOCK:
-        if _take_claim(key, me):
+        if _take_claim(key, me, cleans_up):
             return key, me
 
     # Refusal path only, so its cost buys back a directory nobody is using and
@@ -69,35 +77,65 @@ def _claim_work_dir(work_dir, model_name: str):
     # this frees calls _release_work_dir, which takes it.
     gc.collect()
     with _PINNED_WORK_DIRS_LOCK:
-        if _take_claim(key, me):
+        if _take_claim(key, me, cleans_up):
             return key, me
-        owner = _PINNED_WORK_DIRS[key]
+        other = _overlapping_claim(key, me, cleans_up)
+        owner = _PINNED_WORK_DIRS[other]
+        where = ("" if other == key else
+                 f" (through {other!r}, which "
+                 f"{'contains' if _contains(other, key) else 'lies inside'} "
+                 f"it)")
         raise ConfigurationError(
             f"{model_name}: work_dir {str(work_dir)!r} is already in use by "
-            f"thread {owner[0].name!r}, which is still running; concurrent "
-            "runs would collide in the same scratch directory and return "
-            "each other's results.",
+            f"thread {owner[0].name!r}{where}, which is still running; "
+            "concurrent runs would collide in the same scratch directory, "
+            "and one's cleanup would remove the other's files.",
             remediation="Give each run its own work_dir, or leave "
                         "work_dir=None to allocate a fresh tempdir per run.",
         )
 
 
-def _take_claim(key: str, me) -> bool:
+def _contains(outer: str, inner: str) -> bool:
+    """Whether the resolved directory ``inner`` lies inside ``outer``."""
+    return inner.startswith(outer.rstrip(os.sep) + os.sep)
+
+
+def _overlapping_claim(key: str, me, cleans_up: bool) -> Optional[str]:
+    """The key of a claim another live thread holds on ``key``, on a
+    directory containing it whose run cleans up, or on one inside it when
+    the asking run (``cleans_up``) cleans ``key`` up; ``None`` when there is
+    none. Call under the lock."""
+    for other, entry in _PINNED_WORK_DIRS.items():
+        if entry[0] is me or not entry[0].is_alive():
+            continue
+        if (other == key
+                or (_contains(other, key) and entry[3])
+                or (_contains(key, other) and cleans_up)):
+            return other
+    return None
+
+
+def _take_claim(key: str, me, cleans_up: bool) -> bool:
     """Record ``me`` as the owner of ``key`` if it is free; call under the lock.
 
-    Free means unclaimed, claimed by ``me`` already (the re-entrant case), or
-    claimed by a thread that has since exited. A dead owner cannot be running
-    a model, so its claim is stale — it outlived the run only because whatever
-    was going to release it never got the chance.
+    Free means no other live thread holds a claim it collides with
+    (:func:`_overlapping_claim`): unclaimed, claimed by ``me``
+    already (the re-entrant case), or claimed by a thread that has since
+    exited. A dead owner cannot be running a model, so its claim is stale —
+    it outlived the run only because whatever was going to release it never
+    got the chance.
     """
+    if _overlapping_claim(key, me, cleans_up) is not None:
+        return False
     owner = _PINNED_WORK_DIRS.get(key)
     if owner is None or not owner[0].is_alive():
         if owner is not None:
             _close_work_dir_lock(owner)
-        _PINNED_WORK_DIRS[key] = [me, 1, None]
+        _PINNED_WORK_DIRS[key] = [me, 1, None, cleans_up]
         return True
     if owner[0] is me:
         owner[1] += 1
+        owner[3] = owner[3] or cleans_up
         return True
     return False
 
@@ -210,11 +248,42 @@ if hasattr(os, 'register_at_fork'):        # POSIX only
 _SCRATCH_REDIRECT = threading.local()
 
 
+@contextlib.contextmanager
+def scratch_subdir(model, name: str):
+    """Run the block with ``model``'s pinned ``work_dir`` redirected into
+    its subdirectory ``name``; an unpinned one (a fresh temp dir per run)
+    needs no such split.
+
+    The redirect is recorded in a thread-local map keyed by the model
+    rather than written to ``model.work_dir``: the attribute is shared state
+    that :meth:`~uacpy.models.base.PropagationModel._setup_file_manager`
+    reads on every run, so mutating it made a concurrent single-depth run on
+    the same model claim — and be refused for — a ``source_depth_*``
+    directory it never asked for, and left the instance pointing inside a
+    subdirectory if a run raised between the two writes. Keying by
+    ``id(model)`` keeps a model a hook runs from inheriting the redirect of
+    the model that runs it."""
+    if model.work_dir is None:
+        yield
+        return
+    by_model = getattr(_SCRATCH_REDIRECT, 'by_model', None)
+    if by_model is None:
+        by_model = _SCRATCH_REDIRECT.by_model = {}
+    saved = by_model.get(id(model))
+    by_model[id(model)] = name
+    try:
+        yield
+    finally:
+        if saved is None:
+            by_model.pop(id(model), None)
+        else:
+            by_model[id(model)] = saved
+
+
 def _effective_work_dir(model) -> Optional[Path]:
     """The pinned directory a run writes into: ``model.work_dir``, or its
     per-depth subdirectory while :meth:`PropagationModel.run` is inside one
-    depth of a per-depth loop (see
-    :meth:`PropagationModel._scratch_subdir`). Read by
+    depth of a per-depth loop (see :func:`scratch_subdir`). Read by
     :meth:`PropagationModel._setup_file_manager` in place of the attribute,
     so the redirect never touches what the user configured.
 
@@ -564,7 +633,7 @@ def setup_file_manager(work_dir, *, model_name: str, use_tmpfs: bool,
     The claim comes back through the manager's release hook.
     """
     if work_dir is not None:
-        claim = _claim_work_dir(work_dir, model_name)
+        claim = _claim_work_dir(work_dir, model_name, cleans_up=cleanup)
         try:
             # base_dir is the *parent*: FileManager validates that it
             # exists, while ``adopt_work_dir`` keys ownership on whether

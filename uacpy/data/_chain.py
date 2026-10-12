@@ -15,7 +15,7 @@ from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.data import _cache
 
 __all__ = ['CACHE_BACKEND', 'SourceProvider', 'SourceChain', 'first_answer',
-           'raise_substantive', 'source_tuple']
+           'lower_source_spec', 'raise_substantive', 'source_tuple']
 
 #: The backend token of a source's cached twin.
 CACHE_BACKEND = 'local'
@@ -81,6 +81,20 @@ def source_tuple(value):
     return tuple(str(v).lower() for v in value)
 
 
+def lower_source_spec(spec):
+    """A ``source=`` / ``*_sources`` value lower-cased in its own shape: a
+    preset or one name stays a ``str``, a sequence becomes a tuple of names,
+    and ``None`` or a value that is no sequence passes as given (its
+    validator refuses it) — so every preset check and validator downstream
+    compares against one spelling."""
+    if spec is None or isinstance(spec, str):
+        return spec if spec is None else spec.lower()
+    try:
+        return source_tuple(spec)
+    except TypeError:
+        return spec
+
+
 @dataclass(frozen=True)
 class SourceProvider:
     """One fetchable source of an axis.
@@ -122,7 +136,9 @@ class SourceChain:
     def resolve(self, spec):
         """A ``*_sources`` spec as ``(sources, cache_only)``: ``'auto'`` →
         the axis's best-available chain; ``'local'`` → the same chain with
-        cached backends only (no network); else the explicit list."""
+        cached backends only (no network); else the explicit list. Names
+        and presets match in any case."""
+        spec = lower_source_spec(spec)
         if spec == 'local':
             return self.auto, True
         if spec == 'auto':

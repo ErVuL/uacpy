@@ -9,8 +9,10 @@ from typing import Optional, Sequence, Tuple
 
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results import Field, ResultStack
-from uacpy.visualization.plots._common import DEPTH_AXIS_HEADROOM, ZORDER_SOURCE, _depth_range_heatmap, _draw_geometry, _grid_figure, _overlay_seafloor, _painted_x_span, _time_trace_label, typed_plot_error
+from uacpy.core.results import Field
+from uacpy.core.results._superposition import split_source_depths
+from uacpy.visualization.style import LINEAR_VIEW_COLORMAP
+from uacpy.visualization.plots._common import DEPTH_AXIS_HEADROOM, ZORDER_SOURCE, _coordinate_caption, _depth_range_heatmap, _draw_geometry, _grid_figure, _overlay_seafloor, _painted_x_span, _time_trace_label, typed_plot_error
 
 
 _TIME_AXES = ('depth', 'range', 'time')
@@ -20,13 +22,29 @@ def _time_layout(field, who: str, what: str = 'field'):
     """``(data, depths, ranges, times)`` of a time-series field in the
     canonical (depth, range, time) layout, whatever storage order
     ``field.coords`` declares. Refuses a field missing any of the three axes
-    by name, so no caller indexes a coordinate it does not have."""
+    by name, so no caller indexes a coordinate it does not have, and a field
+    with any further axis (the ``source_depth`` axis of a multi-depth run),
+    which no one (depth, range) frame can show, naming the selection or sum
+    that removes it."""
     coords = getattr(field, 'coords', {})
     missing = set(_TIME_AXES) - set(coords)
     if missing:
         raise ConfigurationError(
             f"{who}: {what} is missing coord axes {sorted(missing)}. "
             f"Need depth, range, and time — got {list(coords)}.")
+    extra = [a for a in coords if a not in _TIME_AXES]
+    if extra:
+        raise ConfigurationError(
+            f"{who}: {what} has the axes {list(coords)}; a (depth, range) "
+            f"frame over time shows only depth, range and time, not "
+            f"{extra}.",
+            remediation=(
+                "Animate one source with field.at(source_depth=...), or the "
+                "sources driven together with field.superpose(); "
+                "plot_time_snapshots(field, ...) draws one row per source "
+                "depth." if 'source_depth' in extra else
+                f"Select one value of each with field.at("
+                f"{', '.join(f'{a}=...' for a in extra)})."))
     order = list(coords)
     data = np.moveaxis(np.asarray(field.data),
                        [order.index(a) for a in _TIME_AXES], [0, 1, 2])
@@ -49,19 +67,20 @@ def _pmax_percentile(data) -> float:
 @typed_plot_error
 def animate_field(
     field: 'Field',
+    ax=None,
     *,
     env: Optional[Environment] = None,
     fps: int = 30,
     frame_stride: Optional[int] = None,
     p_max: Optional[float] = None,
-    cmap: str = 'RdBu_r',
-    ax=None,
+    cmap: Optional[str] = None,
     show_source: bool = True,
     show_seafloor: bool = True,
     show_time: bool = True,
     title: Optional[str] = None,
     aspect: str = 'auto',
     show_colorbar: bool = True,
+    figsize: Tuple[float, float] = (8, 4.5),
 ):
     """Animate a time-series :class:`Field` as a (depth, range) heatmap
     that evolves along the time axis.
@@ -72,8 +91,8 @@ def animate_field(
         Must have ``coords={'depth', 'range',
         'time'}``. Data is real-valued p(d, r, t).
     env : Environment, optional
-        When supplied, the seafloor (and surface, if elastic) overlay is
-        drawn on top of the field — same convention as :func:`plot_field`.
+        When supplied, the seafloor overlay is drawn on top of the field —
+        same convention as :func:`plot_field`.
     fps : int, optional
         Playback frame rate. Default 30. The animation's elapsed wall-
         time is ``n_frames / fps``.
@@ -87,7 +106,9 @@ def animate_field(
         whole field — keeps the wave visible without the early-time
         near-source spike washing out later frames.
     cmap : str, optional
-        Diverging colormap for ±pressure. Default ``'RdBu_r'``.
+        Diverging colormap for ±pressure. ``None`` (default) is the signed
+        map every linear pressure view shares,
+        :data:`uacpy.visualization.style.LINEAR_VIEW_COLORMAP`.
     ax : matplotlib.axes.Axes, optional
         Target axes. ``None`` creates a fresh figure.
     show_source : bool, optional
@@ -111,6 +132,9 @@ def animate_field(
     show_colorbar : bool, optional
         Draw the pressure colorbar, labelled from the field's own kind and
         unit as :func:`plot_field` labels it. Default True.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(8, 4.5)`` by default; unused
+        when ``ax`` is given.
 
     Each cell is drawn at its own coordinates: an evenly spaced grid as an
     image, any other grid (a receiver fan dense near the surface) as a mesh
@@ -151,8 +175,10 @@ def animate_field(
     if p_max is None:
         p_max = _pmax_percentile(data)
 
+    if cmap is None:
+        cmap = LINEAR_VIEW_COLORMAP
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 4.5))
+        fig, ax = plt.subplots(figsize=figsize)
     else:
         fig = ax.figure
 
@@ -270,12 +296,13 @@ def plot_time_snapshots(
     times_s: Sequence[float],
     *,
     env: Optional[Environment] = None,
-    cmap: str = 'RdBu_r',
+    cmap: Optional[str] = None,
     aspect=None,
     p_max=None,
     figsize_per_panel: Optional[Tuple[float, float]] = None,
     title: Optional[str] = None,
     fig=None,
+    show_colorbar: bool = True,
 ):
     """Snapshot grid: per-model rows × per-time columns of ``p(d, r, t)``.
 
@@ -286,19 +313,23 @@ def plot_time_snapshots(
 
     Parameters
     ----------
-    fields : ResultStack, Mapping[str, Field], Sequence[(str, Field)], Field or Sequence[Field]
-        Time-series fields, one row each, in the order given. A
-        :class:`ResultStack` names its rows ``"<coordinate>=<value>"``; a
-        mapping or a sequence of ``(name, field)`` pairs names them
-        explicitly; a bare :class:`Field` or a sequence of fields is named
-        by each field's ``model``.
+    fields : Field, Mapping[str, Field], Sequence[(str, Field)] or Sequence[Field]
+        Time-series fields, one row each, in the order given. A Field with a
+        ``source_depth`` axis (a multi-depth run) gives one row per source
+        depth, named by the depth in the unit its axis is drawn in
+        (``'Source depth = 20 m'``); a mapping or a sequence of
+        ``(name, field)`` pairs names them explicitly; any other bare
+        :class:`Field` or a sequence of fields is named by each field's
+        ``model``.
     times_s : sequence of float
         Wall-clock times to sample (s). Each model's nearest time bin
         is picked independently.
     env : Environment, optional
         When supplied, the seafloor overlay is drawn on every panel.
     cmap : str, optional
-        Diverging colormap for ±pressure. Default ``'RdBu_r'``.
+        Diverging colormap for ±pressure. ``None`` (default) is
+        :data:`uacpy.visualization.style.LINEAR_VIEW_COLORMAP`, as on
+        :func:`animate_field` and :func:`plot_field`.
     aspect : str or float, optional
         The panels' axes aspect. ``None`` (default) stretches a panel whose
         range axis spans more than ten times its depth axis to a 4:1 floor —
@@ -327,6 +358,10 @@ def plot_time_snapshots(
         figure. Its size and layout are then the caller's — give the parent
         ``layout='constrained'`` — so each row's colorbar takes its space
         from that row's panels, and ``figsize_per_panel=`` is refused.
+    show_colorbar : bool, optional
+        Draw each row's colour bar. Default True; ``False`` leaves the
+        rows for a :func:`shared_colorbar` (pass a scalar ``p_max`` so the
+        rows share one scale).
 
     Each cell is drawn at its own coordinates: an evenly spaced grid as an
     image, any other grid (a receiver fan dense near the surface) as a mesh
@@ -337,11 +372,13 @@ def plot_time_snapshots(
     matplotlib.figure.Figure, numpy.ndarray[matplotlib.axes.Axes]
         Figure and 2-D axes array (shape ``(n_models, n_times)``).
     """
-    # Accept the canonical multi-result container (ResultStack), a single
-    # Field, a sequence of Fields (auto-named by model), a {name: field} dict,
-    # or a sequence of (name, field) pairs.
-    if isinstance(fields, ResultStack):
-        rows = [(f"{fields.coordinate_name}={c:g}", slab) for c, slab in fields]
+    # Accept a multi-depth Field (one row per source depth), a single
+    # Field, a sequence of Fields (auto-named by model), a {name: field}
+    # dict, or a sequence of (name, field) pairs.
+    if isinstance(fields, Field) and 'source_depth' in fields.coords:
+        rows = [(_coordinate_caption('source_depth', z), plane)
+                for z, plane in zip(fields.coords['source_depth'],
+                                    split_source_depths(fields))]
     elif hasattr(fields, 'items'):
         rows = list(fields.items())
     elif isinstance(fields, Field):
@@ -360,6 +397,8 @@ def plot_time_snapshots(
             f"be non-empty — the grid is one row per field, one column per "
             f"time.")
 
+    if cmap is None:
+        cmap = LINEAR_VIEW_COLORMAP
     layouts = [_time_layout(field, 'plot_time_snapshots',
                             f"field {(name or type(field).__name__)!r}")
                for name, field in rows]
@@ -452,8 +491,10 @@ def plot_time_snapshots(
         # One bar per row, inset beside the row's last panel so it takes that
         # panel's drawn height (the aspect shrinks a panel inside its slot)
         # and no width from any panel; the right margin is reserved for it.
-        fig.subplots_adjust(right=1.0 - 0.9 / fig.get_figwidth())
-    for (_, field), row, mappable in zip(rows, axes, row_mappables):
+        if show_colorbar:
+            fig.subplots_adjust(right=1.0 - 0.9 / fig.get_figwidth())
+    for (_, field), row, mappable in zip(rows if show_colorbar else (),
+                                         axes, row_mappables):
         # A caller's figure is laid out by its own engine, which places a
         # bar that takes its space from the row rather than an inset that
         # would print over whatever the caller put to the right.

@@ -15,7 +15,8 @@ from uacpy.core.exceptions import (
 )
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core._validate import (
-    require_below_nyquist, require_positive_finite_scalar,
+    require_below_nyquist, require_generator,
+    require_positive_finite_scalar,
 )
 import math
 import warnings
@@ -523,9 +524,10 @@ def hfm_chirp(
     Parameters
     ----------
     freq_start : float
-        Minimum frequency in Hz
+        Frequency at the start of the sweep in Hz
     freq_end : float
-        Maximum frequency in Hz
+        Frequency at the end of the sweep in Hz; below ``freq_start`` the
+        sweep runs down
     duration : float
         Duration in seconds
     sample_rate : float
@@ -720,7 +722,8 @@ def bpsk_modulate(
     >>> fc = 12000  # 12 kHz carrier
     >>> sample_rate = 48000  # 48 kHz sample rate
     >>> chips_per_sec = 3000  # 3k chips/sec
-    >>> s = bpsk_modulate(bits, fc, *, sample_rate, chips_per_sec)
+    >>> s = bpsk_modulate(bits, fc, sample_rate=sample_rate,
+    ...                   chips_per_sec=chips_per_sec)
 
     References
     ----------
@@ -1189,7 +1192,7 @@ def synthesize_noise_from_psd(psd, frequencies, duration=1, amplitude_factor=1, 
 
     x_total = np.zeros(samples_needed)
     t_total = np.arange(samples_needed) / sample_rate
-    rng = np.random.default_rng() if rng is None else rng
+    rng = require_generator(rng, "synthesize_noise_from_psd")
 
     for i in range(num_chunks):
         vi = rng.standard_normal(N)
@@ -1466,7 +1469,7 @@ def make_bandlimited_noise(
                              who="make_bandlimited_noise"),
             sample_rate, fc, bandwidth)
         scale = ref * np.sqrt(neb * 10.0 ** (psd_level_dB / 10.0))
-    rng = np.random.default_rng() if rng is None else rng
+    rng = require_generator(rng, "make_bandlimited_noise")
     # One independent unit-RMS draw per channel, in column order, so a
     # seeded multichannel record is reproducible column by column.
     draws = [_bandlimited_noise_samples(
@@ -1500,7 +1503,7 @@ def _bandlimited_noise_samples(fc, bandwidth, n_samples, sample_rate, *,
             f"end; it needs more than {padlen}. Lengthen the record or "
             f"raise the sample rate.")
     time = np.arange(n_samples) / sample_rate
-    rng = np.random.default_rng() if rng is None else rng
+    rng = require_generator(rng, who)
     noise = rng.standard_normal(n_samples)
     filtered_noise = sosfiltfilt(sos, noise)
 

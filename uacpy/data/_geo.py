@@ -15,16 +15,19 @@ from uacpy.data.sources import DataProvenance
 from uacpy.core.provenance import point_in_words
 
 from uacpy.core.exceptions import (
-    ConfigurationError, DataFetchError, FallbackWarning, ProvenanceWarning,
+    ConfigurationError, DataFetchError, FallbackWarning,
 )
 from uacpy.core.geo import great_circle_km
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.data._provenance_notice import provenance_notice
 
 __all__ = [
     'lon_linspace', 'nearest_indices', 'ring_offsets', 'run_representative_indices',
     'run_boundary_indices',
     'DEFAULT_MAX_TRANSECT_POINTS', 'checked_max_points',
-    'checked_n_points', 'capped_n_points', 'require_source',
+    'checked_n_points', 'capped_n_points', 'require_source', 'require_month',
+    'checked_max_days', 'cut_at_first_invalid', 'mid_depth',
+    'value_at_depth',
     'depth_from_elevation',
     'checked_max_distance', 'cell_half_diagonal_km', 'checked_offset',
 ]
@@ -68,16 +71,19 @@ def checked_max_points(max_points, who: str) -> int:
     ``max_points=1`` produced a one-waypoint "transect" with
     ``ranges_m=[0.0]``, ``max_points=0`` an empty one, and a negative value an
     untyped ``ValueError`` out of ``np.linspace``. Two points are the fewest
-    that define a path.
+    that define a path. A fraction (``2.7``) is refused, not truncated, as
+    :func:`checked_n_points` refuses it.
     """
     try:
         value = int(max_points)
     except (TypeError, ValueError):
+        value = None
+    if value is None or value != max_points:
         raise ConfigurationError(
             f"{who}: max_points must be an integer >= 2, got "
             f"{max_points!r}.",
             remediation="Pass max_points>=2, the transect fetch budget.",
-        ) from None
+        )
     if value < 2:
         raise ConfigurationError(
             f"{who}: max_points must be >= 2, got {max_points}.",
@@ -85,6 +91,49 @@ def checked_max_points(max_points, who: str) -> int:
                         "a transect.",
         )
     return value
+
+
+def cut_at_first_invalid(valid, *columns):
+    """``columns`` cut at the first ``False`` of ``valid``: the seafloor of a
+    column read top down, whose levels below the bottom come back masked or
+    filled (an empty cut is a land cell)."""
+    valid = np.asarray(valid, dtype=bool)
+    cut = valid.size if valid.all() else int(np.argmax(~valid))
+    return tuple(column[:cut] for column in columns)
+
+
+def mid_depth(depths) -> float:
+    """Halfway between a column's shallowest and deepest level (m): the depth
+    the data layer reads its one pH and its one water density at."""
+    depths = np.asarray(depths, dtype=float)
+    return 0.5 * (float(depths.min()) + float(depths.max()))
+
+
+def value_at_depth(depths, values, depth=None) -> float:
+    """``values`` at the level nearest ``depth`` (m), or at the column's
+    :func:`mid_depth` when ``None``."""
+    depths = np.asarray(depths, dtype=float)
+    ref = mid_depth(depths) if depth is None else float(depth)
+    return float(np.asarray(values)[int(np.argmin(np.abs(depths - ref)))])
+
+
+def checked_max_days(max_days, who: str) -> int:
+    """Validate a time tolerance: a whole number of days ``>= 0``, given as
+    an int or a whole-valued float (``15.0``), returned as an ``int``; a
+    fraction, a negative, a bool or a non-number raises
+    ``ConfigurationError`` naming ``who``. Every time-specific source (Argo,
+    Copernicus) and every fetcher that forwards ``max_days`` validates it
+    here, so one value means one thing in every source of a chain."""
+    whole = (not isinstance(max_days, bool)
+             and isinstance(max_days, (int, float, np.integer, np.floating))
+             and bool(np.isfinite(max_days)) and float(max_days).is_integer()
+             and max_days >= 0)
+    if not whole:
+        raise ConfigurationError(
+            f"{who}: max_days must be a whole number of days >= 0; got "
+            f"{max_days!r}.",
+            remediation="Pass e.g. max_days=15 (0 = the requested day only).")
+    return int(max_days)
 
 
 def checked_n_points(n_points, label: str, *, allow_auto: bool = False,
@@ -422,8 +471,7 @@ def checked_offset(prov: DataProvenance, *, who: str, warn_km: float,
         why = (f"beyond the {warn_km:.1f} km this source's data stand for"
                if offset > warn_km else None)
     if why is not None:
-        warnings.warn(
+        provenance_notice(
             f"{who}: {where}: {why}. Pass max_distance_km= to refuse data "
-            f"that far.",
-            ProvenanceWarning, skip_file_prefixes=USER_FRAME_SKIP)
+            f"that far.")
     return prov

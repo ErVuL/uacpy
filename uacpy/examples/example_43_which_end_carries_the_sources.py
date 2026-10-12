@@ -49,7 +49,7 @@ elements' receive directivity — the only route to it, since ``Receiver``
 carries no pattern and a modelled pressure has already summed the arrivals.
 
 Uses: Environment.plot(source_marker_range_m=) · Kraken(mode_coupling=) ·
-Bathymetry.eval · ResultStack.p · Source(beam_pattern=) as element directivity ·
+Bathymetry.eval · Field.p over source_depth · Source(beam_pattern=) as element directivity ·
 a range-dependent section reversed about each range
 """
 
@@ -96,6 +96,7 @@ elements = 120.0 + HALF * (np.arange(n_el) - (n_el - 1) / 2.0)
 target = uacpy.Source(depths=60.0, frequencies=FREQ)
 array_as_sources = uacpy.Source(depths=elements, frequencies=FREQ)
 kraken = uacpy.Kraken(verbose=False, mode_coupling='coupled')
+flat_kraken = uacpy.Kraken(verbose=False)
 
 fig, ax = env.plot(source=target,
                    receiver=uacpy.Receiver(depths=elements, ranges=[0.0]),
@@ -114,8 +115,8 @@ for R in probe_ranges:
     rx_array = uacpy.Receiver(depths=elements, ranges=[float(R)])
     rx_target = uacpy.Receiver(depths=[60.0], ranges=[float(R)])
     # (a) sources on the array, receiver at the target: this is the one to use
-    # a multi-depth Source returns one slab per depth; .p stacks their
-    # complex pressure as (n_el, 1, 1)
+    # a multi-depth Source returns one Field over source_depth; .p is the
+    # complex pressure of each source as (n_el, 1, 1)
     p_a = kraken.run(env, array_as_sources, rx_target).p.ravel()
     # (b) the mirror: source at the target depth, receivers on the array
     p_b = np.asarray(kraken.run(env, target, rx_array).data)[:, 0]
@@ -134,9 +135,10 @@ for R in probe_ranges:
     solver.append(abs(tl_a - tl_c))
     physical.append(abs(tl_b - tl_c))
     naive.append(abs(tl_a - tl_b))
-    # the control: on a flat bottom (a) and (b) must agree exactly
-    f_a = kraken.run(flat, array_as_sources, rx_target).p.ravel()
-    f_b = np.asarray(kraken.run(flat, target, rx_array).data)[:, 0]
+    # the control: on a flat bottom (a) and (b) must agree exactly. A flat
+    # guide has nothing to couple, so the control runs plain Kraken.
+    f_a = flat_kraken.run(flat, array_as_sources, rx_target).p.ravel()
+    f_b = np.asarray(flat_kraken.run(flat, target, rx_array).data)[:, 0]
     flat_gap.append(abs(-10.0 * np.log10(np.mean(np.abs(f_a) ** 2))
                         + 10.0 * np.log10(np.mean(np.abs(f_b) ** 2))))
 solver, physical, naive, flat_gap = map(
@@ -204,7 +206,7 @@ ax.plot([9.0] * n_el, elements, 'x', color='C1', ms=4,
         label='array, where the MIRROR puts it')
 ax.set(xlabel='Range (km)', ylabel='Depth (m)', ylim=(210, 0),
        title='Two arrangements of the same two points')
-ax.legend(fontsize=7, loc='lower left')
+ax.legend(fontsize=7, loc='upper right')      # the water beyond the target
 ax.grid(alpha=0.3)
 
 ax = axes[1]

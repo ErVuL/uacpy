@@ -208,6 +208,38 @@ class TestTheArrivalSumHasOneImplementation:
         with pytest.raises(ConfigurationError, match='negative'):
             arrival_transfer_function(self.F, [1.0, -0.6], [0.010, 0.030])
 
+    def test_a_law_scaled_sum_takes_the_rfft_grid_and_its_0_hz_bin(self):
+        from uacpy.core.absorption import Thorp
+        f = np.fft.rfftfreq(1000, 1.0 / 1000.0)
+        kw = dict(delays_imag_s=[-1e-6], trace_frequency=200.0,
+                  absorption=Thorp())
+        H = arrival_transfer_function(f, [1.0], [0.1], **kw)
+        assert H[0] == 1.0
+        np.testing.assert_array_equal(
+            H[1:], arrival_transfer_function(f[1:], [1.0], [0.1], **kw))
+
+    def test_every_arrival_route_refuses_a_negative_amplitude(self):
+        from uacpy.acoustic_signal import (received_amplitudes,
+                                           simulate_arrival_reception)
+        with pytest.raises(ConfigurationError,
+                           match='^received_amplitudes: 1 of 2 amplitudes '
+                                 'are negative'):
+            received_amplitudes([1.0, -0.6], [0.0, 0.0], [0.0, 0.0], 100.0)
+        with pytest.raises(ConfigurationError,
+                           match='^simulate_arrival_reception: 1 of 2 '
+                                 'amplitudes are negative'):
+            simulate_arrival_reception([1.0, -0.6], [0.010, 0.030],
+                                       source_waveform=np.ones(32),
+                                       sample_rate=8000.0,
+                                       trace_frequency=1000.0)
+        a = _arrivals([0.010, 0.030], [1.0, -0.6])
+        for route in (lambda: a.received_amplitudes,
+                      lambda: a.rms_delay_spread(),
+                      lambda: a.to_time_series(source_waveform=np.ones(32),
+                                               sample_rate=8000.0)):
+            with pytest.raises(ConfigurationError, match='are negative'):
+                route()
+
     def test_the_sign_is_expressible_the_way_the_refusal_says(self):
         """The refusal has to leave the caller a way through, so this pins
         that abs(A) with pi of phase is the same signal."""
@@ -247,6 +279,20 @@ class TestTheBroadbandLossIsReachableWithoutAField:
         w = np.ones(self.F.size)
         w[3] = 0.0
         assert np.isnan(broadband_propagation_loss(H, w))
+
+    def test_a_cell_with_no_energy_is_the_no_energy_marker(self):
+        """An all-zero H (an empty arrival list) reports the 600 dB that
+        ``transmission_loss_dB`` gives a zero pressure, not +inf; a level
+        above the floor is its own loss."""
+        from uacpy.core.constants import NO_ENERGY_DB
+        w = np.linspace(1.0, 3.0, self.F.size)
+        assert broadband_propagation_loss(
+            np.zeros(self.F.size, dtype=complex), w) == NO_ENERGY_DB
+        assert broadband_propagation_loss(
+            np.full(self.F.size, 1e-31, dtype=complex)) == NO_ENERGY_DB
+        assert broadband_propagation_loss(
+            np.full(self.F.size, 1e-29, dtype=complex)) == pytest.approx(
+                580.0, rel=1e-12)
 
     def test_a_grid_transforms_in_one_call(self):
         rng = np.random.default_rng(3)
@@ -480,6 +526,10 @@ class TestThePulseShapedTapsAreReachableWithoutArrivals:
         (dict(pulse='boxcar'), 'rc'),
         (dict(span=0), 'span'),
         (dict(symbol_rate=-1.0), 'symbol_rate'),
+        (dict(gains=[1.0, 1.0], delays_s=[-0.010, 0.0]), 'before 0'),
+        (dict(delays_s=[-1e-12]), 'before 0'),
+        (dict(delays_s=[np.nan]), 'finite'),
+        (dict(gains=[], delays_s=[]), 'no arrivals'),
     ])
     def test_a_shape_it_cannot_place_is_refused(self, bad, match):
         kw = dict(gains=[1.0], delays_s=[0.0], symbol_rate=1000.0)
@@ -986,19 +1036,26 @@ class TestTheCapabilitiesThatWereReachableOnlyThroughAModel:
 
     def test_a_reception_carries_the_absorption_and_the_carrier(self):
         """What simulate_arrival_reception adds over simulate_reception:
-        the exp(omega*Im tau) absorption and the carrier rotation."""
+        the exp(omega*Im tau) absorption and the carrier rotation. The
+        first arrival keeps its peak to 1.1e-9 (measured): with no law the
+        absorption is exp(-a|f|), whose response falls as 1/t^2, and the
+        absorbed path 20 ms later reaches back that far."""
         from uacpy.acoustic_signal import simulate_arrival_reception
         fs, fc = 20000.0, 3000.0
         t = np.arange(400) / fs
         src = np.hanning(400) * np.sin(2 * np.pi * fc * t)
-        _, lossless = simulate_arrival_reception(
-            src, [1.0, 1.0], [0.010, 0.030], fs, fc)
-        _, lossy = simulate_arrival_reception(
-            src, [1.0, 1.0], [0.010, 0.030], fs, fc,
-            delays_imag_s=[0.0, -5e-5])
+        _, lossless = simulate_arrival_reception([1.0, 1.0], [0.010, 0.030],
+                                                 source_waveform=src,
+                                                 sample_rate=fs,
+                                                 trace_frequency=fc)
+        _, lossy = simulate_arrival_reception([1.0, 1.0], [0.010, 0.030],
+                                              source_waveform=src,
+                                              sample_rate=fs,
+                                              trace_frequency=fc,
+                                              delays_imag_s=[0.0, -5e-5])
         # the absorbed second arrival is quieter; the first is untouched
         assert np.abs(lossy).max() == pytest.approx(np.abs(lossless).max(),
-                                                    rel=1e-9)
+                                                    rel=1e-8)
         assert np.sum(lossy ** 2) < 0.95 * np.sum(lossless ** 2)
 
     @pytest.mark.parametrize('bad,match', [
@@ -1011,12 +1068,13 @@ class TestTheCapabilitiesThatWereReachableOnlyThroughAModel:
         kw = dict(amplitudes=[1.0], delays_s=[0.01])
         kw.update(bad)
         with pytest.raises(ConfigurationError, match=match):
-            simulate_arrival_reception(np.ones(32), sample_rate=8000.0,
-                                       fc=1000.0, **kw)
+            simulate_arrival_reception(source_waveform=np.ones(32),
+                                       sample_rate=8000.0,
+                                       trace_frequency=1000.0, **kw)
 
     @pytest.mark.parametrize('bad, match', [
         (dict(sample_rate=0.0), 'sample_rate must be > 0'),
-        (dict(fc=np.nan), 'fc must be'),
+        (dict(trace_frequency=np.nan), 'trace_frequency must be'),
         (dict(source_waveform=np.array([])), 'empty'),
         (dict(source_waveform=np.ones(32) + 0j), 'real 1-D waveform'),
         (dict(amplitudes=[1j]), 'real magnitudes'),
@@ -1025,7 +1083,8 @@ class TestTheCapabilitiesThatWereReachableOnlyThroughAModel:
     def test_a_direct_call_is_refused_under_its_own_name(self, bad, match):
         from uacpy.acoustic_signal import simulate_arrival_reception
         kw = dict(source_waveform=np.ones(32), amplitudes=[1.0],
-                  delays_s=[0.01], sample_rate=8000.0, fc=1000.0)
+                  delays_s=[0.01], sample_rate=8000.0,
+                  trace_frequency=1000.0)
         kw.update(bad)
         with pytest.raises(ConfigurationError,
                            match=f"simulate_arrival_reception: .*{match}"):
@@ -1037,15 +1096,20 @@ class TestTheCapabilitiesThatWereReachableOnlyThroughAModel:
         from uacpy.acoustic_signal import simulate_arrival_reception
         from uacpy.acoustic_signal.channel import _simulate_arrival_reception
         with pytest.warns(UserWarning) as rec:
-            simulate_arrival_reception(np.ones(32), [1.0], [0.5], 8000.0,
-                                       1000.0, t_start=0.0, output_duration=0.1)
+            simulate_arrival_reception([1.0], [0.5],
+                                       source_waveform=np.ones(32),
+                                       sample_rate=8000.0,
+                                       trace_frequency=1000.0, t_start=0.0,
+                                       output_duration=0.1)
         text = str(rec[0].message)
         assert text.startswith("simulate_arrival_reception: ")
         assert 'run()' not in text and 'delayandsum' not in text
         with pytest.warns(UserWarning, match="^delayandsum: "):
-            _simulate_arrival_reception(np.ones(32), [1.0], [0.5], 8000.0,
-                                       1000.0, t_start=0.0, output_duration=0.1,
-                                       who="delayandsum")
+            _simulate_arrival_reception([1.0], [0.5],
+                                        source_waveform=np.ones(32),
+                                        sample_rate=8000.0,
+                                        trace_frequency=1000.0, t_start=0.0,
+                                        output_duration=0.1, who="delayandsum")
 
     def test_the_bellhop_wrapper_carries_no_synthesis_of_its_own(self):
         import inspect
@@ -1116,12 +1180,15 @@ class TestTheAxisComesFirst:
         probes = {
             'impulse_response': lambda: A.impulse_response(
                 [1.0, 0.5], [0.0, 0.01], sample_rate=fs),
-            'simulate_reception': lambda: A.simulate_reception(
-                np.ones(32), [1.0], [0.0], fs),
-            'simulate_arrival_reception': lambda: A.simulate_arrival_reception(
-                np.hanning(64) * np.sin(2 * np.pi * 1000
+            'simulate_reception': lambda: A.simulate_reception([1.0], [0.0],
+                                                               source_waveform=np.ones(32),
+                                                               sample_rate=fs),
+            'simulate_arrival_reception': lambda: A.simulate_arrival_reception([1.0],
+                                                                               [0.005],
+                                                                               source_waveform=np.hanning(64) * np.sin(2 * np.pi * 1000
                                         * np.arange(64) / fs),
-                [1.0], [0.005], fs, 1000.0),
+                                                                               sample_rate=fs,
+                                                                               trace_frequency=1000.0),
             'impulse_response_from_transfer_function':
                 lambda: A.impulse_response_from_transfer_function(
                     np.ones(64, complex), frequencies=np.linspace(0, 1000, 64), sample_rate=fs),
@@ -1145,7 +1212,8 @@ class TestTheAxisComesFirst:
         rec = {'n_arrivals': 1, 'amplitudes': np.array([1.0]),
                'delays': np.array([0.01]), 'delays_imag': np.array([0.0]),
                'phases': np.array([0.0])}
-        sig, t = delayandsum(rec, np.ones(64), fs, 3000.0)
+        sig, t = delayandsum(rec, source_waveform=np.ones(64), sample_rate=fs,
+                             trace_frequency=3000.0)
         assert np.all(np.diff(t) > 0)          # the SECOND one is the axis
         assert not np.all(np.diff(sig) > 0)
 
@@ -1253,13 +1321,13 @@ class TestTheP47ComputationsAreReachableWithoutACarrier:
         from uacpy.acoustic_signal import synthesis_band
         a = _arrivals([0.010, 0.030, 0.050], [1.0, 0.6, 0.3])
         got = synthesis_band(a.delays, a._arrival_power(), bandwidth=200.0,
-                             centre=1000.0)
-        assert np.array_equal(a.synthesis_band(bandwidth=200.0, centre=1000.0),
+                             fc=1000.0)
+        assert np.array_equal(a.synthesis_band(bandwidth=200.0, fc=1000.0),
                               got)
         assert np.isclose(1.0 / np.diff(got)[0], 1.2 * 0.04, rtol=0.05)
         with pytest.warns(UserWarning, match='fold back'):
             synthesis_band(a.delays, a._arrival_power(), bandwidth=200.0,
-                           centre=1000.0, record=0.025)
+                           fc=1000.0, output_duration=0.025)
 
     def test_the_miss_distance_matches_the_rays_method(self):
         from uacpy.core.acoustics import polyline_miss_distance

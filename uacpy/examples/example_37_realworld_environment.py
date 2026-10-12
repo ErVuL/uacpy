@@ -5,10 +5,9 @@ fetch a regional GEBCO grid and draw it on a coastline map, build a fully
 range-dependent Environment along a transect (GEBCO seafloor, WOA23 sound
 speed, fetched seabed — all varying with range — and the site's own
 Francois-Garrison water absorption, 0.060-0.068 dB/km at 800 Hz down the
-column and so about 23 dB over the 374 km; without it the far end of the TL panel reads that much too
-loud), run Bellhop
-for coherent TL,
-and compose map, TL and environment with one call to plot_overview.
+column and so about 23 dB over the 374 km; without it the far end of the TL
+panel reads that much too loud), run Bellhop for coherent TL, and compose map,
+TL and environment with one call to plot_overview.
 
 Region: the North Sea, shelf into the Norwegian Trench, chosen because the
 cached EMODnet seabed actually varies along range (sand ↔ mud ↔ coarse), so the
@@ -22,7 +21,10 @@ The `try` blocks here are the feature, not scaffolding: this is the one example
 that reaches outside the process. It runs from the offline cache when installed
 (./install.sh --data all), otherwise hits the live APIs, and falls back to
 representative synthetic data — labelled `[offline fallback]` — if a service is
-unreachable, so it always plots.
+unreachable, so it always plots. Each fetch logs notes on where its data come
+from (a seabed sample far from the point asked for, a sound-speed profile
+extrapolated down to the seafloor); they state the provenance of the numbers
+and are left visible.
 
 Uses: data.fetch_bathy_grid · data.fetch_environment (range-dependent
 bathymetry + SSP + bottom + ice) · data.is_installed ·
@@ -208,30 +210,30 @@ if data.is_installed('sediment'):
                 acoustic_type='half-space',
                 sound_speed=float(half.sound_speed) + 350.0,
                 density=float(half.density) + 0.4, attenuation=0.2)))
+    # Thorp's volume absorption: Francois-Garrison, which the fetched
+    # environment carries, is fitted only above 200 Hz.
     layered_env = uacpy.Environment(
         name="Range-dependent layered seabed", bathymetry=env.bathymetry,
-        ssp=env.ssp, bottom=uacpy.Bottom.from_columns(
+        ssp=env.ssp, absorption=uacpy.Thorp(),
+        bottom=uacpy.Bottom.from_columns(
             columns, ranges=np.asarray(grain.ranges, dtype=float)))
 
-    model = uacpy.RAM(accuracy=1e-1)
+    # RAM's own grid choice. A pinned accuracy= is met as given, and over
+    # this 300 m deep, 374 km section a tight one needs more depth points
+    # than ramgeo's arrays hold, which RAM refuses by name.
+    model = uacpy.RAM()
     backend = model.select_backend(layered_env)
     layered_source = uacpy.Source(depths=SOURCE_DEPTH,
                                   frequencies=RDLB_FREQ_HZ)
+    # From 1 km, as in run_tl: closer in, the direct and surface-reflected
+    # paths are steeper than the PE's angular band.
     layered_receiver = uacpy.Receiver(
         depths=np.linspace(1, env.bathymetry.depth, 100),
-        ranges=np.linspace(100.0, env.bathymetry.range_max, 200))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always')
-        layered_tl = model.run(layered_env, layered_source, layered_receiver,
-                               run_mode=uacpy.RunMode.COHERENT_TL)
+        ranges=np.linspace(1000.0, env.bathymetry.range_max, 200))
+    layered_tl = model.run(layered_env, layered_source, layered_receiver,
+                           run_mode=uacpy.RunMode.COHERENT_TL)
     print(f"  layered seabed: RAM→{backend} at {RDLB_FREQ_HZ:g} Hz, "
           f"{layered_tl.dB.shape} grid")
-    # Surface any grid compromise rather than presenting the field as if it met
-    # the requested accuracy budget.
-    for warning in caught:
-        text = ' '.join(str(warning.message).split())
-        if 'accuracy budget' in text or 'not met' in text:
-            print(f"  layered seabed: ACCURACY CAVEAT — {text}")
 
     fig, _ = uacpy.plot.plot_overview(
         layered_env, grid, transect=(TRANSECT_START, TRANSECT_END),

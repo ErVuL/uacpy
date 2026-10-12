@@ -10,6 +10,7 @@ import numpy as np
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._spec import ModelSpec
+from uacpy.models._window import check_pinned_window, refuse_inverted_window
 from uacpy.core.run_settings import EngineSettings, OutputSpec, RunMode
 from uacpy.core.results import Field
 from uacpy.core.exceptions import (
@@ -19,14 +20,16 @@ from uacpy.io.oases_writer import (
     write_oast_input, oases_wavenumber_bounds, _resolve_freq_sweep,
 )
 from uacpy.io._parsers import parse_oast_tl
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
 from uacpy.models.oases._common import (
     _OASES_TRAITS, _SCTOUT_BARE_FORT46, _geometry_options,
-    _oases_find_executable, _reject_plane_geometry_letter_on_a_point_source,
+    _oases_binary, _reject_plane_geometry_letter_on_a_point_source,
     _check_n_wavenumbers_knob, _warn_offset_ignored_under_auto_sampling,
 )
 from uacpy.models.oases._base import OASES
 from uacpy.core.engine_defaults import OAST_INTEGRATION_OFFSET, OAST_RANGE_MIN, OAST_VREC
+from uacpy.models._extract import attach_output_paths, result_kwargs
+from uacpy.models._launch import require_output
 
 
 #: File root of every deck and output one OAST run writes. OASS's mean-field
@@ -35,8 +38,10 @@ _OAST_BASE_NAME = 'oast_run'
 
 
 #: Native range step, in wavelengths of the slowest water speed, above
-#: which the dB interpolation onto receiver.ranges is warned about. The
-#: default grid sits at 0.5-0.6 wavelengths. Measured on a 100 m Pekeris
+#: which the dB interpolation onto receiver.ranges is warned about —
+#: uacpy's guidance, read off the measurement below (OAST's step is 2*pi
+#: over the wavenumber window, so it follows c_low/c_high, not the
+#: receivers). The default grid sits at 0.5-0.6 wavelengths. Measured on a 100 m Pekeris
 #: guide at 100 and 400 Hz (Scooter on a 0.5 m grid as the truth,
 #: sampled at OAST's native positions and interpolated in dB): at the
 #: native step the error is median 0.01-0.02 dB, p90 <= 0.09 dB, worst
@@ -108,7 +113,9 @@ def _oast_options(options, complex_contour, compute_contour,
 
     A raw ``options`` string is written verbatim; otherwise the letters
     are derived from the typed flags on top of ``'N T'`` (normal stress
-    + TL table). The constructor rejects the two being combined.
+    + TL table). With the default flags the line is ``N T J``: the manual's
+    worked OAST deck, ``N I T J Z`` (oast.tex:476), without its plot-only
+    letters. The constructor rejects the two being combined.
     """
     if options is not None:
         return options
@@ -171,11 +178,11 @@ def _oast_multi_frequency_refusal(source) -> Exception:
 
     The deck and the reader both handle ``NFREQ > 1``: OAST writes one TL
     curve per plotted receiver per frequency and ``read_oast_tl`` returns
-    a ResultStack over frequency. What cannot follow is the
+    one TL Field per frequency. What cannot follow is ONE
     :class:`~uacpy.core.results.Field`. OAST rebuilds its range grid
     *inside* the frequency loop, so ``DX`` scales as ``1/f`` and the
-    sweep has one range axis per frequency — each slab of the reader's
-    stack carries its own for exactly that reason — while
+    sweep has one range axis per frequency — each Field the reader returns
+    carries its own for exactly that reason — while
     a Field carries a single ``'range'`` coordinate.
 
     Putting them on a common axis would mean interpolating dB, which is
@@ -225,6 +232,8 @@ def _oast_settings(option_line, *, c_low_pinned, c_high_pinned,
         c_low = c_low_pinned
     if c_high_pinned is not None:
         c_high = c_high_pinned
+    refuse_inverted_window('OAST', c_low, c_high, c_low=c_low_pinned,
+                           c_high=c_high_pinned)
     c_low_origin = 'OAST(c_low=…)' if c_low_pinned is not None else derived
     c_high_origin = ('OAST(c_high=…)' if c_high_pinned is not None
                      else derived)
@@ -298,12 +307,11 @@ def _warn_if_native_range_step_is_coarse(native_ranges, source,
         f"whose step ({step:.4g} m) is {step / wavelength:.2g} "
         f"wavelengths ({wavelength:.4g} m at {c_water:.6g} m/s and "
         f"{frequency:g} Hz), so TL is linearly interpolated IN dB "
-        f"between samples more than a wavelength apart. Measured on a "
-        f"Pekeris guide, the p90 error grows from 0.1-0.35 dB at one "
-        f"wavelength to 0.5-1.3 dB at two and 1.8-3.8 dB at four, and "
-        f"interference nulls read up to 20-34 dB shallow. The step is "
-        f"2*pi over the phase-speed window: widen c_low/c_high to refine "
-        f"it, read the native grid from metadata['native_ranges'], "
+        f"between samples more than a wavelength apart, where interference "
+        f"structure between them is not seen (one wavelength is uacpy's "
+        f"guidance; docs/models/oases.md shows measured errors). The step "
+        f"is 2*pi over the phase-speed window: widen c_low/c_high to "
+        f"refine it, read the native grid from metadata['native_ranges'], "
         f"or use OASP (.trf complex pressure on receiver.ranges).",
         NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )
@@ -387,9 +395,14 @@ class OAST(OASES):
         under the 'J' option of the default option line is not "no offset":
         OASES takes any value below 1e-10 as a request for its own default,
         60*c/(f*R_max) dB/wavelength with R_max the FFT range
-        (unoast31.f:499-501). A value above 1e-10 is used as given.
+        (unoast31.f:499-501), the value oast.tex:293-303 recommends ("This
+        value is the default which is applied if COFF is specified to
+        0.0"). A value above 1e-10 is used as given.
     n_wavenumbers : int, optional
-        Number of wavenumber samples; ``None`` lets OASES choose.
+        Number of wavenumber samples; ``None`` lets OASES choose: NW = -1,
+        the automatic sampling the manual offers "to obtain correct answers
+        in the first attempt without the usual convergence testing"
+        (oast.tex:543-550).
     c_low, c_high : float, optional
         ``CMIN``/``CMAX`` (m/s), Block VII's phase-speed window
         (``unoast31.f:213``). ``None`` derives the pair from the water
@@ -399,8 +412,11 @@ class OAST(OASES):
         the derived ``k_max`` and never enter the integral. ``c_low``
         admits them; ``c_high`` caps the evanescent tail.
     range_min, range_max : float, optional
-        TL plot range axis bounds (m); ``None`` → 0 /
-        ``receiver.range_max``.
+        First and last range (m) of OAST's native TL grid, ``XLEFT`` /
+        ``XRIGHT`` (unoast31.f:482-490); ``None`` → 0, the manual's worked
+        deck (oast.tex:489), and ``receiver.range_max``, the range OAST's
+        automatic sampling sizes its wavenumber step against
+        (unoast31.f:427-430).
     vrec : float
         Receiver velocity (m/s) for OAST's source/receiver **dynamics**
         option, the fifth token of the frequency line. The binary reads it
@@ -431,8 +447,8 @@ class OAST(OASES):
     -----
     Range-independent wavenumber integration; consumes layered seabed
     columns natively. **Collapse defaults (overrides of
-    :data:`DEFAULT_COLLAPSE`).** Per-model: ``'ssp': 'mean'``,
-    ``'bottom_range': 'median'`` (the layer stack is kept).
+    :data:`DEFAULT_COLLAPSE`).** Per-model: ``'ssp': 'mean'`` (the layer
+    stack is kept).
 
     ``COHERENT_TL`` here returns a **real dB Field** — ``kind='pressure'``,
     ``unit='dB'``, real dtype (transmission loss is the ``unit`` axis of a
@@ -467,13 +483,17 @@ class OAST(OASES):
     # unoast31.f:1046-1050), which _resolve_engine_settings writes for it.
     spec = ModelSpec(
         modes=(RunMode.COHERENT_TL,),
+        # A rough interface is column 7 (RG) of the layer record
+        # (oaseun31.f:54).
         supports={'layered_bottom', 'elastic_media',
                   'rough_surface', 'rough_bottom'},
+        # A line Source runs in the plane geometry, option 'P'.
         source_types=frozenset({'point', 'line'}),
-        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+        collapse={'ssp': 'mean'},
         traits=_OASES_TRAITS,
     )
     provenance_id = 'oases'
+    _BINARIES = MappingProxyType({'oast': _oases_binary('oast')})
     # The .plt carries real TL only: a dB pressure field with no phase.
     outputs = MappingProxyType({
         RunMode.COHERENT_TL: OutputSpec(
@@ -503,10 +523,7 @@ class OAST(OASES):
         timeout: float = DEFAULT_RUN_TIMEOUT_S,
         collapse: Optional[Dict[str, str]] = None,
     ):
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse,
-        )
+        super().__init__(**_host_options(locals()))
         # Kept as passed so ``copy()`` round-trips and so an explicit flag
         # alongside a raw ``options`` string is distinguishable from the
         # default. Resolved by ``_oast_options``.
@@ -548,15 +565,19 @@ class OAST(OASES):
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
         self._exe = self._resolve_executable(
-            executable, lambda: _oases_find_executable(self, 'oast'),
+            executable, lambda: self._find_binary('oast'),
         )
 
     def _check_knobs(self) -> None:
         """Refuse a constructor knob no run could use
-        (:func:`_check_oast_knobs`). Run at construction and again by every
+        (:func:`_check_oast_knobs`, and a pinned phase-speed window that is not
+        positive or not ordered,
+        :func:`~uacpy.models._window.check_pinned_window`). Run at
+        construction and again by every
         run (:meth:`_validate_engine`), since the attributes can be
         reassigned in between."""
         _check_n_wavenumbers_knob(self.n_wavenumbers)
+        check_pinned_window('OAST', c_low=self.c_low, c_high=self.c_high)
         _check_oast_knobs(self.options, self.complex_contour,
                           self.compute_contour, self.compute_depth_average,
                           self.vrec)
@@ -608,8 +629,8 @@ class OAST(OASES):
         ``.plp`` / FOR020 → ``.plt``), quoting the binary's streams — OASES
         writes no print file, so they are its only record."""
         proc = self._execute(deck.stem, inputs.work_dir)
-        self._require_output(
-            [inputs.work_dir / f'{deck.stem}.plt'],
+        require_output(
+            self.model_name, [inputs.work_dir / f'{deck.stem}.plt'],
             what='a TL table (FOR020 .plt)', process=proc,
             hint=('Compare against the reference decks in '
                   'third_party/oases/tloss/.'),
@@ -645,8 +666,8 @@ class OAST(OASES):
         native_ranges = raw['ranges']
         metadata = raw['metadata']
 
-        kw = self._result_kwargs(
-            source,
+        kw = result_kwargs(
+            self.model_name, self.provenance, source,
             backend='oast',
             frequencies=float(np.atleast_1d(source.frequencies)[0]),
         )
@@ -662,9 +683,10 @@ class OAST(OASES):
         result = _oast_on_receiver_grid(native, native_ranges, receiver,
                                         source, inputs.env)
 
-        self._attach_output_paths(
+        attach_output_paths(
             result, inputs.work_dir, deck.stem,
             primary_files=(('plt_file', '.plt'),),
+            cleanup=self.cleanup,
         )
 
         self._log("OAST simulation complete")

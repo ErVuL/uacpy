@@ -1,15 +1,16 @@
-"""A multi-depth ``Source`` runs once per depth on every field model and the
-slabs add coherently through ``ResultStack.superpose``.
+"""A multi-depth ``Source`` runs once per depth on every field model and
+returns ONE ``Field`` whose leading ``source_depth`` axis holds each source's
+field; ``Field.superpose`` adds them.
 
 Two sources are driven by adding the complex field of each one: the engines
-are linear in the source amplitude, so ``Σ wᵢ·pᵢ`` over unit-source slabs is
-the field of the weighted array. That every field engine's slab is its
-single-depth run, and that one weighted depth is ``w`` times the unit run, is
-held for every registered engine by ``test_engine_conformance.py``. The tests
-here pin (a) the single-depth contract and the stacking machinery, (b) that
-``superpose`` is that linear sum, (c) that the sum behaves like a field of two
-sources, (d) the time-domain case, and (e) the guards on weights and on
-stacks that cannot add.
+are linear in the source amplitude, so ``Σ wᵢ·pᵢ`` over the unit-source
+planes is the field of the weighted array. That every field engine's plane is
+its single-depth run, and that one weighted depth is ``w`` times the unit run,
+is held for every registered engine by ``test_engine_conformance.py``. The
+tests here pin (a) the single-depth contract and the joining machinery, (b)
+that ``superpose`` is that linear sum, (c) that the sum behaves like a field
+of two sources, (d) the time-domain case, and (e) the guards on weights and
+on fields that cannot add.
 """
 
 from pathlib import Path
@@ -20,7 +21,9 @@ import pytest
 
 import uacpy
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.core.results import Field, ResultStack
+from uacpy.core.results import Field, ResultStack, stack_fields
+from uacpy.core.results._superposition import (_check_field_weightable,
+                                               split_source_depths)
 from uacpy.models import RunMode
 from uacpy.tests.conftest import make_pekeris
 from uacpy.tests.conftest import recorded_warnings
@@ -90,8 +93,14 @@ def _norm_relative_error(actual, reference):
     return float(np.linalg.norm(act[ok] - ref[ok]) / np.linalg.norm(ref[ok]))
 
 
+def _pair(*fields):
+    """The fields of several one-depth sources as one Field over their
+    ``source_depth`` axis, as a multi-depth run returns them."""
+    return stack_fields(fields, [f.source_depths[0] for f in fields])
+
+
 @pytest.fixture(scope='module')
-def kraken_stack():
+def kraken_pair():
     """One Kraken run over ``Source(depths=[30, 70], weights=[1, -1])``,
     shared by the linearity and guard tests below."""
     pytest.importorskip('uacpy.models.kraken')
@@ -208,13 +217,13 @@ def test_a_weight_on_a_db_mode_refuses_eagerly_and_waits_lazily():
         model.run(_env(), uacpy.Source(depths=50.0, frequencies=F0,
                                        weights=2.0), _receiver(),
                   run_mode=RunMode.INCOHERENT_TL)
-    stack = model.run(_env(), uacpy.Source(depths=[30.0, 70.0],
-                                           frequencies=F0, weights=[1.0, 2.0]),
-                      _receiver(), run_mode=RunMode.INCOHERENT_TL)
-    assert isinstance(stack, ResultStack)
-    assert stack.superpose(coherent=False).unit == 'dB'
+    pair = model.run(_env(), uacpy.Source(depths=[30.0, 70.0],
+                                          frequencies=F0, weights=[1.0, 2.0]),
+                     _receiver(), run_mode=RunMode.INCOHERENT_TL)
+    assert isinstance(pair, Field) and list(pair.coords)[0] == 'source_depth'
+    assert pair.superpose(coherent=False).unit == 'dB'
     with pytest.raises(ConfigurationError, match='coherent sum'):
-        stack.superpose()
+        pair.superpose()
 
 
 @pytest.mark.requires_binary
@@ -303,15 +312,17 @@ def test_a_one_depth_weight_on_a_db_mode_is_refused_before_the_engine_runs(
 @pytest.mark.requires_binary
 def test_a_pinned_work_dir_keeps_one_scratch_set_per_source_depth(tmp_path):
     """Each depth of the loop runs in its own ``source_depth_<z>m``
-    subdirectory of the pinned ``work_dir``, so every slab's ``*_file``
-    paths stay its own instead of all naming the last depth's files. RAM
-    is the engine that genuinely marches once per depth."""
+    subdirectory of the pinned ``work_dir``, so each depth's ``*_file``
+    paths stay its own — one entry per source depth in the field's metadata
+    — instead of all naming the last depth's files. RAM is the engine that
+    genuinely marches once per depth."""
     from uacpy.models.ram import RAM
     depths = [30.0, 70.0]
-    stack = RAM(verbose=False, work_dir=tmp_path, cleanup=False).run(
+    field = RAM(verbose=False, work_dir=tmp_path, cleanup=False).run(
         _env(), uacpy.Source(depths=depths, frequencies=F0), _receiver())
-    key = next(k for k in sorted(stack[0].metadata) if k.endswith('_file'))
-    files = [s.metadata[key] for s in stack.slabs]
+    key = next(k for k in sorted(field.metadata) if k.endswith('_file'))
+    files = field.metadata[key]
+    assert isinstance(files, list) and len(files) == 2, files
     assert files[0] != files[1], files
     for z, path in zip(depths, files):
         path = str(path)
@@ -330,10 +341,11 @@ def test_the_native_engines_solve_once_for_every_source_depth(
         factory, mode, tolerance, tmp_path):
     """SCOOTER's ``.env`` and KRAKEN's ``.flp`` take a source-depth vector:
     one wavenumber sweep / one mode solve serves every depth, and the
-    ``.grn`` / ``.shd`` carries the ``NSz`` axis the reader splits. A
-    multi-depth run in these modes therefore launches the binary once — one
-    deck in the pinned ``work_dir``, no per-depth subdirectory — and each
-    slab is still that depth's stand-alone run.
+    ``.grn`` / ``.shd`` carries the ``NSz`` axis the reader puts on the
+    Field's ``source_depth`` axis. A multi-depth run in these modes
+    therefore launches the binary once — one deck in the pinned
+    ``work_dir``, no per-depth subdirectory — and each plane is still that
+    depth's stand-alone run.
 
     Both are exact. Scooter's depth mesh comes from the media, so a source
     depth touches no other depth's answer. Kraken's receivers are placed on
@@ -347,27 +359,29 @@ def test_the_native_engines_solve_once_for_every_source_depth(
     model.work_dir, model.cleanup = tmp_path, False
     env, receiver = _env(), _receiver()
     depths = [30.0, 70.0]
-    stack = model.run(env, uacpy.Source(depths=depths, frequencies=F0),
+    field = model.run(env, uacpy.Source(depths=depths, frequencies=F0),
                       receiver, run_mode=mode)
-    assert isinstance(stack, ResultStack) and stack.n_slabs == 2
+    assert isinstance(field, Field)
+    assert field.coords['source_depth'].tolist() == depths
     decks = list(tmp_path.rglob('*.env'))
     assert len(decks) == 1, decks
     assert not list(tmp_path.glob('source_depth_*')), \
         "the run was split into one deck per depth"
-    np.testing.assert_array_equal(stack.source_weights, [1.0, 1.0])
-    for i, z in enumerate(depths):
+    np.testing.assert_array_equal(field.source_weights, [1.0, 1.0])
+    np.testing.assert_array_equal(field.source_depths, depths)
+    for i, (z, plane) in enumerate(zip(depths, split_source_depths(field))):
         single = factory().run(env, uacpy.Source(depths=z, frequencies=F0),
                                receiver, run_mode=mode)
-        np.testing.assert_array_equal(stack[i].source_depths, [z])
-        assert stack[i].is_complex == single.is_complex
-        err = _relative_error(stack[i].data, single.data)
-        assert err <= tolerance, f"slab {i} (z={z} m) drifted by {err:.2e}"
+        np.testing.assert_array_equal(plane.source_depths, [z])
+        assert plane.is_complex == single.is_complex
+        err = _relative_error(plane.data, single.data)
+        assert err <= tolerance, f"plane {i} (z={z} m) drifted by {err:.2e}"
 
 
 @pytest.mark.requires_binary
-def test_a_line_source_stack_levels_each_slab_at_its_own_depth():
+def test_a_line_source_field_levels_each_source_at_its_own_depth():
     """The line-source level is sqrt(k0) at the SOURCE depth, so on a
-    sound-speed gradient each slab of a native multi-depth run must use
+    sound-speed gradient each plane of a native multi-depth run must use
     its own depth's speed. A point source on an isovelocity guide makes
     both factors degenerate, which is why this uses neither."""
     grad = uacpy.Environment(
@@ -378,14 +392,14 @@ def test_a_line_source_stack_levels_each_slab_at_its_own_depth():
     receiver = _receiver()
     depths = [30.0, 70.0]
     model = _scooter()
-    stack = model.run(grad, uacpy.Source(depths=depths, frequencies=F0,
+    field = model.run(grad, uacpy.Source(depths=depths, frequencies=F0,
                                          source_type='line'), receiver)
     for i, z in enumerate(depths):
         single = _scooter().run(
             grad, uacpy.Source(depths=z, frequencies=F0, source_type='line'),
             receiver)
-        assert _relative_error(stack[i].data, single.data) < 1e-9, (
-            f"slab {i} (z={z} m) is not the stand-alone line-source run")
+        assert _relative_error(field.data[i], single.data) < 1e-9, (
+            f"plane {i} (z={z} m) is not the stand-alone line-source run")
 
 
 @pytest.mark.requires_binary
@@ -469,7 +483,6 @@ def test_a_complex_weight_needs_a_phase_reference_not_just_complex_data():
     artefact of AT's storage (``phase_reference`` is None). Rotating it by
     a complex weight would record a source phase the field cannot carry,
     so a complex weight is refused there; a real one still scales it."""
-    from uacpy.core.results.stack import _check_field_weightable
     artefact = Field(
         data=np.full((2, 3), 1.0 + 1.0j),
         coords={'depth': [10.0, 20.0], 'range': [100.0, 200.0, 300.0]},
@@ -483,61 +496,60 @@ def test_a_complex_weight_needs_a_phase_reference_not_just_complex_data():
     _check_field_weightable(referenced, np.array([1j]), where='probe')
 
 
-def test_a_stack_with_unapplied_weights_warns_on_its_level_views():
-    """A multi-depth run's stack holds unit-amplitude slabs whatever the
-    Source's weights, so its dB / TL view and its panel plot show a field
-    the weights never touched; they say so once, naming ``superpose``. A
-    unit-weight stack is silent."""
-    weighted = ResultStack([_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)],
-                           [10.0, 20.0])
-    for slab in weighted.slabs:
-        slab.source_weights = np.array([1.0, -1.0])
-    with pytest.warns(UserWarning, match=r'weights.*superpose'):
-        weighted.dB
-    with pytest.warns(UserWarning, match=r'weights.*superpose'):
-        weighted.tl
-    unit = ResultStack([_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)],
-                       [10.0, 20.0])
-    for slab in unit.slabs:
-        slab.source_weights = np.array([1.0, 1.0])
+def test_a_multi_depth_field_with_unapplied_weights_warns_on_its_views():
+    """A multi-depth run's field holds unit-amplitude planes whatever the
+    Source's weights, so its dB / TL / pressure view and its panel plot show
+    a field the weights never touched; they say so, naming ``superpose``. A
+    unit-weight field, and the one-source field ``superpose`` returns, are
+    silent."""
     import warnings
+    weighted = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0))
+    weighted.source_weights = np.array([1.0, -1.0])
+    for view in ('dB', 'tl', 'p'):
+        with pytest.warns(UserWarning, match=r'weights.*superpose'):
+            getattr(weighted, view)
+    unit = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0))
+    unit.source_weights = np.array([1.0, 1.0])
     with warnings.catch_warnings():
         warnings.simplefilter('error')
         unit.dB
         unit.tl
+        unit.p
+        weighted.superpose().dB
 
 
 # ── (b) superpose is the linear sum ─────────────────────────────────────
 
 
-def test_superpose_is_the_weighted_sum_of_the_slabs(kraken_stack):
+def test_superpose_is_the_weighted_sum_of_the_slabs(kraken_pair):
     """``superpose([w1, w2])`` is ``w1·p1 + w2·p2`` cell by cell, for real
     and complex weights, and ``[1, 0]`` returns slab 0 unchanged."""
-    p1, p2 = kraken_stack[0].data, kraken_stack[1].data
+    p1, p2 = kraken_pair.data[0], kraken_pair.data[1]
     for w1, w2 in ((1.0, 1.0), (0.3, -2.0), (1.0, 1j), (0.5 + 0.5j, -1j)):
-        summed = kraken_stack.superpose([w1, w2])
+        summed = kraken_pair.superpose([w1, w2])
         assert isinstance(summed, Field)
         assert summed.is_complex
         assert _relative_error(summed.data, w1 * p1 + w2 * p2) < 1e-12
-    only_first = kraken_stack.superpose([1.0, 0.0])
+    only_first = kraken_pair.superpose([1.0, 0.0])
     np.testing.assert_array_equal(only_first.data, p1)
 
 
-def test_superpose_reads_the_source_weights_by_default(kraken_stack):
-    """With no argument the stack sums with the weights the ``Source``
+def test_superpose_reads_the_source_weights_by_default(kraken_pair):
+    """With no argument the field sums with the weights the ``Source``
     carried, here ``[1, -1]``: the same result as applying them by hand."""
-    np.testing.assert_array_equal(kraken_stack.source_weights,
+    np.testing.assert_array_equal(kraken_pair.source_weights,
                                   [1.0, -1.0])
-    by_default = kraken_stack.superpose()
-    by_hand = kraken_stack[0].data - kraken_stack[1].data
+    by_default = kraken_pair.superpose()
+    by_hand = kraken_pair.data[0] - kraken_pair.data[1]
     assert _relative_error(by_default.data, by_hand) < 1e-12
 
 
-def test_the_superposed_field_carries_the_stack_identity(kraken_stack):
-    """The sum keeps the slabs' grid, phase reference and model, widens
-    ``source_depths`` to every depth summed, and records what was added."""
-    summed = kraken_stack.superpose([1.0, 1.0])
-    first = kraken_stack[0]
+def test_the_superposed_field_carries_the_runs_identity(kraken_pair):
+    """The sum keeps the receiver grid, phase reference and model, drops
+    the ``source_depth`` axis, keeps ``source_depths`` as every depth
+    summed, and records what was added."""
+    summed = kraken_pair.superpose([1.0, 1.0])
+    first = kraken_pair.isel(source_depth=0)
     assert list(summed.coords) == list(first.coords)
     for axis in first.coords:
         np.testing.assert_array_equal(summed.coords[axis], first.coords[axis])
@@ -562,7 +574,7 @@ def test_two_sources_straddling_one_depth_add_to_twice_the_single_field():
     """In-phase sources at ``50 ± Δ`` m sum to ``2·p(50)`` up to a term of
     order ``(k_z·Δ)²``; at 100 Hz and Δ = 0.05 m that is below 1e-3. The
     antiphase pair is small but not zero — the odd combination is of order
-    ``k_z·Δ`` — which pins that the two slabs really are different fields."""
+    ``k_z·Δ`` — which pins that the two planes really are different fields."""
     model = _kraken()
     env, receiver = _env(), _receiver()
     delta = 0.05
@@ -599,7 +611,8 @@ def test_an_antiphase_pair_from_the_source_matches_the_hand_sum():
 
 
 def _time_slab(z, trace):
-    """A real time-domain slab: one receiver point, ``trace`` samples."""
+    """A real time-domain field of one source: one receiver point,
+    ``trace`` samples."""
     return Field(
         data=np.asarray(trace, dtype=float).reshape(1, 1, -1),
         coords={'depth': [50.0], 'range': [1000.0],
@@ -610,14 +623,13 @@ def _time_slab(z, trace):
     )
 
 
-def test_a_time_series_stack_superposes_to_the_summed_traces():
+def test_a_time_series_field_superposes_to_the_summed_traces():
     """Real traces add sample by sample with real weights; the default
     weights come from the stamp and a complex weight is refused because a
     real trace has no phase to rotate."""
     a = np.sin(np.linspace(0.0, 6.0, 64))
     b = np.cos(np.linspace(0.0, 6.0, 64))
-    stack = ResultStack([_time_slab(30.0, a), _time_slab(70.0, b)],
-                        [30.0, 70.0])
+    stack = _pair(_time_slab(30.0, a), _time_slab(70.0, b))
     summed = stack.superpose([2.0, 0.5])
     assert not summed.is_complex
     assert 'time' in summed.coords
@@ -631,9 +643,10 @@ def test_a_time_series_stack_superposes_to_the_summed_traces():
 
 @pytest.mark.requires_binary
 @pytest.mark.slow
-def test_a_time_series_run_over_two_depths_stacks_real_traces():
-    """Scooter TIME_SERIES over a two-depth ``Source`` returns two real
-    time-domain slabs whose superposition is their sum."""
+def test_a_time_series_run_over_two_depths_returns_real_traces_per_depth():
+    """Scooter TIME_SERIES over a two-depth ``Source`` returns one real
+    time-domain Field, one trace set per depth, whose superposition is their
+    sum."""
     env = uacpy.Environment(name='ts-pair', bathymetry=GUIDE_DEPTH,
                             ssp=1500.0)
     receiver = uacpy.Receiver(depths=[50.0], ranges=[2000.0])
@@ -646,13 +659,11 @@ def test_a_time_series_run_over_two_depths_stacks_real_traces():
         frequencies=np.linspace(60.0, 140.0, 17),
         source_waveform=waveform, sample_rate=fs,
     )
-    assert isinstance(stack, ResultStack)
-    assert stack.n_slabs == 2
-    for _, slab in stack:
-        assert 'time' in slab.coords
-        assert not slab.is_complex
+    assert isinstance(stack, Field)
+    assert list(stack.coords) == ['source_depth', 'depth', 'range', 'time']
+    assert not stack.is_complex
     summed = stack.superpose()
-    np.testing.assert_allclose(summed.data, stack[0].data + stack[1].data,
+    np.testing.assert_allclose(summed.data, stack.data[0] + stack.data[1],
                                rtol=1e-12)
 
 
@@ -660,8 +671,8 @@ def test_a_time_series_run_over_two_depths_stacks_real_traces():
 def test_a_bellhop_time_series_pair_shares_one_padded_time_axis():
     """Bellhop sizes its delay-and-sum window from each depth's own
     arrivals, so the two records differ in length; the loop pads the
-    shorter one with silence at the end so the pair superposes, and the
-    longer slab is the single run untouched."""
+    shorter one with silence at the end so the pair shares one time axis,
+    and the longer plane is the single run untouched."""
     env, receiver, waveform, fs = _bellhop_time_series_setup()
     model = _bellhop()
     stack = model.run(env, uacpy.Source(depths=[30.0, 70.0], frequencies=F0),
@@ -674,15 +685,15 @@ def test_a_bellhop_time_series_pair_shares_one_padded_time_axis():
     lengths = [f.coords['time'].size for f in singles]
     assert lengths[0] != lengths[1], "the pair no longer needs padding"
     n_max = max(lengths)
-    for slab, single, n in zip(stack.slabs, singles, lengths):
-        assert slab.coords['time'].size == n_max
-        np.testing.assert_allclose(slab.coords['time'][:n],
+    assert stack.coords['time'].size == n_max
+    assert stack.metadata['nt'] == n_max
+    for plane, single, n in zip(stack.data, singles, lengths):
+        np.testing.assert_allclose(stack.coords['time'][:n],
                                    single.coords['time'], rtol=1e-12)
-        np.testing.assert_array_equal(slab.data[..., :n], single.data)
-        assert not np.any(slab.data[..., n:])
-        assert slab.metadata['nt'] == n_max
+        np.testing.assert_array_equal(plane[..., :n], single.data)
+        assert not np.any(plane[..., n:])
     summed = stack.superpose()
-    np.testing.assert_allclose(summed.data, stack[0].data + stack[1].data,
+    np.testing.assert_allclose(summed.data, stack.data[0] + stack.data[1],
                                rtol=1e-12)
 
 
@@ -739,13 +750,13 @@ def test_a_complex_weight_on_a_time_domain_run_is_refused():
                                                    'weights': [-2.0]}
 
 
-def test_superpose_names_the_differing_lengths_of_a_time_axis_mismatch():
+def test_joining_names_the_differing_lengths_of_a_time_axis_mismatch():
     short = _time_slab(30.0, np.ones(8))
     long = _time_slab(70.0, np.ones(10))
     with pytest.raises(ConfigurationError,
                        match=r"shape \(1, 1, 8\) vs \(1, 1, 10\), axis "
                              r"lengths \{'time': \(8, 10\)\}"):
-        ResultStack([short, long], [30.0, 70.0]).superpose()
+        _pair(short, long)
 
 
 # ── (e) guards ──────────────────────────────────────────────────────────
@@ -830,42 +841,82 @@ def _complex_slab(z, value):
 
 
 def test_superpose_refuses_a_wrong_length_or_non_finite_weight_vector():
-    stack = ResultStack([_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)],
-                        [10.0, 20.0])
-    with pytest.raises(ConfigurationError, match=r'2 slabs but 3 weight'):
-        stack.superpose([1.0, 1.0, 1.0])
-    with pytest.raises(ConfigurationError, match=r'2 slabs but 1 weight'):
-        stack.superpose([1.0])
+    pair = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0))
+    with pytest.raises(ConfigurationError,
+                       match=r'2 source depths but 3 weight'):
+        pair.superpose([1.0, 1.0, 1.0])
+    with pytest.raises(ConfigurationError,
+                       match=r'2 source depths but 1 weight'):
+        pair.superpose([1.0])
     with pytest.raises(ConfigurationError, match=r'weights\[0\]'):
-        stack.superpose([np.nan, 1.0])
-    # Both sides of the length guard: exactly one weight per slab adds.
-    assert stack.superpose([1.0, 1.0]).data[0, 0] == 3.0 + 0j
+        pair.superpose([np.nan, 1.0])
+    # Both sides of the length guard: exactly one weight per depth adds.
+    assert pair.superpose([1.0, 1.0]).data[0, 0] == 3.0 + 0j
 
 
-def test_superpose_refuses_a_stack_that_lost_its_phase():
-    """A dB-only stack cannot add coherently; the complex one it came from
+def test_superpose_refuses_a_field_that_lost_its_phase():
+    """A dB-only field cannot add coherently; the complex one it came from
     can, which pins that the refusal is about phase and not about the
-    stack."""
-    complex_stack = ResultStack(
-        [_complex_slab(10.0, 1.0 + 1j), _complex_slab(20.0, 2.0)],
-        [10.0, 20.0])
-    assert complex_stack.superpose().data[0, 0] == 3.0 + 1j
-    db_stack = ResultStack([s.to_dB() for s in complex_stack.slabs],
-                           [10.0, 20.0])
+    field."""
+    pair = _pair(_complex_slab(10.0, 1.0 + 1j), _complex_slab(20.0, 2.0))
+    assert pair.superpose().data[0, 0] == 3.0 + 1j
     with pytest.raises(ConfigurationError,
                        match='not complex pressure.*coherent sum'):
-        db_stack.superpose()
+        pair.to_dB().superpose()
+
+
+def test_the_coherent_refusal_of_a_db_field_names_the_intensity_sum():
+    """The sources of a dB-only field still add in intensity, so the
+    coherent sum's refusal names superpose(coherent=False), which then
+    runs; the one-depth weight a run applies has no such sum to offer."""
+    from uacpy.core.results._superposition import _weighted_sum
+    levels = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)).to_dB()
+    with pytest.raises(ConfigurationError,
+                       match=r"(?s)Field\.superpose:.*How to fix:.*"
+                             r"superpose\(coherent=False\)"):
+        levels.superpose()
+    assert levels.superpose(coherent=False).unit == 'dB'
+    one = _complex_slab(10.0, 1.0).to_dB()
+    with pytest.raises(ConfigurationError,
+                       match=r'run: the field is real .* not complex') as err:
+        _weighted_sum(one, [one.data], [2.0], where='run')
+    assert 'coherent=False' not in str(err.value)
+
+
+def test_superpose_refuses_a_field_with_no_source_depth_axis():
+    """A one-source field has nothing to sum: the refusal names the run
+    that gives the axis; the same field with the axis sums."""
+    one = _complex_slab(10.0, 1.0)
+    with pytest.raises(ConfigurationError,
+                       match="no 'source_depth' axis") as ei:
+        one.superpose()
+    assert 'Source(depths=[...]' in ei.value.remediation
+    np.testing.assert_array_equal(_pair(one).superpose().data, one.data)
+
+
+def test_superpose_sums_the_source_depth_axis_wherever_it_lies():
+    """The axis is found by name: a field built with ``source_depth``
+    after ``depth`` sums along it as one built with it first."""
+    pair = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0 - 1j))
+    moved = Field(data=np.moveaxis(pair.data, 0, 1),
+                  coords={'depth': pair.coords['depth'],
+                          'source_depth': pair.coords['source_depth'],
+                          'range': pair.coords['range']},
+                  model='Test', frequencies=F0,
+                  source_depths=pair.coords['source_depth'],
+                  phase_reference='travelling_wave')
+    np.testing.assert_array_equal(moved.superpose([1.0, 1j]).data,
+                                  pair.superpose([1.0, 1j]).data)
 
 
 def test_an_incoherent_sum_adds_intensities_not_pressures():
-    """Independent sources add in intensity: N identical slabs give
+    """Independent sources add in intensity: N identical planes give
     10*log10(N) of gain, against the coherent 20*log10(N). The two answers
     differ, which is why the caller has to say which one they mean."""
-    slabs = [_complex_slab(z, 1.0 + 0.0j) for z in (10.0, 20.0, 30.0)]
-    stack = ResultStack(slabs, [10.0, 20.0, 30.0])
+    field = _pair(*[_complex_slab(z, 1.0 + 0.0j) for z in (10.0, 20.0, 30.0)])
     one = -20.0 * np.log10(1.0)
-    inc = stack.superpose(coherent=False)
-    coh = stack.superpose()
+    inc = field.superpose(coherent=False)
+    coh = field.superpose()
     np.testing.assert_allclose(np.asarray(inc.data)[0, 0],
                                one - 10.0 * np.log10(3.0), atol=1e-12)
     np.testing.assert_allclose(np.asarray(coh.dB)[0, 0],
@@ -875,51 +926,49 @@ def test_an_incoherent_sum_adds_intensities_not_pressures():
 def test_an_incoherent_sum_returns_a_real_db_field_with_no_phase():
     """An incoherent sum has no phase, so it is stored the way every engine
     stores its own incoherent mode: real dB, ``phase_reference`` cleared."""
-    stack = ResultStack([_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)],
-                        [10.0, 20.0])
-    out = stack.superpose(coherent=False)
+    out = _pair(_complex_slab(10.0, 1.0),
+                _complex_slab(20.0, 2.0)).superpose(coherent=False)
     assert not out.is_complex
     assert out.unit == 'dB'
+    assert out.coherent is False
     assert out.phase_reference is None
     assert out.metadata['superposed_sources']['coherent'] is False
     np.testing.assert_array_equal(out.source_depths, [10.0, 20.0])
+    assert 'source_depth' not in out.coords
 
 
 def test_an_incoherent_sum_uses_only_the_weight_magnitudes():
     """Phase is meaningless in an intensity sum, so ``1j`` weighs the same
     as ``1`` — and the caller who wrote a complex weight is told so rather
     than having it quietly dropped."""
-    stack = ResultStack([_complex_slab(10.0, 1.0), _complex_slab(20.0, 1.0)],
-                        [10.0, 20.0])
-    plain = stack.superpose([1.0, 1.0], coherent=False)
+    pair = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 1.0))
+    plain = pair.superpose([1.0, 1.0], coherent=False)
     with pytest.warns(UserWarning, match='magnitude'):
-        rotated = stack.superpose([1.0, 1j], coherent=False)
+        rotated = pair.superpose([1.0, 1j], coherent=False)
     np.testing.assert_allclose(rotated.data, plain.data, atol=1e-12)
     # A quadrature weight is the one pair that CANNOT separate the two
     # sums: |p + i·p| is the quadrature sum, which is what adding
     # intensities computes. Show the difference with an in-phase pair,
     # where coherent gives 20*log10(2) and incoherent 10*log10(2).
-    in_phase = stack.superpose([1.0, 1.0])
+    in_phase = pair.superpose([1.0, 1.0])
     np.testing.assert_allclose(np.asarray(in_phase.dB)[0, 0],
                                -20.0 * np.log10(2.0), atol=1e-12)
     np.testing.assert_allclose(np.asarray(plain.data)[0, 0],
                                -10.0 * np.log10(2.0), atol=1e-12)
 
 
-def test_a_db_only_stack_adds_incoherently_though_it_cannot_add_coherently():
-    """The asymmetry an intensity sum removes: a dB-only stack (Kraken's
+def test_a_db_only_field_adds_incoherently_though_it_cannot_add_coherently():
+    """The asymmetry an intensity sum removes: a dB-only field (Kraken's
     INCOHERENT_TL, OAST's TL) has lost its phase, so a coherent sum is
     undefined — but magnitudes are all an incoherent one needs."""
-    complex_stack = ResultStack(
-        [_complex_slab(10.0, 1.0), _complex_slab(20.0, 1.0)], [10.0, 20.0])
-    db_stack = ResultStack([s.to_dB() for s in complex_stack.slabs],
-                           [10.0, 20.0])
+    complex_pair = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 1.0))
+    db_pair = complex_pair.to_dB()
     with pytest.raises(ConfigurationError, match='coherent sum'):
-        db_stack.superpose()
-    out = db_stack.superpose(coherent=False)
+        db_pair.superpose()
+    out = db_pair.superpose(coherent=False)
     # Same two unit sources, so the same answer as adding them as pressure.
     np.testing.assert_allclose(
-        out.data, complex_stack.superpose(coherent=False).data, atol=1e-9)
+        out.data, complex_pair.superpose(coherent=False).data, atol=1e-9)
 
 
 def test_an_incoherent_sum_refuses_time_domain_traces():
@@ -931,26 +980,501 @@ def test_an_incoherent_sum_refuses_time_domain_traces():
                    phase_reference='time_domain_native')
              for z, a in ((10.0, 1.0), (20.0, 2.0))]
     with pytest.raises(ConfigurationError, match='time-domain'):
-        ResultStack(slabs, [10.0, 20.0]).superpose(coherent=False)
+        _pair(*slabs).superpose(coherent=False)
 
 
-def test_superpose_refuses_slabs_on_different_grids():
-    a = _complex_slab(10.0, 1.0)
-    b = Field(data=np.ones((2, 3), dtype=complex),
-              coords={'depth': [10.0, 20.0],
-                      'range': [100.0, 200.0, 400.0]},
-              model='Test', frequencies=F0, source_depths=[20.0],
-              phase_reference='travelling_wave')
-    with pytest.raises(ConfigurationError, match='different grid'):
-        ResultStack([a, b], [10.0, 20.0]).superpose()
+class TestAnIntensitySumReadsEachSourceAsWhatItIs:
+    """``superpose(coherent=False)`` adds the power behind each source's
+    field: a dB level or loss through its sign, real linear magnitudes in
+    ``'Pa'`` as they stand, and nothing that is not a power."""
+
+    @staticmethod
+    def _pair(**field):
+        def one(z):
+            return Field(coords={'depth': [10.0], 'range': [100.0, 200.0]},
+                         source_depths=[z], **field)
+        return _pair(one(10.0), one(20.0))
+
+    def test_real_linear_magnitudes_add_as_magnitudes(self):
+        out = self._pair(data=[[1.0, 2.0]], unit='Pa').superpose(
+            coherent=False)
+        # |p| = sqrt(2) * [1, 2], so TL = -20 log10 of that.
+        np.testing.assert_allclose(
+            out.data, -20.0 * np.log10(np.sqrt(2.0) * np.array([[1.0, 2.0]])),
+            atol=1e-12)
+
+    def test_dB_levels_and_losses_add_in_intensity(self):
+        level = self._pair(data=[[120.0, 100.0]], kind='level', unit='dB')
+        np.testing.assert_allclose(
+            level.superpose(coherent=False).data,
+            [[120.0 + 10 * np.log10(2.0), 100.0 + 10 * np.log10(2.0)]],
+            atol=1e-12)
+        loss = self._pair(data=[[60.0, 80.0]], unit='dB')
+        np.testing.assert_allclose(
+            loss.superpose(coherent=False).data,
+            [[60.0 - 10 * np.log10(2.0), 80.0 - 10 * np.log10(2.0)]],
+            atol=1e-12)
+
+    def test_a_cell_no_energy_reached_keeps_the_no_energy_marker(self):
+        """Two zero-pressure sources sum to the package's no-energy marker
+        (600 dB loss), not to a finite loss 3 dB under it."""
+        from uacpy.core.constants import NO_ENERGY_DB
+        out = self._pair(data=[[0.0 + 0j, 1.0 + 0j]]).superpose(
+            coherent=False)
+        assert out.data[0, 0] == NO_ENERGY_DB
+        np.testing.assert_allclose(out.data[0, 1], -10 * np.log10(2.0),
+                                   atol=1e-12)
+
+    @pytest.mark.parametrize('kind, unit, data', [
+        ('difference', 'dB', [[3.0, -3.0]]),
+        ('probability_of_detection', '1', [[0.5, 0.9]]),
+        ('signal_excess', 'dB', [[3.0, -3.0]]),
+        ('peak_pressure', 'dB', [[150.0, 140.0]]),
+    ])
+    def test_a_quantity_that_is_not_a_power_is_refused(self, kind, unit,
+                                                       data):
+        field = self._pair(data=data, kind=kind, unit=unit)
+        with pytest.raises(ConfigurationError,
+                           match=rf"superpose\(coherent=False\): the field "
+                                 rf"is a '{kind}' field"):
+            field.superpose(coherent=False)
+
+    def test_a_snapshot_of_a_trace_is_refused(self):
+        field = self._pair(data=[[0.3, -0.1]], unit='Pa',
+                           pinned={'time': 0.5})
+        with pytest.raises(ConfigurationError, match='snapshots of one'):
+            field.superpose(coherent=False)
 
 
-def test_superpose_refuses_non_field_slabs():
-    from uacpy.core.results import Rays
-    rays = [Rays(rays=[], model='Test', frequencies=F0, source_depths=[z])
-            for z in (10.0, 20.0)]
-    with pytest.raises(ConfigurationError, match='not Field'):
-        ResultStack(rays, [10.0, 20.0]).superpose()
+class TestOneSourceWeightIsTheSuperposeSum:
+    """The n = 1 weight a run applies to a one-depth ``Source`` and
+    ``Field.superpose`` form one sum, ``_weighted_sum``."""
+
+    @staticmethod
+    def _one():
+        return Field(data=np.array([[1.0 + 2.0j, -3.0 + 0.5j]]),
+                     coords={'depth': np.array([10.0]),
+                             'range': np.array([100.0, 200.0])},
+                     model='Test', frequencies=100.0,
+                     source_depths=np.array([50.0]),
+                     phase_reference='travelling_wave')
+
+    def test_both_paths_call_the_one_sum(self, monkeypatch):
+        from uacpy.core.results import _superposition
+        from uacpy.models import _stacking
+        calls = []
+        real = _superposition._weighted_sum
+
+        def spy(field, planes, weights, *, where, **kwargs):
+            calls.append(where)
+            return real(field, planes, weights, where=where, **kwargs)
+        monkeypatch.setattr(_superposition, '_weighted_sum', spy)
+        monkeypatch.setattr(_stacking, '_weighted_sum', spy)
+        _pair(self._one()).superpose([2.0 - 1.0j])
+        source = uacpy.Source(depths=50.0, frequencies=100.0,
+                              weights=[2.0 - 1.0j])
+        _stacking.apply_single_source_weight(self._one(), source,
+                                             model_name='Test')
+        assert len(calls) == 2
+
+    def test_the_one_source_weight_equals_the_one_source_superpose(self):
+        from uacpy.models import _stacking
+        w = 2.0 - 1.0j
+        summed = _pair(self._one()).superpose([w])
+        source = uacpy.Source(depths=50.0, frequencies=100.0, weights=[w])
+        weighted = _stacking.apply_single_source_weight(
+            self._one(), source, model_name='Test')
+        np.testing.assert_array_equal(weighted.data, summed.data)
+
+
+# ── (f) joining the fields of several sources ──────────────────────────
+
+
+class TestTheFieldsOfSeveralSourcesJoinOnOneAxis:
+    """``stack_fields`` is how a run joins its per-depth fields: one grid,
+    one quantity, one identity apart from the axis it adds; what the depths
+    disagree on is kept per depth."""
+
+    def test_the_axis_leads_and_lists_the_depths(self):
+        pair = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0))
+        assert list(pair.coords) == ['source_depth', 'depth', 'range']
+        np.testing.assert_array_equal(pair.coords['source_depth'],
+                                      [10.0, 20.0])
+        np.testing.assert_array_equal(pair.source_depths, [10.0, 20.0])
+        assert pair.data.shape == (2, 2, 3)
+
+    def test_a_split_field_joins_back_into_the_field(self):
+        pair = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0))
+        planes = split_source_depths(pair)
+        np.testing.assert_array_equal(planes[1].data, pair.data[1])
+        np.testing.assert_array_equal(planes[1].source_depths, [20.0])
+        assert 'source_depth' not in planes[1].coords
+        assert 'source_depth' not in planes[1].pinned
+        again = stack_fields(planes, pair.coords['source_depth'])
+        np.testing.assert_array_equal(again.data, pair.data)
+
+    def test_metadata_the_depths_disagree_on_is_kept_per_depth(self):
+        a, b = _complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)
+        a.metadata.update(prt_file='/x/source_depth_10m/a.prt', nt=8)
+        b.metadata.update(prt_file='/x/source_depth_20m/a.prt', nt=8)
+        pair = _pair(a, b)
+        assert pair.metadata['prt_file'] == ['/x/source_depth_10m/a.prt',
+                                             '/x/source_depth_20m/a.prt']
+        assert pair.metadata['nt'] == 8
+
+    def test_components_held_once_are_kept_and_differing_ones_stacked(self):
+        from uacpy.tests._synthetic_fields import _bounce
+        a, b = _complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)
+        shared = _bounce()
+        a._components = {'bounce': shared}
+        b._components = {'bounce': shared}
+        assert _pair(a, b).components['bounce'] is shared
+        b._components = {'bounce': _bounce()}
+        joined = _pair(a, b).components['bounce']
+        assert isinstance(joined, ResultStack) and len(joined) == 2
+
+    def test_selecting_a_source_depth_narrows_the_components_to_it(self):
+        """A component that runs over source depth (each depth's own
+        table, joined into a stack) follows a selection of the field: one
+        depth gets its own table, a window keeps the stack of the kept
+        depths, an evaluation between depths keeps none of it; a component
+        every depth shares is kept as it is."""
+        from uacpy.tests._synthetic_fields import _bounce
+        a, b = _complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0)
+        shared, own_a, own_b = _bounce(), _bounce(), _bounce()
+        a._components = {'bounce': own_a, 'mean_field': shared}
+        b._components = {'bounce': own_b, 'mean_field': shared}
+        pair = _pair(a, b)
+        assert isinstance(pair.components['bounce'], ResultStack)
+        assert pair.isel(source_depth=1).components['bounce'] is own_b
+        assert pair.at(source_depth=10.0).components['bounce'] is own_a
+        planes = split_source_depths(pair)
+        assert [p.components['bounce'] for p in planes] == [own_a, own_b]
+        kept = pair.window(source_depth=(15.0, 25.0)).components['bounce']
+        assert isinstance(kept, ResultStack) and kept.slabs == [own_b]
+        between = pair.eval(source_depth=15.0).components
+        assert 'bounce' not in between
+        assert between['mean_field'] is shared
+        assert pair.isel(range=0).components['bounce'] is \
+            pair.components['bounce']
+
+    def test_selecting_source_depths_narrows_the_weights_to_them(self):
+        """The Source weights follow the ``source_depth`` axis: a window
+        keeps the weight of each depth it keeps, so ``superpose()`` is the
+        weighted sum of the kept planes; pinning one depth (at, isel, eval,
+        max, a split plane, an xarray plane) leaves one source's field,
+        which carries no weight; an axis widened to a depth no weight was
+        given for carries none. Joining the split planes again restores the
+        run's weights."""
+        from uacpy.core.results._superposition import restack_source_depths
+        trio = _pair(_complex_slab(30.0, 1.0), _complex_slab(60.0, 2.0),
+                     _complex_slab(90.0, 3.0))
+        trio.source_weights = np.array([1.0, 0.5, -0.25])
+        kept = trio.window(source_depth=(50.0, 95.0))
+        np.testing.assert_array_equal(kept.source_weights, [0.5, -0.25])
+        np.testing.assert_allclose(kept.superpose().data,
+                                   0.5 * trio.data[1] - 0.25 * trio.data[2])
+        for plane in (trio.at(source_depth=60.0), trio.isel(source_depth=1),
+                      trio.eval(source_depth=45.0), trio.max(),
+                      *split_source_depths(trio)):
+            assert plane.source_weights is None
+        widened = trio.reindex(source_depth=[30.0, 45.0, 60.0, 90.0])
+        assert widened.source_weights is None
+        again = restack_source_depths(split_source_depths(trio), trio,
+                                      who='t')
+        np.testing.assert_array_equal(again.source_weights,
+                                      trio.source_weights)
+        array = trio.to_xarray()
+        assert Field.from_xarray(
+            array.sel(source_depth=60.0)).source_weights is None
+        sliced = Field.from_xarray(array.isel(source_depth=slice(1, 3)))
+        np.testing.assert_array_equal(sliced.source_depths, [60.0, 90.0])
+        np.testing.assert_array_equal(sliced.source_weights, [0.5, -0.25])
+        np.testing.assert_array_equal(
+            Field.from_xarray(array).source_weights, trio.source_weights)
+
+    def test_a_reordered_source_axis_reorders_its_identity_and_weights(self):
+        """An xarray step that permutes the source_depth axis (sortby, isel
+        of a permutation) keeps each depth's weight with it, so superpose()
+        is the same sum."""
+        trio = _pair(_complex_slab(30.0, 1.0), _complex_slab(60.0, 2.0),
+                     _complex_slab(90.0, 3.0))
+        trio.source_weights = np.array([1.0, 0.5 + 0.5j, -0.25])
+        array = trio.to_xarray()
+        for permuted in (array.sortby('source_depth', ascending=False),
+                         array.isel(source_depth=[1, 0, 2])):
+            back = Field.from_xarray(permuted)
+            labels = back.coords['source_depth']
+            np.testing.assert_array_equal(back.source_depths, labels)
+            order = [list(trio.coords['source_depth']).index(z)
+                     for z in labels]
+            np.testing.assert_array_equal(back.source_weights,
+                                          trio.source_weights[order])
+            np.testing.assert_allclose(back.superpose().data,
+                                       trio.superpose().data, rtol=1e-12)
+
+    def test_the_stacked_record_is_the_whole_stacks_or_none(self):
+        """One-depth records that differ only in their source depth join
+        into the multi-depth record (the axis, depth_loop 'per_depth');
+        records that differ in a setting describe no one run, so the
+        stack carries none and keeps the speeds they stated; one shared
+        record is kept."""
+        from uacpy.core.run_settings import RunSettings, WaveguideSpeeds
+
+        def record(z, **changes):
+            return RunSettings(model='Test', mode=RunMode.COHERENT_TL,
+                               frequencies=np.array([F0]),
+                               source_depths=np.array([z]),
+                               waveguide=WaveguideSpeeds(1500.0, 1700.0),
+                               **changes)
+
+        def slab(z, settings):
+            return _complex_slab(z, z).replace(run_settings=settings)
+
+        joined = _pair(slab(10.0, record(10.0)), slab(20.0, record(20.0)))
+        np.testing.assert_array_equal(joined.run_settings.source_depths,
+                                      [10.0, 20.0])
+        assert joined.run_settings.depth_loop == 'per_depth'
+        assert joined.run_settings == record(10.0)._replace(
+            source_depths=np.array([10.0, 20.0]), depth_loop='per_depth')
+        swept = _pair(slab(10.0, record(10.0)),
+                      slab(20.0, record(20.0, source_level_dB=170.0)))
+        assert swept.run_settings is None
+        assert swept.speeds.waveguide_max == 1700.0
+        knob = stack_fields([slab(10.0, record(10.0)),
+                             slab(10.0, record(10.0, source_type='line'))],
+                            [1.0, 2.0], coordinate_name='case')
+        assert knob.run_settings is None
+        shared = record(10.0)
+        same = stack_fields([slab(10.0, shared), slab(10.0, shared)],
+                            [1.0, 2.0], coordinate_name='case')
+        assert same.run_settings is shared
+
+    def test_a_component_over_the_sources_carries_the_runs_weights(self):
+        """Each source's own Field component (an OASES mean field) joins
+        into one over source_depth that carries the weights its run
+        stamped, so the component's superpose() drives the same sources;
+        split and joined again it keeps them."""
+        from uacpy.core.results._superposition import restack_source_depths
+        slabs = []
+        for z, value in ((80.0, 1.0), (100.0, 2.0j)):
+            slab = _complex_slab(z, value).replace(
+                components={'mean_field': _complex_slab(z, 3.0 * value)})
+            slab.source_weights = np.array([1.0, 0.5])
+            slabs.append(slab)
+        pair = stack_fields(slabs, [80.0, 100.0])
+        mean = pair.components['mean_field']
+        np.testing.assert_array_equal(mean.source_weights, [1.0, 0.5])
+        np.testing.assert_allclose(mean.superpose().data,
+                                   3.0 + 0.5 * 6.0j)
+        again = restack_source_depths(split_source_depths(pair), pair,
+                                      who='t')
+        np.testing.assert_array_equal(
+            again.components['mean_field'].source_weights, [1.0, 0.5])
+
+    def test_a_selection_keeps_a_declared_absence_of_coherence(self):
+        """A field stamped with no coherence answer keeps it on every
+        selection of its cells; complex planes re-decided from their storage
+        would read as coherent. A stated answer is kept too."""
+        pair = _pair(_complex_slab(10.0, 1.0), _complex_slab(20.0, 2.0))
+        assert pair.coherent is True
+        assert pair.isel(source_depth=0).coherent is True
+        pair._coherent = None
+        assert pair.isel(source_depth=0).coherent is None
+        assert pair.at(source_depth=20.0).coherent is None
+        assert pair.window(range=(100.0, 200.0)).coherent is None
+        assert [p.coherent for p in split_source_depths(pair)] == [None, None]
+
+    def test_the_public_join_is_exported_and_names_itself(self):
+        """stack_fields is reachable where the result types are (uacpy,
+        uacpy.core, uacpy.core.results), takes no caller label, and its
+        refusal names it; a run names itself through the labelled form."""
+        import inspect
+        import uacpy.core
+        from uacpy.core.results._superposition import _stack_fields
+        assert uacpy.stack_fields is uacpy.core.stack_fields is stack_fields
+        assert list(inspect.signature(stack_fields).parameters) == [
+            'fields', 'coordinate', 'coordinate_name']
+        a = _complex_slab(10.0, 1.0)
+        b = _complex_slab(20.0, 1.0).window(range=(100.0, 200.0))
+        with pytest.raises(ConfigurationError,
+                           match=r'^stack_fields: fields\[1\] is on a '
+                                 r'different grid'):
+            stack_fields([a, b], [10.0, 20.0])
+        with pytest.raises(ConfigurationError,
+                           match=r'^Kraken\.run: fields\[1\] is on a '
+                                 r'different grid'):
+            _stack_fields([a, b], [10.0, 20.0], who='Kraken.run')
+
+    def test_a_label_must_be_its_fields_own_and_used_once(self):
+        """A one-depth field is the field of its depth, so its label must
+        be that depth (within a deck's rounding): a swapped or made-up list
+        is refused, as is a label used twice; the same holds on a frequency
+        axis; a field with no one value there takes any label."""
+        a, b = _complex_slab(30.0, 1.0), _complex_slab(60.0, 2.0)
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^stack_fields: fields\[0\] is the "
+                                 r"field of source_depth 30 but is labelled "
+                                 r"60\..*f\.source_depths\[0\] for f in "
+                                 r"fields"):
+            stack_fields([a, b], [60.0, 30.0])
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)labels \[30\.0, 30\.0\] repeat "
+                                 r"\[30\.0\].*its own label"):
+            stack_fields([a, b], [30.0, 30.0])
+        joined = stack_fields([a, b], [30.0, 60.0 * (1 + 1e-7)])
+        assert joined.data.shape == (2, 2, 3)
+        with pytest.raises(ConfigurationError, match='is labelled 60.0006'):
+            stack_fields([a, b], [30.0, 60.0 * (1 + 1e-5)])
+        low = _complex_slab(30.0, 1.0)
+        high = _complex_slab(30.0, 2.0).replace(frequencies=120.0)
+        with pytest.raises(ConfigurationError,
+                           match='field of frequency 100 but is labelled 1'):
+            stack_fields([low, high], [1.0, 2.0], coordinate_name='frequency')
+        assert stack_fields([low, high], [F0, 120.0],
+                            coordinate_name='frequency').data.shape[0] == 2
+        anonymous = [a.replace(source_depths=[]), b.replace(source_depths=[])]
+        assert stack_fields(anonymous, [1.0, 2.0]).data.shape[0] == 2
+
+    def test_labels_are_finite_flat_and_apart(self):
+        """On the source_depth axis labels within a deck's rounding of each
+        other — 1e-6 of the largest of the axis span, the label and 1, so
+        6e-5 m at 60 m — are one position and are refused as a repeat, as
+        the identity check reads them: 60 and 60 + 3e-5 are one, 60 and
+        60 + 1.2e-4 two. A sweep's labels, in any unit, repeat only when
+        equal (1e-7, 2e-7, 3e-7 are three). A 2-D list and a non-finite
+        label are refused by name with a remedy."""
+        a = _complex_slab(60.0, 1.0)
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^stack_fields: the source_depth labels "
+                                 r"\[60\.0, 60\.00003\] repeat "
+                                 r"\[60\.0\].*its own label"):
+            stack_fields([a, _complex_slab(60.0 + 3e-5, 2.0)],
+                         [60.0, 60.0 + 3e-5])
+        apart = stack_fields([a, _complex_slab(60.0 + 1.2e-4, 2.0)],
+                             [60.0, 60.0 + 1.2e-4])
+        assert apart.data.shape[0] == 2
+        anonymous = [_complex_slab(60.0, v).replace(source_depths=[])
+                     for v in (1.0, 2.0, 3.0)]
+        sweep = stack_fields(anonymous, [1e-7, 2e-7, 3e-7],
+                             coordinate_name='sweep')
+        assert sweep.data.shape[0] == 3
+        with pytest.raises(ConfigurationError, match=r"repeat \[2e-07\]"):
+            stack_fields(anonymous, [1e-7, 2e-7, 2e-7],
+                         coordinate_name='sweep')
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^stack_fields: the source_depth labels "
+                                 r"must be one 1-D list; got shape "
+                                 r"\(1, 2\)\..*flat list"):
+            stack_fields([a, _complex_slab(30.0, 2.0)], [[60.0, 30.0]])
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^stack_fields: the source_depth labels "
+                                 r"\[60\.0, nan\] hold a non-finite value.*"
+                                 r"finite label"):
+            stack_fields([a, _complex_slab(30.0, 2.0)], [60.0, np.nan])
+
+    @pytest.mark.parametrize('labels', [[True, False], [60.0 + 0j, 30.0],
+                                        ['60', '30'], [True, 100.0],
+                                        [60.0, np.True_]])
+    def test_labels_that_are_not_real_numbers_are_refused(self, labels):
+        # Read as depths, bools would be 1 m and 0 m, complex values their
+        # real parts.
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^stack_fields: the source_depth labels "
+                                 r"must be real numbers.*one number per "
+                                 r"field"):
+            stack_fields([_complex_slab(60.0, 1.0), _complex_slab(30.0, 2.0)],
+                         labels)
+
+    def test_every_joining_refusal_says_what_to_do(self):
+        """The refusals of fields that do not join carry a remedy: a sweep
+        over the waveguide's sound speeds is iterated, not stacked."""
+        from uacpy.core.results import SoundSpeeds
+        a = _complex_slab(30.0, 1.0).replace(speeds=SoundSpeeds(
+            water_max=1500.0))
+        b = _complex_slab(60.0, 1.0).replace(speeds=SoundSpeeds(
+            water_max=1520.0))
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)fields\[0\]\.speeds=.*How to fix:.*"
+                                 r"ParallelResult\.results"):
+            stack_fields([a, b], [30.0, 60.0])
+        c = _complex_slab(60.0, 1.0).replace(pinned={'time': 1.0})
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)is pinned at.*How to fix:.*field\.at"):
+            stack_fields([_complex_slab(30.0, 1.0), c], [30.0, 60.0])
+
+    def test_fields_on_different_grids_are_refused(self):
+        a = _complex_slab(10.0, 1.0)
+        b = Field(data=np.ones((2, 3), dtype=complex),
+                  coords={'depth': [10.0, 20.0],
+                          'range': [100.0, 200.0, 400.0]},
+                  model='Test', frequencies=F0, source_depths=[20.0],
+                  phase_reference='travelling_wave')
+        with pytest.raises(ConfigurationError, match='different grid'):
+            _pair(a, b)
+
+    def test_fields_holding_different_quantities_are_refused(self):
+        a = _complex_slab(10.0, 1.0)
+        with pytest.raises(ConfigurationError,
+                           match="storage 'complex' vs 'real'"):
+            _pair(a, _complex_slab(20.0, 1.0).to_dB())
+
+    def test_fields_of_different_models_are_refused(self):
+        a = _complex_slab(10.0, 1.0)
+        b = _complex_slab(20.0, 1.0)
+        b.model = 'Other'
+        with pytest.raises(ConfigurationError, match=r"fields\[0\]\.model"):
+            _pair(a, b)
+
+    def test_only_fields_join(self):
+        from uacpy.core.results import Rays
+        rays = [Rays(rays=[], model='Test', frequencies=F0, source_depths=[z])
+                for z in (10.0, 20.0)]
+        with pytest.raises(ConfigurationError, match='only Fields stack'):
+            stack_fields(rays, [10.0, 20.0])
+
+
+@pytest.mark.requires_binary
+def test_a_bellhop_time_series_whose_depths_open_apart_runs_every_depth_at_one_start():
+    """Bellhop opens each depth's record just before that depth's own
+    earliest arrival; on two ranges the two starts differ by less than a
+    sample, so the depths share no time axis. The loop runs every depth
+    again at the earlier start: each plane is the one-depth run at that
+    ``t_start`` and the settings say so. A caller's own ``t_start`` is
+    honoured with no second run."""
+    env = make_pekeris(name='ts-start', bathymetry=GUIDE_DEPTH)
+    receiver = uacpy.Receiver(depths=[30.0, 50.0], ranges=[1000.0, 3000.0])
+    fs = 2000.0
+    t = np.arange(100) / fs
+    waveform = np.hanning(t.size) * np.sin(2 * np.pi * 200.0 * t)
+    model = _bellhop()
+    starts = [model.run(env, uacpy.Source(depths=z, frequencies=200.0),
+                        receiver, run_mode=RunMode.TIME_SERIES,
+                        source_waveform=waveform,
+                        sample_rate=fs).coords['time'][0]
+              for z in (20.0, 70.0)]
+    assert starts[0] != starts[1], "the depths no longer open apart"
+    field = model.run(env, uacpy.Source(depths=[20.0, 70.0],
+                                        frequencies=200.0),
+                      receiver, run_mode=RunMode.TIME_SERIES,
+                      source_waveform=waveform, sample_rate=fs)
+    t0 = min(starts)
+    assert field.coords['time'][0] == t0
+    assert any('t_start' in note for note in field.run_settings.notes)
+    for plane, z in zip(field.data, (20.0, 70.0)):
+        single = model.run(env, uacpy.Source(depths=z, frequencies=200.0),
+                           receiver, run_mode=RunMode.TIME_SERIES,
+                           source_waveform=waveform, sample_rate=fs,
+                           t_start=t0)
+        n = single.coords['time'].size
+        np.testing.assert_array_equal(plane[..., :n], single.data)
+    pinned = model.run(env, uacpy.Source(depths=[20.0, 70.0],
+                                         frequencies=200.0),
+                       receiver, run_mode=RunMode.TIME_SERIES,
+                       source_waveform=waveform, sample_rate=fs,
+                       t_start=0.5)
+    assert pinned.coords['time'][0] == 0.5
+    assert not any('t_start' in note for note in pinned.run_settings.notes)
 
 
 @pytest.mark.requires_binary

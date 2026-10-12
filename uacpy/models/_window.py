@@ -1,9 +1,9 @@
 """The phase-speed window ``[c_low, c_high]`` an Acoustics-Toolbox deck
-searches or integrates over (M-15): the default rule the engines derive an
+searches or integrates over: the default rule the engines derive an
 unpinned bound from, the window a wavenumber integral resolves with the
-origin of each bound, the check that a pinned pair is ordered, and the
-near-field reach of a window — the steep paths it cuts — with the notice that
-states it.
+origin of each bound, the check that a pinned pair is ordered, and what a
+derived window leaves out — the steep paths its ``c_high`` cuts, the seabed
+interface wave below its ``c_low`` — with the notices that state it.
 
 The rules an engine derives on its own (Kraken's ``c_low`` of 0 and its
 reflection-table ``c_high``, BOUNCE's ``min(SSP)``) stay in that engine; what
@@ -15,43 +15,45 @@ from typing import NamedTuple, Optional, Tuple
 import numpy as np
 
 from uacpy.core.boundary import BoundaryType
+from uacpy.core.engine_defaults import C_LOW_FACTOR
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core.run_settings import Notice
+from uacpy.models._knobs import positive_finite
 
-# ``C_LOW_FACTOR`` is the wavenumber-integration default: Scooter / SPARC
-# pin ``k_max = omega/c_low`` so a positive floor is required (c_low=0
-# blows up the integral). 0.95·c_min is the canonical conservative
-# choice.
+# ``C_LOW_FACTOR`` is the wavenumber-integration default every engine shares
+# (:data:`uacpy.core.engine_defaults.C_LOW_FACTOR`, with its sources): Scooter /
+# SPARC pin ``k_max = omega/c_low``, so a positive floor is required (c_low=0
+# blows up the integral).
 #
-# ``C_HIGH_FACTOR`` pads the upper bound symmetrically: the engines take
-# ``c_high = 1.05 · max(c_max, bottom cp)`` so the fastest speed in the problem
-# sits strictly inside the interval rather than on its edge.
-# The pad is REQUIRED by the integration models and merely TOLERATED by the
-# modal one, so it cannot be tuned for either alone: for Scooter
-# (``scooter.f90:67,123``) and SPARC (``SPARC._resolve_engine_settings``'s Nk)
-# c_high is the lower limit of a wavenumber INTEGRAL, and padding past the
-# bottom speed keeps the branch point k = omega/c_bottom strictly inside the
-# window — which
-# is what lets Scooter recover the lateral wave that makes it the right model
-# below the modal cutoff. Kraken only searches [c_low, c_high] for roots, so
-# there the same pad means a default run returns a few modes with a phase speed
-# above the bottom speed (``models/kraken/_modes.py`` logs the count and
-# refuses when
-# every mode is one of them).
+# ``C_HIGH_FACTOR`` pads the upper bound of the mode search over a half-space:
+# :func:`resolve_phase_speed_bounds` takes ``c_high = 1.05 · max(c_max, bottom
+# cp)`` so the fastest speed in the problem sits strictly inside the interval
+# rather than on its edge. The 1.05 is uacpy guidance, measured on Kraken
+# (models/kraken/_window.py); doc/kraken.htm leaves CHIGH to "a matter of
+# experience". The wavenumber integrals (Scooter, SPARC) do not use it: their
+# unpinned c_high is unbounded, k_min = 0, as Jensen et al. (*Computational
+# Ocean Acoustics*, ch. 4 App. 1) recommend (:func:`resolve_window`).
+# Kraken only searches [c_low, c_high] for roots, so
+# there the pad means a default run returns a few modes with a phase speed
+# above the bottom speed: on kraken.exe roots of a rigid seabed
+# (``Kraken/BCImpedanceMod.f90:83-88``), which the run's notice states
+# (``models/kraken/_checks.py``, ``kraken_exe_above_seabed_notice``), on krakenc
+# leaky modes. ``models/kraken/_modes.py`` logs the count, and a field run whose
+# every mode is one of them warns (``models/kraken/_model.py``, ``_warn_leaky``).
 # (KRAKEN's modal-solver c_low default is the literal 0.0 written at its use
 # site in ``models/kraken/_window.py`` — 0 makes KRAKEN compute the bound
 # itself, per
 # kraken.htm, Phase Speed Limits.)
-C_LOW_FACTOR = 0.95
 C_HIGH_FACTOR = 1.05
 
 # "No upper phase-speed limit" for the AT family. A vacuum / rigid boundary
 # traps every mode, so the mode search must not be capped on a half-space
 # speed that does not exist. Acoustics-Toolbox/doc/bounce.htm prescribes the
 # value: "For a full 90 degree calculation set CMin to the lowest speed in the
-# problem (say 1400.0) CMax to 1.0E9." Kraken's ``leaky_modes`` uses the same
-# number.
+# problem (say 1400.0) CMax to 1.0E9." bounce.f90:47 takes kMin = 0 above 1e6.
+# Kraken's ``leaky_modes`` uses 10 x the fastest speed instead
+# (``models/kraken/_window.py``, ``_LEAKY_C_HIGH_FACTOR``).
 DEFAULT_C_MAX_UNBOUNDED = 1.0e9
 
 
@@ -76,7 +78,7 @@ def resolve_phase_speed_bounds(
     keeps 3 of its 7 modes, a 10.6 dB error; a 'file' bottom's 1600 m/s
     placeholder capped cHigh at 1680 m/s), so those boundaries resolve to
     :data:`DEFAULT_C_MAX_UNBOUNDED` instead — the AT idiom for "no upper
-    limit", the same value ``leaky_modes`` uses.
+    limit".
     """
     if c_low is not None and c_high is not None:
         return float(c_low), float(c_high)
@@ -105,8 +107,13 @@ class PhaseSpeedWindow(NamedTuple):
 
 
 def check_pinned_window(model_name: str, *, c_low, c_high) -> None:
-    """Refuse two pinned bounds with ``c_low >= c_high`` (one pinned bound
-    is held to the other once a run derives it, :func:`resolve_window`)."""
+    """Refuse a pinned bound that is not a positive finite speed (the
+    integral's ``k_max = omega/c_low`` and ``k_min = omega/c_high`` need
+    one), and two pinned bounds with ``c_low >= c_high``. A single pinned
+    bound is held to the other once a run derives it
+    (:func:`refuse_inverted_window`)."""
+    positive_finite(f"{model_name}: c_low (m/s)", c_low, optional=True)
+    positive_finite(f"{model_name}: c_high (m/s)", c_high, optional=True)
     if (c_low is not None and c_high is not None
             and c_low >= c_high):
         raise ConfigurationError(
@@ -116,13 +123,40 @@ def check_pinned_window(model_name: str, *, c_low, c_high) -> None:
         )
 
 
-def resolve_window(env, *, c_low, c_high,
+def refuse_inverted_window(model_name: str, cl: float, ch: float, *,
+                           c_low, c_high) -> None:
+    """Refuse a resolved window ``[cl, ch]`` with ``cl >= ch``, naming the
+    bound the caller pinned (``c_low`` / ``c_high``, ``None`` when derived),
+    since that is the one to move."""
+    if cl < ch:
+        return
+    if c_low is not None and c_high is None:
+        pinned = (f"the pinned c_low={c_low} m/s is at or above "
+                  f"the env-derived c_high = {ch:.1f} m/s")
+    elif c_high is not None and c_low is None:
+        pinned = (f"the pinned c_high={c_high} m/s is at or "
+                  f"below the env-derived c_low = {cl:.1f} m/s")
+    else:
+        pinned = (f"the env-derived band collapsed to c_low = "
+                  f"{cl:.1f} m/s, c_high = {ch:.1f} m/s")
+    raise ConfigurationError(
+        f"{model_name} spectral phase-velocity band requires "
+        f"c_low < c_high: {pinned}.",
+        remediation="Widen the pinned bound, or leave both unset to "
+                    "derive the band from the SSP and bottom.",
+    )
+
+
+def resolve_window(env, *, c_low, c_high, c_high_unbounded: float,
                    model_name: str) -> PhaseSpeedWindow:
     """The window of a wavenumber integral (Scooter, SPARC): the pinned
-    bounds, and the unpinned ones from :func:`resolve_phase_speed_bounds`
-    on the projected ``env`` — ``0.95 × min(SSP)`` and ``1.05 × max(SSP,
-    seabed sound speed)``, unbounded (1e9 m/s) over a vacuum, rigid,
-    ``'file'`` or ``'precalc'`` seabed — with the origin of each.
+    bounds; an unpinned ``c_low`` from :func:`resolve_phase_speed_bounds`
+    on the projected ``env`` (``0.9 × min(SSP)``); an unpinned ``c_high``
+    of ``c_high_unbounded`` over every seabed — the engine's own "no upper
+    limit", which puts ``k_min = omega/c_high`` at 0 to every grazing angle
+    short of 90° — as Jensen et al. (*Computational Ocean Acoustics*, ch. 4
+    App. 1 step 1) recommend: "it is recommended to initially include these
+    components by choosing k min = 0"; with the origin of each.
 
     The constructor can only compare two pinned bounds
     (:func:`check_pinned_window`). A single pinned bound is only comparable
@@ -132,31 +166,15 @@ def resolve_window(env, *, c_low, c_high,
     instead, naming the bound the user pinned, since that is the one to
     move.
     """
-    cl, ch = resolve_phase_speed_bounds(env, c_low, c_high)
-    if cl >= ch:
-        if c_low is not None and c_high is None:
-            pinned = (f"the pinned c_low={c_low} m/s is at or above "
-                      f"the env-derived c_high = {ch:.1f} m/s")
-        elif c_high is not None and c_low is None:
-            pinned = (f"the pinned c_high={c_high} m/s is at or "
-                      f"below the env-derived c_low = {cl:.1f} m/s")
-        else:
-            pinned = (f"the env-derived band collapsed to c_low = "
-                      f"{cl:.1f} m/s, c_high = {ch:.1f} m/s")
-        raise ConfigurationError(
-            f"{model_name} spectral phase-velocity band requires "
-            f"c_low < c_high: {pinned}.",
-            remediation="Widen the pinned bound, or leave both unset to "
-                        "derive the band from the SSP and bottom.",
-        )
+    cl, ch = resolve_phase_speed_bounds(
+        env, c_low, c_high_unbounded if c_high is None else c_high)
+    refuse_inverted_window(model_name, cl, ch, c_low=c_low, c_high=c_high)
     if c_high is not None:
         high_origin = f"{model_name}(c_high=…)"
-    elif ch == DEFAULT_C_MAX_UNBOUNDED:
-        high_origin = ("DEFAULT_C_MAX_UNBOUNDED: the seabed has no "
-                       "half-space speed (vacuum, rigid, 'file' or "
-                       "'precalc')")
     else:
-        high_origin = f"{C_HIGH_FACTOR:g} × max(env.ssp, seabed sound speed)"
+        high_origin = (f"unbounded ({c_high_unbounded:g} m/s): k_min = 0, "
+                       f"every phase speed (Jensen et al., Computational "
+                       f"Ocean Acoustics, ch. 4 App. 1)")
     return PhaseSpeedWindow(
         c_low=cl, c_high=ch,
         c_low_origin=(f"{model_name}(c_low=…)" if c_low is not None
@@ -203,29 +221,103 @@ def steep_path_cut(c_water: float, c_high: float, source_depths,
     return cut, steepest
 
 
+def steep_path_clear_range(source_depths, receiver_depths,
+                           cut: float) -> int:
+    """The range (m, rounded up to a whole metre) from which no direct or
+    surface-reflected path between ``source_depths`` and
+    ``receiver_depths`` is steeper than ``cut`` degrees: the deepest
+    surface-reflected span over ``tan(cut)``."""
+    zs = np.atleast_1d(np.asarray(source_depths, dtype=float))
+    zr = np.atleast_1d(np.asarray(receiver_depths, dtype=float))
+    span = float(np.max(zr[:, None] + zs[None, :]))
+    return int(np.ceil(span / np.tan(np.radians(cut))))
+
+
 def steep_path_notice(env, source, receiver, c_high: float, *,
                       model_name: str, kept: str, summed_in: str,
-                      evidence: str, remediation: str) -> Optional[Notice]:
+                      evidence: str, remediation: str,
+                      pinned: bool = False) -> Optional[Notice]:
     """``(note, warning)`` when a receiver's direct or surface-reflected
-    path is steeper than the auto-derived ``c_high`` keeps
-    (:func:`steep_path_cut`, at the fastest water speed), else ``None``.
+    path is steeper than ``c_high`` keeps (:func:`steep_path_cut`, at the
+    fastest water speed), else ``None``.
 
     The engine names what its window keeps (``kept``: Scooter's paths,
     Kraken's modes carrying them), what the energy is missing from
-    (``summed_in``), the measurement behind the claim (``evidence``) and
-    its remediation."""
+    (``summed_in``), where the claim is shown (``evidence``: a measurement,
+    or the docs that hold one) and its remediation, and whether the user
+    pinned ``c_high`` (``pinned``: Scooter's notice concerns a pinned bound
+    only, Kraken's its derived one); the message adds the range from
+    which no direct or surface-reflected path is steeper than the cut
+    (RAM's notice states the same for its band)."""
     c_water = float(np.nanmax(np.asarray(env.ssp.sound_speed, dtype=float)))
     reach = steep_path_cut(c_water, c_high, source.depths,
                            receiver.depths, receiver.ranges)
     if reach is None:
         return None
     cut, steepest = reach
+    clear = steep_path_clear_range(source.depths, receiver.depths, cut)
     return Notice(
         f"c_high {c_high:.1f} m/s drops paths steeper than {cut:.1f}° "
         f"that the receiver geometry needs (up to {steepest:.1f}°)",
-        f"{model_name}: the auto-derived c_high = {c_high:.1f} m/s keeps "
+        f"{model_name}: the {'pinned' if pinned else 'auto-derived'} "
+        f"c_high = {c_high:.1f} m/s keeps "
         f"{kept} up to {cut:.1f}° grazing, but the closest receiver sees a "
         f"direct or surface-reflected path at {steepest:.1f}°; that energy "
         f"is not in the {summed_in}, so the near-range field is wrong "
-        f"({evidence}). {remediation}", NumericsWarning,
+        f"({evidence}); from {clear} m on no direct or surface-reflected "
+        f"path is steeper than {cut:.1f}°. {remediation}", NumericsWarning,
     )
+
+
+#: Phase speed of the seabed interface (Scholte) wave as a fraction of the
+#: slowest shear speed of the medium under the water: "generally about 0.85
+#: times the minimum shear-wave speed" (JKPS §5.10.5; the wave itself is
+#: introduced in §4.10.1).
+SCHOLTE_SPEED_FRACTION = 0.85
+
+
+def interface_wave_notice(env, source, receiver, c_low: float, frequency: float,
+                          *, model_name: str) -> Optional[Notice]:
+    """A notice when the derived ``c_low`` leaves out the seabed interface
+    (Scholte) wave that the geometry can see, else ``None``.
+
+    The wave travels at about :data:`SCHOLTE_SPEED_FRACTION` × the slowest
+    shear speed of the medium touching the water, below the
+    ``0.9 × min(SSP)`` floor a derived ``c_low`` takes, and it is confined to
+    the seafloor: it counts only when the source or a receiver lies within
+    one of its wavelengths, ``0.85·c_s / f`` at the lowest frequency
+    ``frequency``, of the seafloor (``env.depth``). Far from the bed leaving
+    it out costs nothing measurable (docs/models/scooter.md: 0.01 dB for a
+    source 75 m above a sand seabed); 1 m above it, up to 4 dB.
+    """
+    shear = []
+    for column in env.bottom.columns:
+        top = column.layers[0] if column.layers else column.halfspace
+        if (column.layers or BoundaryType.from_string(
+                top.acoustic_type).is_geoacoustic) and top.shear_speed > 0:
+            shear.append(float(top.shear_speed))
+    if not shear:
+        return None
+    speed = SCHOLTE_SPEED_FRACTION * min(shear)
+    if not speed < c_low:
+        return None
+    wavelength = speed / float(frequency)
+    seafloor = float(env.depth)
+    heights = np.abs(seafloor - np.concatenate([
+        np.atleast_1d(np.asarray(source.depths, dtype=float)),
+        np.atleast_1d(np.asarray(receiver.depths, dtype=float))]))
+    nearest = float(heights.min())
+    if nearest > wavelength:
+        return None
+    return Notice(
+        f"c_low {c_low:.1f} m/s leaves out the seabed interface wave "
+        f"(~{speed:.0f} m/s) within {nearest:.3g} m of the seafloor",
+        f"{model_name}: the auto-derived c_low = {c_low:.1f} m/s lies above "
+        f"the seabed interface (Scholte) wave, about {speed:.0f} m/s "
+        f"({SCHOLTE_SPEED_FRACTION:g} × the {min(shear):g} m/s shear speed, "
+        f"JKPS §5.10.5), so the integral leaves it out; the geometry reaches "
+        f"within {nearest:.3g} m of the seafloor, inside the wave's "
+        f"{wavelength:.3g} m wavelength at {float(frequency):g} Hz, where it "
+        f"carries energy (up to 4 dB measured 1 m above a sand seabed). Pass "
+        f"c_low below {speed:.0f} m/s to include it, at the cost of more "
+        f"wavenumbers.", NumericsWarning)

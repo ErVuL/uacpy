@@ -40,6 +40,9 @@ _EXPORTS = {
     'RunMode': 'uacpy.core.run_settings',
     'ModelSpec': 'uacpy.models._spec',
     'RunSettings': 'uacpy.core.run_settings',
+    # Which engine binaries this install holds (``python -m uacpy``).
+    'engine_status': 'uacpy.models._status',
+    'EngineStatus': 'uacpy.models._status',
     **{entry.class_name: entry.module for entry in _ENGINES.values()},
     # The abstract base and factory of the OASES family (not an engine).
     'OASES': 'uacpy.models.oases',
@@ -56,6 +59,7 @@ if _typing.TYPE_CHECKING:
     from uacpy.core.run_settings import RunMode, RunSettings  # noqa: F401
     from uacpy.models.base import PropagationModel  # noqa: F401
     from uacpy.models._spec import ModelSpec  # noqa: F401
+    from uacpy.models._status import EngineStatus, engine_status  # noqa: F401
     from uacpy.models.bellhop import Bellhop  # noqa: F401
     from uacpy.models.bounce import Bounce  # noqa: F401
     from uacpy.models.kraken import Kraken  # noqa: F401

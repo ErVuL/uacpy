@@ -18,13 +18,11 @@ from uacpy.core.results.array_products import (
 from uacpy.core.results.reflection import ReflectionCoefficient
 from uacpy.core.results.greens_function import GreensFunction
 from uacpy.core.results.speeds import SoundSpeeds
+from uacpy.core.results._superposition import stack_fields
 
 __all__ = [
     'Result', 'PhaseReference', 'Field', 'ResultStack',
     'Arrivals', 'Rays', 'Modes',
     'Covariance', 'Replicas', 'ReflectionCoefficient', 'GreensFunction',
-    'ambiguity_field', 'SoundSpeeds', 'MediaTable',
-    # submodules
-    'array_products', 'field', 'greens_function', 'modes', 'quantities', 'rays', 'reflection',
-    'speeds', 'stack',
+    'ambiguity_field', 'SoundSpeeds', 'MediaTable', 'stack_fields',
 ]

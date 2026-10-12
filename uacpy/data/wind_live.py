@@ -18,6 +18,7 @@ import numpy as np
 from uacpy.core.exceptions import DataFetchError
 from uacpy.core.units import ms_to_knots
 from uacpy.core.geo import as_coordinate, geodesic_waypoints
+from uacpy.data._chain import lower_source_spec
 from uacpy.data._geo import (AlongTrack, cell_half_diagonal_km, checked_max_distance,
                              checked_n_points, checked_offset, require_source)
 from uacpy.data._http import (erddap_griddap_url, erddap_point,
@@ -55,25 +56,28 @@ def _griddap_url(var, when, lat, lon):
 
 
 def _fetch_var(var, when, lat, lon, *, timeout, verbose):
-    """``(value, node)``: ``var`` at the grid node NBS selected for the
-    query, and that node's ``(lat, lon)`` (``None`` when unnamed)."""
+    """``(value, node, time)``: ``var`` at the grid node NBS selected for the
+    query, that node's ``(lat, lon)`` (``None`` when unnamed) and the time
+    step read (ISO 8601 UTC, ``None`` when unnamed)."""
     url = _griddap_url(var, when, lat, lon)
     body = http_get(url, timeout=timeout, verbose=verbose, source='wind',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace')
-    node_lat, node_lon, value = erddap_point(body)
-    return value, (None if node_lat is None else (node_lat, node_lon))
+    point = erddap_point(body)
+    node = None if point.lat is None else (point.lat, point.lon)
+    return point.value, node, point.time
 
 
 def _wind_speed(lat, lon, when, *, timeout, verbose):
-    """``(speed, node)``: the 10 m wind speed (m/s) at a cell, √(u²+v²), else
-    a scalar speed var, and the ``(lat, lon)`` of the node read."""
+    """``(speed, node, time)``: the 10 m wind speed (m/s) at a cell,
+    √(u²+v²), else a scalar speed var, the ``(lat, lon)`` of the node read
+    and the time step read."""
     last_exc = None
     for u_var, v_var in _COMPONENT_VARS:
         try:
-            u, node = _fetch_var(u_var, when, lat, lon, timeout=timeout,
+            u, node, step = _fetch_var(u_var, when, lat, lon,
+                                       timeout=timeout, verbose=verbose)
+            v, _, _ = _fetch_var(v_var, when, lat, lon, timeout=timeout,
                                  verbose=verbose)
-            v, _ = _fetch_var(v_var, when, lat, lon, timeout=timeout,
-                              verbose=verbose)
         except DataFetchError as exc:
             last_exc = exc
             continue
@@ -83,18 +87,18 @@ def _wind_speed(lat, lon, when, *, timeout, verbose):
                 remediation="Pick an ocean location/date in range, or "
                             "source='local'.",
             )
-        return float(np.hypot(u, v)), node
+        return float(np.hypot(u, v)), node, step
     for var in _SPEED_VARS:
         try:
-            speed, node = _fetch_var(var, when, lat, lon, timeout=timeout,
-                                     verbose=verbose)
+            speed, node, step = _fetch_var(var, when, lat, lon,
+                                           timeout=timeout, verbose=verbose)
         except DataFetchError as exc:
             last_exc = exc
             continue
         # A speed cannot be negative: a negative number is a fill or a schema
         # change, and reads as no value rather than as its magnitude.
         if np.isfinite(speed) and speed >= 0.0:
-            return speed, node
+            return speed, node, step
     raise DataFetchError(
         f"NBS returned no wind speed at ({lat:.4f}, {lon:.4f}): "
         f"{last_exc.message}",
@@ -109,19 +113,22 @@ def wind_at(point, *, date, source='nbs', timeout=60.0, verbose=False,
     record :func:`uacpy.data.fetch_sea_surface` stamps, through the offset
     rule (a warning once the cell read is not the point's own 0.25° cell, a
     refusal past ``max_distance_km``)."""
+    source = lower_source_spec(source)
     _check_source(source)
     lat, lon = as_coordinate(point)
     if source == 'local':
         from uacpy.data import wind_local
         speed = wind_local.wind_speed(point, date=date)
-        node = wind_local.wind_cell(point)
+        node, step = wind_local.wind_cell(point), None
     else:
-        speed, node = _wind_speed(lat, lon, date, timeout=timeout,
-                                  verbose=verbose)
+        speed, node, step = _wind_speed(lat, lon, date, timeout=timeout,
+                                        verbose=verbose)
     prov = checked_offset(
         DataProvenance(source=SOURCES['nbs'], data_point=node,
-                       requested_point=(lat, lon), point_kind='cell',
-                       cell_size_deg=NBS_GRID_DEG),
+                       data_date=step,
+                       requested_point=(lat, lon),
+                       requested_date=parse_date(date).isoformat(),
+                       point_kind='cell', cell_size_deg=NBS_GRID_DEG),
         who=who,
         warn_km=cell_half_diagonal_km(lat if node is None else node[0],
                                       NBS_GRID_DEG, NBS_GRID_DEG),
@@ -134,9 +141,13 @@ def fetch_wind(point, *, date, source='nbs', timeout=60.0, verbose=False,
     """10 m wind speed (knots) at a ``(lat, lon)`` point and date: the
     source's m/s, converted here.
 
-    ``source='nbs'`` queries NBS live over ERDDAP (date-specific);
-    ``source='local'``
-    reads the cached monthly climatology (``install.sh --data wind``). Raises
+    ``source='nbs'`` queries NBS live over ERDDAP at 00:00 UTC of ``date``
+    (a time of day in ``date`` is ignored; the record
+    :func:`uacpy.data.fetch_sea_surface` stamps names the step read in its
+    ``data_date``); ``source='local'``
+    reads the cached monthly climatology (``install.sh --data wind``). The
+    NBS host is the module constant :data:`ERDDAP_URL`; reassign it to read
+    a mirror. Raises
     ``DataFetchError`` where no wind is available (land / out of range).
 
     The value is raw and carries no provenance;
@@ -148,7 +159,7 @@ def fetch_wind(point, *, date, source='nbs', timeout=60.0, verbose=False,
     point : (lat, lon)
         Site coordinates in decimal degrees.
     date : str or datetime.date
-        Calendar date.
+        Calendar date, read at 00:00 UTC (the time of day is ignored).
     source : {'nbs', 'local'}, optional
         NBS live (default) or the cached monthly climatology.
     timeout : float, optional
@@ -193,6 +204,7 @@ def fetch_wind_transect(start, end, *, date, n_points=6, source='nbs',
     """
     n_points = checked_n_points(n_points, 'fetch_wind_transect')
     limit = checked_max_distance(max_distance_km, 'fetch_wind_transect')
+    source = lower_source_spec(source)
     _check_source(source)
     lats, lons, ranges_m = geodesic_waypoints(start, end, n_points)
     speeds = np.array([

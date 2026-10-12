@@ -98,27 +98,30 @@ for m in range(n_shared):
 scenarios = [
     ('example_02a_munk', munk_env,
      uacpy.Source(depths=1000.0, frequencies=25.0),
-     uacpy.Receiver(depths=np.linspace(100, 4900, 25),
+     uacpy.Receiver(depths=np.linspace(100, 4900, 49),
                     ranges=np.linspace(1000, 20000, 25)),
      {'Bellhop': uacpy.Bellhop(backend='fortran'), 'Kraken': uacpy.Kraken()}),
     ('example_02b_pekeris', pekeris_env, pekeris_source,
-     uacpy.Receiver(depths=np.linspace(3, 97, 30),
+     uacpy.Receiver(depths=np.linspace(2, 98, 49),
                     ranges=np.linspace(300, 5000, 40)),
      {'Bellhop': uacpy.Bellhop(backend='fortran'), 'RAM': uacpy.RAM(),
       'Kraken': uacpy.Kraken(), 'Scooter': uacpy.Scooter()}),
     ('example_02c_thermocline', coastal_env,
      uacpy.Source(depths=30.0, frequencies=100.0),
-     uacpy.Receiver(depths=np.linspace(3, 197, 30),
+     uacpy.Receiver(depths=np.linspace(2, 198, 50),
                     ranges=np.linspace(500, 5000, 40)),
      {'Bellhop': uacpy.Bellhop(backend='fortran'), 'RAM': uacpy.RAM(),
       'Kraken': uacpy.Kraken(), 'Scooter': uacpy.Scooter()}),
 ]
 
-# Two model limits stay in the comparison on purpose, and their notices are
+# Three model limits stay in the comparison on purpose, and their notices are
 # printed rather than hidden: in the Munk column the 1 km receivers see paths
-# steeper than Kraken's mode window keeps (none are past about 14 km), and at
+# steeper than Kraken's mode window keeps (none are past about 14 km); at
 # 50 Hz the 100 m Pekeris guide is 3.3 wavelengths deep, under the D/λ >= 5
-# floor of ray theory. The panels show where each departs from the others.
+# floor of ray theory; and Scooter's derived c_low leaves out the elastic
+# seabed's interface (Scholte) wave, which the deepest receivers, 2 m above
+# the seafloor, sit within a wavelength of. The panels show where each
+# departs from the others.
 for prefix, env, source, receiver, models in scenarios:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
@@ -126,8 +129,10 @@ for prefix, env, source, receiver, models in scenarios:
                   for name, model in models.items()}
     for warning in caught:
         print(f"  noted: {str(warning.message).splitlines()[0]}")
+    # Both cuts sit on receiver samples (each grid holds the source depth), so
+    # every model is cut at the same place: Field.at picks the nearest sample.
     depth = float(source.depths[0])
-    mid_range = float(np.median(receiver.ranges))
+    mid_range = float(receiver.ranges[receiver.ranges.size // 2])
     print(f"  {env.name}: " + ", ".join(
         f"{name} {np.nanmin(f.dB):.0f}-{np.nanmax(f.dB):.0f} dB"
         for name, f in fields.items()))

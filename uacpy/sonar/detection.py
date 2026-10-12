@@ -328,7 +328,7 @@ def detection_threshold_energy(
     ``DT = 10*log10(S)`` with ``S = Ginv(1-Pf; M)/Ginv(1-Pd; M) - 1``, where
     ``M = w*t`` is the processing time-bandwidth product and ``Ginv`` the
     Gamma(M) quantile (Abraham, *Underwater Acoustic Signal Processing*,
-    eq. 2.76). ``exact=False`` returns Abraham's large-``M`` form, eq. (2.77),
+    eq. 2.81). ``exact=False`` returns Abraham's large-``M`` form, eq. (2.77),
     ``DT = 5*log10(d / M)`` with ``d`` the detection index (§9.2.3.1 /
     §9.2.11): the textbook line, straight at −5 dB per decade of ``M``, which
     the exact threshold approaches from above as ``M`` grows. Either way more
@@ -350,7 +350,8 @@ def detection_threshold_energy(
     bandwidth, so the choice matters.
 
     **The large-M form's validity envelope** (``exact=False``). Eq. (2.77) is
-    the large-``M`` limit of eq. (2.76). It is optimistic (asks for less SNR than the exact
+    the central-limit Gaussian approximation, eq. (2.76), without its
+    ``1/sqrt(M)`` term; the exact threshold is eq. (2.81). It is optimistic (asks for less SNR than the exact
     noise-normalised energy detector needs) at every operating point, and
     accurate to ~1 dB only for ``M`` of order 100 and above — from
     ``M`` ≈ 20–50 at ``Pd = 0.5``, the least demanding case. At ``Pf = 1e-6``

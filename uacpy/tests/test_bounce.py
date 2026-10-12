@@ -678,11 +678,12 @@ class TestRmaxResolutionAndReceiverInertness:
 
     def test_receiver_none_with_n_angles_derives_rmax_from_n_angles(self):
         """``n_angles`` sizes the table without the receiver, so
-        ``run(env, src, None)`` is accepted and rmax inverts bounce.f90:49."""
+        ``run(env, src, None)`` is accepted and rmax inverts bounce.f90:49,
+        half an angle above the count."""
         model = Bounce(c_low=1400.0, n_angles=200, verbose=False)
         rmax = self._resolved_rmax(model, None)
         omega = 2.0 * np.pi * 200.0
-        assert rmax == pytest.approx(200 * 2.0 * np.pi / (omega / 1400.0))
+        assert rmax == pytest.approx(200.5 * 2.0 * np.pi / (omega / 1400.0))
 
 
 class TestGradientSSPAnchorsTheTopHalfspaceAtTheSeabed:
@@ -1127,26 +1128,30 @@ class TestBounceMeshFollowsItsOwnManual:
     def test_the_density_is_the_manuals_hundred_not_the_generic_twenty(self):
         from uacpy.models.bounce import _plan
         assert _plan._MESH_POINTS_PER_WAVELENGTH == 100
-        assert _plan._AT_AUTO_MESH_POINTS_PER_WAVELENGTH == 20
 
     def test_a_layer_gets_a_hundred_points_per_shear_wavelength(self):
         counts = resolve_n_mesh(self._layered(), 2000.0)
         assert counts == [int(100 * 20.0 * 2000.0 / 1600.0)]
 
-    def test_the_ceiling_clips_where_the_binary_accepts(self):
-        # At 50 kHz the manual's density wants 62500 points, above the 20000
-        # ceiling — but AT itself needs only 12500 and rejects below 6250, so
-        # clipping keeps a deck the binary runs instead of refusing it.
-        counts = resolve_n_mesh(self._layered(), 50000.0)
-        assert counts == [20000]
+    @pytest.mark.parametrize('thickness, frequency', [(20.0, 50000.0),
+                                                      (400.0, 50000.0)])
+    def test_a_dense_layer_gets_the_manuals_density_uncapped(
+            self, thickness, frequency):
+        """bounce.f90:78 allocates the mesh arrays to the deck's count, so
+        62 500 and 1 250 000 points are asked for as the manual's density
+        gives them."""
+        counts = resolve_n_mesh(self._layered(thickness=thickness), frequency)
+        assert counts == [int(100 * thickness * frequency / 1600.0)]
 
-    def test_a_stack_the_binary_would_reject_is_refused(self):
-        # 400 m at 50 kHz needs 250000 points even at AT's own density, so the
-        # 20000 ceiling sits below the binary's floor and refusing is right.
-        from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError, match='mesh points'):
-            resolve_n_mesh(
-                self._layered(thickness=400.0), 50000.0)
+    @pytest.mark.requires_binary
+    def test_a_mesh_past_twenty_thousand_points_runs(self, tmp_path):
+        """62 500 points in one medium: BOUNCE allocates them and returns
+        the table."""
+        import uacpy
+        res = Bounce(work_dir=tmp_path, verbose=False).run(
+            self._layered(), uacpy.Source(depths=50.0, frequencies=50000.0),
+            _rcv())
+        assert len(res.angles) > 0 and np.isfinite(res.magnitude).all()
 
 
 class TestTheAnalyticCoefficientSharesTheEnginesConvention:
@@ -1218,8 +1223,8 @@ class TestIrcImpedanceIsOnTheAbsoluteDensityScale:
                 bottom=BoundaryProperties(
                     acoustic_type='precalc',
                     reflection_file=ref.metadata['irc_file']))
-            tl_direct = np.asarray(Scooter().compute_tl(env, src, rcv).tl)
-            tl_table = np.asarray(Scooter().compute_tl(precalc, src, rcv).tl)
+            tl_direct = np.asarray(Scooter().compute_field(env, src, rcv).tl)
+            tl_table = np.asarray(Scooter().compute_field(precalc, src, rcv).tl)
         assert np.mean(np.abs(tl_direct - tl_table)) < 0.1
 
 
@@ -1258,6 +1263,37 @@ class TestConstructorKnobsAreCheckedAtConstruction:
 
     def test_a_whole_float_angle_count_is_accepted(self):
         assert Bounce(n_angles=50.0).n_angles == 50.0
+
+    def test_n_angles_beside_rmax_m_is_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match="pins the table's angular sampling twice"):
+            Bounce(n_angles=50, rmax_m=5000.0)
+
+    @pytest.mark.parametrize('frequency', [100.0, 500.0, 5000.0, 20000.0])
+    def test_a_pinned_count_is_the_count_the_deck_tabulates(self, frequency):
+        """RMax n·c_low/f lands on n - 1 for 1201 of these 7992 counts once
+        the deck rounds it to the millimetre; half an angle above lands on
+        n for every one."""
+        from uacpy.models.bounce._plan import (
+            resolve_rmax_m, tabulated_angle_count)
+        for n in range(2, 2000):
+            rmax, _ = resolve_rmax_m(None, frequency, 1400.0, n_angles=n,
+                                     rmax_m=None, c_high=1e9)
+            assert tabulated_angle_count(rmax, frequency, 1400.0,
+                                         c_high=1e9) == n, (frequency, n)
+
+    def test_a_count_the_deck_rmax_cannot_give_is_refused_naming_its_own(
+            self):
+        """At 5 MHz one angle is 0.28 mm of RMax and the deck carries RMax
+        to the millimetre: 1 mm gives 3 angles, 2 mm gives 7."""
+        from uacpy.models.bounce._plan import resolve_rmax_m
+        assert resolve_rmax_m(None, 5e6, 1400.0, n_angles=3, rmax_m=None,
+                              c_high=1e9)[1] == 'n_angles=3'
+        with pytest.raises(ConfigurationError,
+                           match='gives 7 angles, not 5') as exc:
+            resolve_rmax_m(None, 5e6, 1400.0, n_angles=5, rmax_m=None,
+                           c_high=1e9)
+        assert 'n_angles=7' in exc.value.remediation
 
     def test_a_knob_reassigned_after_construction_is_refused_by_the_run(
             self):
@@ -1304,7 +1340,6 @@ class TestTheThreeEntryPointsRefuseAlike:
         'fewer than two tabulated angles',
         'c_low above the water speed',
         'c_high at or below the derived c_low',
-        'a layer beyond the mesh ceiling',
     ])
     def test_validate_inputs_run_settings_and_run_raise_the_same(
             self, label, tmp_path, monkeypatch):
@@ -1322,9 +1357,6 @@ class TestTheThreeEntryPointsRefuseAlike:
             model_kw = dict(c_low=1560.0, rmax_m=5000.0)
         elif label == 'c_high at or below the derived c_low':
             model_kw = dict(c_high=1300.0)
-        elif label == 'a layer beyond the mesh ceiling':
-            env = TestBounceMeshFollowsItsOwnManual._layered(thickness=400.0)
-            src = _src(50000.0)
         model = Bounce(verbose=False, **model_kw)
 
         def _spy(*a, **k):

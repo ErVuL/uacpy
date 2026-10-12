@@ -10,15 +10,16 @@ import matplotlib.pyplot as plt
 
 from uacpy.core.exceptions import ConfigurationError, FallbackWarning
 from uacpy.visualization.plots._common import (
-    fig_ax, typed_plot_error, _axes_pair, _carrier_or_arrays, _plot_warn,
-    _refuse_spread_carrier, _require_nonempty, _title_or)
+    fig_ax, typed_plot_error, _axes_pair, _carrier_or_arrays, _floored_dB,
+    _plot_warn, _refuse_spread_carrier, _require_nonempty, _title_or)
 
 
 
 
 @typed_plot_error
 def plot_channel(h, sample_rate=None, ax=None, *, delays_s=None, title=None,
-                 freq_title=None, figsize=(12, 4), **mpl_kw):
+                 freq_title=None, figsize=(12, 4), dynamic_range_dB=None,
+                 **mpl_kw):
     """Two-panel channel view: |h[n]| (delay) and |H(f)| (frequency response).
 
     Takes a :class:`~uacpy.comms.channel.ChannelTaps` — ``plot_channel(taps)``,
@@ -60,6 +61,10 @@ def plot_channel(h, sample_rate=None, ax=None, *, delays_s=None, title=None,
     figsize : tuple, optional
         Size (inches) of the new figure, ``(12, 4)`` by default; unused when
         ``ax`` is given.
+    dynamic_range_dB : float, optional
+        Depth (dB) below the peak of ``|H(f)|`` at which the frequency
+        response is floored, a null drawn on the floor; ``None`` is 120 dB,
+        as on :func:`plot_subcarriers`.
     **mpl_kw
         Matplotlib keywords for the frequency-response line.
     """
@@ -121,10 +126,10 @@ def plot_channel(h, sample_rate=None, ax=None, *, delays_s=None, title=None,
     # The transform is public, so a reader can get these numbers without
     # drawing them: it picks the two-sided FFT and the zero-padding, and
     # returns complex H. The dB floor is the plotter's, because it is a
-    # drawing decision — it sets how deep a null is painted, and 20*log10 of
-    # a perfect null is -inf, which no axis can show.
+    # drawing decision — it sets how deep a null is painted.
     f, H = channel_response(h, fs)
-    ax[1].plot(f, 20 * np.log10(np.abs(H) + 1e-12), **mpl_kw)
+    ax[1].plot(f, _floored_dB(H, dynamic_range_dB=dynamic_range_dB,
+                              who='plot_channel'), **mpl_kw)
     ax[1].set_xlabel("Frequency (Hz)")
     ax[1].set_ylabel("|H(f)| (dB)")
     ax[1].set_title(_title_or(title_freq, "Frequency response"))
@@ -133,16 +138,17 @@ def plot_channel(h, sample_rate=None, ax=None, *, delays_s=None, title=None,
 
 
 @typed_plot_error
-def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
-                           figsize=(7, 4), **mpl_kw):
-    """Doppler-scale ambiguity curve (peak correlation vs scale).
+def plot_doppler_ambiguity(estimate, ax=None, *, title=None, figsize=(7, 4),
+                           **mpl_kw):
+    """Doppler-scale ambiguity curve (peak correlation vs scale), with the
+    estimate marked.
 
     Parameters
     ----------
-    scales : array_like
-        The Doppler scales scanned (:func:`~uacpy.comms.estimate_doppler_scale`).
-    peak_metric : array_like
-        The peak matched-filter metric at each scale.
+    estimate : DopplerEstimate
+        What :func:`~uacpy.comms.estimate_doppler_scale` returns: the curve
+        is its ``peak_metric`` over its ``scales``, and the dashed line marks
+        its ``best_scale``, the estimator's own answer.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     title : str, optional
@@ -153,11 +159,23 @@ def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
     **mpl_kw
         Matplotlib keywords for the curve.
     """
-    s = np.asarray(scales, dtype=float)
-    p = np.asarray(peak_metric, dtype=float)
+    if not (hasattr(estimate, '_fields') and tuple(estimate._fields) == (
+            'best_scale', 'scales', 'peak_metric')):
+        raise ConfigurationError(
+            f"plot_doppler_ambiguity: needs the DopplerEstimate "
+            f"estimate_doppler_scale returns; got "
+            f"{type(estimate).__name__}.",
+            remediation="Pass the estimate whole: "
+                        "plot_doppler_ambiguity(estimate_doppler_scale(rx, "
+                        "probe)), or call .plot() on it.")
+    s = np.asarray(estimate.scales, dtype=float)
+    p = np.asarray(estimate.peak_metric, dtype=float)
+    best = float(estimate.best_scale) * 1e3
     fig, ax = fig_ax(ax, figsize)
-    ax.plot(s * 1e3, p / (p.max() + 1e-12), **mpl_kw)
-    best = s[int(np.argmax(p))] * 1e3
+    # Normalised to its own peak; an all-zero metric has none and is drawn
+    # as it is.
+    peak = float(np.max(p)) if p.size else 0.0
+    ax.plot(s * 1e3, p / peak if peak > 0.0 else p, **mpl_kw)
     ax.axvline(best, color="r", ls="--", lw=1, label=f"a = {best:.2f} e-3")
     ax.set_xlabel("Doppler scale a (×10⁻³)")
     ax.set_ylabel("Norm. peak correlation")
@@ -169,7 +187,7 @@ def plot_doppler_ambiguity(scales, peak_metric, ax=None, *, title=None,
 
 @typed_plot_error
 def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
-                     **mpl_kw):
+                     dynamic_range_dB=None, **mpl_kw):
     """Equalizer learning curve (MSE vs symbol index, dB).
 
     Parameters
@@ -185,13 +203,17 @@ def plot_convergence(mse, ax=None, *, label=None, title=None, figsize=(7, 4),
     figsize : tuple, optional
         Size (inches) of the new figure, ``(7, 4)`` by default; unused when
         ``ax`` is given.
+    dynamic_range_dB : float, optional
+        Depth (dB) below the largest MSE at which the curve is floored, a
+        zero error drawn on the floor; ``None`` is 120 dB.
     **mpl_kw
         Matplotlib keywords for the curve.
     """
     _require_nonempty('plot_convergence', mse=mse)
     m = np.asarray(mse, dtype=float)
     fig, ax = fig_ax(ax, figsize)
-    ax.plot(10 * np.log10(np.maximum(m, 1e-12)), label=label, **mpl_kw)
+    ax.plot(_floored_dB(m, power=True, dynamic_range_dB=dynamic_range_dB,
+                        who='plot_convergence'), label=label, **mpl_kw)
     ax.set_xlabel("Symbol index")
     ax.set_ylabel("MSE (dB)")
     ax.set_title(_title_or(title, "Equalizer convergence"))
@@ -239,7 +261,7 @@ def plot_sync_metric(metric, ax=None, *, threshold=None, title=None,
 
 @typed_plot_error
 def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
-                     figsize=(8, 3.5), **mpl_kw):
+                     figsize=(8, 3.5), dynamic_range_dB=None, **mpl_kw):
     """Channel magnitude across the OFDM subcarriers.
 
     Parameters
@@ -255,6 +277,10 @@ def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
     figsize : tuple, optional
         Size (inches) of the new figure, ``(8, 3.5)`` by default; unused when
         ``ax`` is given.
+    dynamic_range_dB : float, optional
+        Depth (dB) below the peak ``|H|`` at which the response is floored,
+        a null subcarrier drawn on the floor; ``None`` is 120 dB, as on
+        :func:`plot_channel`.
     **mpl_kw
         Matplotlib keywords for the response line.
     """
@@ -273,7 +299,8 @@ def plot_subcarriers(channel, n_subcarriers, ax=None, *, title=None,
     # Unshifted, so index k is the subcarrier ``ofdm_modulate`` /
     # ``ofdm_demodulate`` address as k.
     ax.plot(np.arange(nsc),
-            20 * np.log10(np.abs(H)), **mpl_kw)      # a zero bin is -inf, not -240 dB
+            _floored_dB(H, dynamic_range_dB=dynamic_range_dB,
+                        who='plot_subcarriers'), **mpl_kw)
     ax.set_xlabel("Subcarrier index")
     ax.set_ylabel("|H| (dB)")
     ax.set_title(_title_or(title, "OFDM subcarrier response"))
@@ -414,10 +441,14 @@ def plot_eye_diagram(signal, samples_per_symbol, ax=None, *, n_symbols=2,
 
 
 @typed_plot_error
-def plot_ber_curve(ebn0_dB, ber_measured, ax=None, *, scheme=None,
+def plot_ber_curve(ebn0_dB, ber_measured=None, ax=None, *, scheme=None,
                    label="measured", n_bits=None, title=None, figsize=(7, 5),
                    **mpl_kw):
     """Measured BER vs Eb/N0 (semilog-y) with optional theory overlay.
+    Consumes a :class:`~uacpy.comms.BerCurve` itself, or its arrays. A
+    ``BerCurve`` supplies ``n_bits`` when ``n_bits=`` is unset, and its
+    ``scheme`` when ``scheme=`` is unset and the link was uncoded with no
+    channel — the one link the closed-form AWGN curve describes.
 
     A point with zero observed errors measured no BER: the run only shows the
     rate is too low to resolve with the bits it sent. It is therefore not
@@ -428,10 +459,10 @@ def plot_ber_curve(ebn0_dB, ber_measured, ax=None, *, scheme=None,
 
     Parameters
     ----------
-    ebn0_dB : array_like
-        Eb/N0 (dB) of each measured point.
-    ber_measured : array_like
-        Measured bit error rate at each point.
+    ebn0_dB : BerCurve or array_like
+        The result itself, or the Eb/N0 (dB) of each measured point.
+    ber_measured : array_like, optional
+        Measured bit error rate at each point, with array input.
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     scheme : str, optional
@@ -448,6 +479,22 @@ def plot_ber_curve(ebn0_dB, ber_measured, ax=None, *, scheme=None,
     **mpl_kw
         Matplotlib keywords for the measured line.
     """
+    given = ebn0_dB
+    _unpacked = _carrier_or_arrays(
+        ebn0_dB, (ber_measured,), count=2, who="plot_ber_curve",
+        carrier=(('BerCurve',), ('ebn0_dB', 'ber')),
+        fields=('ebn0_dB', 'ber_measured'))
+    if _unpacked is not None:
+        ebn0_dB, ber_measured = _unpacked
+        if n_bits is None:
+            n_bits = getattr(given, 'n_bits', None)
+        if (scheme is None and getattr(given, 'code', None) is None
+                and getattr(given, 'channel', None) is None):
+            scheme = getattr(given, 'scheme', None)
+    elif ber_measured is None:
+        raise ConfigurationError(
+            "plot_ber_curve: pass both arrays, plot_ber_curve(ebn0_dB, "
+            "ber_measured), or one BerCurve, plot_ber_curve(ber_sweep(...)).")
     _require_nonempty('plot_ber_curve', ebn0_dB=ebn0_dB, ber_measured=ber_measured)
     ebn0 = np.atleast_1d(np.asarray(ebn0_dB, dtype=float))
     ber = np.atleast_1d(np.asarray(ber_measured, dtype=float))

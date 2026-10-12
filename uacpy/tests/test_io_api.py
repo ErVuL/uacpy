@@ -13,8 +13,8 @@ class TestTheCarriersTheReadersHandBackAreImportable:
 
     ``read_reflection_coefficient`` returns the package's own
     :class:`~uacpy.ReflectionCoefficient`, so it reads, plots and exports as
-    a Bounce or OASR table does; ``read_oast_tl`` returns a
-    :class:`~uacpy.ResultStack` of TL fields over frequency.
+    a Bounce or OASR table does; ``read_oast_tl`` returns a list of
+    :class:`~uacpy.Field` TL maps, one per frequency.
     """
 
     TABLE = "3\n 0.0 1.0 0.0\n 45.0 0.5 3.14\n 90.0 0.1 0.0\n"

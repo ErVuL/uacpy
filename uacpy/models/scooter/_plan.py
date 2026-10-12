@@ -8,7 +8,10 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
+)
+from uacpy.io.oalib_writer import writable_layers
 from uacpy.core.run_settings import RunMode
 from uacpy.models._window import (
     check_pinned_window, steep_path_notice as _steep_path_notice,
@@ -17,11 +20,15 @@ from uacpy.models._budget import memory_budget
 from uacpy.core.run_settings import Notice
 
 
-#: Scooter's ``rmax_factor`` defaults: RMax in units of the
-#: farthest receiver range, finer for the syntheses that sum many
-#: frequencies (see :func:`resolve_rmax_factor`).
-SCOOTER_RMAX_FACTOR_BROADBAND = 3.0
-SCOOTER_RMAX_FACTOR_NARROWBAND = 2.0
+#: Scooter's ``rmax_factor`` default in every run mode: RMax in units of the
+#: farthest receiver range (see :func:`resolve_rmax_factor`). 2 is the ratio
+#: of the toolbox's own Scooter decks, narrowband and broadband alike
+#: (tests/Munk/MunkS.env and tests/BroadBand/MunkS.env: RMax 200 km for
+#: receivers to 100 km); doc/scooter.htm asks only that RMax reach the
+#: farthest receiver ("You can get increased accuracy by making Rmax larger
+#: than the largest receiver range; however, run time will increase in
+#: direct proportion").
+SCOOTER_RMAX_FACTOR = 2.0
 
 # Bytes per (nk x nr) element the k->r transform holds at peak: the complex128
 # phase array it exponentiates in place (16) plus the complex64 kernel that
@@ -71,18 +78,18 @@ def _deck_nk(rmax_m: float, freq_max: float, c_low: float, c_high: float) -> int
     ``4000 * RMax_km * freq_max * (1/cLow - 1/cHigh)``.
 
     The deck's own rounding is applied first — ``write_phase_speed_and_rmax``
-    writes RMax as ``%.6f`` km and the phase-speed pair as ``%.1f`` — so this
+    writes RMax as ``%.6f`` km and the phase-speed pair exactly — so this
     reproduces the binary's count rather than an unrounded neighbour of it.
     """
     rmax_km = round(float(rmax_m) / 1000.0, 6)
-    cl = round(float(c_low), 1)
-    ch = round(float(c_high), 1)
-    return int(4000.0 * rmax_km * float(freq_max) * (1.0 / cl - 1.0 / ch))
+    return int(4000.0 * rmax_km * float(freq_max)
+               * (1.0 / float(c_low) - 1.0 / float(c_high)))
 
 
 def check_knobs(*, taper, c_low, c_high, wavenumber_spectrum) -> None:
     """Refuse a constructor knob no run could use: a taper outside
-    ``[0, 0.5)``, two pinned phase-speed bounds with ``c_low >= c_high``,
+    ``[0, 0.5)``, a pinned phase-speed bound that is not a positive finite
+    speed or two with ``c_low >= c_high``,
     an unknown ``wavenumber_spectrum``.
 
     Run at construction and again by every run (the attributes can be
@@ -103,6 +110,34 @@ def check_knobs(*, taper, c_low, c_high, wavenumber_spectrum) -> None:
         )
 
 
+def reject_fluid_below_elastic(env) -> None:
+    """Refuse a fluid sediment layer below an elastic one.
+
+    ``scooter.f90:206-207`` sets ``FirstAcoustic .. LastAcoustic`` over every
+    acoustic medium, so the acoustic block (``NTotal1``, ``:139``) spans the
+    elastic layer between the water and that fluid layer and assembles it
+    with its elastic-form coefficients (``:213-224``), while ``BCImpedance``
+    shoots up only through the media below ``LastAcoustic`` (``:374-379``):
+    the binary returns a field without error, and it is wrong — measured on
+    example 16's seabed against OAST, 52.44 against 60.07 dB median, whatever
+    the shear speed. Elastic layers below the last fluid one, down to a
+    fluid or elastic half-space, and an all-fluid stack run (measured within
+    0.07 dB of OAST)."""
+    shear = [float(layer.shear_speed) > 0.0
+             for layer in writable_layers(env.bottom)]
+    if True in shear and not all(shear[shear.index(True):]):
+        raise UnsupportedFeatureError(
+            'Scooter',
+            "a fluid sediment layer below an elastic one — scooter.f90:206-207 "
+            "takes FirstAcoustic..LastAcoustic over every acoustic medium, so "
+            "the acoustic block (:139) spans the elastic layer with its "
+            "elastic-form coefficients (:213-224) and BCImpedance shoots up "
+            "only below LastAcoustic (:374-379): the binary returns a wrong "
+            "field without an error",
+            alternatives=['OAST', "RAM(backend='rams')"],
+        )
+
+
 def refuse_nonpositive_range(receiver) -> None:
     """Refuse a receiver with no positive range: the spectral ``RMax`` is
     ``receiver.range_max × rmax_factor``, and ``scooter.f90:69`` sizes
@@ -118,10 +153,10 @@ def refuse_nonpositive_range(receiver) -> None:
         )
 
 
-def resolve_rmax_factor(run_mode: RunMode, *,
-                            rmax_factor) -> Tuple[float, str]:
+def resolve_rmax_factor(*, rmax_factor) -> Tuple[float, str]:
     """``(rmax_factor, origin)``: the effective multiplier for this
-    run and where it came from.
+    run and where it came from — the pinned value, else
+    :data:`SCOOTER_RMAX_FACTOR` in every run mode.
 
     ``scooter.exe`` writes only the wavenumber-domain ``.grn``; the k→r
     step is uacpy's :func:`~uacpy.core.acoustics.hankel_transform`, a
@@ -132,18 +167,14 @@ def resolve_rmax_factor(run_mode: RunMode, *,
     finite-element solve) and resolution scale linearly with the
     multiplier. A uniform-``Δk`` DFT is periodic in range with period
     ``2π/Δk ≈ 4·RMax_m`` at the top frequency, so the wrap-around
-    replica also moves out proportionally. ``BROADBAND`` /
-    ``TIME_SERIES`` use the finer grid: their syntheses sum many
-    frequencies, and an under-resolved ``G(k)`` shows up as trapezoidal
-    error in every one of them. User-pinned values win.
+    replica also moves out proportionally. User-pinned values win.
     """
     if rmax_factor is not None:
         return float(rmax_factor), 'Scooter(rmax_factor=…)'
-    if run_mode in _BROADBAND_MODES:
-        return (SCOOTER_RMAX_FACTOR_BROADBAND,
-                f'the {run_mode.name} default')
-    return (SCOOTER_RMAX_FACTOR_NARROWBAND,
-            f'the {run_mode.name} default')
+    return (SCOOTER_RMAX_FACTOR,
+            f"the default, {SCOOTER_RMAX_FACTOR:g} × the farthest receiver "
+            f"as the toolbox's Scooter decks (tests/Munk/MunkS.env, "
+            f"tests/BroadBand/MunkS.env)")
 
 
 def deck_max_frequency(source, frequencies):
@@ -188,7 +219,7 @@ def refuse_too_few_wavenumbers(nk: int, rmax_m: float, f_deck: float,
 
 def green_cube_axes(source, receiver,
                     settings) -> Tuple[int, int, int, int]:
-    """``(n_freqs, n_source_depths, n_receiver_depths, n_ranges)`` of
+    """``(n_frequencies, n_source_depths, n_receiver_depths, n_ranges)`` of
     the Green's-function cube and transform kernel ONE launch of this
     call holds.
 
@@ -198,17 +229,17 @@ def green_cube_axes(source, receiver,
     :func:`deck_max_frequency` mirrors. A per-depth loop launches one
     source depth at a time.
     """
-    n_freqs = 1
+    n_frequencies = 1
     if settings.mode in _BROADBAND_MODES and settings.frequencies.size > 1:
-        n_freqs = int(settings.frequencies.size)
+        n_frequencies = int(settings.frequencies.size)
     n_source_depths = (1 if settings.depth_loop == 'per_depth' else
                        int(np.atleast_1d(np.asarray(source.depths)).size))
-    return (n_freqs, n_source_depths,
+    return (n_frequencies, n_source_depths,
             int(np.atleast_1d(np.asarray(receiver.depths)).size),
             int(np.atleast_1d(np.asarray(receiver.ranges)).size))
 
 
-def green_cube_detail(nk: int, n_freqs: int, n_source_depths: int,
+def green_cube_detail(nk: int, n_frequencies: int, n_source_depths: int,
                       n_receiver_depths: int, n_ranges: int, *,
                       rmax_m: float, f_deck: float, c_low: float,
                       c_high: float) -> Tuple[int, int, str]:
@@ -234,7 +265,7 @@ def green_cube_detail(nk: int, n_freqs: int, n_source_depths: int,
     against peak RSS on an ``nk x nr`` of 120000 x 499, the estimate is
     1.17x the real peak — tight, and on the safe side.
     """
-    cube = (8 * int(n_freqs) * int(n_source_depths)
+    cube = (8 * int(n_frequencies) * int(n_source_depths)
             * int(n_receiver_depths) * int(nk))
     kernel = (_TRANSFORM_BYTES_PER_ELEMENT * int(nk)
               * max(int(n_ranges), 1))
@@ -242,7 +273,7 @@ def green_cube_detail(nk: int, n_freqs: int, n_source_depths: int,
     detail = (
         f"Nk = {int(nk)} wavenumber samples: a "
         f"{cube / 1024 ** 3:.1f} GiB complex64 Green's-function cube "
-        f"({int(n_freqs)} frequencies x {int(n_source_depths)} source "
+        f"({int(n_frequencies)} frequencies x {int(n_source_depths)} source "
         f"depth(s) x {int(n_receiver_depths)} receiver depth(s) x Nk x "
         f"8 B) and a {kernel / 1024 ** 3:.1f} GiB transform kernel "
         f"({int(nk)} x {int(n_ranges)} ranges), about "
@@ -255,7 +286,7 @@ def green_cube_detail(nk: int, n_freqs: int, n_source_depths: int,
 
 
 def reject_oversized_green_cube(
-    nk: int, n_freqs: int, n_source_depths: int,
+    nk: int, n_frequencies: int, n_source_depths: int,
     n_receiver_depths: int, n_ranges: int, *, rmax_m: float,
     f_deck: float, c_low: float, c_high: float,
 ) -> Tuple[int, Optional[Notice]]:
@@ -266,7 +297,7 @@ def reject_oversized_green_cube(
     free.
     """
     cube, peak, detail = green_cube_detail(
-        nk, n_freqs, n_source_depths, n_receiver_depths, n_ranges,
+        nk, n_frequencies, n_source_depths, n_receiver_depths, n_ranges,
         rmax_m=rmax_m, f_deck=f_deck, c_low=c_low, c_high=c_high)
     return peak, memory_budget(
         peak, model_name='Scooter', what='peak memory',
@@ -315,18 +346,25 @@ def mesh_floor_notice(freq0, freqs, *,
 def steep_path_notice(env, source, receiver,
                       c_high: float) -> Optional[Tuple[str, str]]:
     """``(note, warning)`` when a receiver's direct or surface-reflected
-    path is steeper than the auto-derived ``c_high`` integrates, else
-    ``None`` (:func:`~uacpy.models._window.steep_path_notice`).
+    path is steeper than a pinned ``c_high`` integrates, else ``None``
+    (:func:`~uacpy.models._window.steep_path_notice`); an unpinned
+    ``c_high`` is unbounded and keeps every path.
 
     A steeper path is simply absent from the field, with no sign of it in
-    the result: measured on a Lloyd geometry over a transparent bottom,
-    23 dB of error at 0.2 km. Jensen et al. (*Computational Ocean
-    Acoustics*, ch. 4 App. 1) recommend the unbounded ``k_min = 0``
-    whenever in doubt."""
+    the result: a component at grazing angle ``theta`` has the horizontal
+    wavenumber ``k*cos(theta)``, below the ``k_min = omega/c_high`` the
+    integral starts at. As an illustration, a Lloyd geometry over a
+    transparent bottom read 23 dB of error at 0.2 km with ``c_high`` at
+    1.05 x the water speed. Jensen et al. (*Computational Ocean
+    Acoustics*, ch. 4 App. 1) recommend the unbounded ``k_min = 0``."""
     return _steep_path_notice(
         env, source, receiver, c_high, model_name='Scooter',
         kept='paths', summed_in='integral',
-        evidence='measured 23 dB at 0.2 km in a Lloyd geometry',
-        remediation=("Pass c_high=1e9 to integrate from k = 0, the Acoustics "
-                "Toolbox's unbounded value, and a small taper (e.g. "
-                "taper=0.05) to remove the ripple the k_min edge leaves."))
+        evidence=('a component at grazing angle theta has the horizontal '
+                  'wavenumber k*cos(theta), below the integral\'s k_min = '
+                  'omega/c_high'),
+        remediation=("Leave c_high unset to integrate from k = 0 (Jensen et "
+                     "al., Computational Ocean Acoustics, ch. 4 App. 1: "
+                     "\"it is recommended to initially include these "
+                     "components by choosing k min = 0\")."),
+        pinned=True)

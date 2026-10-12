@@ -10,6 +10,7 @@ from uacpy.core.exceptions import ConfigurationError
 from typing import Optional
 from uacpy.core._validate import (
     require_increasing_axis, require_positive_finite_scalar,
+    require_real_signal,
 )
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core._finite_difference import warn_if_storage_under_resolves
@@ -386,7 +387,9 @@ def warp_signal(data, sample_rate: float, range_m: float,
     have the same length, so the argument-shape checks downstream cannot tell
     them apart and the error surfaces only as a wrong answer.
     """
-    x = np.asarray(data, dtype=float)
+    x = require_real_signal(
+        data, "warp_signal", shape_hint=" (n_samples,)",
+        why="; the warp resamples a real pressure trace.")
     fs = require_positive_finite_scalar(sample_rate, "warp_signal",
                                         "sample_rate", " Hz")
     n = x.size

@@ -44,7 +44,8 @@ from uacpy.core.acoustics.modal import modal_field
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.results import Field, PhaseReference, ResultStack
+from uacpy.core.results import Field, PhaseReference
+from uacpy.core.results._superposition import _stack_fields
 
 __all__ = ["free_field", "lloyd_mirror", "ideal_waveguide", "pekeris"]
 
@@ -68,7 +69,7 @@ def _check_source(source, who):
     if not source.has_unit_weights:
         raise ConfigurationError(
             f"{who}: the closed form returns one unit-amplitude field per "
-            f"source depth; superpose weights with ResultStack.superpose.")
+            f"source depth; superpose weights with Field.superpose.")
 
 
 def _isovelocity_water(env, who):
@@ -103,8 +104,9 @@ def _isovelocity_water(env, who):
 
 
 def _assemble(pressure_of, source, receiver, *, backend, extra=None):
-    """One Field per source depth — a ResultStack for several, like an
-    engine's run — from ``pressure_of(z_s, f)`` -> (n_depth, n_range)."""
+    """The field of each source depth — one Field over a leading
+    ``source_depth`` axis for several, like an engine's run — from
+    ``pressure_of(z_s, f)`` -> (n_depth, n_range)."""
     freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
     slabs = []
     for zs in np.atleast_1d(source.depths):
@@ -124,8 +126,8 @@ def _assemble(pressure_of, source, receiver, *, backend, extra=None):
             metadata=dict(extra or {})))
     if len(slabs) == 1:
         return slabs[0]
-    return ResultStack(slabs=slabs, coordinate=source.depths,
-                       coordinate_name='source_depth')
+    return _stack_fields(slabs, source.depths, coordinate_name='source_depth',
+                         who=backend)
 
 
 def _point_source(k, dz, r):
@@ -147,7 +149,8 @@ def free_field(source, receiver, *, sound_speed=DEFAULT_SOUND_SPEED):
     Parameters
     ----------
     source : Source
-        Point source(s); one Field per depth.
+        Point source(s); several depths give one Field over a
+        leading ``source_depth`` axis.
     receiver : Receiver
         Depth x range grid (m).
     sound_speed : float
@@ -175,7 +178,8 @@ def lloyd_mirror(source, receiver, *, sound_speed=DEFAULT_SOUND_SPEED):
     Parameters
     ----------
     source : Source
-        Point source(s); one Field per depth.
+        Point source(s); several depths give one Field over a
+        leading ``source_depth`` axis.
     receiver : Receiver
         Depth x range grid (m).
     sound_speed : float, optional
@@ -221,7 +225,8 @@ def ideal_waveguide(env, source, receiver):
     env : Environment
         Flat, isovelocity, lossless, rigid or vacuum bottom.
     source : Source
-        Point source(s) in the water; one Field per depth.
+        Point source(s) in the water; several depths give one
+        Field over a leading ``source_depth`` axis.
     receiver : Receiver
         Depth x range grid (m); depths below the bottom are NaN.
     """
@@ -337,7 +342,8 @@ def pekeris(env, source, receiver):
         Flat, isovelocity, lossless water over a half-space bottom with
         ``sound_speed`` above the water's and ``attenuation`` 0.
     source : Source
-        Point source(s) in the water; one Field per depth.
+        Point source(s) in the water; several depths give one
+        Field over a leading ``source_depth`` axis.
     receiver : Receiver
         Depth x range grid (m); depths below the seabed take the bottom's
         evanescent form.

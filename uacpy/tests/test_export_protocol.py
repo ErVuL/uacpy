@@ -304,14 +304,12 @@ class TestFieldAxesAndViews:
             f.view('level')
 
 
-def test_a_greens_function_npz_holding_values_loads_its_payload(tmp_path):
-    gf = _greens_function(False)
-    d = gf.to_dict()
+def test_a_greens_function_dict_without_its_payload_is_refused():
+    """Only the current layout is read: the payload is ``data``."""
+    d = _greens_function(False).to_dict()
     d['values'] = d.pop('data')
-    np.savez(tmp_path / 'g.npz', **d)
-    with np.load(tmp_path / 'g.npz', allow_pickle=True) as f:
-        back = GreensFunction.from_dict(dict(f))
-    np.testing.assert_array_equal(back.data, gf.data)
+    with pytest.raises(ConfigurationError, match='data'):
+        GreensFunction.from_dict(d)
 
 
 # ── carriers ───────────────────────────────────────────────────────────────
@@ -434,6 +432,27 @@ class TestGriddedCarriersHaveLabelledForms:
         back = type(a).from_xarray(ds)
         np.testing.assert_array_equal(back.data, a.data)
         assert not a.values().flags.writeable
+
+    def test_a_carrier_nested_in_a_mapping_field_round_trips(self):
+        """A carrier inside a mapping field — the WaterProfile record a
+        profile law keeps its pairs in, in
+        ``AbsorptionCoefficient.parameters`` — is written as its own
+        ``to_dict`` and read back as itself, through ``to_dict`` and
+        through ``to_xarray``'s JSON."""
+        pytest.importorskip('xarray')
+        import uacpy
+        from uacpy.core._water import WaterProfile
+        t = WaterProfile([0.0, 60.0, 200.0], [22.0, 12.0, 10.0])
+        a = uacpy.FrancoisGarrison(
+            [(0.0, 22.0), (60.0, 12.0), (200.0, 10.0)], 35.0,
+            8.0).table([1000.0, 2000.0])
+        saved = a.to_dict()['parameters']['temperature']
+        assert saved['__class__'].endswith('WaterProfile')
+        for back in (type(a).from_dict(a.to_dict()),
+                     type(a).from_xarray(a.to_xarray())):
+            assert back.parameters['temperature'] == t
+            assert uacpy.FrancoisGarrison(**back.parameters) == \
+                uacpy.FrancoisGarrison(**a.parameters)
 
 
 class TestSeabedAndSurfaceTables:
@@ -655,6 +674,30 @@ class TestTheShadeFileRecordExports:
         assert ds['bearing'].attrs['units'] == 'deg'
         self._assert_same(ShdFile.from_xarray(ds), self._record())
 
+    def test_the_receiver_depths_label_the_rows_or_pair_with_the_ranges(
+            self):
+        """A rectilinear file's receiver depths are the ``row`` axis's
+        coordinate; an irregular file's (one row) pair with the ranges. Both
+        round-trip."""
+        import dataclasses
+        pytest.importorskip('xarray')
+        from uacpy.io import ShdFile
+        ds = self._record().to_xarray()
+        assert ds['receiver_depth'].dims == ('row',)
+        assert ds['receiver_depth'].values.tolist() == [10.0, 20.0]
+        assert ds['receiver_depth'].attrs['units'] == 'm'
+        irregular = dataclasses.replace(
+            self._record(), plot_type='irregular ',
+            pressure=np.array([[[[1 + 2j, 3 - 1j]]]]))
+        ds = irregular.to_xarray()
+        assert ds['receiver_depth'].dims == ('range',)
+        self._assert_same(ShdFile.from_xarray(ds), irregular)
+        unmatched = dataclasses.replace(
+            self._record(), receiver_depths=np.array([10.0, 20.0, 30.0]))
+        ds = unmatched.to_xarray()
+        assert ds['receiver_depth'].dims == ('receiver_depth',)
+        self._assert_same(ShdFile.from_xarray(ds), unmatched)
+
     def test_a_shade_file_is_not_a_table(self):
         with pytest.raises(ConfigurationError, match='gridded'):
             self._record().to_dataframe()
@@ -721,16 +764,28 @@ class TestEveryRecordFreezesEveryArrayField:
         names = {cls.__name__ for cls in _record_classes()}
         assert {'ArgoProfile', 'RtsFile', 'ShdFile', 'Ssp3dFile'} <= names
 
+    #: Fields that keep a protocol name by design. A WaterProfile, the record
+    #: a carrier keeps (depth, value) pairs in, has no payload, so the
+    #: protocol's values() has nothing to return and the field is the
+    #: profile's values.
+    _PROTOCOL_NAMES_BY_DESIGN = {'WaterProfile': {'values'}}
+
     @pytest.mark.parametrize('cls', _record_classes(),
                              ids=lambda c: c.__name__)
     def test_no_field_shadows_a_protocol_name(self, cls):
         """A field named after an inherited method (``values``) takes the
-        method as its dataclass default and hides it on every instance."""
+        method as its dataclass default and hides it on every instance. A
+        field kept by design is declared with no default, so the method is
+        never its value."""
         import dataclasses
         from uacpy.core._export import CarrierExport
         protocol = {name for name in dir(CarrierExport)
                     if not name.startswith('__')}
-        assert not {f.name for f in dataclasses.fields(cls)} & protocol
+        kept = self._PROTOCOL_NAMES_BY_DESIGN.get(cls.__name__, set())
+        fields = {f.name: f for f in dataclasses.fields(cls)}
+        assert not (set(fields) & protocol) - kept
+        for name in kept:
+            assert fields[name].default is dataclasses.MISSING, name
 
     @pytest.mark.parametrize('cls', _record_classes(),
                              ids=lambda c: c.__name__)
@@ -800,3 +855,124 @@ class TestPerLaunchSettingsAreTables:
         with pytest.raises(ConfigurationError, match='no per-launch'):
             engine.to_dataframe()
 
+
+
+class TestSignalResultsExportTheirAxesByName:
+    """A result whose data field comes before its axes, or whose axes a
+    length coincidence could swap, states its dimensions."""
+
+    @pytest.mark.parametrize('level_max_dB', [128, 129, 150])
+    def test_a_histograms_level_axis_is_never_named_frequencies(
+            self, level_max_dB):
+        """129 frequencies: 128 levels makes level_edges as long as the
+        frequency axis, 129 makes the pdf's level axis as long."""
+        pytest.importorskip('xarray')
+        import warnings
+        from uacpy.acoustic_signal import probabilistic_welch
+        x = np.random.default_rng(0).standard_normal(8000 * 8)
+        pw = probabilistic_welch(x, 8000, nperseg=256,
+                                 level_max_dB=level_max_dB)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')        # segment_levels_dB is 2-D
+            ds = pw.to_xarray()
+        assert ds['pdf'].dims == ('level', 'frequencies')
+        assert ds['level_edges'].dims == ('level_edges_dim0',)
+        assert ds['frequencies'].dims == ('frequencies',)
+
+    def test_a_beamformed_field_exports_on_its_angles_grid_and_band(self):
+        pytest.importorskip('xarray')
+        from uacpy.acoustic_signal import beamform_field
+        bf = beamform_field(np.ones((8, 4, 5), dtype=complex),
+                            np.arange(8) * 0.75, np.linspace(-60, 60, 7),
+                            np.linspace(900, 1100, 5),
+                            grid_coords={'range': np.arange(4.0)})
+        ds = bf.to_xarray()
+        assert ds['response'].dims == ('angles', 'range', 'frequencies')
+        assert ds['element_power'].dims == ('range', 'frequencies')
+        np.testing.assert_array_equal(ds['range'].values, np.arange(4.0))
+        back = type(bf).from_xarray(ds)
+        np.testing.assert_array_equal(back.grid_coords['range'],
+                                      np.arange(4.0))
+        np.testing.assert_allclose(back.response, bf.response)
+
+    def test_a_beam_scan_exports_snr_on_angles_and_ranges(self):
+        pytest.importorskip('xarray')
+        from uacpy.acoustic_signal import beamform
+        b = beamform(np.ones((8, 3), dtype=complex), np.arange(8) * 0.75,
+                     np.linspace(-60, 60, 7), 1000.0, source_level_dB=150.0,
+                     noise_level_dB=60.0, ranges=np.array([1.0, 2.0, 3.0]))
+        ds = b.to_xarray()
+        assert ds['snr'].dims == ('angles', 'ranges')
+        assert float(ds['snr'].sel(ranges=2.0, angles=0.0)) == \
+            pytest.approx(float(b.snr[3, 1]))
+
+
+@pytest.mark.parametrize('build, key', [
+    (lambda: _greens_function(False), 'times'),
+    (lambda: _greens_function(False), 'stabilizing_attenuation'),
+])
+def test_a_greens_function_dict_missing_a_written_key_is_refused(build, key):
+    d = build().to_dict()
+    del d[key]
+    with pytest.raises(ConfigurationError, match=key):
+        GreensFunction.from_dict(d)
+
+
+@pytest.mark.parametrize('build, key', [
+    (_field, 'coords'),
+    (_arrivals, 'receiver_depths'),
+    (_rays, 'ray_lengths'),
+])
+def test_a_result_dict_missing_a_written_key_is_refused(build, key):
+    """A mapping that lacks a key ``to_dict`` always writes is refused,
+    naming the class and the key, not a raw KeyError."""
+    result = build()
+    d = result.to_dict()
+    del d[key]
+    with pytest.raises(ConfigurationError,
+                       match=f"{type(result).__name__}.from_dict.*{key}"):
+        type(result).from_dict(d)
+
+
+def test_arrival_columns_without_their_delays_are_refused():
+    d = _arrivals().to_dict()
+    del d['delays']
+    with pytest.raises(ConfigurationError, match="no .*'delays'"):
+        Arrivals.from_dict(d)
+
+
+def test_an_empty_arrival_set_round_trips():
+    """A set no arrival reached writes no columns, and reads back empty."""
+    cell = {k: np.array([]) for k in ('amplitudes', 'phases', 'delays')}
+    cell['n_arrivals'] = 0
+    empty = Arrivals(by_receiver=[[[cell]]], receiver_depths=[10.0],
+                     receiver_ranges=[100.0], frequencies=1000.0)
+    back = Arrivals.from_dict(empty.to_dict())
+    assert len(back.delays) == 0
+
+
+#: Keys a result's ``to_dict`` writes that its ``from_dict`` does not need:
+#: derived on reading (Arrivals' kinds), or arrival columns a hand-built set
+#: may lack (a set needs its delays and amplitudes only).
+_OPTIONAL_KEYS = {'kinds', 'phases', 'delays_imag', 'source_angles',
+                  'receiver_angles', 'n_top_bounces', 'n_bot_bounces',
+                  'src_idx', 'depth_idx', 'range_idx'}
+
+
+@pytest.mark.parametrize('name', MAKERS)
+def test_from_dict_reads_exactly_what_to_dict_writes(name):
+    """Every key ``to_dict`` writes is required: a mapping that lacks one is
+    refused naming it, never read with a default in its place."""
+    x = MAKERS[name]()
+    d = x.to_dict()
+    optional = _OPTIONAL_KEYS if isinstance(x, Arrivals) else {'kinds'}
+    for key in sorted(set(d) - optional):
+        partial = {k: v for k, v in d.items() if k != key}
+        with pytest.raises(ConfigurationError, match=key):
+            type(x).from_dict(partial)
+
+
+def test_the_identity_keys_are_what_every_result_writes():
+    from uacpy.core.results import Result
+    x = _field()
+    assert set(Result._IDENTITY_KEYS) == set(x._identity_dict())

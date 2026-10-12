@@ -496,12 +496,12 @@ def replica_banks():
 
     # One Bellhop run fills the whole bank: the candidate depths are the source
     # depths, the array elements are the receivers, and the candidate ranges
-    # are the range axis. The run returns a ResultStack over source_depth.
+    # are the range axis. The run returns one Field over source_depth.
     swept = uacpy.Source(depths=CAND_DEPTHS, frequencies=200.0)
     array = uacpy.Receiver(depths=ARRAY_DEPTHS, ranges=CAND_RANGES)
-    stack = Bellhop(n_beams=4000).run(env, swept, array,
+    field = Bellhop(n_beams=4000).run(env, swept, array,
                                       run_mode=RunMode.COHERENT_TL)
-    ray_bank = sonar.replica_bank_from_field(stack, array_depths=ARRAY_DEPTHS)
+    ray_bank = sonar.replica_bank_from_field(field, array_depths=ARRAY_DEPTHS)
 
     K = _csdm(modes)
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.6), sharey=True)

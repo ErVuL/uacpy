@@ -12,17 +12,25 @@ import numpy as np
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, ModelExecutionError, NumericsWarning,
 )
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, PropagationModel
+from uacpy.models._launch import (
+    BinarySearch, attach_prt_tail, require_output, run_prt_binary,
+)
+from uacpy.models.base import (
+    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._conventions import (
     _line_source_unit_at_1m, _source_sound_speed,
 )
-from uacpy.models._checks import reject_precalc_surface
+from uacpy.models._checks import (
+    reject_malformed_irc_bottom, reject_precalc_surface, total_media_depth,
+)
 from uacpy.models._projection import _max_roughness, _smooth_surface
 from uacpy.models._spec import EngineTraits, ModelSpec
-from uacpy.models._stacking import _slabs_of
 from uacpy.core.run_settings import OutputSpec, RunMode
-from uacpy.core.results import GreensFunction, PhaseReference, ResultStack
+from uacpy.core.results import GreensFunction, PhaseReference
+from uacpy.core.results._superposition import (restack_source_depths,
+                                               split_source_depths)
 from uacpy.io.at_codes import boundary_code
 from uacpy.io.grn_reader import read_grn_file
 from uacpy.io.oalib_writer import (
@@ -31,16 +39,22 @@ from uacpy.io.oalib_writer import (
     reject_biological_edges_under_neighbour_interp,
 )
 from uacpy.models.scooter._extract import assemble_field_from_grn
-from uacpy.models._window import resolve_window
+from uacpy.models._window import (
+    DEFAULT_C_MAX_UNBOUNDED, interface_wave_notice, resolve_window,
+)
 from uacpy.models.scooter._plan import (
     _BROADBAND_MODES, _deck_nk,
     _nk_consequence, check_knobs, deck_max_frequency,
     green_cube_axes, mesh_floor_notice, refuse_nonpositive_range,
-    refuse_too_few_wavenumbers, reject_oversized_green_cube,
-    resolve_rmax_factor, steep_path_notice,
+    refuse_too_few_wavenumbers, reject_fluid_below_elastic,
+    reject_oversized_green_cube, resolve_rmax_factor, steep_path_notice,
 )
 from uacpy.models.scooter._settings import ScooterSettings
 from uacpy.core.engine_defaults import SCOOTER_N_MESH
+from uacpy.models._extract import (
+    attach_output_paths, finish_broadband, mask_unresolvable_depths,
+    stamp_result,
+)
 
 # File root of the deck and of every file the binary writes next to it.
 _BASE_NAME = 'model'
@@ -62,15 +76,16 @@ class Scooter(PropagationModel):
     Hankel transform (:meth:`~uacpy.core.results.GreensFunction.to_field`).
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the layer
-    stack is kept since Scooter consumes layered seabed columns natively).
+    Per-model: ``'ssp': 'mean'`` (the layer stack is kept since Scooter
+    consumes layered seabed columns natively).
 
     Defaults auto-derived at ``run()`` time:
 
-    - ``c_low=None`` → ``min(env.ssp) × 0.95``
-    - ``c_high=None`` → ``max(max(env.ssp), env.bottom.sound_speed) × 1.05``,
-      or the unbounded sentinel for a vacuum, rigid, ``'file'`` or
-      ``'precalc'`` bottom
+    - ``c_low=None`` → ``min(env.ssp) × 0.9`` (``scooter.f90:258``'s own
+      factor, :data:`~uacpy.core.engine_defaults.C_LOW_FACTOR`)
+    - ``c_high=None`` → the unbounded ``DEFAULT_C_MAX_UNBOUNDED`` (1e9 m/s,
+      ``k_min = 0``) over every bottom, as Jensen et al. (*Computational
+      Ocean Acoustics*, ch. 4 App. 1) recommend
     - Spectral ``RMax = receiver.range_max × rmax_factor``
     - ``n_mesh=0`` → Scooter picks from frequency / wavelength.
     - TopOpt position 4 reads ``env.absorption``.
@@ -104,7 +119,7 @@ class Scooter(PropagationModel):
         modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
         supports={'layered_bottom', 'elastic_media', 'rough_surface'},
         source_types=frozenset({'point', 'line', 'scaled'}),
-        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+        collapse={'ssp': 'mean'},
         traits=EngineTraits(
             consumes_run_t_start=True,
             # TopOpt position 4 carries env.absorption to the engine.
@@ -121,6 +136,12 @@ class Scooter(PropagationModel):
         ),
     )
     provenance_id = 'acoustics_toolbox'
+
+    _BINARIES = MappingProxyType({
+        'scooter': BinarySearch(('scooter.exe',), ('oalib',),
+                                'Acoustics-Toolbox/Scooter'),
+    })
+
     # Complex pressure in the travelling-wave convention of the .grn
     # transform for the TL and H(f) modes; the synthesised p(t) is real.
     outputs = MappingProxyType({
@@ -161,43 +182,52 @@ class Scooter(PropagationModel):
         ----------
         executable : Path, optional
             Path to ``scooter.exe``. Auto-detected if ``None``.
-        c_low : float, optional
-            Lower phase speed limit (m/s). None = auto (0.95 * min SSP
-            speed). The auto value reads the water only, so seabed
-            interface (Scholte) waves slower than it are outside the
-            integration window: for a source or receiver near an elastic
-            seabed, set ``c_low`` below the slowest shear speed
-            (``docs/models/scooter.md``, "Layered and elastic seabeds").
         c_low, c_high : float, optional
-            Phase-speed bounds (m/s). ``None`` ⇒ ``0.95 × min SSP`` /
-            ``1.05 × max(SSP, bottom)``; a vacuum, rigid, ``'file'`` or
-            ``'precalc'`` bottom has no half-space speed to cap on, so ``c_high``
-            resolves to the AT "unbounded" sentinel (1e9 m/s) instead (see
-            :func:`~uacpy.models._window.resolve_phase_speed_bounds`). The
+            Phase-speed bounds (m/s), each positive and ``c_low < c_high``.
+            ``None`` ⇒ ``0.9 × min SSP`` / the AT "unbounded" sentinel
+            (1e9 m/s, ``doc/bounce.htm``: "CMax to 1.0E9") over every
+            bottom, so the integral starts at ``k_min = omega/c_high ≈ 0``:
+            Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1
+            step 1), "it is recommended to initially include these
+            components by choosing k min = 0" (see
+            :func:`~uacpy.models._window.resolve_window`). That costs
+            wavenumbers — ``Nk`` grows as ``1/c_low − 1/c_high``, 4-11x a
+            window capped at 1.05 x the fastest speed on the cases measured —
+            and a pinned ``c_high``
+            is written as given; one that cuts a direct or surface-reflected
+            path the receivers see warns. The
             default ``c_low`` reads the water only, so the interface (Scholte)
-            waves an elastic seabed carries below it are left out: for a source
-            or receiver near the seabed, set ``c_low`` below the slowest shear
-            speed (``docs/models/scooter.md``, "Layered and elastic seabeds").
-        c_high : float, optional
-            Upper phase speed limit (m/s). None = auto (1.05 * max of SSP and
-            bottom speed; unbounded, 1e9 m/s, for a vacuum, rigid, 'file' or
-            'precalc' bottom, which has no half-space speed).
+            waves an elastic seabed carries below it are left out — the run
+            warns when the geometry reaches within one of their wavelengths
+            of the seabed: set ``c_low`` below the slowest shear speed
+            (``docs/models/scooter.md``, "Layered and elastic seabeds").
         n_mesh : int, optional
             Total number of mesh points PER MEDIUM used by the finite-element
             spectral solver (AT's ``NG`` column on the SSP mesh line). 0 = let
-            Scooter pick automatically from frequency / wavelength. Default: 0.
+            Scooter pick automatically from frequency / wavelength, as
+            ``doc/EnvironmentalFile.htm`` documents ("If you type 0 for the
+            number of mesh points, the code will calculate NMESH
+            automatically"; scaled with frequency and floored at 100 points
+            by ``scooter.f90:106-110``).
             Note: this is NOT a "points per wavelength" density — it is a total
-            point count per medium.
-            Default ``0``.
+            point count per medium. Default ``0``.
         rmax_factor : float, optional
             Multiplier on ``receiver.ranges.max()`` to set Scooter's spectral
             ``RMax``, which fixes the wavenumber sampling:
             ``scooter.f90:69`` takes ``Nk = INT(2000·RMax_km·(kMax−kMin)/π)``,
-            i.e. ``Δk ≈ π/(2·RMax_m)``. Default ``None`` → 2.0 for
-            ``COHERENT_TL``, 3.0 for ``BROADBAND`` / ``TIME_SERIES``.
+            i.e. ``Δk ≈ π/(2·RMax_m)``. Default ``None`` → 2.0 in every run
+            mode, the ratio of the toolbox's own Scooter decks, narrowband
+            and broadband (``tests/Munk/MunkS.env``,
+            ``tests/BroadBand/MunkS.env``: RMax 200 km for receivers to
+            100 km). ``doc/scooter.htm`` asks only that RMax reach the
+            farthest receiver ("You can get increased accuracy by making
+            Rmax larger than the largest receiver range; however, run time
+            will increase in direct proportion").
         interp_ssp : str, optional
             SSP connection scheme written into ``TopOpt(1)``. ``None``
-            (default) resolves to ``'linear'`` (C-linear): Scooter declares
+            (default) resolves to ``'linear'`` (C-linear, the manual's choice
+            when unsure: "If your not sure which option to take, I'd suggest
+            you use 'C'.", ``doc/EnvironmentalFile.htm``): Scooter declares
             no range-dependent-SSP capability, so ``run()`` collapses
             ``env.ssp`` to 1-D before the deck is written and the
             range-dependent auto-pick never applies. Explicit values:
@@ -209,7 +239,7 @@ class Scooter(PropagationModel):
             the letter is applied by the in-tree Hankel transform, which
             follows ``Matlab/Scooter/fieldsco.m:170-181``. 'positive'
             (default) uses only the positive wavenumber spectrum (fast,
-            recommended). 'negative' uses only the negative branch; 'both'
+            recommended: ``doc/fields.htm``, "'P' Positive (recommended)"). 'negative' uses only the negative branch; 'both'
             integrates along the full k-axis.
         taper : float, optional
             Hanning roll-off applied to the wavenumber kernel over this fraction
@@ -241,22 +271,21 @@ class Scooter(PropagationModel):
             Values far above that attenuate real spectrum, which is occasionally
             what you want (the far evanescent tail is the least well conditioned
             part of the solve) and is never free. Measure it against something
-            independent before adopting one.
+            independent before adopting one. A Green's function of fewer
+            than four phase speeds has no room for a roll-off at each edge,
+            and a run that returns one refuses a positive taper.
         stabilizing_attenuation_off : bool, optional
             If True, writes ``'0'`` at TopOpt position 7. Scooter then
             replaces its default ``Atten = Deltak`` with zero
-            (``scooter.f90:81,129-130``). Leave False (default) unless you
-            know what you're doing — the stabiliser is there to prevent
+            (``scooter.f90:81,129-130``). Default ``False``, SCOOTER's own
+            (``doc/EnvironmentalFile.htm``: "Use 0 (zero) to disable
+            stabilizing attenuation in SCOOTER"); leave it unless
+            you know what you're doing — the stabiliser is there to prevent
             pole-on-contour blow-ups.
-            Default ``False``; leave it unless you know what you're doing (the
-            stabiliser prevents pole-on-contour blow-ups).
         use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
             Standard plumbing (see :class:`PropagationModel`).
         """
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse,
-        )
+        super().__init__(**_host_options(locals()))
 
         self.c_low = c_low
         self.c_high = c_high
@@ -281,20 +310,14 @@ class Scooter(PropagationModel):
                 "Scooter(stabilizing_attenuation_off=True) removes the contour "
                 "offset that keeps the modal poles off the integration path "
                 "(scooter.f90:581), so the wavenumber integral is evaluated "
-                "through them. Measured 6.7 dB TL error at 5 km against Kraken "
-                "on a 100 m Pekeris guide, against 0.075 dB with the stabiliser "
-                "on. Use it only to inspect the un-damped kernel.",
+                "through them. Use it only to inspect the un-damped kernel.",
                 NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
         self._exe = self._resolve_executable(
-            executable,
-            lambda: self._find_executable_in_paths(
-                'scooter.exe', bin_subdirs='oalib',
-                dev_subdir='Acoustics-Toolbox/Scooter',
-            ),
+            executable, lambda: self._find_binary('scooter'),
         )
 
     def _project_environment(self, env, *, request=None):
@@ -351,14 +374,18 @@ class Scooter(PropagationModel):
         - a receiver with no positive range: the spectral ``RMax`` is
           ``receiver.range_max × rmax_factor``, and ``scooter.f90:69``
           sizes the wavenumber grid from it — a non-positive value stops the
-          binary with a bare STOP that names no cause.
+          binary with a bare STOP that names no cause;
+        - a fluid sediment layer below an elastic one, which the binary
+          assembles as acoustic and returns wrong
+          (:func:`~uacpy.models.scooter._plan.reject_fluid_below_elastic`).
         """
         reject_precalc_surface(env, model_name=self.model_name)
         reject_unsupported_ssp_interp('Scooter', self.interp_ssp)
         reject_biological_edges_under_neighbour_interp(
             'Scooter', env, self.interp_ssp)
-        self._reject_malformed_irc_bottom(env)
+        reject_malformed_irc_bottom(self.model_name, env)
         refuse_nonpositive_range(receiver)
+        reject_fluid_below_elastic(env)
 
     def _resolve_engine_settings(self, env, source, receiver, settings, *,
                                  given_env, request=None) -> ScooterSettings:
@@ -396,9 +423,10 @@ class Scooter(PropagationModel):
         reject_coarse_at_mesh('Scooter', self.n_mesh, env, freq0)
 
         multiplier, multiplier_origin = resolve_rmax_factor(
-            settings.mode, rmax_factor=self.rmax_factor)
+            rmax_factor=self.rmax_factor)
         rmax_m = float(receiver.ranges.max()) * multiplier
         window = resolve_window(env, c_low=self.c_low, c_high=self.c_high,
+                                c_high_unbounded=DEFAULT_C_MAX_UNBOUNDED,
                                 model_name='Scooter')
         cl, ch = window.c_low, window.c_high
         if self.c_low is None or self.c_high is None:
@@ -430,8 +458,13 @@ class Scooter(PropagationModel):
             mesh_floor_notice(
                 freq0, deck_frequencies if broadband else [freq0],
                 n_mesh=self.n_mesh),
-            (None if self.c_high is not None else
+            (None if self.c_high is None else
              steep_path_notice(env, source, receiver, ch)),
+            (None if self.c_low is not None else
+             interface_wave_notice(
+                 env, source, receiver, cl,
+                 min(deck_frequencies if broadband else [freq0]),
+                 model_name='Scooter')),
             headroom,
         ]
         notices = [n for n in notices if n is not None]
@@ -491,9 +524,8 @@ class Scooter(PropagationModel):
         """Stage 4: run ``scooter.exe`` on the deck through the shared
         binary-launch helper, clearing a stale ``.grn`` first."""
         self._log("Running...")
-        self._run_and_attach_prt([str(self._exe), deck.stem],
-                                 inputs.work_dir, deck.stem,
-                                 stale_outputs=('.grn',))
+        run_prt_binary(self._launch_context(), [str(self._exe), deck.stem],
+                       inputs.work_dir, deck.stem, stale_outputs=('.grn',))
 
     def _read_output(self, inputs, deck: Path) -> GreensFunction:
         """Stage 4: the Green's function as
@@ -510,8 +542,8 @@ class Scooter(PropagationModel):
         work_dir = inputs.work_dir
         # A missing or empty .grn means the binary died silently; the raised
         # error carries the .prt tail with the actual cause.
-        grn_file = self._require_output(
-            [work_dir / f'{base_name}.grn'],
+        grn_file = require_output(
+            self.model_name, [work_dir / f'{base_name}.grn'],
             what="a Green's function (.grn)",
             prt_base=base_name, work_dir=work_dir,
         )
@@ -527,7 +559,7 @@ class Scooter(PropagationModel):
                     f"wavenumber sample(s); {_nk_consequence(nk)}"
                 ),
             )
-            self._attach_prt_tail(exc, work_dir, base_name)
+            attach_prt_tail(exc, work_dir, base_name)
             raise exc
         return greens_function
 
@@ -547,7 +579,9 @@ class Scooter(PropagationModel):
             raw, source, inputs.receiver, broadband, taper=self.taper,
             spectrum=self.wavenumber_spectrum, model_name=self.model_name,
             log=self._log)
-        slabs = _slabs_of(result)
+        # Each source depth of the deck on its own (a one-depth field is its
+        # own one), joined on the source_depth axis again below.
+        slabs = split_source_depths(result)
         sources = ([source.at_depth(i) for i in range(len(slabs))]
                    if len(slabs) > 1 else [source])
         for slab, slab_source in zip(slabs, sources):
@@ -570,26 +604,29 @@ class Scooter(PropagationModel):
 
             freqs = (np.array(settings.frequencies, dtype=float) if broadband
                      else float(source.frequencies[0]))
-            self._stamp_result(
-                slab, slab_source, backend='scooter', frequencies=freqs,
+            stamp_result(
+                self.model_name, self.provenance, slab, slab_source,
+                backend='scooter', frequencies=freqs,
                 phase_reference=PhaseReference.TRAVELLING_WAVE.value)
 
-            self._attach_output_paths(
+            attach_output_paths(
                 slab, inputs.work_dir, deck.stem,
                 primary_files=(('grn_file', '.grn'),),
+                cleanup=self.cleanup,
             )
 
         self._log("Simulation complete")
-        media_depth = self._total_media_depth(env)
-        if isinstance(result, ResultStack):
+        media_depth = total_media_depth(env)
+        if len(slabs) > 1:
             # Narrowband only (the broadband modes loop per depth), so
             # there is no synthesis to finish.
-            result.slabs = [
-                self._mask_unresolvable_depths(slab, inputs.receiver,
-                                               media_depth)
-                for slab in result.slabs]
-            return result
+            return restack_source_depths(
+                [mask_unresolvable_depths(self.model_name, slab,
+                                          inputs.receiver, media_depth)
+                 for slab in slabs],
+                result, who=f"{self.model_name}.run")
+        result = slabs[0]
         if settings.time is not None:
-            result = self._finish_broadband(result, settings)
-        return self._mask_unresolvable_depths(
-            result, inputs.receiver, media_depth)
+            result = finish_broadband(self.model_name, result, settings)
+        return mask_unresolvable_depths(
+            self.model_name, result, inputs.receiver, media_depth)

@@ -14,6 +14,8 @@ from collections import namedtuple
 import numpy as np
 import scipy.signal as _sig
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
+from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+from uacpy.core.acoustics import power_to_dB
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import (
     require_at_most_nyquist, require_finite_signal,
@@ -73,6 +75,11 @@ class CWTResult(PlottedResult,
         return {"frequencies": "Hz", "times": "s", "coefficients": None}
 
 
+#: Unit of a ``'magnitude'`` / ``'complex'`` spectrogram, per scaling: the
+#: STFT carries the square root of the scaling's factor.
+_STFT_UNITS = {"density": "Pa/√Hz", "spectrum": "Pa"}
+
+
 class SpectrogramResult(PlottedResult,
                         namedtuple("SpectrogramResult",
                                    "frequencies times power")):
@@ -83,7 +90,8 @@ class SpectrogramResult(PlottedResult,
     panel holds rides on attributes, as on :class:`SpectralEstimate`:
     ``scaling`` (``'density'`` Pa²/Hz or ``'spectrum'`` Pa²) and ``mode``
     (``'psd'``, or ``'magnitude'`` / ``'complex'`` / ``'angle'`` /
-    ``'phase'``, for which ``power`` is not a power).
+    ``'phase'``, for which ``power`` is not a power). :meth:`level_dB`
+    gives a ``'psd'`` panel as levels in dB re a reference pressure.
     """
 
     _attrs = ("scaling", "mode")
@@ -98,12 +106,45 @@ class SpectrogramResult(PlottedResult,
         self.mode = str(mode)
         return self
 
+    def level_dB(self, ref=REFERENCE_PRESSURE_WATER):
+        """The ``'psd'`` panel as levels in dB re the reference pressure
+        ``ref`` (Pa, 1 µPa by default): :func:`~uacpy.core.acoustics.power_to_dB`
+        of ``power``, in dB re 1 µPa²/Hz under ``scaling='density'`` and
+        dB re 1 µPa² under ``'spectrum'`` — the levels :meth:`plot` draws.
+
+        A ``'magnitude'`` / ``'complex'`` / ``'angle'`` / ``'phase'`` panel
+        holds no power, so it is refused.
+
+        Parameters
+        ----------
+        ref : float, optional
+            Reference pressure (Pa).
+
+        Returns
+        -------
+        numpy.ndarray
+            The levels, shaped as ``power``.
+        """
+        if self.mode != "psd":
+            raise ConfigurationError(
+                f"SpectrogramResult.level_dB: this panel was computed with "
+                f"mode={self.mode!r}, which holds no power to take a level "
+                f"of.",
+                remediation="Compute the spectrogram with mode='psd' (the "
+                            "default).")
+        return power_to_dB(self.power, ref)
+
     def _field_units(self):
         # 'psd' holds the power the scaling names, 'angle' / 'phase' a
-        # phase in radians; 'magnitude' and 'complex' hold STFT values,
-        # calibrated to no unit.
-        power = (POWER_UNITS[self.scaling] if self.mode == "psd" else
-                 "rad" if self.mode in ("angle", "phase") else None)
+        # phase in radians; 'magnitude' and 'complex' hold the STFT scaled
+        # by the square root of the scaling's factor: Pa/√Hz under
+        # 'density', Pa under 'spectrum'.
+        if self.mode == "psd":
+            power = POWER_UNITS[self.scaling]
+        elif self.mode in ("angle", "phase"):
+            power = "rad"
+        else:
+            power = _STFT_UNITS.get(self.scaling)
         return {"frequencies": "Hz", "times": "s", "power": power}
 
 
@@ -191,9 +232,12 @@ def _smoothing_window(spec, name):
     return w, w.size // 2
 
 
-# Cap on the (NF, n) float64 distribution, checked before it is allocated:
-# 2**27 cells is 1 GiB, the ceiling ``detect._MAX_AMBIGUITY_CELLS`` sets.
-_MAX_WIGNER_CELLS = 1 << 27
+# Cap on a time-frequency surface, in bytes, checked before it is allocated:
+# 1 GiB, the ceiling ``detect._MAX_AMBIGUITY_CELLS`` sets for its surface.
+_MAX_SURFACE_BYTES = 1 << 30
+
+# The (NF, n) float64 Wigner-Ville distribution under that cap: 2**27 cells.
+_MAX_WIGNER_CELLS = _MAX_SURFACE_BYTES // 8
 
 
 # Largest fraction of a complex signal's energy ``wigner_ville`` accepts at
@@ -420,7 +464,7 @@ def _reconstruction_constants(wavelet, w0, order):
 
 
 def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
-        order=None, n_freqs=64):
+        order=None, n_frequencies=64):
     """Continuous wavelet transform with a selectable wavelet (FFT-based).
 
     At each scale the signal is filtered by the chosen analysing wavelet
@@ -435,8 +479,8 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
     sample_rate : float
         Sample rate (Hz).
     frequencies : array, optional
-        Frequencies (Hz) to analyse. Default: ``n_freqs`` log-spaced points
-        from ``4*fs/N`` to ``fs/2``.
+        Frequencies (Hz) to analyse. Default: ``n_frequencies`` log-spaced
+        points from ``4*fs/N`` to ``fs/2``.
     wavelet : {'morlet', 'paul', 'dog'}
         Analysing wavelet. ``'morlet'`` (complex, best frequency resolution),
         ``'paul'`` (complex, best time resolution), ``'dog'`` (real Derivative
@@ -447,7 +491,7 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
     order : int, optional
         Wavelet order ``m``. Default 4 for ``'paul'``, 2 for ``'dog'``; ignored
         for ``'morlet'``.
-    n_freqs : int
+    n_frequencies : int
         Number of log-spaced frequencies when ``frequencies`` is None.
 
     Notes
@@ -469,7 +513,7 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
         ``(frequencies, times, coefficients)``: the analysis frequencies
         (Hz), the time (s) of each sample, ``arange(len(data)) /
         sample_rate``, and the complex CWT coefficients, shape
-        ``(n_freqs, len(data))``; ``abs(coefficients)`` is the scalogram.
+        ``(n_frequencies, len(data))``; ``abs(coefficients)`` is the scalogram.
     """
     xr = require_real_signal(
         data, "cwt", why="; the transform analyses a real signal.")
@@ -486,7 +530,7 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
                 f"range — the lowest analysis frequency {f_lo:.1f} Hz already "
                 f"exceeds Nyquist {fs / 2.0:.1f} Hz. Pass an explicit "
                 "`frequencies=` below Nyquist, or use a longer signal.")
-        frequencies = np.geomspace(f_lo, fs / 2.0, int(n_freqs))
+        frequencies = np.geomspace(f_lo, fs / 2.0, int(n_frequencies))
     frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
     if np.any(frequencies <= 0):
         bad = frequencies <= 0
@@ -497,6 +541,14 @@ def cwt(data, sample_rate, frequencies=None, wavelet="morlet", *, w0=6.0,
     require_at_most_nyquist(frequencies, fs, "cwt", "analysis frequencies",
                             "the sampled wavelet aliases and the coefficients "
                             "are numerical residue, not band content")
+    # The scalogram is one complex128 row per frequency, as long as the record.
+    nbytes = 16 * frequencies.size * n
+    if nbytes > _MAX_SURFACE_BYTES:
+        raise ConfigurationError(
+            f"cwt: the scalogram would be {frequencies.size} x {n} complex "
+            f"cells ({nbytes / 2 ** 30:.2f} GiB), past the "
+            f"{_MAX_SURFACE_BYTES / 2 ** 30:.2f} GiB cap. Decimate or shorten "
+            f"the record, or pass fewer n_frequencies / frequencies.")
     omega = 2.0 * np.pi * np.fft.fftfreq(n)  # rad/sample
     Xf = np.fft.fft(xr)
     # One scale gives the factor; scales follow from f = factor*fs/s.
@@ -531,7 +583,7 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
     Parameters
     ----------
     W : ndarray
-        CWT coefficients ``(n_freqs, n_time)`` from :func:`cwt`.
+        CWT coefficients ``(n_frequencies, n_time)`` from :func:`cwt`.
     frequencies : array
         The analysis frequencies returned by :func:`cwt`.
     sample_rate : float
@@ -553,8 +605,8 @@ def inverse_cwt(W, frequencies, sample_rate, wavelet="morlet", *, w0=6.0,
     frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
     if Wc.ndim != 2 or Wc.shape[0] != frequencies.size:
         raise ConfigurationError(
-            "inverse_cwt: W must be (n_freqs, n_time) matching frequencies"
-            f"; got W shape {Wc.shape} and {frequencies.size} frequencies.")
+            "inverse_cwt: W must be (n_frequencies, n_time) matching "
+            f"frequencies; got W shape {Wc.shape} and {frequencies.size} frequencies.")
     if order is None:
         order = 4 if wavelet == "paul" else 2
     fs = require_positive_finite_scalar(sample_rate, "inverse_cwt",
@@ -821,9 +873,13 @@ def spectrogram(data, sample_rate, *, window="hann", nperseg=_DEFAULT_NPERSEG,
     and model time series. ``mode`` is passed through to
     :func:`scipy.signal.spectrogram`: ``'psd'`` (default) is the power
     spectral density the stated Pa²/Hz units apply to; ``'complex'`` /
-    ``'magnitude'`` return the (windowed) STFT itself in Pa /
-    ``'angle'``/``'phase'`` its phase in radians — for those the ``power``
-    field is not a power and the Pa²/Hz units do not apply. For logarithmic /
+    ``'magnitude'`` return the windowed STFT scaled by the square root of
+    the scaling's factor — Pa/√Hz under ``scaling='density'``, Pa under
+    ``'spectrum'``, where a tone of amplitude A reads A/2 — and carry no
+    one-sided doubling, so their square is the two-sided density (half
+    the ``'psd'`` value off DC and Nyquist); ``'angle'``/``'phase'``
+    return its phase in radians. For those four the ``power`` field is
+    not a power and the Pa²/Hz units do not apply. For logarithmic /
     constant-Q frequency resolution, see
     :func:`uacpy.acoustic_signal.constant_q_spectrogram`.
 

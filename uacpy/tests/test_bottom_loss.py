@@ -7,6 +7,8 @@ import warnings
 import numpy as np
 import pytest
 
+from uacpy.core.exceptions import FallbackWarning
+
 from uacpy.core.acoustics import (
     bottom_loss_curve, reflection_coeff)
 from uacpy.core.constants import DEFAULT_WATER_DENSITY_G_CM3
@@ -273,6 +275,43 @@ def _fluid_solid_R(graz_deg, cp1, rho1, cp2, cs2, rho2,
     else:
         Ztot = Zp
     return (Ztot - Z1) / (Ztot + Z1)
+
+
+class TestAnIgnoredShearSpeedIsAnnounced:
+    """The curve is fluid-fluid. A carrier or dict that carries a positive
+    shear speed is evaluated as that fluid with a FallbackWarning naming
+    the speed; the same seabed without shear, and a preset name (its fluid
+    curve by definition), are silent. Both sides pinned."""
+
+    @staticmethod
+    def _warnings(material):
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            bottom_loss_curve(material, grazing_angles_deg=[30.0, 60.0])
+        return [w for w in caught
+                if issubclass(w.category, FallbackWarning)]
+
+    @pytest.mark.parametrize('shear, warns', [(2500.0, True), (1e-3, True),
+                                              (0.0, False)])
+    def test_a_carrier_warns_exactly_when_it_carries_shear(self, shear, warns):
+        from uacpy.core import BoundaryProperties
+        rock = BoundaryProperties('half-space', density=2.773,
+                                  sound_speed=5250.0, attenuation=0.1,
+                                  shear_speed=shear)
+        caught = self._warnings(rock)
+        assert len(caught) == int(warns)
+        if warns:
+            assert f'shear speed ({shear:g} m/s) is ignored' in str(
+                caught[0].message)
+
+    def test_a_dict_with_shear_warns(self):
+        assert len(self._warnings({'sound_speed': 1650.0, 'density': 1.9,
+                                   'attenuation': 0.8,
+                                   'shear_speed': 110.0})) == 1
+
+    def test_a_preset_name_is_its_fluid_curve_silently(self):
+        assert self._warnings('basalt') == []
 
 
 class TestShearLossMagnitude:

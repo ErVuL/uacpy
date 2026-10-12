@@ -1,7 +1,9 @@
 """Tests for the shared HTTP layer retry/backoff (uacpy.data._http)."""
 
 import errno
+import http.client
 import pathlib
+import ssl
 import urllib.error
 import urllib.request
 
@@ -39,6 +41,28 @@ def test_retries_on_429_then_succeeds(monkeypatch):
     monkeypatch.setattr(_http.time, 'sleep', lambda s: None)   # no real wait
     assert _http.http_get('http://x') == b'OK'
     assert calls['n'] == 2                                     # retried once
+
+
+@pytest.mark.parametrize('failure', [
+    lambda: ssl.SSLEOFError(8, 'EOF occurred in violation of protocol'),
+    lambda: http.client.LineTooLong('header line'),
+    lambda: http.client.BadStatusLine('HTTP/1.1 ???')],
+    ids=['SSLEOFError', 'LineTooLong', 'BadStatusLine'])
+def test_a_failure_while_reading_the_response_is_a_data_fetch_error(
+        monkeypatch, failure):
+    """getresponse()/read() errors reach http_get unwrapped by urllib; they
+    leave it typed, so a source chain moves on, and are not retried."""
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(1)
+        raise failure()
+
+    monkeypatch.setattr(_http.urllib.request, 'urlopen', fake_urlopen)
+    monkeypatch.setattr(_http.time, 'sleep', lambda s: None)
+    with pytest.raises(DataFetchError, match='Could not read the response'):
+        _http.http_get('http://x')
+    assert len(calls) == 1
 
 
 def test_raises_after_retries_exhausted(monkeypatch):

@@ -162,6 +162,10 @@ _EXPORTS = {
     'channel_regime': 'delay_profile',
     'channel_response': 'channel',
     'simulate_reception': 'channel',
+    'apply_impulse_response': 'channel',
+    'apply_impulse_response_blocks': 'channel',
+    'arrival_impulse_response': 'channel',
+    'arrival_grid_impulse_response': 'channel',
     # system: modal dispersion and warping
     'modal_group_velocity': 'dispersion', 'unwarp_signal': 'dispersion',
     'warp_signal': 'dispersion',

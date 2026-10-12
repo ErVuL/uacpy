@@ -8,10 +8,13 @@ bound a scan — ``plane_wave_array_gain``, ``matched_replica_gain`` and
 """
 
 import re
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+
+from uacpy.tests.conftest import recorded_warnings
 
 from uacpy import acoustic_signal as N
 
@@ -167,6 +170,81 @@ def test_mvdr_music_no_divide_warning_and_music_peaks_at_source():
     assert abs(angles[np.argmax(mu)] - 10.0) < 2.0
 
 
+class TestMusicTakesWeightsAsBartlettAndMvdrDo:
+    """``music_spectrum`` follows the weight contract of its two siblings:
+    rows scaled to unit norm, a column-major bank refused by name, an
+    ``(F, N, N)`` covariance stack paired with one bank per matrix."""
+
+    @staticmethod
+    def _scene(n=8):
+        pos = np.arange(n) * 0.75
+        angles = np.linspace(-90.0, 90.0, 61)
+        E = steering_vectors(pos, angles, 1000.0)
+        src = steering_vectors(pos, [20.0], 1000.0)[0]
+        R = 0.01 * np.eye(n, dtype=complex) + np.outer(src, src.conj())
+        return R, E
+
+    def test_a_bank_with_unequal_row_norms_gives_the_unit_row_spectrum(self):
+        R, E = self._scene()
+        ramp = np.linspace(0.5, 2.0, E.shape[0])[:, None]
+        np.testing.assert_allclose(music_spectrum(R, ramp * E, 1),
+                                   music_spectrum(R, E, 1), rtol=1e-10)
+        np.testing.assert_allclose(bartlett(R, ramp * E), bartlett(R, E),
+                                   rtol=1e-10)
+
+    def test_a_column_major_bank_is_refused_naming_the_layout(self):
+        from uacpy.core.exceptions import ConfigurationError
+        R, E = self._scene()
+        with pytest.raises(ConfigurationError,
+                           match=r"music_spectrum: weights .*np\.moveaxis"):
+            music_spectrum(R, E.T, 1)
+
+    def test_a_covariance_stack_takes_one_bank_per_matrix(self):
+        R, E = self._scene()
+        stack = music_spectrum(np.stack([R, 2.0 * R]), np.stack([E, E]), 1)
+        assert stack.shape == (2, E.shape[0])
+        np.testing.assert_allclose(stack[0], music_spectrum(R, E, 1))
+        np.testing.assert_allclose(stack[1], music_spectrum(2.0 * R, E, 1))
+
+    def test_normalize_max_peaks_the_pseudospectrum_at_one(self):
+        R, E = self._scene()
+        raw = music_spectrum(R, E, 1)
+        scaled = music_spectrum(R, E, 1, normalize='max')
+        assert np.nanmax(scaled) == pytest.approx(1.0, rel=1e-12)
+        np.testing.assert_allclose(scaled, raw / raw.max(), rtol=1e-12)
+
+    def test_an_unknown_normalize_is_refused(self):
+        from uacpy.core.exceptions import ConfigurationError
+        R, E = self._scene()
+        with pytest.raises(ConfigurationError, match="None or 'max'"):
+            music_spectrum(R, E, 1, normalize='trace')
+
+    @pytest.mark.parametrize('normalize', [None, 'max'])
+    def test_a_zero_row_has_no_direction_and_scores_nan(self, normalize):
+        """A replica bank's shadow cell is a row of zeros. Its 1/0 is no
+        MUSIC peak: it scores NaN, as mvdr scores it, while every other row
+        keeps the value it has without that row."""
+        R, E = self._scene()
+        bank = np.vstack([E, np.zeros((1, E.shape[1]))])
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            got = music_spectrum(R, bank, 1, normalize=normalize)
+        assert np.isnan(got[-1]) and np.isnan(mvdr(R, bank)[-1])
+        np.testing.assert_allclose(
+            got[:-1], music_spectrum(R, E, 1, normalize=normalize),
+            rtol=1e-12)
+
+    def test_an_infinite_peak_is_kept_and_the_rest_scaled_by_the_finite_max(
+            self):
+        """A row orthogonal to the noise subspace scores +inf, the intended
+        MUSIC peak: 'max' scales by the largest finite value and keeps it."""
+        from uacpy.acoustic_signal.beamforming import _scaled_to_peak
+        out = _scaled_to_peak(np.array([[1.0, np.inf, 4.0, np.nan]]))
+        np.testing.assert_array_equal(out, [[0.25, np.inf, 1.0, np.nan]])
+        np.testing.assert_array_equal(_scaled_to_peak(np.array([[np.nan]])),
+                                      [[np.nan]])
+
+
 class TestPowerlessCovariance:
     """``diagonal_loading`` is a *fraction of* ``trace(R)/N``, so it vanishes
     with the trace: it stabilises a rank-deficient covariance that still
@@ -243,7 +321,7 @@ def test_look_direction_agrees_with_an_independently_propagated_field():
                                   sound_speed=1800.0, density=1.8,
                                   attenuation=0.5),
     )
-    field = Bellhop(beam_type='G', n_beams=4001, launch_angles=(6.0, 9.0)).compute_tl(
+    field = Bellhop(beam_type='G', n_beams=4001, launch_angles=(6.0, 9.0)).compute_field(
         env, Source(depths=z_src, frequencies=freq),
         Receiver(depths=z_rcv, ranges=[range_m]))
     p = np.asarray(field.data).ravel()
@@ -745,7 +823,7 @@ class TestBeamformedFieldSynthesisesAReception:
                                           source_waveform=wf, sample_rate=fs,
                                           t_start=3.2)
         by_spectrum = beams.to_time_trace(
-            0.0, range=5000.0, t_start=3.2,
+            0.0, range=5000.0, t_start=3.2, sample_rate=fs,
             source_spectrum=waveform_spectrum_at(wf, fs, beams.frequencies))
         np.testing.assert_array_equal(by_waveform.data, by_spectrum.data)
 
@@ -1596,3 +1674,79 @@ class TestRealisedArrayGainIsTheArrayForm:
         with pytest.raises(ConfigurationError,
                            match='look-angle axis and must be non-empty'):
             N.realised_array_gain(np.zeros((0, 3), dtype=complex), np.ones(3))
+
+
+def test_an_all_zero_beamform_warns_through_the_warnings_machinery():
+    """A filterable ``ValidityWarning``, not a log line."""
+    from uacpy.acoustic_signal import beamform
+    from uacpy.core.exceptions import ValidityWarning
+    with pytest.warns(ValidityWarning, match='all beam outputs are zero'):
+        beamform(np.zeros((8, 3), dtype=complex), np.arange(8) * 0.75,
+                 np.linspace(-60.0, 60.0, 7), 1000.0,
+                 source_level_dB=150.0, noise_level_dB=60.0)
+
+
+def test_independent_beams_falls_back_with_a_fallback_warning(monkeypatch):
+    """Weights whose beam shows no null within 8 cells fall back to the
+    unshaded spacing, with a filterable ``FallbackWarning``."""
+    from uacpy.acoustic_signal import beamforming
+    from uacpy.core.exceptions import FallbackWarning
+    with pytest.warns(FallbackWarning, match='no null within 8 unshaded'):
+        beamforming.independent_beams(np.arange(8) * 0.75,
+                                      np.linspace(-60.0, 60.0, 61), 1000.0,
+                                      weights=np.r_[1.0, np.zeros(7)])
+
+
+class TestBeamformFieldGuardsItsInputsAsBeamformDoes:
+    """``beamform_field`` refuses a non-positive frequency or sound speed in
+    its own name, and a field with no finite point; a blank cell gets NaN
+    beams at its own point."""
+
+    @staticmethod
+    def _call(**changes):
+        from uacpy.acoustic_signal import beamform_field
+        args = dict(pressure=np.ones((8, 3), dtype=complex),
+                    positions_m=np.arange(8) * 0.75,
+                    angles_deg=np.linspace(-60.0, 60.0, 7), frequency=1000.0)
+        args.update(changes)
+        sound_speed = args.pop('sound_speed', 1500.0)
+        return beamform_field(args['pressure'], args['positions_m'],
+                              args['angles_deg'], args['frequency'],
+                              sound_speed=sound_speed)
+
+    def test_a_point_with_a_nan_sample_gets_nan_beams_and_one_warning(self):
+        """A blank cell (Bellhop's r = 0, a cell below the seafloor) is NaN at
+        its own grid point only: the other points equal the clean run."""
+        clean = self._call()
+        p = np.ones((8, 3), dtype=complex)
+        p[2, 1] = np.nan
+        with recorded_warnings() as caught:
+            beams = self._call(pressure=p)
+        hits = [str(w.message) for w in caught
+                if '1 of 3 grid points' in str(w.message)]
+        assert len(hits) == 1
+        assert np.all(np.isnan(beams.response[:, 1]))
+        assert np.isnan(beams.element_power[1])
+        assert np.isnan(beams.best_angle[1])
+        for j in (0, 2):
+            np.testing.assert_array_equal(beams.response[:, j],
+                                          clean.response[:, j])
+            assert beams.best_angle[j] == clean.best_angle[j]
+
+    def test_a_field_with_no_finite_point_is_refused(self):
+        p = np.full((8, 3), np.nan, dtype=complex)
+        with pytest.raises(ConfigurationError,
+                           match='every grid point of pressure holds a '
+                                 'non-finite element sample'):
+            self._call(pressure=p)
+
+    @pytest.mark.parametrize('change, name', [
+        ({'frequency': -1000.0}, 'frequency'),
+        ({'sound_speed': 0.0}, 'sound_speed')])
+    def test_a_non_positive_scalar_is_refused_by_name(self, change, name):
+        with pytest.raises(ConfigurationError,
+                           match=f'^beamform_field: {name} must be > 0'):
+            self._call(**change)
+
+    def test_finite_input_beamforms(self):
+        assert self._call().power.shape == (7, 3)

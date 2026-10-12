@@ -7,6 +7,8 @@ from __future__ import annotations
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._validate import (require_below_nyquist,
+                                  require_positive_finite_scalar)
 
 
 #: Symbol periods within which a pulse time counts as ON a removable
@@ -214,11 +216,22 @@ def upconvert(baseband, sample_rate, fc):
     sample_rate : float
         Sample rate (Hz).
     fc : float
-        Carrier frequency (Hz).
+        Carrier frequency (Hz), below Nyquist.
     """
+    sample_rate = _checked_mixer_rate(sample_rate, fc, "upconvert")
     x = np.asarray(baseband, dtype=complex)
     n = np.arange(x.size)
     return np.real(x * np.exp(2j * np.pi * fc * n / sample_rate))
+
+
+def _checked_mixer_rate(sample_rate, fc, who):
+    """``sample_rate`` as a float, refused unless positive and finite, with
+    the carrier ``fc`` below its Nyquist frequency."""
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, who, "sample_rate", " Hz")
+    require_below_nyquist(fc, sample_rate, who, "the carrier fc",
+                          "the mixed signal aliases")
+    return sample_rate
 
 
 def downconvert(passband, sample_rate, fc):
@@ -235,8 +248,14 @@ def downconvert(passband, sample_rate, fc):
     sample_rate : float
         Sample rate (Hz).
     fc : float
-        Carrier frequency (Hz).
+        Carrier frequency (Hz), below Nyquist.
     """
+    sample_rate = _checked_mixer_rate(sample_rate, fc, "downconvert")
+    if np.iscomplexobj(passband):
+        raise ConfigurationError(
+            "downconvert: passband must be real; a complex record is "
+            "already baseband (or analytic), and casting it to real drops "
+            "its imaginary part.")
     x = np.asarray(passband, dtype=float)
     n = np.arange(x.size)
     return 2.0 * x * np.exp(-2j * np.pi * fc * n / sample_rate)

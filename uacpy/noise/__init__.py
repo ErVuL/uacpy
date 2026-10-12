@@ -1,8 +1,18 @@
 """
-Ambient-noise model — Tollefsen / Pecknold packaging.
+Underwater noise: the ambient soundscape, ship radiated noise, and the
+marine-mammal weighting of a received level.
 
-Compact Wenz-style noise spectrum (wind / shipping / rain / thermal /
-turbulence), in dB re 1 µPa²/Hz.
+- :mod:`~uacpy.noise.ambient` — the Wenz-style ambient-noise spectrum (wind /
+  shipping / rain / thermal / turbulence, Tollefsen / Pecknold packaging), in
+  dB re 1 µPa²/Hz: :class:`WenzNoise`, :func:`wind_noise_level`.
+- :mod:`~uacpy.noise.ship_radiated_noise` — a passing ship's radiated noise
+  level and equivalent monopole source level per ISO 17208:
+  :func:`radiated_noise_level`, :func:`monopole_source_level`; and the mean
+  monopole source spectrum of a merchant ship (Wales and Heitmeyer 2002):
+  :func:`ship_source_level_wales_heitmeyer`.
+- :mod:`~uacpy.noise.marine_mammal` — Southall et al. (2019) auditory
+  weighting applied to a level spectrum: :func:`auditory_weighting`,
+  :func:`apply_weighting`, :func:`weighted_level`.
 
 Examples
 --------
@@ -28,8 +38,10 @@ from uacpy.noise.ship_radiated_noise import (
     monopole_source_level,
     nominal_source_depth,
     radiated_noise_level,
+    ship_source_level_wales_heitmeyer,
 )
 from uacpy.noise.marine_mammal import (
+    EXPOSURE_THRESHOLDS,
     HEARING_GROUPS,
     WEIGHTING_PARAMS,
     apply_weighting,
@@ -53,10 +65,13 @@ __all__ = [
     'lloyd_mirror_correction',
     'monopole_source_level',
     'RNL_UNCERTAINTY_DB',
+    # ship source spectrum (Wales & Heitmeyer 2002, Ainslie 2010 Eq. 8.195)
+    'ship_source_level_wales_heitmeyer',
     # marine-mammal auditory weighting (Southall 2019)
     'auditory_weighting',
     'apply_weighting',
     'weighted_level',
     'WEIGHTING_PARAMS',
     'HEARING_GROUPS',
+    'EXPOSURE_THRESHOLDS',
 ]

@@ -159,21 +159,21 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | Name | Default | Meaning |
 |---|---|---|
 | `c_low` | `None` | Lowest phase velocity tabulated (m/s). Must be `> 0`. `None` derives `min(1400, min(env.ssp))` at `run()` time — AT `bounce.htm` asks for "the lowest speed in the problem (say 1400.0)", and the 1400 there is the example, not the rule, so cold or brackish water needs the lower value or the table loses its grazing wedge. |
-| `c_high` | `None` | Highest phase velocity; `None` resolves to `1e9`, which zeroes the minimum wavenumber and buys the full 0–90° sweep. |
-| `rmax_m` | `None` | Range (m) the table is sized for — it sets how many angles you get. `None` auto-derives from `receiver.range_max` (10 km when that is 0); with `receiver=None`, pin it or `n_angles`. |
-| `n_angles` | `None` | Ask for ≈ N samples directly; `rmax_m` is back-derived to match. |
+| `c_high` | `None` | Highest phase velocity; `None` resolves to `1e9`, which zeroes the minimum wavenumber and buys the full 0–90° sweep — the manual's value: "For a full 90 degree calculation set CMin to the lowest speed in the problem (say 1400.0) CMax to 1.0E9." (`doc/bounce.htm`; `bounce.f90:47` sets `kMin = 0` above 1e6). |
+| `rmax_m` | `None` | Range (m) the table is sized for — it sets how many angles you get. `None` auto-derives from `receiver.range_max` (10 km when that is 0); with `receiver=None`, pin it or `n_angles`. Refused beside `n_angles`, which sets it. |
+| `n_angles` | `None` | The number of tabulated angles, exactly: `rmax_m` is set half an angle above the count, so the `INT` of `bounce.f90:49` gives `n_angles`; a count the deck's six-decimal km RMax cannot give is refused, naming the one it gives. A whole number ≥ 2; refused beside `rmax_m`. |
 
 **Everything else**
 
 | Name | Default | Meaning |
 |---|---|---|
 | `executable` | `None` | Path to `bounce`; auto-detected. |
-| `interp_ssp` | `None` | SSP interpolation scheme written into the `.env`. |
+| `interp_ssp` | `None` | SSP interpolation scheme written into the `.env`; unset → `'linear'` (AT `'C'`), the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). |
 | `collapse` | `None` | Override the collapse policy (default `bottom_range='median'`). |
 | `use_tmpfs` | `False` | Stage scratch files in RAM. |
 | `work_dir` | `None` | Pin the scratch dir to keep `.brc` / `.irc` / `.env` / `.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
-| `timeout` | `600.0` | Subprocess timeout (s). |
+| `timeout` | `600.0` | Subprocess timeout (s). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`. |
 
 ---
@@ -245,7 +245,8 @@ modes depend on the sediment even when the sediment absorbs nothing.
 
 Above the critical angle energy escapes into the bottom and `|R|` falls fast,
 levelling off at normal incidence to the impedance-contrast value
-`(ρ₂c₂ − ρ₁c₁)/(ρ₂c₂ + ρ₁c₁) = 0.353`.
+`(ρ₂c₂ − ρ_w c_w)/(ρ₂c₂ + ρ_w c_w) = 0.341`, with the water at its default
+density `ρ_w` = 1.027 g/cm³ (unit-density water would give 0.353).
 
 ### What absorption does to it
 

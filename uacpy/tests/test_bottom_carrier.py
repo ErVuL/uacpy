@@ -37,6 +37,27 @@ def _layers():
 
 # ─── acoustic_type inference ────────────────────────────────────────────────
 
+@pytest.mark.parametrize('build', [
+    lambda density: SedimentLayer(thickness=5.0, sound_speed=1600.0,
+                                  density=density),
+    lambda density: BoundaryProperties(sound_speed=1600.0, density=density),
+], ids=['SedimentLayer', 'BoundaryProperties'])
+class TestADensityTypedInKgPerCubicMetreIsRefused:
+    """A density over 20 g/cm³ is a kg/m³ number in a g/cm³ slot, refused
+    as reflection_coeff and the water density refuse it."""
+
+    def test_it_is_refused_naming_the_g_per_cm3_value_it_means(self, build):
+        with pytest.raises(ConfigurationError,
+                           match=r'density=1500 reads as kg/m³') as e:
+            build(1500.0)
+        assert 'density=1.5' in str(e.value)
+
+    def test_the_bound_is_twenty_g_per_cm3(self, build):
+        with pytest.raises(ConfigurationError, match='reads as kg/m³'):
+            build(20.001)
+        assert build(20.0).density == 20.0
+
+
 class TestAcousticTypeInference:
     """acoustic_type inference keys on *explicitly passed* parameters, not on
     value-vs-default comparison — passing the documented default values must
@@ -109,7 +130,7 @@ class TestBottomQueries:
     def test_elastic_detected_layer_and_halfspace(self):
         assert Bottom.from_column(SeabedColumn(_layers(), _hs(cs=600))).is_elastic
         assert Bottom.from_column(SeabedColumn(
-            [SedimentLayer(5, 1600, 1.5, 0.3, shear_speed=200)], _hs())).is_elastic
+            [SedimentLayer(5, sound_speed=1600, density=1.5, attenuation=0.3, shear_speed=200)], _hs())).is_elastic
 
     def test_bottom_rejects_column_count_range_mismatch_and_nonmonotone_ranges(self):
         with pytest.raises(ConfigurationError,       # ranges=None needs 1 column
@@ -379,7 +400,7 @@ class TestRDHalfspace:
 class TestRDLayered:
     def _b(self):
         near = SeabedColumn(_layers(), _hs(cp=1900))
-        far = SeabedColumn([SedimentLayer(5, 1650, 1.8, 0.3)], _hs(cp=2200))
+        far = SeabedColumn([SedimentLayer(5, sound_speed=1650, density=1.8, attenuation=0.3)], _hs(cp=2200))
         return Bottom.from_columns([near, far], ranges=[0, 10000])
 
     def test_at_nearest_column(self):
@@ -418,7 +439,7 @@ class TestRDLayered:
 class TestCollapse:
     def test_layers_collapse_keeps_range_axis(self):
         near = SeabedColumn(_layers(), _hs(cp=1900))
-        far = SeabedColumn([SedimentLayer(5, 1650, 1.8, 0.3)], _hs(cp=2200))
+        far = SeabedColumn([SedimentLayer(5, sound_speed=1650, density=1.8, attenuation=0.3)], _hs(cp=2200))
         flat = Bottom.from_columns([near, far], ranges=[0, 10000]).collapse(layers='halfspace')
         assert flat.is_range_dependent and not flat.is_layered
         assert flat.halfspace_sound_speed.tolist() == [1900, 2200]
@@ -636,12 +657,28 @@ class TestReductionsReturnCopies:
 
     def test_a_layered_median_does_not_write_back(self):
         b = self._rd(layered=True)
-        b.collapse_range('median').columns[0].layers[0].sound_speed = 9999.0
+        with pytest.warns(uacpy.FallbackWarning):
+            picked = b.collapse_range('median')
+        picked.columns[0].layers[0].sound_speed = 9999.0
         assert b.columns[1].layers[0].sound_speed == pytest.approx(1600.0)
+
+    def test_a_layered_median_names_the_column_it_picks(self):
+        """Layer stacks cannot be averaged, so 'median' of a layered bottom
+        is its middle column; a FallbackWarning names it. A half-space
+        bottom takes a property-wise median, silently."""
+        import warnings
+        with pytest.warns(uacpy.FallbackWarning,
+                          match=r"index 1 of 3, at 1000 m"):
+            picked = self._rd(layered=True).collapse_range('median')
+        assert picked.columns[0].halfspace.sound_speed == pytest.approx(1700.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            self._rd().collapse_range('median')
+            self._rd(layered=True).collapse_range('r0')
 
     def test_collapse_on_the_range_axis_does_not_write_back(self):
         b = self._rd()
-        b.collapse(range='rmax').columns[0].halfspace.density = 42.0
+        b.collapse(range='rmax').columns[0].halfspace.density = 2.2
         assert b.columns[-1].halfspace.density == pytest.approx(1.9)
 
     def test_a_range_independent_bottom_does_not_write_back(self):
@@ -920,23 +957,27 @@ class TestSedimentLayerPresetCopiesRoughness:
 
 
 class TestSedimentLayerCoercesNumericFieldsToFloat:
-    """The numeric fields are ``float()``-coerced in ``__post_init__``
-    (as ``BoundaryProperties`` does), so a convertible string is stored as
-    a float and a non-numeric one is refused at construction — the
-    validators check a converted copy, so an unconverted string used to
-    pass them and crash later in ``__repr__``."""
+    """The numeric fields are stored as the floats they read as, by the
+    package's one rule for a scalar (as ``BoundaryProperties`` stores its
+    own): text — numeric or not —, a bool and a complex value are refused at
+    construction, by the field's name, rather than stored as what they
+    spell, 1 or 0, or their real part."""
 
-    def test_numeric_strings_are_stored_as_floats(self):
-        layer = SedimentLayer(thickness='10', sound_speed='1650',
-                              density='1.9')
+    @pytest.mark.parametrize('value, what', [
+        ('1650', 'a number, not text'), ('fast', 'a number, not text'),
+        (True, 'a number, not a bool'), (np.array(True), 'a number, not a bool'),
+        (np.complex128(1650.0), 'a real number, not complex')])
+    def test_a_value_that_is_not_one_real_number_is_refused(self, value,
+                                                            what):
+        with pytest.raises(ConfigurationError,
+                           match=f'^SedimentLayer sound_speed must be {what}'):
+            SedimentLayer(thickness=10.0, sound_speed=value, density=1.9)
+
+    def test_an_integer_is_stored_as_a_float(self):
+        layer = SedimentLayer(thickness=10, sound_speed=np.int64(1650),
+                              density=2)
         assert isinstance(layer.sound_speed, float)
-        assert layer.sound_speed == pytest.approx(1650.0)
-        assert 'cp=1650' in repr(layer)
-
-    def test_a_non_numeric_string_is_refused_at_construction(self):
-        with pytest.raises(ValueError,
-                           match='could not convert string to float'):
-            SedimentLayer(thickness=10.0, sound_speed='fast', density=1.9)
+        assert layer.sound_speed == 1650.0
 
     def test_numpy_scalars_construct(self):
         layer = SedimentLayer(thickness=np.float64(10.0),
@@ -972,7 +1013,8 @@ class TestBoundaryCarrierLabelsMustBeFiniteScalars:
             _range_dependent_bottom().at(range=np.inf)
 
     def test_bottom_at_array_range_raises_a_typed_scalar_label_error(self):
-        with pytest.raises(ConfigurationError, match="not a scalar label"):
+        with pytest.raises(ConfigurationError,
+                           match=r"^Bottom\.at: range=.* is not one value"):
             _range_dependent_bottom().at(range=np.array([0.0, 5000.0]))
 
     def test_bottom_at_a_finite_range_returns_the_nearest_column(self):
@@ -1087,7 +1129,9 @@ class TestColumnIndexAt:
 
     def test_it_rejects_an_array_range_the_way_at_does(self):
         bottom = wide_range_dependent_env().bottom
-        with pytest.raises(ConfigurationError, match='is not a scalar label'):
+        with pytest.raises(ConfigurationError,
+                           match=r'^Bottom\.column_index_at: range=.* is not '
+                                 r'one value'):
             bottom.column_index_at(range=np.array([0.0, 1.0]))
 
 
@@ -1297,6 +1341,22 @@ class TestSeabedColumnDelegatedWritesReachTheHalfspace:
         assert 'sound_speed' not in vars(col)
 
 
+@pytest.mark.parametrize('field', ['sound_speed', 'density', 'attenuation',
+                                   'roughness', 'grain_size_phi'])
+@pytest.mark.parametrize('value, what', [
+    ('1600', 'a number, not text'), (True, 'a number, not a bool'),
+    (np.complex128(1.0), 'a real number, not complex')])
+def test_a_boundary_field_that_is_not_one_real_number_is_refused(field, value,
+                                                                 what):
+    """BoundaryProperties stores each number as the float it reads as, by
+    the package's one rule for a scalar."""
+    kw = dict(acoustic_type='half-space', sound_speed=1600.0, density=1.8)
+    kw[field] = value
+    with pytest.raises(ConfigurationError,
+                       match=f'^BoundaryProperties {field} must be {what}'):
+        BoundaryProperties(**kw)
+
+
 class TestGrainSizeMustBeAFiniteNumberEverywhere:
     """ϕ is signed metadata, so it has no sign rule — but every carrier must
     agree that it is a finite NUMBER: a NaN/inf/str ϕ stored on one carrier and
@@ -1307,7 +1367,7 @@ class TestGrainSizeMustBeAFiniteNumberEverywhere:
         from uacpy.core.boundary import BoundaryProperties
         with pytest.raises(
                 (ConfigurationError, ValueError),
-                match='grain_size_phi must be finite|could not convert string to float'):
+                match='grain_size_phi must be (finite|a number, not text)'):
             BoundaryProperties(acoustic_type='half-space', sound_speed=1600.0,
                                grain_size_phi=bad)
 
@@ -1476,3 +1536,17 @@ def test_bottom_from_grain_size_reaches_every_hamilton_fit(hamilton_fit):
     for name in ('sound_speed', 'density', 'attenuation'):
         assert getattr(got, name) == getattr(want, name), name
     assert (got.sound_speed, got.density) != (shelf.sound_speed, shelf.density)
+
+
+def test_the_acoustic_properties_are_keyword_only():
+    """Only ``thickness`` and ``acoustic_type`` are positional: the two
+    carriers list density and sound speed in different orders, so a
+    positional call could swap them."""
+    with pytest.raises(TypeError, match='positional'):
+        SedimentLayer(5.0, 1600.0, 1.8)
+    with pytest.raises(TypeError, match='positional'):
+        BoundaryProperties('half-space', 1.8, 1600.0)
+    layer = SedimentLayer(5.0, sound_speed=1600.0, density=1.8)
+    assert (layer.thickness, layer.sound_speed) == (5.0, 1600.0)
+    half = BoundaryProperties('half-space', density=1.8, sound_speed=1600.0)
+    assert half.acoustic_type == 'half-space'

@@ -121,7 +121,7 @@ class PhaseReference(str, Enum):
 # ``Result.list_metadata()`` consults this so users get the type + meaning
 # for every documented entry on ``result.metadata`` without grepping the
 # source. Keep this synchronised with what each wrapper actually attaches
-# (grep ``_attach_output_paths`` and ``_result_kwargs(`` calls per model).
+# (grep ``attach_output_paths`` and ``result_kwargs(`` calls per model).
 _UNIVERSAL_METADATA: Dict[str, Tuple[type, str]] = {
     'work_dir': (
         str, 'The directory holding the run\'s files (only when its '
@@ -157,7 +157,7 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('Bellhop', 'shd_file'): (str, 'Bellhop pressure-field output (.shd).'),
     ('Bellhop', 'arr_file'): (str, 'Bellhop arrivals output (.arr).'),
     ('Bellhop', 'ray_file'): (str, 'Bellhop ray paths (.ray).'),
-    ('Bellhop', 'center_frequency'): (
+    ('Bellhop', 'fc'): (
         float, 'Carrier (centre) frequency fc (Hz) used to build H(f) '
         'from a single arrivals run.'
     ),
@@ -214,20 +214,20 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         "trapezoidal-rule matrix-product DFT (there is no FFT on this path)."
     ),
     ('Scooter', 'source_type'): (
-        str, "Scooter source type passed to GreensFunction.to_field ('R' = "
-        "point/cylindrical, 'X' = line/Cartesian, 'S' = point with "
-        "cylindrical spreading removed)."
+        str, "Scooter source type passed to GreensFunction.to_field "
+        "('point' = point/cylindrical, 'line' = line/Cartesian, 'scaled' = "
+        "point with cylindrical spreading removed)."
     ),
     ('Scooter', 'spectrum'): (
         str,
-        "Wavenumber-branch selector the Hankel transform consumed: 'P' "
-        "positive branch, 'N' negative branch, 'B' both."
+        "Wavenumber-branch selector the Hankel transform consumed: "
+        "'positive' branch, 'negative' branch, or 'both'."
     ),
-    ('Scooter', 'center_frequency'): (
+    ('Scooter', 'fc'): (
         float, 'Centre frequency (Hz) of the broadband sweep — picked '
         'as the middle element of the GreensFunction frequencies.'
     ),
-    ('Scooter', 'nfreq'): (
+    ('Scooter', 'n_frequencies'): (
         int, 'Number of frequencies in the broadband sweep.'
     ),
     # ───────── SPARC (time-domain FFP) ─────────
@@ -265,13 +265,13 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         "single-frequency steady-state snapshot."
     ),
     ('SPARC', 'source_type'): (
-        str, "Source type ('R' / 'X' / 'S') consumed by the Hankel "
-        "transform."
+        str, "Source type ('point' / 'line' / 'scaled') consumed by the "
+        "Hankel transform."
     ),
     ('SPARC', 'spectrum'): (
         str,
-        "Wavenumber-branch selector the Hankel transform consumed: 'P' "
-        "positive branch, 'N' negative branch, 'B' both."
+        "Wavenumber-branch selector the Hankel transform consumed: "
+        "'positive' branch, 'negative' branch, or 'both'."
     ),
     ('SPARC', 'snapshot_freq_bin'): (
         float, "Nearest FFT-bin frequency (Hz) to the source frequency; "
@@ -386,7 +386,7 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
     ('OASP', 'trf_file'): (
         str, 'Transfer-function output (.trf).'
     ),
-    ('OASP', 'center_frequency'): (
+    ('OASP', 'fc'): (
         float, 'OASP carrier (centre) frequency (Hz).'
     ),
     ('OASP', 'frequencies_available'): (
@@ -450,7 +450,7 @@ _DOCUMENTED_METADATA: Dict[Tuple[str, str], Tuple[type, str]] = {
         str, 'Mean field inside the scattering layer, consumed as FOR046 '
         '(.046); OASSP opens it unconditionally (unoassp30.f:128).'
     ),
-    ('OASSP', 'center_frequency'): (
+    ('OASSP', 'fc'): (
         float, 'Carrier (centre) frequency (Hz) read from the .trf header.'
     ),
     ('OASSP', 'freq_max'): (
@@ -481,13 +481,18 @@ def coordinate_axis(name: str, values) -> str:
 _AXIS_MATCH_RTOL = 1e-6
 
 
-def axis_match_tolerance(axis_values, value) -> float:
+def axis_match_tolerance(axis_values, value):
     """How far ``value`` may sit from a point of ``axis_values`` and still
     be that point: a coordinate written to an engine's deck and read back
-    from its output file carries the deck's rounding."""
+    from its output file carries the deck's rounding.
+
+    A float for a scalar ``value``; for an array of values, the array of
+    their tolerances, the axis span taken once."""
     axis_values = np.asarray(axis_values, dtype=float).ravel()
-    return _AXIS_MATCH_RTOL * max(float(np.ptp(axis_values)),
-                                  abs(float(value)), 1.0)
+    tol = _AXIS_MATCH_RTOL * np.maximum(
+        max(float(np.ptp(axis_values)), 1.0),
+        np.abs(np.asarray(value, dtype=float)))
+    return float(tol) if tol.ndim == 0 else tol
 
 
 class Result(DeepCopyMixin, Exportable):
@@ -556,9 +561,9 @@ class Result(DeepCopyMixin, Exportable):
         source stated none.
     source_weights : ndarray, optional
         The ``Source`` weights of a multi-depth run, one per source depth,
-        recorded on every slab of its stack so
-        :meth:`ResultStack.superpose` applies them by default. ``None`` on a
-        result no weighted stack produced.
+        recorded on its result so :meth:`Field.superpose` applies them by
+        default. ``None`` on a result no weighted multi-depth run
+        produced.
     metadata : dict, optional
         Model-specific extras (Q, T, dr, dz, n_modes, …). It never carries
         an identity field: a ``metadata`` holding ``source_level_dB`` or
@@ -622,7 +627,7 @@ class Result(DeepCopyMixin, Exportable):
         self.backend = backend if backend is not None else (model.lower() if model else "")
         # Provenance of the engine that produced this result (a
         # ``uacpy.models.provenance.ModelProvenance`` or ``None``). Injected centrally
-        # by ``PropagationModel._result_kwargs``; rendered on plots alongside
+        # by ``models._extract.result_kwargs``; rendered on plots alongside
         # the data-source credit. Mirrors how ``env.data_sources`` carries
         # dataset provenance.
         self.model_source = model_source
@@ -739,7 +744,7 @@ class Result(DeepCopyMixin, Exportable):
             source_level_dB=self.source_level_dB,
             source_weights=self.source_weights,
             metadata=dict(self.metadata),
-            run_settings=self._run_settings,
+            run_settings=self.run_settings,
         )
 
     # Persistence ------------------------------------------------------------
@@ -779,12 +784,32 @@ class Result(DeepCopyMixin, Exportable):
                 for name, component in self.components.items()}
         return out
 
-    @staticmethod
-    def _unwrap_saved(d, payload=()) -> Dict[str, Any]:
+    #: The identity block :meth:`_identity_dict` writes, which every
+    #: result's ``to_dict`` carries and its ``from_dict`` therefore requires.
+    _IDENTITY_KEYS = ('model', 'backend', 'source_depths', 'frequencies',
+                      'phase_reference', 'model_source', 'run_mode',
+                      'source_level_dB', 'source_weights', 'metadata',
+                      'run_settings')
+
+    @classmethod
+    def _unwrap_saved(cls, d, payload=(), required=(),
+                      identity: bool = True) -> Dict[str, Any]:
         """``d`` with the 0-d arrays ``np.load(f, allow_pickle=True)`` hands
         back for a pickled dict, ``None`` or string unwrapped to their value.
         The ``payload`` keys are left alone: a fully reduced payload is
-        itself a 0-d array."""
+        itself a 0-d array. ``from_dict`` reads exactly what :meth:`to_dict`
+        writes, so a mapping that lacks a ``payload`` key, one of the other
+        keys it always writes (``required``) or, with ``identity``, one of
+        :data:`_IDENTITY_KEYS` is refused."""
+        missing = [k for k in (*payload, *required,
+                               *(cls._IDENTITY_KEYS if identity else ()))
+                   if k not in d]
+        if missing:
+            raise ConfigurationError(
+                f"{cls.__name__}.from_dict: the mapping holds no {missing}; "
+                f"it reads what {cls.__name__}.to_dict writes.",
+                remediation=f"Pass the dict {cls.__name__}.to_dict returned "
+                            f"(or np.load of the .npz it was saved to).")
         return {k: (v.item() if k not in payload and isinstance(v, np.ndarray)
                     and v.ndim == 0 else v)
                 for k, v in d.items()}
@@ -793,9 +818,8 @@ class Result(DeepCopyMixin, Exportable):
     def _identity_from_dict(d) -> Dict[str, Any]:
         """The constructor keywords for the identity :meth:`_identity_dict`
         wrote, the phase reference restored to its member and each component
-        rebuilt by its own class's ``from_dict``. A source identity field a
-        file keeps in its metadata is read from there. The run settings are
-        the record's plain-type dict, or the record itself as
+        rebuilt by its own class's ``from_dict``. The run settings are the
+        record's plain-type dict, or the record itself as
         :meth:`_identity_from_attrs` rebuilds it."""
         phase_reference = d.get('phase_reference')
         if phase_reference in {m.value for m in PhaseReference}:
@@ -805,8 +829,7 @@ class Result(DeepCopyMixin, Exportable):
                                                        RunSettings):
             run_settings = RunSettings.from_dict(run_settings)
         metadata = dict(d.get('metadata') or {})
-        source = {tag: metadata.pop(tag, d.get(tag))
-                  for tag in Result._SOURCE_IDENTITY}
+        source = {tag: d.get(tag) for tag in Result._SOURCE_IDENTITY}
         components = {}
         for name, saved in dict(d.get('components') or {}).items():
             saved = dict(saved)
@@ -930,7 +953,10 @@ class Result(DeepCopyMixin, Exportable):
         stored as ``int8`` (:func:`~uacpy.core._export.portable_attrs`)
         come back booleans through each class's ``from_xarray``. A file written by
         :meth:`to_xarray` and xarray alone, which names no class, is read by
-        this class's :meth:`from_xarray`.
+        this class's :meth:`from_xarray`; one whose one variable is an array
+        (``Field.to_xarray().to_netcdf(path)``) is read as the
+        :class:`Field` it holds by ``Result`` and ``Field``. uacpy reads the
+        files this version writes, and no other format.
 
         Parameters
         ----------
@@ -969,10 +995,26 @@ class Result(DeepCopyMixin, Exportable):
     @staticmethod
     def _from_netcdf_group(xarray, path, group, base, kwargs,
                            who) -> 'Result':
-        from uacpy.core._export import (join_complex,
+        """The result in ``group`` of the file at ``path``, of the class the
+        part names, which must be a ``base``. A part naming no class is read
+        as a :class:`Field` when it is one array and ``base`` admits a
+        Field, and by ``base`` itself when ``base`` is a concrete class
+        other than a Field. Anything else is refused naming what the file holds and the call
+        that reads it (:func:`~uacpy.core._export.netcdf_holding`)."""
+        from uacpy.core._export import (join_complex, netcdf_holding,
                                         refuse_complex_without_backend)
         with xarray.open_dataset(path, group=group, **kwargs) as ds:
             ds = join_complex(ds.load())
+        # Read before the class attributes are taken off below.
+        what, reader = netcdf_holding(ds)
+
+        article = 'an' if base.__name__[:1] in 'AEIOU' else 'a'
+
+        def refuse():
+            raise ConfigurationError(
+                f"{who}: {str(path)!r} holds {what}, not {article} "
+                f"{base.__name__}.", remediation=f"Read it with {reader}.")
+
         # netCDF4 without auto_complex reads a complex variable as an
         # (r, i) compound record
         for name, variable in ds.variables.items():
@@ -989,8 +1031,41 @@ class Result(DeepCopyMixin, Exportable):
         path_attr = obj.attrs.pop('uacpy_class', None)
         names = [n for n in str(obj.attrs.pop('uacpy_components', '') or '')
                  .split(',') if n]
-        klass = base if path_attr is None else _resolve_class(path_attr, base)
-        result = klass.from_xarray(obj)
+        from uacpy.core.results.field import Field
+        if path_attr is not None:
+            klass = _resolve_class(path_attr, Result)
+            if not issubclass(klass, base):
+                refuse()
+        elif ('uacpy_fields' in ds.attrs
+              or 'uacpy_result_fields' in ds.attrs or not ds.data_vars):
+            # A carrier or a signal result, which no result reads, or a file
+            # holding no data at all.
+            refuse()
+        elif isinstance(obj, xarray.DataArray):
+            # A file naming no class whose one variable is an array is what
+            # Field.to_xarray and xarray alone write (the fields of several
+            # sources side by side included): a Field.
+            if not issubclass(Field, base) and not issubclass(base, Field):
+                refuse()
+            klass = Field if base is Result else base
+        elif base is Result or issubclass(base, Field):
+            # Several variables naming no class: no Field is written so.
+            refuse()
+        else:
+            klass = base
+        try:
+            result = klass._from_netcdf_part(xarray, path, group, obj,
+                                             kwargs, who)
+        except (KeyError, IndexError, ValueError) as exc:
+            if path_attr is not None:
+                raise
+            # A file naming no class, read by this class's own reader: one
+            # that lacks what the reader needs is not this class's file.
+            raise ConfigurationError(
+                f"{who}: {str(path)!r} holds {what}, which "
+                f"{klass.__name__}.from_xarray cannot read "
+                f"({type(exc).__name__}: {exc}).",
+                remediation=f"Read it with {reader}.") from exc
         components = {
             name: Result._from_netcdf_group(
                 xarray, path,
@@ -1000,6 +1075,15 @@ class Result(DeepCopyMixin, Exportable):
         if components:
             result._components = components
         return result
+
+    @classmethod
+    def _from_netcdf_part(cls, xarray, path, group, obj, kwargs,
+                          who) -> 'Result':
+        """This class's result from ``obj``, the part :meth:`to_netcdf`
+        wrote to ``group`` of the file at ``path``: its :meth:`from_xarray`.
+        A result that keeps parts of itself in the groups below its own (a
+        :class:`ResultStack`'s slabs) reads them here too."""
+        return cls.from_xarray(obj)
 
     def _export_attrs(self) -> Dict[str, Any]:
         """The identity (:meth:`_identity_attrs`) plus every metadata
@@ -1052,13 +1136,36 @@ class Result(DeepCopyMixin, Exportable):
         modes'``, the receiver axes, …) to :meth:`__repr__`."""
         return []
 
+    #: The plotter of :mod:`uacpy.visualization.plots` that draws this result
+    #: (read through :meth:`_plotter_name`); empty on a type with no view.
+    _plotter = ''
+
+    #: Whether that view takes ``env=`` and draws the environment under the
+    #: result; ``env=`` on any other view is refused (:meth:`_env_refusal`),
+    #: since accepting it silently would look like it had an effect.
+    _draws_env = False
+
+    def _plotter_name(self) -> str:
+        """The name of the plotter that draws this result: :attr:`_plotter`.
+        A type whose view depends on what it holds chooses here."""
+        return self._plotter
+
+    def _env_refusal(self, who: str) -> str:
+        """The refusal of ``env=`` on a view that draws no environment,
+        naming ``who``, the call the user made."""
+        return (f"{who}: env= has no effect on this "
+                f"view — only Field and Rays plots draw the environment. "
+                f"Drop env=.")
+
     def plot(self, **kwargs):
         """Plot this result via :func:`uacpy.plot.plot_result`.
 
         Dispatches on result type; concrete subclasses may override. ``kwargs``
-        are forwarded to the selected plotter.
+        are forwarded to the selected plotter. A refusal names this call
+        (``Field.plot``), the one the user made.
         """
-        return plotter('plot_result')(self, **kwargs)
+        return plotter('_draw_result')(
+            f"{type(self).__name__}.plot", self, **kwargs)
 
     def list_metadata(self) -> Dict[str, Dict[str, Any]]:
         """Describe every key currently in ``self.metadata``.

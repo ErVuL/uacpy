@@ -173,14 +173,18 @@ evaluate the sonar equation at every `(depth, range)` sample of it:
 
 | Call | Takes | Gives |
 |---|---|---|
-| `passive_signal_excess_field(tl_field, *, source_level_dB, noise_level_dB, detection_threshold_dB, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
-| `active_signal_excess_field(tl_field, *, source_level_dB, target_strength_dB, detection_threshold_dB, noise_level_dB=None, reverberation_level_dB=None, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
+| `passive_signal_excess_field(tl_field, *, source_level_dB=None, noise_level_dB, detection_threshold_dB, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
+| `active_signal_excess_field(tl_field, *, source_level_dB=None, target_strength_dB, detection_threshold_dB, noise_level_dB=None, reverberation_level_dB=None, directivity_index_dB=None, array_gain_dB=None, processing_loss_dB=0.0)` | a TL `Field` | `SE` `Field` |
 | `transition_probability_field(se_field, *, sigma_dB)` | an `SE` `Field` | `P_D` `Field` |
 | `detection_ranges_by_depth(se_field, *, crossing='outermost')` | an `SE` `Field` | `(depths, ranges)` |
 | `detection_range_from_field(se_field, *, crossing='outermost')` | a 1-D `SE` `Field` over range, e.g. `se.at(depth=z)` | detection range (m) |
 
 The two map functions build a `SonarBudget` from their keywords and evaluate
 it (`budget.signal_excess_field(tl_field)` is the same map).
+`source_level_dB=None` takes the TL field's own `source_level_dB` (set by
+`Source(source_level_dB=...)` on the run) and is refused when the field has
+none; the map's `source_level_dB` is the level the budget used, and the
+`P_D` map inherits it.
 `transition_probability_field` and `detection_ranges_by_depth` are the Field
 forms of two array functions: `transition_probability(signal_excess_dB, *,
 sigma_dB)` and `detection_ranges(ranges_m, *, signal_excess_dB, axis=-1,
@@ -263,14 +267,17 @@ plot_signal_excess(
 ![Passive signal excess over a modelled TL field](figures/sonar_signal_excess.png)
 
 A Munk profile 5000 m deep, source at 1000 m, 50 Hz, receivers out to 100 km.
-Warm is detectable, cool is not, and the black contour labelled `SE 0 dB` is
-the detection boundary. With `FOM = 82.6 dB` for this budget, that contour is
+Warm is detectable, cool is not, and the black contour labelled `SE = 0 dB` is
+the detection boundary (`contours=(0.0,)`, the default; `contours=(0.0, 10.0)`
+adds the SE = +10 dB line). With `FOM = 82.6 dB` for this budget, that contour is
 **exactly the 82.6 dB TL contour** of the Bellhop field — the sonar equation has
 done nothing but relabel the colour axis.
 
-What that buys you is the shape. The detectable region is a solid lobe filling
-the whole water column out to about 20 km, then it collapses: the boundary dives
-to ~1700 m by 25 km and sends a tongue all the way to the seabed near 27 km.
+What that buys you is the shape. The detectable region fills the whole water
+column only out to about 7 km. From there the surface drops out first — the
+upper boundary dives from the surface to ~1700 m by 25 km — while below it
+detection still reaches the seabed out to about 26 km, where the lower boundary
+meets it.
 Past that, detectability is not a disc at all — it survives only in slivers that
 track the deep-sound-channel ray arcs, with warm bands reappearing near the
 surface around 50 km and near 1000–1500 m out past 70 km. A range-independent
@@ -380,7 +387,7 @@ crossing at `99167.8 m`. Widen `receiver.ranges` until the answer is finite.
 
 "The last range with data" is what the function tests, not `ranges[-1]`:
 `detection_range` masks the no-data cells (`NaN`, the package's no-data
-convention — a Bellhop cell no ray reached is exactly that,
+convention — a cell the engine never evaluated or a solver wrote no number for,
 [results](results.md#9-gotchas)) before it looks at the far edge, so a far-edge
 recovery on a 20 km grid with three trailing no-data cells returns `inf`, and
 the warning quotes `17000 m` as the outermost range the model filled.
@@ -393,11 +400,11 @@ warnings, unless you have set `simplefilter('always')`.
 
 It also **interpolates** linearly between the two samples that straddle the
 crossing: `3013.3 m` sits between grid points at 3012.0 and 3031.9 m, on a
-range axis spaced 19.9 m. Crossings quoted later on this page from a plotted curve
-rather than from `detection_range` — the reverberation orderings in
-[§7](#7-reverberation), the reverberation-limited edge in
-[§8](#8-the-active-budget-end-to-end) — are the **grid sample** where the sign
-changes, and the two conventions can differ by up to one cell.
+range axis spaced 19.9 m. The reverberation orderings in
+[§7](#7-reverberation) are interpolated the same way; the reverberation-limited
+edge in [§8](#8-the-active-budget-end-to-end) is read off a plotted curve as the
+first **grid sample** past the change of sign, and the two conventions can
+differ by up to one cell.
 
 ### Where `noise_level_dB` comes from — `WenzNoise` into the budget
 
@@ -478,7 +485,8 @@ for sigma in (5.6, 9.0):
 ![Detection probability for two fluctuation models](figures/sonar_detection_probability.png)
 
 The same deep-water field as §2, now read as probability. Green is detected, red
-is lost, and the contours are `P_D = 0.1`, `0.5`, `0.9`.
+is lost, and the contours are `P_D = 0.1`, `0.5`, `0.9` (`contours=`, the
+default levels).
 
 **The `P_D = 0.5` contour is identical in both panels** — it *is* the `SE = 0`
 boundary, unchanged, because `Φ(0) = 0.5` for any `σ`. What `σ` changes is the
@@ -683,8 +691,9 @@ sphere are nothing like `a`, `b` or `c`. The gap is large and it runs both ways.
 Take a needle, `a = 10 m`, `b = c = 1 m`, pinged end-on at 1 kHz in 1500 m/s
 water (`k = 4.19 rad/m`): compute `ka` from the semi-axis and you get **41.9**,
 comfortably geometric — but the radii of curvature are `b²/a = 0.1 m`, the code
-checks **0.42**, and it warns, naming `ts_convex` rather than the function you
-called. A factor of 100 between the reader's number and the code's. Invert the
+checks **0.42**, and it warns, `ts_ellipsoid: k·a = 0.42 < 10`, the `a` of
+that message being the radius of curvature. A factor of 100 between the
+reader's number and the code's. Invert the
 body — an oblate `a = 1 m`, `b = c = 10 m` — and it reverses: `ka` from the
 semi-axis is **4.19** and looks invalid, while the radii of curvature are
 `b²/a = 100 m`, the code checks **419**, and no warning fires. The page's own
@@ -697,8 +706,8 @@ frequency backscatter from a smooth convex body is set by how sharply the
 surface curves where the sound strikes it, not by how large the body is, so
 curvature is the quantity that has to clear the geometric threshold. A long thin
 target ensonified end-on really is a poor geometric scatterer at 1 kHz, however
-long it is. When the warning names `ts_convex`, it is naming the function that
-holds the test, not reporting a call you did not make.
+long it is. When the warning quotes a `k·a` that matches none of your
+semi-axes, the `a` it means is that radius of curvature.
 
 ```python
 freq = 5000.0
@@ -1046,7 +1055,7 @@ surface** is the localisation estimate.
 |---|---|
 | `synthesize_replica(modes, *, source_depth, ranges, array_depths)` | one replica, `(N, R)` |
 | `replica_bank(modes, *, array_depths, candidate_depths, candidate_ranges)` | a one-frequency `Replicas` from Kraken modes: `candidates={'depth', 'range'}`, `replicas` `(1, n_z, n_r, N)` |
-| `replica_bank_from_field(field, *, array_depths=None)` | a one-frequency `Replicas` from any coherent `Field`/`ResultStack` |
+| `replica_bank_from_field(field, *, array_depths=None)` | a one-frequency `Replicas` from any coherent `Field` |
 | `csdm(snapshots)` | `(N, N)` from `(N, L)` complex snapshots |
 | `bartlett(covariance, replicas)` | `P_B = eᴴKe / (eᴴe · tr K)` (`K` = `covariance`), in `[0, 1]`, as an ambiguity `Field` on the candidates: `kind='ambiguity'` in dB re its peak, `.max()` the estimate, its coordinates in `.pinned` (and its repr), `.reference` the peak `P_B` itself |
 | `mvdr(covariance, replicas, *, diagonal_loading=1e-2)` | `P_MV = 1 / (eᴴK⁻¹e)`, max scaled to 1, as the same kind of Field |
@@ -1136,7 +1145,7 @@ gone, and the panel turns from black to uniform mottled green with the peak
 barely distinguishable from the clutter. It still points roughly the right way,
 but it no longer speaks with authority.
 
-That is the MFP trade in one figure, and it is why `loading` exists: raising it
+That is the MFP trade in one figure, and it is why `diagonal_loading` exists: raising it
 flattens MVDR toward Bartlett, trading resolution for robustness. Loading is
 also **required** when `K` is rank-deficient — a single snapshot, for instance.
 
@@ -1150,12 +1159,12 @@ same one.
 ```python
 # One Bellhop run fills the whole bank: candidate depths are the source depths,
 # array elements are the receivers, candidate ranges are the range axis. The
-# run returns a ResultStack over source_depth.
+# run returns one Field over source_depth.
 swept = uacpy.Source(depths=CAND_DEPTHS, frequencies=200.0)
 array = uacpy.Receiver(depths=ARRAY_DEPTHS, ranges=CAND_RANGES)
-stack = Bellhop(n_beams=4000).run(env, swept, array,
+field = Bellhop(n_beams=4000).run(env, swept, array,
                                   run_mode=RunMode.COHERENT_TL)
-ray_bank = sonar.replica_bank_from_field(stack, array_depths=ARRAY_DEPTHS)
+ray_bank = sonar.replica_bank_from_field(field, array_depths=ARRAY_DEPTHS)
 ```
 
 ![Bartlett from two replica engines](figures/sonar_replica_banks.png)
@@ -1180,10 +1189,9 @@ The trick is in how the carriers are used: the candidate depths become the
 carrier geometry standing on its head relative to a normal TL run — see
 [source and receiver](source-receiver.md).
 
-`replica_bank_from_field` accepts either a single `Field` whose axes are a
-subset of `{source_depth, depth, range}`, or a `ResultStack` over `source_depth`
-— which is exactly what a multi-depth [Bellhop](../models/bellhop.md) run
-returns. `depth` is the array axis and becomes the element axis, last; the
+`replica_bank_from_field` accepts a `Field` whose axes are a subset of
+`{source_depth, depth, range}` — a multi-depth [Bellhop](../models/bellhop.md)
+run returns exactly that. `depth` is the array axis and becomes the element axis, last; the
 remaining axes become the candidates, in order, with the field's
 `source_depth` named `'depth'`. Pass `array_depths=` and the depth
 axis is checked against it rather than trusted.
@@ -1194,10 +1202,9 @@ with `field.at(frequency=…)`; **uacpy's** MFP is single-frequency. Broadband
 MFP is standard in the literature — coherent and incoherent multi-frequency
 Bartlett both exist, and both are markedly more robust to mismatch — but
 neither is implemented here: loop over frequencies and combine the surfaces
-yourself. And every slab of a
-`ResultStack` must share identical depth and range axes, because two slabs on
-different grids would stack into a bank with an undefined candidate axis and
-mislocalise silently.
+yourself. And every source depth shares identical depth and range axes —
+one `Field` cannot hold any other — because two sources on different grids
+would make a bank with an undefined candidate axis and mislocalise silently.
 
 **A cheaper construction by reciprocity.** When the array has fewer elements
 than the candidate-depth grid has points — 16 against 181 here — put the source
@@ -1258,7 +1265,7 @@ reporting the first crossing would hide it. The consequence is that a **coherent
 TL cut, which crosses the FOM line at every interference null, will report a
 range far beyond the last reliable one. Budgets want `INCOHERENT_TL`.
 
-**And `compute_tl` is the coherent one.** `Model.compute_tl(...)` — and the
+**And `compute_field` is the coherent one.** `Model.compute_field(...)` — and the
 default `Model.run(...)` — is `RunMode.COHERENT_TL`, so the warning above lands
 squarely on the shortest path into the package. On the deep-water budget of
 [§2](#2-signal-excess-over-a-modelled-tl-field) at 2731 m receiver depth, the
@@ -1266,8 +1273,10 @@ same 60 km field gives **45.9 km** coherent against **31.7 km** incoherent: 45 %
 too far, from one keyword. Pass `run_mode=RunMode.INCOHERENT_TL` whenever the
 answer you want is a detection range rather than an interference pattern.
 `passive_signal_excess_field` and `active_signal_excess_field` warn when handed
-coherent pressure (a complex field with a phase reference); filter the warning
-when the coherent field is what you intend.
+a field whose `Field.coherent` is `True` — coherent pressure, its `to_dB()`, or
+a `COHERENT_TL` run's real-dB TL; `Field.broadband_loss()` is not coherent and
+passes without it. Filter the warning when the coherent field is what you
+intend.
 
 **The `*_field` budgets read `Field.kind`.** The TL argument must be a
 propagation loss (a model run, or `Field.broadband_loss()`): a received
@@ -1309,7 +1318,7 @@ sweep's separation of bandwidth from duration is not represented.
 field has no phase to correlate. Broadband MFP exists in the literature; it is
 not implemented here.
 
-**MVDR's `loading` is a robustness knob, not a tuning nuisance.** Small values
+**MVDR's `diagonal_loading` is a robustness knob, not a tuning nuisance.** Small values
 give sharp Capon peaks and collapse under mismatch; larger values approach
 Bartlett. The default is `1e-2`; this page's figures use `1e-3` to make the
 mismatch behaviour visible.

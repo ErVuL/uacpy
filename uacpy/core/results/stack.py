@@ -1,201 +1,44 @@
-"""The :class:`ResultStack`: typed :class:`Result` slabs along one coordinate,
-and the checks its sums apply."""
+"""The :class:`ResultStack`: the sparse results of one run (rays,
+arrivals), one per value of a coordinate."""
 
 from __future__ import annotations
 
-import warnings
-
 import numpy as np
-from typing import Optional, Dict, Any, List, Mapping, Tuple, Union
+from typing import Optional, Dict, Any, List, Mapping, Union
 
-from uacpy.core._carrier import DeepCopyMixin
-from uacpy.core._export import (_resolve_class, saved_class_path, unwrap_0d,
-                                join_complex, write_netcdf)
-from uacpy.core.constants import PRESSURE_FLOOR
+from uacpy.core._export import (_resolve_class, saved_class_path,
+                                require_extra)
 from uacpy.core._repr import build, count
-from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._plotting import plotter
 from uacpy.core._grid import nearest_index_on_axis
-from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.results import quantities as _quantities
-from uacpy.core.results._base import (PhaseReference, Result, _integer_index,
-                                      coordinate_axis)
-from uacpy.core.results.field import Field, _RESULTSTACK_VARYING_ATTR
+from uacpy.core.results._base import Result, _integer_index, coordinate_axis
+from uacpy.core.results.field import Field, _AXIS_IDENTITY_ATTR
 
 
-def _check_superpose_grids(slabs) -> None:
-    """Refuse slabs that are not sampled at the same points.
+class ResultStack(Result):
+    """Results that share no grid, one per value of a coordinate.
 
-    Either kind of sum adds cell to cell, so this belongs to both: a
-    coherent one would add pressures from different places, an incoherent
-    one their intensities, and the answer would carry the first slab's axes
-    whichever it was.
-    """
-    first = slabs[0]
-    for i, slab in enumerate(slabs[1:], start=1):
-        same_axes = list(slab.coords) == list(first.coords) and all(
-            np.array_equal(slab.coords[k], first.coords[k])
-            for k in first.coords)
-        if not same_axes or slab.data.shape != first.data.shape:
-            sizes = {k: (first.coords[k].size, slab.coords[k].size)
-                     for k in first.coords
-                     if k in slab.coords
-                     and first.coords[k].size != slab.coords[k].size}
-            detail = (
-                f"axes {list(first.coords)} vs {list(slab.coords)}"
-                if list(slab.coords) != list(first.coords) else
-                f"shape {first.data.shape} vs {slab.data.shape}"
-                + (f", axis lengths {sizes}" if sizes else
-                   "; same lengths, different coordinate values")
-            )
-            raise ConfigurationError(
-                f"ResultStack.superpose: slabs[{i}] is on a different "
-                f"grid from slabs[0] ({detail}); a sum needs every slab "
-                f"sampled at the same points. A TIME_SERIES pair gets one "
-                f"time axis from run(output_duration=…)."
-            )
+    A run over a ``Source`` with several depths returns one :class:`Field`
+    in every mode that returns a field (TL, ``BROADBAND`` H(f),
+    ``TIME_SERIES`` traces): the depths are its leading ``source_depth``
+    axis and :meth:`Field.superpose` sums them. The sparse results cannot
+    be one array — the :class:`Rays` of a ``RAYS`` / ``EIGENRAYS`` run and
+    the :class:`Arrivals` of an ``ARRIVALS`` run hold a different number of
+    paths per source — so a multi-depth run of those modes returns a
+    ``ResultStack``: one slab per source depth.
+    :meth:`ParallelResult.stack() <uacpy.parallel.ParallelResult.stack>`
+    bundles the non-Field results of a sweep the same way. A Field is never
+    a slab.
 
-
-def _check_one_quantity(slabs) -> None:
-    """Refuse Field slabs that do not hold the same quantity the same way.
-
-    Every sum and every stacked view reads the first slab's storage, kind,
-    unit and phase convention for all of them: a complex pressure slab and
-    its own ``to_dB()`` would add a decibel to a pascal, and a loss and a
-    level would be read with one sign."""
-    def signature(slab):
-        reference = slab.phase_reference
-        return {'storage': 'complex' if slab.is_complex else 'real',
-                'kind': slab.kind, 'unit': slab.unit,
-                'phase_reference': (None if reference is None
-                                    else PhaseReference(reference).value)}
-    first = signature(slabs[0])
-    for i, slab in enumerate(slabs[1:], start=1):
-        this = signature(slab)
-        differ = [k for k in first if this[k] != first[k]]
-        if differ:
-            detail = ', '.join(f"{k} {first[k]!r} vs {this[k]!r}"
-                               for k in differ)
-            raise ConfigurationError(
-                f"ResultStack: slabs[{i}] holds a different quantity from "
-                f"slabs[0] ({detail}); a stack is one quantity stored one "
-                f"way, since every sum and view reads the first slab's.",
-                remediation="Convert the slabs to one form first (e.g. "
-                            "to_dB() on every one), or keep them in "
-                            "separate stacks.")
-
-
-def _check_stack_weightable(field: 'Field', weights, *, where: str) -> None:
-    """The weaker check a *stack* has to pass: refuse only what no sum of
-    it could ever use.
-
-    A stack is not weighted when it is built — :meth:`ResultStack.superpose`
-    applies the weights, and the caller has not yet said which sum they
-    mean. A dB-only stack cannot add coherently but adds perfectly well in
-    intensity, so refusing it here would close the only route to "N mutually
-    incoherent sources at these levels". What is unusable either way is a
-    complex weight on data with no phase to rotate; that is refused now,
-    while the rest waits for :meth:`ResultStack.superpose` to judge against
-    the sum actually asked for.
-    """
-    w = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
-    if not np.any(w.imag != 0.0):
-        return
-    if 'time' in field.coords or not field.is_complex:
-        _check_field_weightable(field, w, where=where)
-    elif field.phase_reference is None:
-        _check_field_weightable(field, w, where=where)
-
-
-def _dB_weight_refusal(unit, *, where: str) -> ConfigurationError:
-    """The refusal of a weight on a real frequency-domain field of
-    ``unit`` (dB): its phase is gone, so no weight scales it."""
-    return ConfigurationError(
-        f"{where}: the field is real {unit!r} values, not "
-        f"complex pressure, so its phase is gone and a weight cannot "
-        f"scale it (multiplying dB is not a coherent sum). Weight the "
-        f"complex field the run returned (before to_dB(), or a mode "
-        f"that keeps phase — phase_reference is not None); for the "
-        f"level of one source at magnitude |w|, subtract "
-        f"20*log10(|w|) from the dB view yourself."
-    )
-
-
-def _check_field_weightable(field: 'Field', weights, *, where: str) -> None:
-    """Raise :class:`ConfigurationError` unless ``weights`` can scale
-    ``field``. The one rule behind the n = 1 weight
-    :meth:`PropagationModel.run` applies and the n-slab sum
-    :meth:`ResultStack.superpose` forms:
-
-    * a real frequency-domain field (dB) has lost its phase and takes no
-      weight at all — multiplying decibels is not a scaling;
-    * a real time-domain trace takes a real weight (a sign flip is -1),
-      never a complex one;
-    * complex data takes a complex weight only when it carries a
-      ``phase_reference``. Complex data without one — a field built by
-      hand, say — states no phase convention, so its phase cannot be told
-      from an artefact of how it was stored; rotating it would record a
-      source phase the field cannot carry. A real weight still scales such
-      a field's level.
-    """
-    w = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
-    time_domain = 'time' in field.coords
-    if not time_domain and not field.is_complex:
-        raise _dB_weight_refusal(field.unit, where=where)
-    if not field.is_complex and np.any(w.imag != 0.0):
-        raise ConfigurationError(
-            f"{where}: the data are real time-domain traces, which a "
-            f"complex weight cannot scale; give a real weight (a sign flip "
-            f"is -1), or run BROADBAND and weight the transfer function "
-            f"before synthesising."
-        )
-    if (field.is_complex and field.phase_reference is None
-            and np.any(w.imag != 0.0)):
-        raise ConfigurationError(
-            f"{where}: the data are complex but carry no phase reference, "
-            f"so nothing says their phase is a propagation phase rather "
-            f"than an artefact of how they were stored. Rotating it by a "
-            f"complex weight would record a source phase the field cannot "
-            f"carry; give a real weight to scale its level, or build the "
-            f"field with a phase_reference (every coherent model mode "
-            f"stamps one)."
-        )
-
-
-def _weighted_slab_sum(slabs, weights, *, where: str) -> Tuple[np.ndarray,
-                                                              np.ndarray]:
-    """``(Σ wᵢ·dataᵢ, w)``: the coherent weighted sum of ``slabs``' data,
-    and the weights as applied — real for real data, complex otherwise —
-    after :func:`_check_field_weightable` on the first slab. The one sum
-    behind :meth:`ResultStack.superpose` and the n = 1 weight
-    :meth:`PropagationModel.run` applies to a one-depth ``Source``."""
-    first = slabs[0]
-    w = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
-    _check_field_weightable(first, w, where=where)
-    if not first.is_complex:
-        w = w.real
-    total = np.zeros(first.data.shape,
-                     dtype=np.result_type(first.data.dtype, w.dtype))
-    for wi, slab in zip(w, slabs):
-        total += wi * slab.data
-    return total, w
-
-
-class ResultStack(DeepCopyMixin):
-    """Stack of typed :class:`Result` slabs along one coordinate.
-
-    Bundles a list of slabs together with the coordinate vector along
-    which they are stacked. The coordinate can be a :class:`Result`
-    field (``source_depth``, ``frequency``) or an external parameter
-    the user varied. Every slab carries the same concrete type,
-    ``model``, and ``backend``, and the same identification along
-    every axis *except* the stacking axis.
-
-    This is what a multi-source run returns, for gridded (``Field``) and
-    sparse (``Rays`` / ``Arrivals``) results alike. Consumers that need one
-    dense array — matched-field processing, say — accept either this stack or
-    a single :class:`Field` carrying the varying axis in ``coords`` (e.g.
-    ``coords={'source_depth', 'depth', 'range'}``).
+    Every slab has the same concrete type, ``model`` and ``backend``, and
+    the same identity along every axis *except* the stacking one. The stack
+    is a :class:`Result`: its identity is its first slab's (the stacking
+    axis excepted), and it saves and loads as every result does —
+    :meth:`to_dict` / :meth:`from_dict` (npz), :meth:`to_netcdf` /
+    :meth:`~Result.from_netcdf` (each slab in its own NetCDF group), and
+    :meth:`~uacpy.core._export.Exportable.to_dataframe` (the slabs' tables
+    with the stacking coordinate as a column).
 
     Construction
     ------------
@@ -206,8 +49,8 @@ class ResultStack(DeepCopyMixin):
     ``stack[i]``                              i-th slab
     ``for c, slab in stack: …``               iterate ``(coordinate, slab)`` pairs
     ``stack.at(<coordinate_name>=value)``     nearest-label lookup
+    ``stack.isel(<coordinate_name>=index)``   positional lookup
     ``len(stack)``                            number of slabs
-    ``stack.superpose(weights)``              coherent sum ``Σ wᵢ·pᵢ`` → Field
     """
 
     def __init__(
@@ -217,6 +60,7 @@ class ResultStack(DeepCopyMixin):
         *,
         coordinate_name: str = 'source_depth',
     ):
+        slabs = list(slabs)
         if len(slabs) == 0:
             raise ConfigurationError("ResultStack: requires at least one slab.")
         coord = np.atleast_1d(np.asarray(coordinate, dtype=float))
@@ -225,6 +69,22 @@ class ResultStack(DeepCopyMixin):
                 f"ResultStack: coordinate length ({coord.size}) does not "
                 f"match number of slabs ({len(slabs)})"
             )
+        not_results = sorted({type(s).__name__ for s in slabs
+                              if not isinstance(s, Result)})
+        if not_results:
+            raise ConfigurationError(
+                f"ResultStack: every slab must be a Result; got "
+                f"{not_results}.")
+        if any(isinstance(s, Field) for s in slabs):
+            raise ConfigurationError(
+                "ResultStack: a Field is not a slab. The fields of several "
+                "sources (or of any sweep on one grid) are one Field with a "
+                "leading axis over them.",
+                remediation=(
+                    "Take the one Field a multi-depth run returns "
+                    "(Field.superpose() sums it), or join separately "
+                    "computed fields into it: stack_fields(fields, depths) "
+                    "(coordinate_name= names another axis)."))
         types = {type(s) for s in slabs}
         if len(types) != 1:
             raise ConfigurationError(
@@ -232,7 +92,7 @@ class ResultStack(DeepCopyMixin):
                 f"type; got {sorted(t.__name__ for t in types)}."
             )
 
-        varying_attr = _RESULTSTACK_VARYING_ATTR.get(str(coordinate_name))
+        varying_attr = _AXIS_IDENTITY_ATTR.get(str(coordinate_name))
         shared_attrs = ['model', 'backend']
         for attr in ('frequencies', 'source_depths'):
             if attr != varying_attr:
@@ -258,7 +118,7 @@ class ResultStack(DeepCopyMixin):
                     # own stacking coordinate, so a sweep over one of them
                     # is told which coordinate_name admits it.
                     axis = {v: k for k, v in
-                            _RESULTSTACK_VARYING_ATTR.items()}.get(attr)
+                            _AXIS_IDENTITY_ATTR.items()}.get(attr)
                     raise ConfigurationError(
                         f"ResultStack: slabs[0].{attr}={ref!r} but "
                         f"slabs[{i}].{attr}={val!r} — every slab must "
@@ -267,8 +127,7 @@ class ResultStack(DeepCopyMixin):
                         remediation=(
                             "For a source-depth sweep, stack along "
                             "coordinate_name='source_depth', or pass "
-                            "Source(depths=[...]) to one run — it returns a "
-                            "ResultStack over source_depth."
+                            "Source(depths=[...]) to one run."
                             if axis == 'source_depth' else
                             f"For a sweep over {attr}, stack along "
                             f"coordinate_name={axis!r}."
@@ -278,10 +137,7 @@ class ResultStack(DeepCopyMixin):
                             f"separate ResultStack."),
                     )
 
-        if isinstance(first, Field):
-            _check_one_quantity(slabs)
-
-        self.slabs: List[Result] = list(slabs)
+        self.slabs: List[Result] = slabs
         self.coordinate: np.ndarray = coord
         self.coordinate_name: str = str(coordinate_name)
 
@@ -291,15 +147,15 @@ class ResultStack(DeepCopyMixin):
         """The lone slab when ``slabs`` holds one, else a
         :class:`ResultStack` of them along ``coordinate``.
 
-        The one rule for a result that may vary along an axis: a reader or
-        a run that produced a single slab returns it as it is, and several
-        are stacked. An empty ``slabs`` is refused as the constructor
-        refuses it.
+        The one rule for a sparse result that may vary along an axis: a
+        reader or a run that produced a single slab returns it as it is, and
+        several are stacked. An empty ``slabs`` is refused as the
+        constructor refuses it.
 
         Parameters
         ----------
         slabs : sequence of Result
-            The slabs, at least one.
+            The slabs, at least one; none a :class:`Field`.
         coordinate : array_like
             The stacking label of each slab.
         coordinate_name : str, optional
@@ -317,6 +173,8 @@ class ResultStack(DeepCopyMixin):
     @property
     def n_slabs(self) -> int:
         return int(self.coordinate.size)
+
+    # ── identity: the first slab's, the stacking axis excepted ─────────────
 
     @property
     def model(self) -> str:
@@ -366,13 +224,12 @@ class ResultStack(DeepCopyMixin):
 
     @property
     def source_weights(self) -> Optional[np.ndarray]:
-        """The ``Source`` weights, one per source depth, that
-        :meth:`superpose` applies by default (every slab records them), or
-        ``None``."""
+        """The ``Source`` weights, one per source depth, every slab records,
+        or ``None``. A sparse result has no sum to apply them to."""
         return self.slabs[0].source_weights
 
     def _identity_axis(self, attr: str):
-        if _RESULTSTACK_VARYING_ATTR.get(self.coordinate_name) == attr:
+        if _AXIS_IDENTITY_ATTR.get(self.coordinate_name) == attr:
             return self.coordinate.copy()
         return getattr(self.slabs[0], attr)
 
@@ -388,6 +245,8 @@ class ResultStack(DeepCopyMixin):
         the results a run's slabs were built from, which one run puts on
         every slab."""
         return self.slabs[0].components
+
+    # ── access ─────────────────────────────────────────────────────────────
 
     def __len__(self) -> int:
         return self.n_slabs
@@ -415,7 +274,8 @@ class ResultStack(DeepCopyMixin):
             )
         idx = nearest_index_on_axis(
             self.coordinate, kwargs[self.coordinate_name],
-            self.coordinate_name)
+            self.coordinate_name, who="ResultStack.at",
+            several=", or index positions with isel()")
         return self.slabs[idx]
 
     def isel(self, **kwargs) -> Result:
@@ -434,404 +294,128 @@ class ResultStack(DeepCopyMixin):
             kwargs[self.coordinate_name],
             f"ResultStack.isel: {self.coordinate_name}")]
 
-    @property
-    def dB(self) -> np.ndarray:
-        """Every slab's dB view stacked along the coordinate axis — shape
-        ``(n_slabs, *slab.dB.shape)`` — so generic code can read ``result.dB``
-        whether one or many source depths were requested. Requires Field slabs.
-        """
-        first = self.slabs[0]
-        if not isinstance(first, Field):
-            raise ConfigurationError(
-                f"ResultStack.dB: slabs are {self.slab_type.__name__}, not "
-                f"Field — no dB view. Pick a slab with stack[i] or "
-                f"stack.at({self.coordinate_name}=...)."
-            )
-        self._warn_if_weights_unapplied('dB')
-        if 'time' in first.coords:
-            raise ConfigurationError(
-                "ResultStack.dB: time-domain slabs are linear pressure, not "
-                "a level; read the samples via stack[i].data, or recover a "
-                "complex narrowband field first with stack[i].extract_tone(f)."
-            )
-        # Complex slabs derive their dB view (unit 'Pa', -20*log10|data|);
-        # a real slab's data IS its dB view only when its unit says so, and
-        # Field.dB refuses any other unit — pre-check it here so the stack
-        # raises the same typed error as the time-domain case above.
-        if not first.is_complex and first.unit != 'dB':
-            raise ConfigurationError(
-                f"ResultStack.dB: slabs are in {first.unit!r}, not dB, so "
-                f"their values are not a level; read them via stack[i].data. "
-                f"to_dB() returns a real slab unchanged, so if a dB view of "
-                f"{first.unit!r} is meaningful, take "
-                f"20*np.log10(np.abs(stack[i].data)) yourself and tag the "
-                f"result unit='dB'."
-            )
-        return np.stack([s.dB for s in self.slabs], axis=0)
+    # ── export ─────────────────────────────────────────────────────────────
 
-    @property
-    def p(self) -> np.ndarray:
-        """Every slab's complex pressure stacked along the coordinate axis —
-        shape ``(n_slabs, *slab.data.shape)`` — :attr:`Field.p` per slab.
-
-        Refused when the slabs are real (a dB field has discarded its phase),
-        as :attr:`Field.p` refuses, but with the stack accessors'
-        ConfigurationError. The per-source weights are not applied; use
-        :meth:`superpose` for the weighted sum.
-        """
-        first = self.slabs[0]
-        if not isinstance(first, Field):
-            raise ConfigurationError(
-                f"ResultStack.p: slabs are {self.slab_type.__name__}, not "
-                f"Field — no pressure view. Pick a slab with stack[i] or "
-                f"stack.at({self.coordinate_name}=...)."
-            )
-        if not first.is_complex:
-            raise ConfigurationError(
-                f"ResultStack.p: slabs are real ({first.unit!r}); complex "
-                f"pressure is unavailable because the phase was discarded. "
-                f"Run a complex mode (COHERENT_TL / BROADBAND) to keep it."
-            )
-        self._warn_if_weights_unapplied('p')
-        return np.stack([s.p for s in self.slabs], axis=0)
-
-    @property
-    def tl(self) -> np.ndarray:
-        """Every slab's transmission loss stacked along the coordinate
-        axis — :attr:`dB` restricted to pressure slabs, mirroring
-        :attr:`Field.tl` in values. The refusal type follows each class's
-        own accessors: ``Field`` accessors raise :class:`AttributeError`,
-        stack accessors raise ConfigurationError."""
-        first = self.slabs[0]
-        if isinstance(first, Field) and first.kind != 'pressure':
-            raise ConfigurationError(
-                f"ResultStack.tl: the slabs' kind is {first.kind!r}, not "
-                f"'pressure', so their values are not a transmission loss; "
-                f"their level view is stack.dB."
-            )
-        return self.dB
-
-    def superpose(self, weights=None, *, coherent: bool = True) -> 'Field':
-        """Coherent sum of the slabs: one :class:`Field` holding
-        ``Σ wᵢ·pᵢ`` over the stack on the shared receiver grid.
-
-        Adding the complex pressure of each source is how a multi-source
-        array is driven: the engines are linear in the source amplitude, so
-        the field of a weighted array is the weighted sum of the unit-source
-        fields the stack holds. Every slab must therefore carry complex
-        pressure (``phase_reference`` intact) or a time-domain trace — a
-        dB-only slab has lost its phase and is refused.
+    def values(self, name: Optional[str] = None) -> np.ndarray:
+        """Refused: the slabs share no grid, so the stack holds no payload
+        of its own; read a slab's (``stack[i].values()``).
 
         Parameters
         ----------
-        weights : array-like, optional
-            One coefficient per slab. ``None`` reads the weights the
-            ``Source`` that produced the stack carried
-            (:attr:`source_weights`, stamped by
-            :meth:`PropagationModel.run`), else unit weights. Complex on a
-            complex-pressure stack; real on a time-domain stack, whose
-            traces are real samples. ``coherent=False`` uses only ``|w|``.
-        coherent : bool, keyword-only
-            How the sources combine, which is a statement about the sources
-            and not about the arithmetic:
-
-            ``True`` (default) adds complex pressure, ``Σ wᵢ·pᵢ`` — the
-            sources are driven together with a fixed relative phase, as the
-            elements of one array are.
-
-            ``False`` adds intensity, ``√Σ|wᵢ·pᵢ|²`` — the sources are
-            mutually incoherent (separate platforms, unrelated tones,
-            random relative phase), so their phases carry no information and
-            only ``|w|`` is read. N identical sources then give
-            ``10·log10(N)`` where a coherent sum gives ``20·log10(N)``.
-            The result has no phase, so it comes back the way every engine
-            returns its own incoherent mode: real dB, ``phase_reference``
-            cleared. A dB-only stack, which cannot add coherently, adds this
-            way.
-
-        Returns
-        -------
-        Field
-            Same grid and identity as the slabs, with ``source_depths``
-            widened to the stacking coordinate and
-            ``metadata['superposed_sources']`` recording the ``depths``, the
-            ``weights`` and whether the sum was ``coherent``. A coherent sum
-            keeps the slabs' ``phase_reference``; an incoherent one clears
-            it and returns real dB.
+        name : str, optional
+            A payload name, as :meth:`Exportable.values` takes it.
 
         Raises
         ------
         ConfigurationError
-            Non-Field slabs; slabs on different grids; a weight vector of
-            the wrong length or with a non-finite entry. A coherent sum also
-            refuses a real frequency-domain (dB) stack, a complex weight on
-            a time-domain stack, and a complex weight on data carrying no
-            phase reference; an incoherent sum refuses time-domain traces,
-            which do not add in intensity sample by sample.
+            Always.
         """
-        first = self.slabs[0]
-        if not isinstance(first, Field):
-            raise ConfigurationError(
-                f"ResultStack.superpose: slabs are "
-                f"{self.slab_type.__name__}, not Field — only gridded "
-                f"pressure adds. Pick a slab with stack[i]."
-            )
-        if self.coordinate_name != 'source_depth':
-            raise ConfigurationError(
-                f"ResultStack.superpose: this stack runs over "
-                f"{self.coordinate_name!r}, not over sources. The sum is the "
-                f"field of an array of sources driven together; summing "
-                f"slabs over {self.coordinate_name!r} adds fields that "
-                f"never coexist, and would record the "
-                f"{self.coordinate_name} values as source depths.",
-                remediation=f"Select a slab with stack[i] or "
-                            f"stack.at({self.coordinate_name}=…).")
-        if weights is None:
-            weights = first.source_weights
-        if weights is None:
-            weights = np.ones(self.n_slabs)
-        w = np.atleast_1d(np.asarray(weights, dtype=np.complex128))
-        if w.ndim != 1 or w.size != self.n_slabs:
-            raise ConfigurationError(
-                f"ResultStack.superpose: {self.n_slabs} slabs but "
-                f"{w.size} weight(s) (shape {w.shape}); give one weight "
-                f"per slab."
-            )
-        if not np.all(np.isfinite(w)):
-            bad = int(np.flatnonzero(~np.isfinite(w))[0])
-            raise ConfigurationError(
-                f"ResultStack.superpose: weights must be finite; "
-                f"weights[{bad}] = {w[bad]}."
-            )
-        _check_superpose_grids(self.slabs)
-        if not coherent:
-            return self._superpose_incoherent(w)
-        total, w = _weighted_slab_sum(self.slabs, w,
-                                     where="ResultStack.superpose")
-
-        id_kwargs = first.id_kwargs()
-        id_kwargs['source_depths'] = self.coordinate.copy()
-        id_kwargs['source_weights'] = None
-        meta = id_kwargs['metadata']
-        meta['superposed_sources'] = {
-            'depths': self.coordinate.tolist(),
-            'weights': w.tolist(),
-            'coherent': True,
-        }
-        pinned = {k: v for k, v in first.pinned.items()
-                  if k != 'source_depth'}
-        return first.replace(data=total, pinned=pinned, **id_kwargs)
-
-    def _superpose_incoherent(self, w) -> 'Field':
-        """``√Σ|wᵢ·pᵢ|²`` over the slabs, as a real dB ``Field``.
-
-        Reads magnitudes only, so it serves a dB-only stack as well as a
-        complex one: ``|p| = 10**(-dB/20)`` recovers the magnitude a level
-        already is. Time-domain traces are refused — intensity does not add
-        sample by sample."""
-        first = self.slabs[0]
-        if 'time' in first.coords:
-            raise ConfigurationError(
-                "ResultStack.superpose(coherent=False): the slabs are "
-                "time-domain traces, and intensity does not add sample by "
-                "sample. Sum the traces coherently, or superpose the "
-                "BROADBAND transfer function and synthesise afterwards."
-            )
-        if np.any(w.imag != 0.0):
-            warnings.warn(
-                "ResultStack.superpose(coherent=False): an intensity sum "
-                "carries no phase, so only the weight magnitudes are used "
-                f"({np.abs(w).tolist()}); the phases of {w.tolist()} are "
-                "dropped. Pass coherent=True to drive the sources with a "
-                "fixed relative phase.",
-                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-        amp = np.abs(w)
-
-        # A loss counts DOWN from the source and a level counts UP, so the
-        # stored numbers turn into an amplitude with opposite signs. Reading
-        # every real dB field as a loss inverted a stack of levels: two
-        # incoherent 120 dB sources came back 116.99 dB instead of 123.01.
-        loss = _quantities.is_loss(first.kind)
-        sign = -1.0 if loss else 1.0
-
-        def magnitude(slab):
-            data = np.asarray(slab.data)
-            if slab.is_complex:
-                return np.abs(data)
-            return np.power(10.0, sign * np.asarray(data, dtype=float) / 20.0)
-
-        total = np.zeros(np.asarray(first.data).shape, dtype=float)
-        for a, slab in zip(amp, self.slabs):
-            total += (a * magnitude(slab)) ** 2
-        # Clamped like every other dB view (``transmission_loss_dB``), so a cell no
-        # energy reached reads the package's floor instead of ``inf``.
-        # A loss counts down (-20log10|p|), a level counts up (+20log10|p|),
-        # which is the same ``sign`` the magnitudes were recovered with.
-        level = sign * 20.0 * np.log10(
-            np.maximum(np.sqrt(total), PRESSURE_FLOOR))
-
-        id_kwargs = first.id_kwargs()
-        id_kwargs['source_depths'] = self.coordinate.copy()
-        id_kwargs['phase_reference'] = None
-        id_kwargs['source_weights'] = None
-        meta = id_kwargs['metadata']
-        id_kwargs['unit'] = 'dB'
-        # An intensity sum is incoherent whatever run mode produced the
-        # slabs; the run mode it inherits would say otherwise.
-        id_kwargs['coherent'] = False
-        meta['superposed_sources'] = {
-            'depths': self.coordinate.tolist(),
-            'weights': amp.tolist(),
-            'coherent': False,
-        }
-        pinned = {k: v for k, v in first.pinned.items()
-                  if k != 'source_depth'}
-        return first.replace(data=level, pinned=pinned, **id_kwargs)
-
-    def _warn_if_weights_unapplied(self, view: str) -> None:
-        """Every slab is the unit-amplitude field of one source; when the
-        ``Source`` carried other weights, the level view or panel plot of
-        the slabs shows a field those weights never touched. Say so once,
-        naming :meth:`superpose`, which is where they apply."""
-        weights = self.slabs[0].source_weights
-        if weights is None or np.all(np.asarray(weights) == 1.0):
-            return
-        warnings.warn(
-            f"ResultStack.{view}: the slabs are unit-amplitude fields; the "
-            f"Source weights {np.asarray(weights).tolist()} this stack "
-            f"carries are not applied to them. Call stack.superpose() for "
-            f"the weighted field.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        raise ConfigurationError(
+            f"ResultStack.values: a stack holds one "
+            f"{self.slab_type.__name__} per {self.coordinate_name}, which "
+            f"share no grid, so it has no array of its own.",
+            remediation="Read one slab's: stack[i].values().")
 
     def to_xarray(self):
-        """This stack as one ``xarray.DataArray`` (optional extra
-        ``uacpy[xarray]``), the slabs joined along a leading
-        :attr:`coordinate_name` dimension whose coordinate is
-        :attr:`coordinate`.
-
-        Each slab is written by :meth:`Field.to_xarray`, so ``attrs`` carry
-        the first slab's quantity and identity — every slab shares them except
-        along the stacking axis, whose values are the new coordinate. The
-        attribute that axis varies (``source_depths`` for a ``source_depth``
-        stack, ``frequencies`` for a ``frequency`` stack) is therefore left
-        out of ``attrs``. The Source weights are recorded, not applied (see
-        :meth:`superpose`), as the complex pair :meth:`Field.to_xarray`
-        writes. :meth:`from_xarray` reads the whole stack back;
-        ``da.isel({coordinate_name: i})`` read with :meth:`Field.from_xarray`
-        is slab ``i`` alone, the stacking label as a pinned coordinate.
-        Requires :class:`Field` slabs.
-        """
-        first = self.slabs[0]
-        if not isinstance(first, Field):
-            raise ConfigurationError(
-                f"ResultStack.to_xarray: slabs are {self.slab_type.__name__}, "
-                f"not Field — only a gridded stack is one DataArray.")
-        try:
-            import xarray as xr
-        except ImportError as exc:
-            raise ConfigurationError(
-                "ResultStack.to_xarray: xarray is not installed.",
-                remediation="pip install 'uacpy[xarray]'") from exc
-        arrays = [s.to_xarray() for s in self.slabs]
-        stacked = xr.concat(arrays, dim=self.coordinate_name,
-                            combine_attrs='override')
-        stacked = stacked.assign_coords(
-            {self.coordinate_name: np.asarray(self.coordinate, dtype=float)})
-        varying = _RESULTSTACK_VARYING_ATTR.get(self.coordinate_name)
-        if varying is not None:
-            stacked.attrs.pop(varying, None)
-        return stacked
-
-    @classmethod
-    def from_xarray(cls, array, coordinate_name: Optional[str] = None
-                    ) -> 'ResultStack':
-        """A stack of :class:`Field` slabs from an ``xarray.DataArray``, such
-        as :meth:`to_xarray` writes: the inverse of that method.
-
-        ``coordinate_name`` names the stacking dimension; ``None`` takes the
-        leading one, where :meth:`to_xarray` puts it. Each slab is read by
-        :meth:`Field.from_xarray` and carries the stacking label as its
-        identity when the axis is one (``source_depths=[z]`` for a
-        ``source_depth`` stack), not as a pinned coordinate, so the slabs
-        come back as the stack held them.
-
-        Parameters
-        ----------
-        array : xarray.DataArray
-            An array as :meth:`to_xarray` writes it.
-        coordinate_name : str, optional
-            The stacking dimension; ``None`` is the leading one.
-        """
-        # A file's complex data, stored as real and imaginary parts.
-        array = join_complex(array)
-        name = str(array.dims[0]) if coordinate_name is None \
-            else str(coordinate_name)
-        if name not in array.dims or name not in array.coords:
-            raise ConfigurationError(
-                f"ResultStack.from_xarray: {name!r} is not a dimension with "
-                f"a coordinate of this DataArray (dims {list(array.dims)}).",
-                remediation="Pass coordinate_name= naming the stacking "
-                            "dimension.")
-        coordinate = np.asarray(array.coords[name].values, dtype=float)
-        slabs = []
-        for i in range(coordinate.size):
-            slab = Field.from_xarray(array.isel({name: i}))
-            slab.pinned.pop(name, None)
-            slabs.append(slab)
-        return cls(slabs, coordinate, coordinate_name=name)
-
-    def to_netcdf(self, path, **kwargs) -> None:
-        """Write :meth:`to_xarray` to a NetCDF file at ``path``
-        (:func:`~uacpy.core._export.write_netcdf`); :meth:`from_netcdf`
-        reads it back. Requires :class:`Field` slabs, as :meth:`to_xarray`
-        does.
-
-        Parameters
-        ----------
-        path : str or path-like
-            The file to write (replaced if it exists).
-        **kwargs
-            Passed to xarray's ``to_netcdf``. Complex values are written as
-            real and imaginary parts any backend stores.
+        """Refused: the slabs share no grid, so they are not one xarray
+        object. :meth:`to_netcdf` writes them, each in its own group, and
+        ``stack[i].to_xarray()`` is one slab.
 
         Raises
         ------
         ConfigurationError
-            Non-Field slabs.
+            Always.
         """
-        write_netcdf(self.to_xarray(), path,
-                     who="ResultStack.to_netcdf", **kwargs)
+        raise ConfigurationError(
+            f"ResultStack.to_xarray: a stack holds one "
+            f"{self.slab_type.__name__} per {self.coordinate_name}, which "
+            f"share no grid, so it is not one xarray object.",
+            remediation="Read one slab (stack[i].to_xarray()); to_netcdf() "
+                        "writes every slab and from_netcdf() reads the "
+                        "stack back; to_dataframe() lists every slab's "
+                        "rows.")
 
     @classmethod
-    def from_netcdf(cls, path, coordinate_name: Optional[str] = None,
-                    **kwargs) -> 'ResultStack':
-        """The stack :meth:`to_netcdf` wrote to ``path``: the file's one
-        array read with ``xarray.open_dataarray`` and rebuilt by
-        :meth:`from_xarray`.
+    def from_xarray(cls, obj):
+        """Refused: a stack is not one xarray object; :meth:`from_netcdf`
+        reads the file :meth:`to_netcdf` wrote.
 
         Parameters
         ----------
-        path : str or path-like
-            The file to read.
-        coordinate_name : str, optional
-            The stacking dimension; ``None`` is the leading one.
-        **kwargs
-            Passed to ``xarray.open_dataarray``.
+        obj : xarray.Dataset or xarray.DataArray
+            The object a caller would read.
+
+        Raises
+        ------
+        ConfigurationError
+            Always.
         """
-        from uacpy.core._export import require_extra
-        xarray = require_extra('xarray', 'ResultStack.from_netcdf')
-        with xarray.open_dataarray(path, **kwargs) as array:
-            array = array.load()
-        return cls.from_xarray(array, coordinate_name=coordinate_name)
+        raise ConfigurationError(
+            "ResultStack.from_xarray: a stack is not one xarray object.",
+            remediation="Read the file to_netcdf() wrote with "
+                        "ResultStack.from_netcdf(path).")
+
+    def _table(self) -> Optional[Dict[str, np.ndarray]]:
+        """Every slab's rows, in stacking order, under a first column named
+        by the stacking axis that holds each row's coordinate; ``None`` when
+        the slabs are not tables."""
+        tables = [slab._table() for slab in self.slabs]
+        if any(t is None for t in tables):
+            return None
+        columns = list(tables[0])
+        if self.coordinate_name in columns:
+            raise ConfigurationError(
+                f"ResultStack.to_dataframe: the slabs already carry a "
+                f"{self.coordinate_name!r} column.")
+        rows = [np.full(len(next(iter(t.values()))) if t else 0, c)
+                for c, t in zip(self.coordinate, tables)]
+        out = {self.coordinate_name: np.concatenate(rows)}
+        for column in columns:
+            out[column] = np.concatenate([np.asarray(t[column])
+                                          for t in tables])
+        return out
+
+    def _netcdf_parts(self, group, parts) -> None:
+        """The stack's own part — its coordinate, named by the stacking
+        axis, and the class and slab count — then each slab (with its own
+        components) in the group ``slab_<i>`` below it."""
+        xarray = require_extra('xarray', 'ResultStack.to_netcdf')
+        root = xarray.Dataset(
+            coords={self.coordinate_name: (self.coordinate_name,
+                                           np.asarray(self.coordinate,
+                                                      dtype=float))},
+            attrs={'uacpy_class': saved_class_path(type(self)),
+                   'uacpy_components': '',
+                   'coordinate_name': self.coordinate_name,
+                   'n_slabs': int(self.n_slabs)})
+        parts.append((group, root))
+        for i, slab in enumerate(self.slabs):
+            below = f'slab_{i}' if group is None else f'{group}/slab_{i}'
+            slab._netcdf_parts(below, parts)
+
+    @classmethod
+    def _from_netcdf_part(cls, xarray, path, group, obj, kwargs,
+                          who) -> 'ResultStack':
+        """The stack :meth:`_netcdf_parts` wrote: the coordinate from the
+        part ``obj``, each slab read back from its group below it."""
+        name = str(obj.attrs['coordinate_name'])
+        coordinate = np.asarray(obj.coords[name].values, dtype=float)
+        slabs = [Result._from_netcdf_group(
+                     xarray, path,
+                     f'slab_{i}' if group is None else f'{group}/slab_{i}',
+                     Result, kwargs, who)
+                 for i in range(int(obj.attrs['n_slabs']))]
+        return cls(slabs, coordinate, coordinate_name=name)
 
     def to_dict(self) -> Dict[str, Any]:
         """This stack as plain data: ``coordinate`` (copied),
         ``coordinate_name`` and ``slabs``, each slab its own
         :meth:`Result.to_dict` under ``'__class__'``, its public class path,
-        as :meth:`Result.to_dict` nests a component. Any slab type saves, not
-        only :class:`Field`. ``np.savez(path, **stack.to_dict())`` stores it;
-        :meth:`from_dict` of ``dict(np.load(path, allow_pickle=True))`` reads
-        it back.
+        as :meth:`Result.to_dict` nests a component.
+        ``np.savez(path, **stack.to_dict())`` stores it; :meth:`from_dict` of
+        ``dict(np.load(path, allow_pickle=True))`` reads it back. That load
+        unpickles, so use it only on files you wrote; :meth:`to_netcdf` /
+        :meth:`~Result.from_netcdf` is the route for a file from elsewhere.
 
         Returns
         -------
@@ -856,7 +440,8 @@ class ResultStack(DeepCopyMixin):
         ----------
         d : mapping
             What :meth:`to_dict` returned, or the mapping ``np.load(path,
-            allow_pickle=True)`` returns for a file it was saved to.
+            allow_pickle=True)`` returns for a file it was saved to (load
+            such a file only if you wrote it: that load unpickles).
 
         Returns
         -------
@@ -866,23 +451,32 @@ class ResultStack(DeepCopyMixin):
         ------
         ConfigurationError
             A slab class path outside uacpy, or one that names no
-            :class:`Result`.
+            :class:`Result`; a :class:`Field` slab, which no stack holds.
         """
-        d = {k: unwrap_0d(v) for k, v in dict(d).items()}
-        slabs = []
-        for saved in list(d['slabs']):
-            saved = dict(saved)
-            klass = _resolve_class(saved.pop('__class__'), Result)
-            slabs.append(klass.from_dict(saved))
-        return cls(slabs, np.asarray(d['coordinate'], dtype=float),
-                   coordinate_name=str(d['coordinate_name']))
+        d = cls._unwrap_saved(
+            dict(d), required=('coordinate', 'coordinate_name', 'slabs'),
+            identity=False)
+        saved_slabs = [dict(saved) for saved in list(d['slabs'])]
+        klasses = [_resolve_class(saved.pop('__class__'), Result)
+                   for saved in saved_slabs]
+        if any(issubclass(klass, Field) for klass in klasses):
+            raise ConfigurationError(
+                "ResultStack.from_dict: the saved stack holds Field slabs, "
+                "and a ResultStack holds no Field; uacpy reads only files "
+                "written by this version.",
+                remediation="Re-run the computation: a multi-depth run "
+                            "returns one Field over source_depth, saved and "
+                            "read with Field.to_dict / Field.from_dict.")
+        slabs = [klass.from_dict(saved)
+                 for klass, saved in zip(klasses, saved_slabs)]
+        coordinate = np.asarray(d['coordinate'], dtype=float)
+        name = str(d['coordinate_name'])
+        return cls(slabs, coordinate, coordinate_name=name)
 
     def plot(self, **kwargs):
-        """Plot every slab as a labelled panel grid (Field stacks), delegating
-        to :func:`uacpy.plot.plot_result`."""
-        if isinstance(self.slabs[0], Field):
-            self._warn_if_weights_unapplied('plot')
-        return plotter('plot_result')(self, **kwargs)
+        """Refused by :func:`uacpy.plot.plot_result`, naming this call and
+        the slab to pick: the slabs are drawn one at a time."""
+        return plotter('_draw_result')('ResultStack.plot', self, **kwargs)
 
     def __repr__(self) -> str:
         return build('ResultStack', [

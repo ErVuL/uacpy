@@ -15,7 +15,7 @@ from uacpy.core.results import Field
 from uacpy.core.results import PhaseReference
 from uacpy.core.results import ReflectionCoefficient
 from uacpy.core.results._base import Result
-from uacpy.core.results.stack import ResultStack
+from uacpy.core.results import stack_fields
 from uacpy.core.source import Source
 from uacpy.tests._synthetic_fields import _field
 from uacpy.tests._synthetic_fields import _two_path_grid
@@ -374,6 +374,94 @@ class TestEveryResultTypeRoundTripsThroughADict:
         assert back.receiver_positions is None
 
 
+class TestAFileOfAnotherClassIsRefusedNamingItsReader:
+    """A result reader handed a NetCDF file another class wrote refuses
+    typed, naming what the file holds and the call that reads it; a file
+    naming no class with one array (``Field.to_xarray().to_netcdf(path)``)
+    reads as the Field it holds through Result and Field."""
+
+    def test_each_reader_names_what_the_file_holds(self, tmp_path):
+        import re
+        pytest.importorskip('xarray')
+        from uacpy.core._export import write_netcdf
+        from uacpy.core.results import MediaTable, Modes, ResultStack
+        env = Environment(name='e', bathymetry=100.0)
+        env.to_netcdf(tmp_path / 'env.nc')
+        env.ssp.to_netcdf(tmp_path / 'ssp.nc')
+        field = Field(data=np.ones((2, 3)),
+                      coords={'depth': [1.0, 2.0], 'range': [1.0, 2.0, 3.0]},
+                      model='Test', unit='dB')
+        field.to_netcdf(tmp_path / 'field.nc')
+        write_netcdf(field.to_xarray(), tmp_path / 'classless.nc')
+        Modes(k=np.array([0.8 + 1e-5j]), phi=np.ones((3, 1)),
+              depths=np.array([0.0, 50.0, 100.0]), model='Kraken',
+              frequencies=[100.0],
+              media=MediaTable(water_density=1.0, tops=[0.0], densities=[1.0],
+                               bottom_depth=100.0, halfspace_density=2.0)
+              ).to_netcdf(tmp_path / 'modes.nc')
+        for reader, name, what, remedy in (
+                (Result, 'env.nc', 'an Environment',
+                 'Environment.from_netcdf(path)'),
+                (Result, 'ssp.nc', 'a SoundSpeedProfile',
+                 'SoundSpeedProfile.from_xarray(xarray.open_dataset(path))'),
+                (Field, 'modes.nc', 'a Modes', 'Modes.from_netcdf(path)'),
+                (Modes, 'field.nc', 'a Field', 'Field.from_netcdf(path)'),
+                (Modes, 'classless.nc', 'one array',
+                 'Field.from_netcdf(path)'),
+                (ResultStack, 'classless.nc', 'one array',
+                 'Field.from_netcdf(path)')):
+            with pytest.raises(ConfigurationError,
+                               match=rf"(?s){reader.__name__}\.from_netcdf: "
+                                     rf".*holds {what}.*, not an? "
+                                     rf"{reader.__name__}\..*"
+                                     rf"{re.escape(remedy)}"):
+                reader.from_netcdf(tmp_path / name)
+        for reader in (Result, Field):
+            back = reader.from_netcdf(tmp_path / 'classless.nc')
+            assert isinstance(back, Field)
+            np.testing.assert_array_equal(back.data, field.data)
+
+    def test_a_file_no_uacpy_class_wrote_is_refused_typed(self, tmp_path):
+        """A file naming no class that the reader cannot read (two foreign
+        variables) or that holds no data is refused naming what it holds,
+        never a raw KeyError or a scalar Field."""
+        xr = pytest.importorskip('xarray')
+        from uacpy.core.results import Modes, ResultStack
+        xr.Dataset({'a': ('x', [1.0, 2.0]), 'b': ('x', [3.0, 4.0])},
+                   coords={'x': [0.0, 1.0]}).to_netcdf(tmp_path / 'two.nc')
+        xr.Dataset().to_netcdf(tmp_path / 'empty.nc')
+        for reader in (Modes, ResultStack):
+            with pytest.raises(ConfigurationError,
+                               match=rf"(?s)^{reader.__name__}\.from_netcdf: "
+                                     rf".*holds variables \['a', 'b'\] "
+                                     rf"naming no uacpy class, which "
+                                     rf"{reader.__name__}\.from_xarray "
+                                     rf"cannot read.*How to fix"):
+                reader.from_netcdf(tmp_path / 'two.nc')
+        for reader in (Field, Modes, ResultStack):
+            with pytest.raises(ConfigurationError,
+                               match=rf"^{reader.__name__}\.from_netcdf: "
+                                     rf".*holds no data variable"):
+                reader.from_netcdf(tmp_path / 'empty.nc')
+        # No Field is written as several variables naming no class: the
+        # Field reader refuses them as the others do, by what they are.
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^Field\.from_netcdf: .*holds variables "
+                                 r"\['a', 'b'\] naming no uacpy class, not a "
+                                 r"Field\..*How to fix"):
+            Field.from_netcdf(tmp_path / 'two.nc')
+
+    def test_the_refusal_reads_an_before_a_vowel(self, tmp_path):
+        xr = pytest.importorskip('xarray')
+        from uacpy.core.results import Arrivals
+        xr.Dataset().to_netcdf(tmp_path / 'empty.nc')
+        with pytest.raises(ConfigurationError,
+                           match=r"holds no data variable, not an Arrivals\."):
+            Arrivals.from_netcdf(tmp_path / 'empty.nc')
+
+
+
+
 class TestTheRunModeIsOneOfTheRunModes:
     def test_a_misspelt_mode_is_refused(self):
         with pytest.raises(ConfigurationError, match='cohernt_tl'):
@@ -420,13 +508,12 @@ class TestEveryResultCarriesTheSettingsItRanWith:
             f.run_settings = None
         assert f.at(depth=10.0).run_settings is f.run_settings
         assert f.to_dB().run_settings is f.run_settings
-        stack = ResultStack([f, f], [1.0, 2.0])
-        assert stack.run_settings is f.run_settings
+        pair = stack_fields([f, f], [1.0, 2.0])
+        assert pair.run_settings is f.run_settings
 
     @pytest.mark.parametrize('synthesise', [
-        lambda H: H.synthesize_time_series(
-            np.sin(2 * np.pi * 200.0 * np.arange(0.0, 0.02, 1 / 2000.0)),
-            2000.0, t_start=0.0),
+        lambda H: H.synthesize_time_series(source_waveform=np.sin(2 * np.pi * 200.0 * np.arange(0.0, 0.02, 1 / 2000.0)),
+                                           sample_rate=2000.0, t_start=0.0),
         lambda H: H.to_time_trace(depth=10.0, range=300.0, t_start=0.0),
     ], ids=['synthesize_time_series', 'to_time_trace'])
     def test_a_trace_synthesised_from_a_run_carries_its_settings(

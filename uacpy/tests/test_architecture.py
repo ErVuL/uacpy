@@ -26,6 +26,7 @@ is a rule that gets suppressed.
 import ast
 import builtins
 import collections
+import re
 from pathlib import Path
 
 import pytest
@@ -259,6 +260,112 @@ def test_a_decibel_is_never_spelled_db():
     assert not offenders, (
         'a decibel spelled _db (or a database missing from the list in this '
         'file):\n  ' + '\n  '.join(sorted(set(offenders))))
+
+
+#: Engines a message could quote a measurement against, matched without case
+#: on word boundaries.
+_OTHER_MODELS = (r"(?i:kraken(?:c|\.exe)?|scooter|oassp|oas[tpnrs]|oases|"
+                 r"ramgeo|ramsurf|rams|ram|mpirams|bellhop(?:cxx|cuda)?|"
+                 r"sparc|bounce|couple07)")
+#: A level, share or factor: "4 dB", "2.8 dB rms", "30 %", "3-10×".
+_QUOTED_NUMBER = re.compile(
+    r"\d[\d.,]*\s*(?:dB\b|%|×|x\b|times\b|-fold\b)")
+#: The engine a sentence measures against: "against / than / from / off /
+#: below / above / vs / versus / compared with / relative to <engine>",
+#: "<n> dB of <engine>", or an engine in a sentence that says
+#: "differ(s) by".
+_AGAINST_A_MODEL = re.compile(
+    rf"\b(?:against|than|from|off|below|above|vs\.?|versus|"
+    rf"compared\s+(?:with|to)|relative\s+to)\s+(?:the\s+|a\s+)?"
+    rf"\b{_OTHER_MODELS}\b"
+    rf"|\d[\d.,]*\s*(?:dB|%)\s+(?:rms\s+)?of\s+(?:the\s+)?\b{_OTHER_MODELS}\b"
+    rf"|\b{_OTHER_MODELS}\b(?=.*\bdiffer\w*\s+by\b)"
+    rf"|\bdiffer\w*\s+by\b(?=.*\b{_OTHER_MODELS}\b)")
+#: Abbreviations whose dot does not end a sentence.
+_ABBREVIATIONS = re.compile(
+    r"\b(e\.g|i\.e|cf|vs|etc|approx|Eqs?|[Ss]ect|ch|pp?|Fig|al)\.")
+
+
+def _flat_text(node, constants, depth=0):
+    """The text a string expression builds: literal parts joined across
+    ``+`` and ``%``, f-string placeholders replaced by the module-level
+    constant they name (``'{}'`` where they name none)."""
+    if depth > 8:
+        return '{}'
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return node.value
+        if isinstance(node.value, (int, float)) and not isinstance(
+                node.value, bool):
+            return repr(node.value)
+        return '{}'
+    if isinstance(node, ast.JoinedStr):
+        return ''.join(_flat_text(part, constants, depth + 1)
+                       for part in node.values)
+    if isinstance(node, ast.FormattedValue):
+        return _flat_text(node.value, constants, depth + 1)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+        return (_flat_text(node.left, constants, depth + 1)
+                + _flat_text(node.right, constants, depth + 1))
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return ' '.join(_flat_text(e, constants, depth + 1) for e in node.elts)
+    name = (node.id if isinstance(node, ast.Name)
+            else node.attr if isinstance(node, ast.Attribute) else None)
+    if name in constants:
+        return _flat_text(constants[name], constants, depth + 1)
+    return '{}'
+
+
+def test_no_message_quotes_a_measurement_against_another_model():
+    """A warning, refusal, notice or remedy states what the code or the
+    engine does and the theory a result is read by; a number measured
+    against another model belongs in the docs, labelled as an illustration.
+
+    Every string expression in the package but its tests and examples is
+    read as the text it builds — ``+`` and ``%`` joined, f-string
+    placeholders replaced by the module-level constant they name —
+    and each sentence of it is checked. Docstrings and bare documentation
+    strings may carry such a measurement, as comments may. The check sees a
+    sentence that quotes a number in dB, %, or a factor and names the other
+    engine through a comparison; it cannot see a level quoted without naming
+    what it was measured against, a number spelled out in words, a
+    comparison split across sentences, or text assembled at run time from
+    values other than module-level constants."""
+    sources = list(_sources())
+    constants = {}
+    for _, tree in sources:
+        for node in tree.body:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and isinstance(node.value, (ast.Constant, ast.JoinedStr,
+                                                ast.BinOp))):
+                constants.setdefault(node.targets[0].id, node.value)
+    offenders = []
+    for path, tree in sources:
+        parents = {id(child): parent for parent in ast.walk(tree)
+                   for child in ast.iter_child_nodes(parent)}
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
+                continue
+            if isinstance(node, ast.Constant) and not isinstance(node.value,
+                                                                 str):
+                continue
+            parent = parents.get(id(node))
+            # The documentation strings, and the parts of a larger string
+            # expression, which is read whole at its top.
+            if isinstance(parent, (ast.Expr, ast.BinOp, ast.JoinedStr,
+                                   ast.FormattedValue)):
+                continue
+            text = _ABBREVIATIONS.sub(r'\1', _flat_text(node, constants))
+            for sentence in re.split(r'(?<=[.;!?])\s+', text):
+                if (_QUOTED_NUMBER.search(sentence)
+                        and _AGAINST_A_MODEL.search(sentence)):
+                    offenders.append(f'{_rel(path)}:{node.lineno}: '
+                                     f'{sentence.strip()[:120]}')
+    assert not offenders, (
+        'a message quotes a measurement against another model (state the '
+        'theory; put the measurement in the docs as an illustration):'
+        '\n  ' + '\n  '.join(sorted(set(offenders))))
 
 
 class TestKnobsNothingElseEverPasses:
@@ -582,105 +689,205 @@ class TestEveryCollapseMethodReachesAnImplementation:
         assert not accepted, '\n  '.join([''] + accepted)
 
 
-class TestEveryResultTypeHasExactlyOnePlotterRow:
-    """``_PLOTTERS`` must cover the ``Result`` hierarchy and the carriers
-    that draw themselves, and only them.
+class TestEveryDrawableTypeNamesItsPlotter:
+    """Every type that draws itself names its plotter on the class: a
+    ``Result`` subclass and a carrier in ``_plotter`` (a ``Field`` choosing
+    among its views in ``_plotter_name``), a signal result in ``_plotter`` or
+    in its own ``_plotter_name``. ``plot_result``, ``plot_carrier`` and every
+    ``.plot()`` look that name up in :mod:`uacpy.visualization.plots`, so a
+    name that is not a plotter there would fail only when an object of the
+    type is drawn; these tests fail on the declaration.
 
-    ``Result.plot`` is the documented way to draw any result, so a subclass
-    missing from the table is a result that cannot be drawn at all — and the
-    failure surfaces as "no plotter registered", from a call the user made
-    on the object itself.
-
-    The row also carries ``draws_env``. That used to be a second tuple
-    inside ``plot_result``, listing the complement of the branches that
-    accept ``env=``; a type added to one and not the other left ``env=``
-    accepted and silently ignored. One row per type makes the pair
-    inseparable, and this gate makes the row itself mandatory.
+    ``_draws_env`` says whether the view takes ``env=``. It is checked
+    against the plotter's own signature both ways: a type cannot promise an
+    environment its plotter cannot accept, nor have ``env=`` refused for a
+    plotter that draws one.
     """
 
     @staticmethod
-    def _concrete_result_types():
+    def _result_types():
         """Every importable ``Result`` subclass except the base and the
-        stack. ``ResultStack`` dispatches on the type of the slabs it holds,
-        so ``plot_result`` handles it before the table."""
+        stack. ``ResultStack``'s slabs are drawn one at a time, so it is
+        refused before any lookup."""
         import uacpy.core.results as results_pkg
-        from uacpy.core.results._base import Result
-        from uacpy.core.results import ResultStack
-        found = {}
-        for name in dir(results_pkg):
-            obj = getattr(results_pkg, name)
-            if (isinstance(obj, type) and issubclass(obj, Result)
-                    and obj not in (Result, ResultStack)):
-                found[obj] = name
-        return found
+        from uacpy.core.results import Result, ResultStack
+        return {name: obj for name in dir(results_pkg)
+                if isinstance(obj := getattr(results_pkg, name), type)
+                and issubclass(obj, Result)
+                and obj not in (Result, ResultStack)}
 
-    def test_the_table_lists_every_result_subclass_exactly_once(self):
-        from uacpy.core.results import Result
-        from uacpy.visualization.plots import _PLOTTERS
-        listed = [row[0] for row in _PLOTTERS
-                  if issubclass(row[0], Result)]
-        found = self._concrete_result_types()
-        # Silence must mean "they match", never "nothing was discovered".
-        assert len(found) >= 7, (
-            f'only {len(found)} Result subclass(es) discovered — the '
-            f'discovery walk has stopped seeing them: {sorted(found.values())}')
-        missing = sorted(n for c, n in found.items() if c not in listed)
-        stray = sorted(c.__name__ for c in listed if c not in found)
-        duplicated = sorted(c.__name__ for c in set(listed)
-                            if listed.count(c) > 1)
-        assert not (missing or stray or duplicated), (
-            f'_PLOTTERS vs the Result hierarchy: missing={missing} '
-            f'stray={stray} duplicated={duplicated}')
-
-    def test_each_row_names_a_plotter_that_takes_env_iff_it_draws_one(self):
-        """``draws_env`` is checked against the plotter's own signature, so
-        a row cannot promise an environment the plotter cannot accept."""
-        import inspect
-        from uacpy.core.results import Result
-        from uacpy.visualization.plots import _PLOTTERS
-        wrong = []
-        for result_type, plotter, draws_env in _PLOTTERS:
-            if not issubclass(result_type, Result):
-                continue        # plot_carrier passes no env= at all
-            params = inspect.signature(plotter).parameters
-            takes_env = 'env' in params or any(
-                p.kind is inspect.Parameter.VAR_KEYWORD
-                for p in params.values())
-            if draws_env and not takes_env:
-                wrong.append(f'{result_type.__name__}: row says it draws an '
-                             f'environment but {plotter.__name__} has no '
-                             f'env parameter')
-            # The other direction, which the "iff" in the name promises: a
-            # plotter that names env= while its row says False would have
-            # env= refused for it, so the refusal and the capability part
-            # company with nothing to say so.
-            if not draws_env and 'env' in params:
-                wrong.append(f'{result_type.__name__}: row says it draws no '
-                             f'environment but {plotter.__name__} names an '
-                             f'env parameter, so env= is refused for a '
-                             f'plotter that accepts it')
-        assert not wrong, '\n  '.join([''] + wrong)
-
-
-    def test_the_table_lists_every_carrier_that_draws_itself(self):
-        """Every class :mod:`uacpy.core` exports with a ``plot`` method
-        that is not a result has one carrier row, so ``.plot()`` on it
-        reaches a plotter through :func:`plot_carrier`."""
+    @staticmethod
+    def _carriers():
+        """Every class :mod:`uacpy.core` exports with a ``plot`` method that
+        is not a result: the carriers :func:`plot_carrier` draws."""
         import uacpy.core as core
         from uacpy.core.results import Result
-        from uacpy.visualization.plots import _PLOTTERS
-        from uacpy.core.results import ResultStack
-        carriers = {getattr(core, name) for name in core.__all__
-                    if isinstance(getattr(core, name), type)
-                    and callable(getattr(getattr(core, name), 'plot', None))
-                    and not issubclass(getattr(core, name),
-                                       (Result, ResultStack))}
-        assert len(carriers) >= 5, sorted(c.__name__ for c in carriers)
-        rows = [row[0] for row in _PLOTTERS
-                if not issubclass(row[0], Result)]
-        assert sorted(c.__name__ for c in rows) == sorted(
-            c.__name__ for c in carriers)
-        assert len(rows) == len(set(rows))
+        return {name: obj for name in core.__all__
+                if isinstance(obj := getattr(core, name), type)
+                and callable(getattr(obj, 'plot', None))
+                and not issubclass(obj, Result)}
+
+    @staticmethod
+    def _self_drawing_types():
+        """Every public class of the signal, comms, noise and sonar packages
+        (and the package root) that names a plotter in a ``_plotter``
+        attribute, results apart."""
+        import importlib
+        from uacpy.core.results import Result
+        found = {}
+        for mod_name in ('uacpy', 'uacpy.acoustic_signal', 'uacpy.comms',
+                         'uacpy.noise', 'uacpy.sonar'):
+            mod = importlib.import_module(mod_name)
+            for name in getattr(mod, '__all__', ()):
+                obj = getattr(mod, name, None)
+                if (isinstance(obj, type) and hasattr(obj, '_plotter')
+                        and not issubclass(obj, Result)):
+                    found[name] = obj
+        return found
+
+    @staticmethod
+    def _returned_names(cls):
+        """The plotter names every ``_plotter_name`` on ``cls``'s MRO can
+        return: each string a ``return`` gives (either branch of a
+        conditional expression), and ``cls._plotter`` where it returns
+        ``self._plotter``."""
+        import inspect
+        import textwrap
+
+        def given(expr):
+            if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+                return {expr.value}
+            if isinstance(expr, ast.IfExp):
+                return given(expr.body) | given(expr.orelse)
+            if isinstance(expr, ast.Attribute) and expr.attr == '_plotter':
+                return {cls._plotter}
+            return set()
+
+        names = set()
+        for klass in cls.__mro__:
+            fn = klass.__dict__.get('_plotter_name')
+            if fn is None:
+                continue
+            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Return) and node.value is not None:
+                    names |= given(node.value)
+        names.discard('')
+        return names
+
+    def test_the_discovery_walks_find_the_known_drawable_types(self):
+        """Silence must mean "they all name a plotter", never "nothing was
+        discovered"."""
+        results, carriers = self._result_types(), self._carriers()
+        drawing = self._self_drawing_types()
+        assert len(results) >= 8, sorted(results)
+        assert {'Field', 'Rays', 'Arrivals', 'Modes'} <= set(results)
+        assert len(carriers) >= 5, sorted(carriers)
+        assert {'Environment', 'SoundSpeedProfile', 'Bathymetry'} <= set(
+            carriers)
+        assert len(drawing) >= 15, sorted(drawing)
+        assert {'SpectralEstimate', 'FKResult', 'WenzNoise'} <= set(drawing)
+
+    def test_every_named_plotter_is_a_plotter_of_the_package(self):
+        from uacpy.visualization import plots
+        wrong = []
+        types = {**self._result_types(), **self._carriers(),
+                 **self._self_drawing_types()}
+        for type_name, cls in sorted(types.items()):
+            names = self._returned_names(cls)
+            if getattr(cls, '_plotter', ''):
+                names.add(cls._plotter)
+            if not names:
+                wrong.append(f'{type_name} names no plotter')
+            for name in sorted(names):
+                if not callable(getattr(plots, name, None)):
+                    wrong.append(f'{type_name} names {name!r}, which is not '
+                                 f'a plotter of uacpy.visualization.plots')
+                elif not name.startswith('_') and name not in plots.__all__:
+                    wrong.append(f'{type_name} names {name!r}, which '
+                                 f'uacpy.plot does not export')
+        assert not wrong, '\n  '.join([''] + wrong)
+
+    def test_every_result_and_carrier_declares_its_plotter(self):
+        """A result and a carrier each declare ``_plotter`` on the class, and
+        a carrier is a ``CarrierExport``, the type :func:`plot_carrier`
+        draws."""
+        from uacpy.core._export import CarrierExport
+        missing = [name for name, cls in {**self._result_types(),
+                                          **self._carriers()}.items()
+                   if not getattr(cls, '_plotter', '')]
+        assert not missing, missing
+        not_carriers = [name for name, cls in self._carriers().items()
+                        if not issubclass(cls, CarrierExport)]
+        assert not not_carriers, not_carriers
+
+    @staticmethod
+    def _takes_env(plotter):
+        import inspect
+        params = inspect.signature(plotter).parameters
+        return 'env' in params, any(p.kind is inspect.Parameter.VAR_KEYWORD
+                                    for p in params.values())
+
+    def _check_env(self, label, plotter_name, draws_env, wrong):
+        from uacpy.visualization import plots
+        named, sink = self._takes_env(getattr(plots, plotter_name))
+        if draws_env and not (named or sink):
+            wrong.append(f'{label}: draws an environment but {plotter_name} '
+                         f'has no env parameter')
+        if not draws_env and named:
+            wrong.append(f'{label}: draws no environment but {plotter_name} '
+                         f'names an env parameter, so env= is refused for a '
+                         f'plotter that accepts it')
+
+    def test_draws_env_iff_the_plotter_takes_env(self):
+        from uacpy.core.results import Field
+        wrong = []
+        for name, cls in sorted(self._result_types().items()):
+            if cls is Field:
+                continue
+            self._check_env(name, cls._plotter, cls._draws_env, wrong)
+        for label, field in self._field_views().items():
+            self._check_env(f'Field ({label})', field._plotter_name(),
+                            field._draws_env, wrong)
+        assert not wrong, '\n  '.join([''] + wrong)
+
+    @staticmethod
+    def _field_views():
+        """One field per view ``Field._plotter_name`` picks."""
+        from uacpy.core.results import Field
+        depth, rng = np.array([10.0, 20.0]), np.array([100.0, 200.0, 300.0])
+        plane = {'depth': depth, 'range': rng}
+        ranges = np.geomspace(5.0, 5000.0, 60)
+        sel = Field(data=(200.0 - 20.0 * np.log10(ranges))[None, :],
+                    coords={'depth': np.array([10.0]), 'range': ranges},
+                    kind='sound_exposure', unit='dB')
+        return {
+            'pressure plane': Field(data=np.ones((2, 3)) + 0j, coords=plane,
+                                    kind='pressure', unit='Pa'),
+            'source-depth panels': Field(
+                data=np.ones((2, 2, 3)) + 0j,
+                coords={'source_depth': np.array([5.0, 15.0]), **plane},
+                kind='pressure', unit='Pa'),
+            'track plan view': sel.track_exposure(
+                np.arange(-500.0, 501.0, 100.0),
+                closest_approach=np.linspace(10.0, 2000, 12),
+                along=np.linspace(-1500.0, 1500.0, 13)),
+            'signal excess': Field(data=np.ones((2, 3)), coords=plane,
+                                   kind='signal_excess', unit='dB'),
+            'detection probability': Field(data=np.full((2, 3), 0.5),
+                                           coords=plane,
+                                           kind='probability_of_detection',
+                                           unit='1'),
+            'ambiguity plane': Field(data=np.zeros((2, 3)), coords=plane,
+                                     kind='ambiguity', unit='dB'),
+        }
+
+    def test_the_field_samples_cover_every_view(self):
+        """Each view ``Field._plotter_name`` can return is picked by one
+        sample above, so the env check covers every Field view."""
+        from uacpy.core.results import Field
+        picked = [f._plotter_name() for f in self._field_views().values()]
+        assert sorted(picked) == sorted(self._returned_names(Field)), picked
 
 
 class TestEveryResultCarrierCanDrawItself:
@@ -810,32 +1017,115 @@ class TestBothSpellingsOfAPlotAgree:
     """
 
     @staticmethod
-    def _cases():
+    def _plotted_result_classes():
+        """Every ``PlottedResult`` subclass, found by enumeration.
+
+        ``uacpy.acoustic_signal`` loads its submodules lazily, so each one
+        is imported first: without that, ``__subclasses__()`` sees only the
+        carriers some earlier import happened to load."""
+        import importlib
+        import pkgutil
+        import uacpy.acoustic_signal
+        import uacpy.comms
+        import uacpy.noise
+        from uacpy.acoustic_signal._results import PlottedResult
+        for package in (uacpy.acoustic_signal, uacpy.comms, uacpy.noise):
+            for module in pkgutil.iter_modules(package.__path__):
+                importlib.import_module(f'{package.__name__}.{module.name}')
+        found, todo = set(), [PlottedResult]
+        while todo:
+            for sub in todo.pop().__subclasses__():
+                found.add(sub)
+                todo.append(sub)
+        return found
+
+    @staticmethod
+    def _builders():
+        """One way to build each carrier, keyed by class name, with the free
+        plotter that draws it: ``(build, plotter, kwargs)``."""
         import numpy as np
-        import uacpy
-        from uacpy import acoustic_signal as sig, noise
+        from uacpy import acoustic_signal as sig, comms
         fs = 2000.0
         x = np.sin(2 * np.pi * 200 * np.arange(1024) / fs)
+        y = np.convolve(x, [1.0, 0.5, -0.25])[:x.size]
         panel = np.stack([np.roll(x, 3 * i) for i in range(8)], axis=1)
-        f = np.array([100.0, 1000.0, 10000.0])
         moveout = np.linspace(-1e-3, 1e-3, 21)
-        return [
-            (sig.welch(x, fs), 'plot_psd', {}),
-            (sig.spectrogram(x, fs), 'plot_spectrogram', {}),
-            (sig.cwt(x, fs), 'plot_cwt', {}),
-            (sig.wigner_ville(x[:256], fs), 'plot_wigner_ville', {}),
-            (sig.complex_cepstrum(x), 'plot_cepstrum', {}),
-            (sig.cepstrum(x, sample_rate=fs), 'plot_cepstrum', {}),
-            (sig.constant_q_transform(x, fs), 'plot_constant_q_transform', {}),
-            (sig.constant_q_spectrogram(x, fs),
-             'plot_constant_q_spectrogram', {}),
-            (sig.ambiguity_function(x[:256], fs), 'plot_ambiguity', {}),
-            (sig.fk_transform(panel, fs, 1.0), 'plot_fk', {}),
-            (sig.taup_transform(panel, fs, 1.0), 'plot_taup', {}),
-            (sig.radon_transform(panel, fs, 1.0, moveout), 'plot_radon', {}),
+        noise_x = np.random.default_rng(0).standard_normal(8 * 2048)
+        positions = 0.75 * np.arange(8)
+        welch = sig.welch(x, fs)
+        return {
+            'SpectralEstimate': (lambda: sig.welch(x, fs), 'plot_psd', {}),
+            'ProbabilisticSpectralEstimate': (
+                lambda: sig.probabilistic_welch(noise_x, fs,
+                                                segment_duration=0.5,
+                                                nperseg=256),
+                'plot_ppsd', {}),
+            'BandLevels': (
+                lambda: sig.band_levels(welch.power, welch.frequencies,
+                                        band_type='octave', ref=1.0),
+                'plot_band_levels', {}),
+            'SpectrogramResult': (lambda: sig.spectrogram(x, fs),
+                                  'plot_spectrogram', {}),
+            'CWTResult': (lambda: sig.cwt(x, fs), 'plot_cwt', {}),
+            'WignerVilleResult': (lambda: sig.wigner_ville(x[:256], fs),
+                                  'plot_wigner_ville', {}),
+            'ComplexCepstrum': (lambda: sig.complex_cepstrum(x),
+                                'plot_cepstrum', {}),
+            'Cepstrum': (lambda: sig.cepstrum(x, sample_rate=fs),
+                         'plot_cepstrum', {}),
+            'CQTResult': (lambda: sig.constant_q_transform(x, fs),
+                          'plot_constant_q_transform', {}),
+            'CQSpectrogramResult': (lambda: sig.constant_q_spectrogram(x, fs),
+                                    'plot_constant_q_spectrogram', {}),
+            'AmbiguityResult': (lambda: sig.ambiguity_function(x[:256], fs),
+                                'plot_ambiguity', {}),
+            'FKResult': (lambda: sig.fk_transform(panel, fs, 1.0),
+                         'plot_fk', {}),
+            'TauPResult': (lambda: sig.taup_transform(panel, fs, 1.0),
+                           'plot_taup', {}),
+            'RadonResult': (lambda: sig.radon_transform(panel, fs, 1.0,
+                                                        moveout),
+                            'plot_radon', {}),
+            'FRFResult': (lambda: sig.frf_welch(x, y, fs, nperseg=256),
+                          'plot_frf', {}),
+            'BeamformedField': (
+                lambda: sig.beamform_field(
+                    np.exp(1j * np.arange(8) * 0.3), positions,
+                    np.linspace(-60.0, 60.0, 13), 1000.0),
+                'plot_beam_power', {}),
+            'BerCurve': (
+                lambda: comms.ber_sweep('bpsk', [0.0, 4.0], n_bits=2000,
+                                        rng=np.random.default_rng(1)),
+                'plot_ber_curve', {}),
+            'DopplerEstimate': (
+                lambda: comms.estimate_doppler_scale(
+                    x, x, np.linspace(-2e-3, 2e-3, 21)),
+                'plot_doppler_ambiguity', {}),
+        }
+
+    @classmethod
+    def _cases(cls):
+        import numpy as np
+        import uacpy
+        from uacpy import noise
+        f = np.array([100.0, 1000.0, 10000.0])
+        cases = [(build(), plotter, kwargs)
+                 for build, plotter, kwargs in cls._builders().values()]
+        # Carriers that are not PlottedResults but plot themselves the same way.
+        return cases + [
             (uacpy.Thorp().table(f), 'plot_absorption', {}),
             (noise.WenzNoise(f, wind_speed_kn=15.0), 'plot_wenz', {}),
         ]
+
+    def test_every_plotted_result_has_a_case(self):
+        """The case list is checked against the classes themselves, so a new
+        carrier cannot be left out of the two tests below unnoticed."""
+        classes = {klass.__name__ for klass in self._plotted_result_classes()}
+        assert len(classes) >= 17, sorted(classes)
+        missing = classes - set(self._builders())
+        assert not missing, (
+            f'PlottedResult subclasses with no case in _builders: '
+            f'{sorted(missing)}')
 
     @staticmethod
     def _drawn(ax):
@@ -844,9 +1134,12 @@ class TestBothSpellingsOfAPlotAgree:
         Lines, images and mesh collections, because the family draws all
         three: comparing only ``ax.lines`` would call two heatmaps equal
         whatever they contain, which is the failure this gate exists to
-        catch.
+        catch. A two-panel plotter's ``(ax_a, ax_b)`` pair is read panel by
+        panel.
         """
         import numpy as np
+        if isinstance(ax, tuple):
+            return [TestBothSpellingsOfAPlotAgree._drawn(one) for one in ax]
         lines = [tuple(np.asarray(ln.get_ydata()).ravel()[:8])
                  for ln in ax.lines]
         images = [float(np.nansum(im.get_array())) for im in ax.images]
@@ -1214,7 +1507,7 @@ class TestAPlotterDrawsOnlyItsOwnCarrier:
 # beside the functions (``sonar.target_strength`` sat next to ``ts_sphere``)
 # and is still reachable as an attribute without being listed.
 _ALL_WITHOUT_SUBMODULES = ('models', 'io', 'acoustic_signal', 'comms', 'data',
-                           'sonar', 'noise')
+                           'sonar', 'noise', 'core.results')
 
 
 @pytest.mark.parametrize('package', _ALL_WITHOUT_SUBMODULES)
@@ -1502,17 +1795,7 @@ _WARNING_FORWARDERS = {
     ('models/_notices.py', 'message_notice'),
     ('core/run_settings.py', '_saved_notice'),
     ('parallel.py', '_reemit_job_warnings'),
-    ('data/_provenance_notice.py', 'fetch_with_one_provenance_notice'),
     ('models/base.py', '_announce_engine_settings'),
-}
-
-
-#: The readers of a saved settings record: a notice saved before notices
-#: carried their class, or under a name that is not a uacpy warning class,
-#: has no cause to restate and is read as the base class.
-_SAVED_NOTICE_READERS = {
-    ('core/run_settings.py', '_saved_notice'),
-    ('core/run_settings.py', '_with_saved_notes'),
 }
 
 
@@ -1575,9 +1858,6 @@ def test_every_warning_names_its_cause():
             # a sink forwarding a budget Notice's own class
             if category == 'notice.category':
                 continue
-            # a notice read back from a record saved without its class
-            if (rel, fn) in _SAVED_NOTICE_READERS and category == 'UACPYWarning':
-                continue
             offenders.append(f'{rel}:{lineno} ({fn}): {category}')
     # A sweep that stopped recognising the calls would pass silently.
     assert checked >= 250, f'only {checked} warning calls found'
@@ -1592,7 +1872,8 @@ def test_every_warning_names_its_cause():
 #: The layers, bottom first. A module's layer is its subpackage
 #: (``uacpy.<layer>``, with ``core.results`` and ``core.acoustics`` apart
 #: from ``core``) or, for a top-level module, its own name; ``__root__`` is
-#: ``uacpy/__init__.py``. A layer imports only from its own rank or below;
+#: ``uacpy/__init__.py`` and ``__main__`` the ``python -m uacpy`` install
+#: check. A layer imports only from its own rank or below;
 #: the exceptions are listed in :data:`_UPWARD_IMPORTS`.
 _LAYER_ORDER = (
     ('core', 'core.acoustics', '_log', '_stack', '_version'),
@@ -1604,7 +1885,8 @@ _LAYER_ORDER = (
     ('models',),
     ('parallel',),
     ('visualization',),
-    ('__root__', 'acoustics', 'materials', 'metrics', 'plot', 'units'),
+    ('__root__', '__main__', 'acoustics', 'materials', 'metrics', 'plot',
+     'units'),
 )
 
 #: ``(importer, kind, imported module)`` for every import that points up the
@@ -1622,7 +1904,9 @@ _UPWARD_IMPORTS = frozenset({
 #: declares it (``test_packaging`` gates that), and the names such a module
 #: is imported for are covered by its declaration, so they are not repeated
 #: here; a ``_name`` inside any other module belongs to that module. The list
-#: may only shrink, as :data:`_UPWARD_IMPORTS` does.
+#: may only shrink, as :data:`_UPWARD_IMPORTS` does, with one exception: the
+#: labelled twin of a public user-level function (the first group below)
+#: may be added, its entry naming that public function in a comment.
 _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
     # The labelled form of a user-level function: the public one carries no
     # ``who``, and a method (or engine) that delegates passes its own name so
@@ -1639,6 +1923,9 @@ _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
      '_modal_attenuation'),
     ('uacpy.core.results.modes', 'uacpy.core.acoustics.modal',
      '_modal_grazing_angles'),
+    # arrival_grid_impulse_response's, for Arrivals.impulse_response
+    ('uacpy.core.results.rays', 'uacpy.acoustic_signal.channel',
+     '_arrival_cells_impulse_response'),
     ('uacpy.core.results.rays', 'uacpy.acoustic_signal.channel',
      '_arrival_grid_transfer_function'),
     ('uacpy.core.results.rays', 'uacpy.acoustic_signal.channel',
@@ -1667,16 +1954,6 @@ _PRIVATE_NAMES_ACROSS_LAYERS = frozenset({
      '_mode_shapes_at'),
     ('uacpy.core.results.greens_function', 'uacpy.core.acoustics.wavenumber',
      '_warn_zero_ranges'),
-    # The one weighted sum superpose forms; the n = 1 weight a run applies
-    # calls it to refuse a bad weight in the caller's own terms
-    # (``<model>: Source(weights=…)``).
-    ('uacpy.models._stacking', 'uacpy.core.results.stack',
-     '_weighted_slab_sum'),
-    ('uacpy.models._stacking', 'uacpy.core.results.stack',
-     '_check_stack_weightable'),
-    # The dB arm of the same rule, raised in stage 3 before the engine runs.
-    ('uacpy.models._stacking', 'uacpy.core.results.stack',
-     '_dB_weight_refusal'),
     ('uacpy.models.bounce._model', 'uacpy.io.refl_io', '_scale_irc_impedance'),
     ('uacpy.models.oases._common', 'uacpy.io.oases_writer',
      '_OASES_MAX_WAVENUMBERS'),
@@ -2079,7 +2356,7 @@ class TestTheSecondsSuffixIsNotSpentOnMetresPerSecond:
         ``fold_notice``, which takes its caller's error text, went private."""
         seconds = [s for s in _sites_with_suffix('_s')
                    if not s.rstrip(')').endswith('_ms')]
-        assert len(seconds) == 28, seconds
+        assert len(seconds) == 30, seconds
         for site in ('uacpy.acoustic_signal.AmbiguityResult.delays_s',
                      'uacpy.comms.ChannelTaps(delays_s)',
                      'uacpy.comms.ChannelTaps.delays_s',
@@ -2089,7 +2366,9 @@ class TestTheSecondsSuffixIsNotSpentOnMetresPerSecond:
                      'uacpy.acoustic_signal.ChannelRegime(symbol_duration_s)',
                      'uacpy.acoustic_signal.arrival_transfer_function(delays_imag_s)',
                      'uacpy.comms.pulse_shaped_taps(delays_s)',
-                     'uacpy.acoustic_signal.simulate_arrival_reception(delays_imag_s)'):
+                     'uacpy.acoustic_signal.simulate_arrival_reception(delays_imag_s)',
+                     'uacpy.acoustic_signal.arrival_impulse_response(delays_s)',
+                     'uacpy.acoustic_signal.arrival_impulse_response(delays_imag_s)'):
             assert site in seconds, site
 
     def test_no_public_surface_spells_metres_per_second_as_ms(self):
@@ -2334,8 +2613,8 @@ class TestACallCarriesWhatItAskedFor:
 class TestEveryLaunchPassesOneRunner:
     """Every engine binary is launched as a ``Launch`` record through
     ``_launch.run_launch``, which reaches the model's ``_run_subprocess``
-    (the seam a test or a timeout stops a run at) only through
-    ``PropagationModel._launch_binary``."""
+    (the seam a test or a timeout stops a run at) only through the
+    ``LaunchContext`` ``PropagationModel._launch_context`` builds."""
 
     def test_the_subprocess_seam_is_reached_from_one_place(self):
         sites = []

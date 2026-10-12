@@ -44,7 +44,7 @@ from typing import Union, Optional
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
-from uacpy.core._validate import water_property
+from uacpy.core._validate import canonical_choice, water_property
 from uacpy.core.constants import (
     DEFAULT_SOUND_SPEED, REFERENCE_DEPTH_M, REFERENCE_SALINITY_PSU,
     REFERENCE_TEMPERATURE_C, STANDARD_GRAVITY_M_S2)
@@ -73,6 +73,7 @@ def _sequence_as_array(x):
 def sound_speed_mackenzie(
     temperature: Union[float, np.ndarray] = REFERENCE_TEMPERATURE_C,
     salinity: Union[float, np.ndarray] = REFERENCE_SALINITY_PSU,
+    *,
     depth: Optional[Union[float, np.ndarray]] = None,
 ) -> Union[float, np.ndarray]:
     """
@@ -80,11 +81,11 @@ def sound_speed_mackenzie(
 
     Parameters
     ----------
-    temperature : float, ndarray or (N, 2) pairs, optional
+    temperature : float or ndarray, optional
         Water temperature in degrees Celsius (default: 10, the package's
         reference sea water, ``constants.REFERENCE_TEMPERATURE_C``); see
         the water-property rule below.
-    salinity : float, ndarray or (N, 2) pairs, optional
+    salinity : float or ndarray, optional
         Salinity in parts per thousand (ppt) (default: 35)
     depth : float or ndarray, optional
         Depth in meters (default: ``None``, the surface, 0 m)
@@ -92,9 +93,9 @@ def sound_speed_mackenzie(
     Returns
     -------
     float or ndarray
-        Sound speed in m/s. The formula is evaluated element-wise, so an
-        array argument gives an array of the broadcast shape — which is how
-        :meth:`uacpy.SoundSpeedProfile.from_temperature_salinity` calls it.
+        Sound speed in m/s, evaluated point by point: the shape of
+        ``depth`` (and of an array of water, which has it); a float when
+        every input is a single value.
 
     Examples
     --------
@@ -108,10 +109,15 @@ def sound_speed_mackenzie(
 
     Notes
     -----
-    **Water properties.** ``temperature`` and ``salinity`` each take a
-    single value, an array (broadcast with ``depth``), or ``(depth, value)``
-    pairs interpolated linearly onto ``depth`` (end values held), which then
-    must be given (:func:`uacpy.core._validate.water_property`).
+    **Water properties.** ``temperature`` and ``salinity`` are each
+    exactly one of: a single value (constant water); an array of exactly
+    ``depth``'s shape, one value per point; or otherwise ``(depth, value)``
+    pairs, an ``(M, 2)`` array (a profile on depths of its own,
+    interpolated onto ``depth``, which it then needs). Any other array is
+    refused: it is never broadcast against ``depth``, so an omitted or
+    scalar ``depth`` takes single values and pairs only, and two casts side
+    by side take a depth grid of their shape. Values come first: ``M``
+    pairs on a depth grid of exactly shape ``(M, 2)`` are read as values.
 
     Mackenzie's nine-term formula is validated for
     ``temperature ∈ [-2, 30] °C``, ``salinity ∈ [25, 40] PSU``,
@@ -165,8 +171,9 @@ def _water_at_pressure(temperature, salinity, depth, pressure_dbar,
     :func:`depth_to_pressure_dbar` at ``latitude_deg``, default
     ``REFERENCE_LATITUDE_DEG``) or at ``pressure_dbar``; neither is the
     surface. ``temperature`` and ``salinity`` follow the water-property
-    rule (:func:`~uacpy.core._validate.water_property`) on ``depth``, whose
-    pairs are ``(depth, value)``."""
+    rule (:func:`~uacpy.core._validate.water_property`) on the coordinate
+    given: an array of values has its shape, and ``(depth, value)`` pairs
+    need ``depth``."""
     if depth is not None and pressure_dbar is not None:
         raise ConfigurationError(
             f"{who}: pass depth= (m) or pressure_dbar= (dbar), not both.")
@@ -174,8 +181,13 @@ def _water_at_pressure(temperature, salinity, depth, pressure_dbar,
         raise ConfigurationError(
             f"{who}: latitude_deg= converts depth= to pressure, and no "
             f"depth= was given.")
-    t = water_property(temperature, depth, name='temperature', who=who)
-    s = water_property(salinity, depth, name='salinity', who=who)
+    at, at_name = ((pressure_dbar, 'pressure_dbar')
+                   if depth is None and pressure_dbar is not None
+                   else (depth, 'depth'))
+    t = water_property(temperature, at, name='temperature', who=who,
+                       at_name=at_name)
+    s = water_property(salinity, at, name='salinity', who=who,
+                       at_name=at_name)
     if depth is not None:
         lat = (REFERENCE_LATITUDE_DEG if latitude_deg is None
                else float(latitude_deg))
@@ -215,10 +227,10 @@ def sound_speed_unesco(temperature=REFERENCE_TEMPERATURE_C,
 
     Parameters
     ----------
-    temperature : float
-        Temperature [°C, ITS-90].
-    salinity : float
-        Practical salinity [PSU, PSS-78].
+    temperature : float or array_like, optional
+        Temperature [°C, ITS-90]. Default 10.
+    salinity : float or array_like, optional
+        Practical salinity [PSU, PSS-78]. Default 35.
     depth : float or array_like, optional (keyword)
         Depth [m] the equation is evaluated at, converted to pressure (see
         below).
@@ -230,8 +242,9 @@ def sound_speed_unesco(temperature=REFERENCE_TEMPERATURE_C,
 
     Returns
     -------
-    float
-        Sound speed [m/s].
+    float or ndarray
+        Sound speed [m/s], the shape of the coordinate given (and of an
+        array of water, which has it).
 
     **Where it is evaluated.** ``depth`` (m, keyword) is converted to the
     pressure the equation is stated in with :func:`depth_to_pressure_dbar`
@@ -242,11 +255,15 @@ def sound_speed_unesco(temperature=REFERENCE_TEMPERATURE_C,
     gives the pressure itself, for pressure-native data such as an Argo
     cast; pass one of the two, neither being the surface.
 
-    **Water properties.** ``temperature`` and ``salinity`` each take a
-    single value, an array broadcast with the coordinate, or ``(depth,
-    value)`` pairs (m) interpolated linearly onto ``depth`` (end values
-    held), which then must be given
-    (:func:`uacpy.core._validate.water_property`).
+    **Water properties.** ``temperature`` and ``salinity`` are each
+    exactly one of: a single value (constant water); an array of exactly
+    the shape of the coordinate given (``depth`` or ``pressure_dbar``), one
+    value per point; or otherwise ``(depth, value)`` pairs, an ``(M, 2)``
+    array (a profile on depths of its own, interpolated onto ``depth``,
+    which it then needs: at ``pressure_dbar`` pairs are refused). Any other
+    array is refused: it is never broadcast against the coordinate. Values
+    come first: ``M`` pairs on a coordinate of exactly shape ``(M, 2)`` are
+    read as values.
 
     References
     ----------
@@ -364,7 +381,7 @@ def sound_speed_delgrosso(temperature=REFERENCE_TEMPERATURE_C,
         Depth [m] the equation is evaluated at, converted to pressure (see
         below).
     pressure_dbar : float or array_like, optional (keyword)
-        Pressure [dbar], converted to the equation's kg/cm²,, for pressure-native
+        Pressure [dbar], converted to the equation's kg/cm², for pressure-native
         data; ``None`` with no ``depth`` is the surface.
     latitude_deg : float, optional (keyword)
         Latitude [deg] of the depth -> pressure conversion; default 45.
@@ -378,11 +395,15 @@ def sound_speed_delgrosso(temperature=REFERENCE_TEMPERATURE_C,
     gives the pressure itself, for pressure-native data such as an Argo
     cast; pass one of the two, neither being the surface.
 
-    **Water properties.** ``temperature`` and ``salinity`` each take a
-    single value, an array broadcast with the coordinate, or ``(depth,
-    value)`` pairs (m) interpolated linearly onto ``depth`` (end values
-    held), which then must be given
-    (:func:`uacpy.core._validate.water_property`).
+    **Water properties.** ``temperature`` and ``salinity`` are each
+    exactly one of: a single value (constant water); an array of exactly
+    the shape of the coordinate given (``depth`` or ``pressure_dbar``), one
+    value per point; or otherwise ``(depth, value)`` pairs, an ``(M, 2)``
+    array (a profile on depths of its own, interpolated onto ``depth``,
+    which it then needs: at ``pressure_dbar`` pairs are refused). Any other
+    array is refused: it is never broadcast against the coordinate. Values
+    come first: ``M`` pairs on a coordinate of exactly shape ``(M, 2)`` are
+    read as values.
 
     References
     ----------
@@ -620,7 +641,8 @@ def sound_speed_teos10(temperature=REFERENCE_TEMPERATURE_C,
     -------
     float or ndarray
         Sound speed [m/s]; a Python float for scalar input, otherwise the
-        broadcast shape of the three arguments.
+        shape of the coordinate given (and of an array of water, which has
+        it).
 
     **Where it is evaluated.** ``depth`` (m, keyword) is converted to the
     pressure the equation is stated in with :func:`depth_to_pressure_dbar`
@@ -631,11 +653,15 @@ def sound_speed_teos10(temperature=REFERENCE_TEMPERATURE_C,
     gives the pressure itself, for pressure-native data such as an Argo
     cast; pass one of the two, neither being the surface.
 
-    **Water properties.** ``temperature`` and ``salinity`` each take a
-    single value, an array broadcast with the coordinate, or ``(depth,
-    value)`` pairs (m) interpolated linearly onto ``depth`` (end values
-    held), which then must be given
-    (:func:`uacpy.core._validate.water_property`).
+    **Water properties.** ``temperature`` and ``salinity`` are each
+    exactly one of: a single value (constant water); an array of exactly
+    the shape of the coordinate given (``depth`` or ``pressure_dbar``), one
+    value per point; or otherwise ``(depth, value)`` pairs, an ``(M, 2)``
+    array (a profile on depths of its own, interpolated onto ``depth``,
+    which it then needs: at ``pressure_dbar`` pairs are refused). Any other
+    array is refused: it is never broadcast against the coordinate. Values
+    come first: ``M`` pairs on a coordinate of exactly shape ``(M, 2)`` are
+    read as values.
 
     References
     ----------
@@ -902,7 +928,6 @@ def canonical_formula(formula, who: str) -> str:
     :data:`DEFAULT_SOUND_SPEED_FORMULA`. Refuses an unknown name."""
     if formula is None:
         return DEFAULT_SOUND_SPEED_FORMULA
-    from uacpy.core._validate import canonical_choice
     return canonical_choice(formula, tuple(SOUND_SPEED_FORMULAS), who,
                             'formula')
 
@@ -928,11 +953,11 @@ def sound_speed_at_depth(
 
     Parameters
     ----------
-    temperature, salinity : float, ndarray or (N, 2) pairs
+    temperature, salinity : float or ndarray
         In-situ temperature (°C) and practical salinity (psu): a single
-        value, an array broadcast with ``depth``, or ``(depth, value)``
-        pairs interpolated linearly onto ``depth``
-        (:func:`uacpy.core._validate.water_property`).
+        value, an array of exactly ``depth``'s shape (one value per point),
+        or ``(depth, value)`` pairs of shape ``(M, 2)`` interpolated onto
+        ``depth``.
     depth : float or ndarray
         Depth (m, positive down).
     formula : {'teos10', 'unesco', 'delgrosso', 'mackenzie'}, optional

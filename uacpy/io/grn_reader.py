@@ -22,7 +22,6 @@ A file is a SPARC snapshot when its title starts with ``'SPARC'`` (set at
 ``sparc.f90:84``).
 """
 
-import numpy as np
 from pathlib import Path
 from typing import Union
 
@@ -30,7 +29,9 @@ from uacpy.core.results import GreensFunction
 from uacpy.io._fortran_helpers import (
     DirectAccessFile, _bound_counts, require_model_output, typed_format_error,
 )
-from uacpy.io.oalib_reader import read_shd_header
+from uacpy.io.oalib_reader import (
+    _read_shd_pressure_rows, _shd_header_counts, read_shd_header,
+)
 from uacpy.core.exceptions import FileFormatError
 
 
@@ -65,7 +66,8 @@ def read_grn_file(filepath: Union[str, Path]) -> GreensFunction:
     require_model_output(filepath, 'read_grn_file')
 
     with open(filepath, "rb") as f:
-        daf = DirectAccessFile(f, source=f'read_grn_file:{filepath.name}')
+        daf = DirectAccessFile(f, source=f'read_grn_file:{filepath.name}',
+                               header_counts=_shd_header_counts)
         f4, f8 = daf.f4, daf.f8
 
         # Records 1-3: title, PlotType, then Nfreq Ntheta NSx NSy NSz NRz NRr
@@ -135,20 +137,13 @@ def read_grn_file(filepath: Union[str, Path]) -> GreensFunction:
                 f"factor, so only NSz=1 is readable. The Green's function of a "
                 f"snapshot run carries no source-depth axis.",
             )
-        G = np.zeros((nfreq, nsd, nrd, nk), dtype=np.complex64)
-        irec = 9
-        for ifreq in range(nfreq):
-            for isd in range(nsd):
-                for ird in range(nrd):
-                    irec += 1
-                    data = daf.vector(irec, f4, 2 * nk)
-                    if data.size < 2 * nk:
-                        raise FileFormatError(
-                            f"read_grn_file: truncated Green's-function record "
-                            f"at ifreq={ifreq}, isd={isd}, ird={ird} "
-                            f"(expected {2 * nk} float32 values, got {data.size})"
-                        )
-                    G[ifreq, isd, ird, :] = data[0::2] + 1j * data[1::2]
+        # SCOOTER writes record 10 + (ifreq-1)*NSz*NRz + (isd-1)*NRz + ird
+        # (scooter.f90:586-588): a gap-free run of nfreq*nsd*nrd rows of nk
+        # complex REAL*4 from 0-based record 10 — the .shd pressure layout,
+        # read by the .shd's own row reader.
+        G = _read_shd_pressure_rows(
+            daf.fid, f"read_grn_file: {filepath}", 10, nfreq * nsd * nrd,
+            daf.record_words, nk, f4).reshape(nfreq, nsd, nrd, nk)
 
     is_sparc = title.upper().startswith('SPARC')
     model = ('SPARC' if is_sparc

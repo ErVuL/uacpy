@@ -26,7 +26,9 @@ from uacpy.models.kraken._checks import (
 #: tables sized for 1, 2, 5 and 10 km: every c_high from 5000 to 30000 m/s
 #: gave the same TL (0.40-0.48 dB median, 1.8-2.1 dB 95th percentile from
 #: KRAKENC on the half-space itself), so the window is past every mode that
-#: reaches the receivers.
+#: reaches the receivers. uacpy guidance (the manuals give no value; the
+#: toolbox's own Kraken-over-table deck writes 3000 m/s over 1546 m/s water,
+#: tests/TabRefCoef/neggradK_brc.env).
 _TABLE_BOTTOM_C_HIGH_FACTOR = 10.0
 
 #: ``leaky_modes=True``'s c_high, as a multiple of the fastest speed in the
@@ -42,6 +44,11 @@ _TABLE_BOTTOM_C_HIGH_FACTOR = 10.0
 #: unchanged: 100 m over 1650 m/s, 200 Hz, against Scooter, 1e9, 1e5 and
 #: 15000 all sit -0.029 / -0.017 dB at 200 / 400 m (5000: -0.071), and the
 #: 27 leaky modes of docs/models/kraken.md section 6.5 are the same 27.
+#: uacpy guidance (doc/kraken.htm asks only for CHIGH above the half-space
+#: speed: "KRAKENC will attempt to compute leaky modes if CHIGH exceeds the
+#: phase velocity of either the S-wave or P-wave speed in the half-space";
+#: the toolbox's leaky deck writes 20000 m/s over a 1600 m/s seabed,
+#: tests/MunkLeaky/MunkKleaky.env).
 _LEAKY_C_HIGH_FACTOR = 10.0
 
 
@@ -50,8 +57,8 @@ _C_LOW_PINNED = 'Kraken(c_low=…)'
 _C_HIGH_PINNED = 'Kraken(c_high=…)'
 
 
-# The window rule of a fluid or elastic half-space: the window the mode-count
-# check was measured under (see _grid.mode_count_check_mesh).
+# The window rule of a fluid or elastic half-space, as the settings record
+# the origin of its c_high.
 _HALF_SPACE_RULE = f"{C_HIGH_FACTOR:g} × max(env.ssp, half-space sound speed)"
 
 
@@ -83,20 +90,27 @@ def c_low_for(env, *, collapse, pinned_c_low) -> float:
         # automatically (kraken.htm, Phase Speed Limits) — the right
         # choice for a fluid environment.
         return 0.0
+    return _slowest_compressional_speed(env)
+
+
+def _slowest_compressional_speed(env) -> float:
+    """The slowest compressional speed (m/s) of ``env``: its water over
+    every profile column and every medium of its seabed."""
     speeds = [float(env.ssp.sound_speed.min())]
     speeds.extend(env.bottom.all_sound_speeds())
     return min(speeds)
 
 
-def validate_phase_speed_limits(*, leaky_modes, pinned_c_high, pinned_c_low):
+def validate_phase_speed_limits(*, pinned_c_high, pinned_c_low):
     """Check ``0 <= c_low < c_high`` for whichever bound is set.
 
     ``c_high`` is checked on its own as well as against ``c_low``: with
     ``c_low=None`` the writer derives the lower bound from the SSP and
     the bottom, so a non-positive ``c_high`` would otherwise sail past
     every check here and die inside the Fortran with an empty spectrum.
-    ``leaky_modes=True`` derives ``c_high`` per profile, so there is no
-    pinned value to check.
+    ``leaky_modes=True`` derives ``c_high`` per profile and refuses a pinned
+    one beside it (``Kraken._check_knobs``), so ``pinned_c_high`` is
+    ``None`` then.
     """
     cl = pinned_c_low
     ch = pinned_c_high
@@ -156,8 +170,8 @@ def phase_speed_window(env, profiles, *, backend: str,
       measurement is at the constant).
     - a rigid or vacuum floor: unbounded on kraken.exe (0.05 dB median
       against :func:`uacpy.analytic.ideal_waveguide` at 50 and 200 Hz);
-      KRAKENC, reached here only through an elastic medium (stage 2
-      refuses it forced by a knob), gets the table window: under an
+      KRAKENC, reached through an elastic medium or forced by
+      ``backend='krakenc'``, gets the table window: under an
       elastic ice canopy every window from 3000 m/s to 1e5 m/s agrees
       with Scooter to 0.02-0.08 dB median at 50-400 Hz, while the
       unbounded one ran past a 600 s timeout at 200 Hz.
@@ -233,19 +247,14 @@ def steep_path_notice(env, source, receiver,
     ``None``.
 
     A mode of phase speed ``c_p`` carries energy up to grazing angle
-    ``arccos(c/c_p)``, so the modal sum loses every steeper path, as
-    Scooter's wavenumber integral does at the same cut. Measured on a
-    100 m Pekeris guide (cb 1650, 200 Hz, source 50 m, receiver 75 m)
-    against Scooter(c_high=1e9, taper=0.05): +11.9 dB at 200 m and
-    +1.0 dB at 400 m with the default window; ``leaky_modes=True``
-    (krakenc, 10 x window) is within 0.04 dB at every range. The
-    limit is the trapped-mode sum's (docs/models/kraken.md, "Near
-    field"); this says when the geometry reaches it."""
+    ``arccos(c/c_p)``, so the modal sum leaves out every steeper path, as
+    Scooter's wavenumber integral does at the same cut. The limit is the
+    trapped-mode sum's; this says when the geometry reaches it, and
+    ``docs/models/kraken.md`` §6.4 holds a measured illustration."""
     return _steep_path_notice(
         env, source, receiver, c_high, model_name='Kraken',
         kept='modes carrying paths', summed_in='modal sum',
-        evidence=('measured +11.9 dB at 200 m on a 100 m Pekeris guide '
-                  'against Scooter'),
-        remediation=('Pass leaky_modes=True to solve the modes above the window '
-                'on krakenc (within 0.04 dB there), or use Scooter for the '
-                'near field.'))
+        evidence='docs/models/kraken.md §6.4 shows a measured case',
+        remediation=('Pass leaky_modes=True to solve the modes above the '
+                     'window on krakenc, or use Scooter for the near '
+                     'field.'))

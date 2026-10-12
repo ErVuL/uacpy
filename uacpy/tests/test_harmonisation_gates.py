@@ -7,6 +7,7 @@ the known ones still open. The list may only shrink: a new offender fails the
 gate, and so does a listed one that is gone (delete its entry).
 """
 import ast
+import dataclasses
 import importlib
 import inspect
 import json
@@ -56,31 +57,44 @@ def _signature(obj):
         return None
 
 
-def _public_callables():
+def _uacpy_mro(klass):
+    """``klass`` and the bases it inherits from that uacpy defines (a
+    private base's public methods included), nearest first."""
+    return [k for k in klass.__mro__
+            if k.__module__.split('.')[0] == 'uacpy']
+
+
+def _public_callables(*, inherited=False):
     """``(label, callable)`` for every public function, public class (its
-    constructor) and public method a public class defines."""
+    constructor) and public method a public class defines — or, with
+    ``inherited``, also inherits from a uacpy base (``Exportable.to_netcdf``
+    on every result), the nearest definition of each name."""
     out = []
     for label, obj in _public_objects():
         if inspect.isclass(obj):
             if issubclass(obj, BaseException):
                 continue
             out.append((label, obj))
-            for name, member in vars(obj).items():
-                if name.startswith('_'):
-                    continue
-                if isinstance(member, (staticmethod, classmethod)):
-                    member = member.__func__
-                if inspect.isfunction(member):
-                    out.append((f'{label}.{name}', member))
+            seen = set()
+            for klass in (_uacpy_mro(obj) if inherited else [obj]):
+                for name, member in vars(klass).items():
+                    if name.startswith('_') or name in seen:
+                        continue
+                    seen.add(name)
+                    if isinstance(member, (staticmethod, classmethod)):
+                        member = member.__func__
+                    if inspect.isfunction(member):
+                        out.append((f'{label}.{name}', member))
         elif callable(obj):
             out.append((label, obj))
     return out
 
 
-def _parameters():
-    """``(label, Parameter)`` for every parameter of every public callable,
-    ``self``/``cls`` and ``*args``/``**kwargs`` left out."""
-    for label, obj in _public_callables():
+def _parameters(*, inherited=False):
+    """``(label, Parameter)`` for every parameter of every public callable
+    (:func:`_public_callables`), ``self``/``cls`` and
+    ``*args``/``**kwargs`` left out."""
+    for label, obj in _public_callables(inherited=inherited):
         sig = _signature(obj)
         if sig is None:
             continue
@@ -209,6 +223,178 @@ def test_one_keyword_per_argument():
     """No public signature takes two keywords for one value: H10's known
     case was ``plot_transfer_function(axes=, ax=)``."""
     _check(_synonym_keywords(), _SYNONYMS, 'synonym pair')
+
+
+#: Spellings an idea had beside its canonical one, each mapped to the one the
+#: package uses. ``who`` is the label a refusal names: it lives on the private
+#: form (``_name(..., *, who)``), never on a public signature.
+_RETIRED_SPELLINGS = {
+    'center_frequency': 'fc', 'centre': 'fc', 'centres': 'centers',
+    'n_freqs': 'n_frequencies', 'nfreq': 'n_frequencies', 'seed': 'rng',
+    'who': 'the private _name form',
+}
+
+
+def _record_classes():
+    """Every engine's settings record: its fields are saved with each
+    result, so they are public names too."""
+    import uacpy.models  # noqa: F401  (imports every engine's record)
+    from uacpy.core.run_settings import EngineSettings
+    found, todo = [], [EngineSettings]
+    while todo:
+        for sub in todo.pop().__subclasses__():
+            found.append(sub)
+            todo.append(sub)
+    return found
+
+
+#: Parsed source files, by path, for :func:`_self_attributes`.
+_SOURCE_TREES = {}
+
+
+def _self_attributes(klass):
+    """The public attribute names the methods of ``klass`` (one uacpy
+    class, its own body only) assign on ``self`` — ``self.name = …`` and the
+    frozen form ``object.__setattr__(self, 'name', …)`` — read from the
+    source file its methods were compiled from."""
+    files = set()
+    for member in vars(klass).values():
+        if isinstance(member, (staticmethod, classmethod)):
+            member = member.__func__
+        if isinstance(member, property):
+            member = member.fget
+        code = getattr(member, '__code__', None)
+        if code is not None and not code.co_filename.startswith('<'):
+            files.add(code.co_filename)
+    names = set()
+    for path in files:
+        if path not in _SOURCE_TREES:
+            _SOURCE_TREES[path] = ast.parse(
+                Path(path).read_text(encoding='utf-8'))
+        for node in ast.walk(_SOURCE_TREES[path]):
+            if not (isinstance(node, ast.ClassDef)
+                    and node.name == klass.__name__):
+                continue
+            for sub in ast.walk(node):
+                targets = []
+                if isinstance(sub, ast.Assign):
+                    targets = sub.targets
+                elif isinstance(sub, (ast.AnnAssign, ast.AugAssign)):
+                    targets = [sub.target]
+                for target in targets:
+                    if (isinstance(target, ast.Attribute)
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == 'self'):
+                        names.add(target.attr)
+                if (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == '__setattr__'
+                        and len(sub.args) >= 2
+                        and isinstance(sub.args[0], ast.Name)
+                        and sub.args[0].id == 'self'
+                        and isinstance(sub.args[1], ast.Constant)
+                        and isinstance(sub.args[1].value, str)):
+                    names.add(sub.args[1].value)
+    return {name for name in names if not name.startswith('_')}
+
+
+def _public_attributes(klass):
+    """The public names an instance of ``klass`` answers besides its
+    methods: the properties and other class-level attributes, and the
+    attributes its methods set on ``self``, over ``klass`` and the uacpy
+    bases it inherits from."""
+    names = set()
+    for base in _uacpy_mro(klass):
+        names |= {name for name, member in vars(base).items()
+                  if not name.startswith('_')
+                  and not inspect.isfunction(member)
+                  and not isinstance(member, (staticmethod, classmethod))}
+        names |= _self_attributes(base)
+    return names
+
+
+def _attributes_set_from_outside():
+    """``'<file>:<line> .<name> = …'`` for every assignment in the package
+    that sets a retired spelling as an attribute of any object — the
+    ``slab.source_weights = …`` form a run stamps its results with, which no
+    class body shows — including the elements of a tuple or list target
+    (``slab.nfreq, n = …``, starred ones too), ``setattr(x, '<name>', …)``
+    and ``object.__setattr__(x, '<name>', …)``."""
+    def flat(targets):
+        for target in targets:
+            if isinstance(target, (ast.Tuple, ast.List)):
+                yield from flat(target.elts)
+            elif isinstance(target, ast.Starred):
+                yield from flat([target.value])
+            else:
+                yield target
+
+    out = set()
+    for rel, tree in _package_trees():
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets = [node.target]
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                targets = [node.target]
+            names = [target.attr for target in flat(targets)
+                     if isinstance(target, ast.Attribute)]
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, 'id',
+                                getattr(node.func, 'attr', None))
+                    in ('setattr', '__setattr__')
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)):
+                names.append(node.args[1].value)
+            retired = [name for name in names if name in _RETIRED_SPELLINGS]
+            if not retired:
+                continue
+            # A comprehension carries no line of its own; its target does.
+            line = getattr(node, 'lineno', None) or node.target.lineno
+            out |= {f'{rel}:{line} .{name} = -> {_RETIRED_SPELLINGS[name]}'
+                    for name in retired}
+    return out
+
+
+def _retired_spellings():
+    """``'<where> <name> -> <canonical>'`` for every public parameter
+    (inherited methods included), public class or record field, public
+    attribute, property or class attribute, attribute set from outside a
+    class, and documented metadata key spelt the retired way."""
+    def entry(where, name):
+        return f'{where} {name} -> {_RETIRED_SPELLINGS[name]}'
+
+    out = {entry(label, p.name) for label, p in _parameters(inherited=True)
+           if p.name in _RETIRED_SPELLINGS}
+    classes = [(label, obj) for label, obj in _public_objects()
+               if inspect.isclass(obj)]
+    classes += [(f'{k.__module__}.{k.__qualname__}', k)
+                for k in _record_classes()]
+    for label, klass in classes:
+        names = list(getattr(klass, '_fields', ()))
+        if dataclasses.is_dataclass(klass):
+            names += [f.name for f in dataclasses.fields(klass)]
+        names += sorted(_public_attributes(klass))
+        out |= {entry(label, name) for name in names
+                if name in _RETIRED_SPELLINGS}
+    out |= _attributes_set_from_outside()
+    from uacpy.core.results._base import _DOCUMENTED_METADATA
+    out |= {entry(f'{model} metadata key', key)
+            for model, key in _DOCUMENTED_METADATA
+            if key in _RETIRED_SPELLINGS}
+    return out
+
+
+def test_one_spelling_per_idea():
+    """A public parameter, a result or record field and a documented
+    metadata key spell an idea one way: ``fc`` for a centre or carrier
+    frequency, ``centers``, ``n_frequencies``, ``rng`` for a random
+    generator; and no public signature takes the ``who`` label."""
+    found = sorted(_retired_spellings())
+    assert not found, '\n'.join(found)
 
 
 # ── rule 2: the dB reference ──────────────────────────────────────────────
@@ -533,15 +719,15 @@ _SENTENCE_TAILS = frozenset({
     'core/_validate.py _nyquist_check: ...{}: {} {} Hz are {} {}',
     'core/_validate.py require_finite_signal: ...umpy holds as dtype=object. {}',
     'core/_validate.py require_positive_finite_scalar: ...e > 0{} and finite (got {}).{}',
+    'core/_validate.py require_real_scalar: ...{} must be {}{} (got {}).{}',
     'core/_validate.py require_real_signal: ... be real (got complex input){}',
     'core/boundary.py _delegate_write: ...{}.{} = {}: {}',
     'data/wind_live.py _wind_speed: ... no wind speed at ({}, {}): {}',
     'io/bathy_io.py _boundary_rows: ..., value) rows, got shape {}.{}',
     'io/env_reader.py _vector: ...read_env: {}, {}: {}',
     'io/oases_reader.py read_oases_rhs_header: ...s smooth. Underlying error: {}',
+    'models/_checks.py require_timeseries_signal: ....run(run_mode=TIME_SERIES): {}',
     'models/_knobs.py refuse_unknown_knob: ... change nothing a run reads.{}',
-    'models/base.py _require_timeseries_signal: ....run(run_mode=TIME_SERIES): {}',
-    'models/kraken/_model.py _run_kraken_executable: ... the strongest leaky ones.\n\n{}',
     'models/oases/oasp.py _oasp_sweep: ...ompute the top of the band. {}',
     'models/ram/_band.py broadband_frequencies: ...ro or negative frequencies. {}',
     'models/ram/grid.py optimize_grid_relaxing: ...this range. Optimiser said: {}',

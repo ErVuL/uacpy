@@ -1,9 +1,11 @@
-"""Supported-RunMode harmonization tests.
+"""Run-mode surface tests.
 
-Locks in the per-model ``_supported_modes`` set — the mode-axis analogue of
-``test_capability_flags``. If a model gains or loses a RunMode, the change must
-come with an update here so the public mode surface stays explicit, and so
-every *unsupported* mode keeps being refused.
+Which run modes each engine declares and resolves is held to its saved record
+(``tests/data/engine_specs.json``, ``test_capability_flags.py``). The tests
+here hold what is read off those modes: ``supports_mode`` answers for every
+``RunMode`` member as ``supported_modes`` does, the ``compute_*`` refusals name
+exactly the engines that run their mode, every constructor knob is
+documented, and a concrete wrapper declares a well-formed spec.
 """
 
 import pytest
@@ -13,67 +15,21 @@ from uacpy.core.exceptions import ExecutableNotFoundError
 from uacpy.tests.conftest import build_engine, engine_names, engine_params
 
 
-# Expected supported RunModes, per engine. Each test builds its engine with
-# ``build_engine`` behind the markers ``engine_params`` attaches, because
-# every constructor resolves its binary.
-_EXPECTED = {
-    'Bellhop':
-        {RunMode.COHERENT_TL, RunMode.INCOHERENT_TL, RunMode.SEMICOHERENT_TL,
-         RunMode.RAYS, RunMode.EIGENRAYS, RunMode.ARRIVALS,
-         RunMode.BROADBAND, RunMode.TIME_SERIES},
-    'Kraken':
-        {RunMode.MODES, RunMode.COHERENT_TL, RunMode.INCOHERENT_TL,
-         RunMode.BROADBAND, RunMode.TIME_SERIES},
-    'Scooter':
-        {RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES},
-    'SPARC':
-        # CW transmission loss withdrawn: the pulse-to-CW extraction is not
-        # quantitative. SPARC's product is its native time series.
-        {RunMode.TIME_SERIES},
-    'Bounce':
-        {RunMode.REFLECTION},
-    'OAST':
-        {RunMode.COHERENT_TL},
-    'OASN':
-        {RunMode.COVARIANCE, RunMode.REPLICA},
-    'OASR':
-        {RunMode.REFLECTION},
-    'OASP':
-        {RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES},
-    'OASS':
-        {RunMode.REVERBERATION, RunMode.COVARIANCE},
-    'OASSP':
-        {RunMode.BROADBAND, RunMode.TIME_SERIES},
-    'RAM':
-        {RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES},
-}
-
-
 _MODEL_PARAMS = engine_params(value='name')
 
 
-def test_the_expected_table_covers_the_registered_engines():
-    assert set(_EXPECTED) == engine_names()
-
-
 @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_supported_modes(model_name):
-    """``_supported_modes`` matches exactly; ``supports_mode`` agrees on the
-    full RunMode enum (every unsupported mode refused)."""
-    expected = _EXPECTED[model_name]
+def test_supports_mode_answers_as_supported_modes(model_name):
+    """``supports_mode`` agrees with ``supported_modes`` on the full RunMode
+    enum: every supported mode accepted, every other one refused."""
     try:
         m = build_engine(model_name)
     except ExecutableNotFoundError:
         pytest.skip(f"{model_name} binary not available")
-
-    assert set(m._supported_modes) == expected, (
-        f"{model_name}._supported_modes = {set(m._supported_modes)}, "
-        f"expected {expected}"
-    )
     for mode in RunMode:
-        assert m.supports_mode(mode) is (mode in expected), (
+        assert m.supports_mode(mode) is (mode in m.supported_modes), (
             f"{model_name}.supports_mode({mode}) disagrees with "
-            f"_supported_modes"
+            f"supported_modes"
         )
 
 
@@ -85,7 +41,7 @@ def test_supported_modes(model_name):
 #: (``uacpy.models._registry.engines_running``) when the refusal is raised,
 #: and the tests below compare it with every wrapper's ``spec.modes``.
 _COMPUTE_METHOD_MODES = {
-    'compute_tl': RunMode.COHERENT_TL,
+    'compute_field': RunMode.COHERENT_TL,
     'compute_rays': RunMode.RAYS,
     'compute_arrivals': RunMode.ARRIVALS,
     'compute_modes': RunMode.MODES,

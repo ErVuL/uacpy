@@ -7,8 +7,8 @@ only vehicle); the long-format ``.bty`` samples the union of the bathymetry
 and property grids, so interior property breaks survive; and a single-sample
 (constant-offset) altimetry still produces an ``.ati``.
 
-The last class covers the range-dependent-SSP warning the writer raises. The
-writer runs no binary, so these stay in the pure-Python subset — which is why
+``TestRangeDependentSSPWarning`` covers the range-dependent-SSP warning the
+writer raises. The writer runs no binary, so these stay in the pure-Python subset — which is why
 they live here rather than beside the model tests in ``test_bellhop.py``,
 whose module-level ``requires_binary`` mark would take them out of it.
 """
@@ -24,10 +24,11 @@ import uacpy
 from uacpy.core.environment import Bottom, BoundaryProperties, SeabedColumn
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.bellhop_writer import write_bellhop_env_file
-from uacpy.core import Environment
+from uacpy.core import Environment, Source, Receiver
 from uacpy.io.oalib_writer import write_ssp_section
 import io
 from uacpy.tests.conftest import warning_messages
+from uacpy.tests.test_bellhop import _run_type_record
 
 _RD_SSP = 'range-dependent SSP'
 
@@ -845,8 +846,10 @@ class TestBiologicalEdgesReachBothBellhopProfiles:
 def test_a_cerveny_deck_with_no_knobs_writes_the_documented_defaults(tmp_path):
     """The two Cerveny lines (ReadEnvironmentBell.f90:197, :217) of a
     ``beam_type='C'`` deck given no beam knobs: space-filling width 'F',
-    double curvature 'D', epsilon multiplier 1, RLoop 1 km, one image,
-    window 4, pressure — the defaults the Bellhop model declares too."""
+    standard curvature 'S', epsilon multiplier 1, RLoop 1 km, one image,
+    window 5, pressure — BELLHOP's built-ins but the width
+    (bellhopMod.f90:22-25), and what the Bellhop model's ``None`` defaults
+    resolve to."""
     from uacpy import Bellhop
     from uacpy.io.bellhop_writer import CERVENY_DEFAULTS
     src = uacpy.Source(depths=25.0, frequencies=100.0)
@@ -856,13 +859,13 @@ def test_a_cerveny_deck_with_no_knobs_writes_the_documented_defaults(tmp_path):
     write_bellhop_env_file(path, Environment(bathymetry=100.0, ssp=1500.0),
                            src, rcv, beam_type='C')
     assert path.read_text().splitlines()[-2:] == [
-        "'FD' 1.000000 1.000000", "1 4 'P'"]
+        "'FS' 1.000000 1.000000", "1 5 'P'"]
     assert CERVENY_DEFAULTS == {
-        'beam_width_type': 'F', 'beam_curvature': 'D', 'component': 'P',
-        'eps_multiplier': 1.0, 'r_loop': 1000.0, 'n_image': 1, 'ib_win': 4}
+        'beam_width_type': 'F', 'beam_curvature': 'S', 'component': 'P',
+        'eps_multiplier': 1.0, 'r_loop': 1000.0, 'n_image': 1, 'ib_win': 5}
     model = Bellhop()
-    assert {name: getattr(model, name) for name in CERVENY_DEFAULTS} == \
-        CERVENY_DEFAULTS
+    assert all(getattr(model, name) is None
+               for name in CERVENY_DEFAULTS if name != 'component')
 
 
 class TestARangeDependentProfileHoldsTheRange0Absorption:
@@ -904,3 +907,123 @@ class TestARangeDependentProfileHoldsTheRange0Absorption:
 
     def test_a_law_with_a_letter_is_silent(self):
         assert self._notices(uacpy.Thorp(), (1490.0, 1495.0)) == []
+
+
+class TestInterpSspAutoPick:
+    """``interp_ssp=None`` auto-picks quad for a range-dependent ``env.ssp``
+    and C-linear otherwise (bellhop.md §5 "SSP connection scheme:", and
+    bellhop.md §7 "Range-dependent SSP needs"), asserted on the
+    ``TopOpt(1)`` character the deck carries: 'Q' opens ``<root>.ssp``
+    unconditionally (``ReadEnvironmentBell.f90:262-268``), 'C' is AT's
+    C-linear connection. Deck-token test — no binary in the loop."""
+
+    @staticmethod
+    def _topopt(tmp_path, env, receiver):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        path = tmp_path / 'auto.env'
+        write_bellhop_env_file(path, env,
+                               Source(depths=25.0, frequencies=100.0),
+                               receiver, interp_ssp=None)
+        lines = path.read_text().splitlines()
+        # Line 0 is the quoted title; the next quoted line is TopOpt.
+        topopt = next(ln for ln in lines[1:] if ln.startswith("'"))
+        return topopt[1], path
+
+    def test_range_dependent_ssp_auto_picks_quad(self, tmp_path):
+        from uacpy.core.ssp import SoundSpeedProfile
+        z = np.linspace(0.0, 100.0, 5)
+        r = np.array([0.0, 6000.0, 12000.0])
+        c2d = 1500.0 + 0.01 * z[:, None] - 1e-4 * r[None, :]
+        env = Environment(
+            name='rd-auto', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_2d(z, r, c2d))
+        # Receivers stop at 8 km so the 1.2x ray box stays inside the 12 km
+        # SSP span and no constant-extrapolation warning fires.
+        char, path = self._topopt(
+            tmp_path, env,
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.linspace(100.0, 8000.0, 5)))
+        assert char == 'Q'
+        assert path.with_suffix('.ssp').exists(), (
+            "TopOpt 'Q' was written but the .ssp it makes Bellhop open was "
+            "not staged")
+
+    def test_range_independent_ssp_auto_picks_c_linear(self, tmp_path):
+        from uacpy.core.ssp import SoundSpeedProfile
+        env = Environment(
+            name='ri-auto', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1480.0)]))
+        char, path = self._topopt(
+            tmp_path, env,
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.linspace(100.0, 2000.0, 5)))
+        assert char == 'C'
+        assert not path.with_suffix('.ssp').exists()
+
+    def test_a_pinned_quad_on_a_range_independent_ssp_writes_its_ssp(
+            self, tmp_path):
+        """A caller's 'quad' is written as asked: 'Q' in the deck and the
+        one profile in the .ssp Bellhop opens
+        (ReadEnvironmentBell.f90:262-268), held over the ray box on both
+        sides, with no warning about receivers beyond the profiles."""
+        import warnings
+        from uacpy.core.ssp import SoundSpeedProfile
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = Environment(
+            name='ri-quad', bathymetry=100.0,
+            ssp=SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1480.0)]))
+        path = tmp_path / 'quad.env'
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            write_bellhop_env_file(
+                path, env, Source(depths=25.0, frequencies=100.0),
+                Receiver(depths=np.array([50.0]),
+                         ranges=np.linspace(100.0, 2000.0, 5)),
+                interp_ssp='quad')
+        lines = path.read_text().splitlines()
+        assert next(ln for ln in lines[1:] if ln.startswith("'"))[1] == 'Q'
+        ssp = path.with_suffix('.ssp').read_text().split()
+        n_ranges = int(ssp[0])
+        ranges_km = np.array(ssp[1:1 + n_ranges], dtype=float)
+        matrix = np.array(ssp[1 + n_ranges:], dtype=float).reshape(-1, n_ranges)
+        assert n_ranges == 3 and ranges_km[0] < 0.0 < ranges_km[-1]
+        assert ranges_km[1] == 0.0
+        for column in matrix.T:
+            np.testing.assert_array_equal(column, matrix[:, 1])
+        np.testing.assert_allclose(matrix[[0, -1], 1], [1500.0, 1480.0])
+
+
+class TestRayBoxDefaults:
+    """``z_box``/``r_box`` left ``None`` reach the deck as 1.2x the max depth
+    / receiver range
+    (DOCUMENTATION.md §18 "Max depth of the ray box",
+    ``write_bellhop_env_file``); the range column is written in km
+    (``ReadEnvironmentBell.f90:154`` converts back). Deck-token test — no
+    binary in the loop."""
+
+    @staticmethod
+    def _box_line(tmp_path, **kwargs):
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        path = tmp_path / 'box.env'
+        write_bellhop_env_file(
+            path, Environment(bathymetry=100.0, ssp=1500.0),
+            Source(depths=25.0, frequencies=100.0),
+            Receiver(depths=np.array([50.0]),
+                     ranges=np.linspace(100.0, 5000.0, 5)),
+            **kwargs)
+        lines = path.read_text().splitlines()
+        # RunType record, then n_beams, alpha, step, box — the box is the
+        # fourth line after it.
+        i, _ = _run_type_record(lines)
+        z_str, r_km_str = lines[i + 4].split()
+        return float(z_str), float(r_km_str)
+
+    def test_defaults_are_1_2x_the_grid(self, tmp_path):
+        z_box, r_box_km = self._box_line(tmp_path)
+        assert z_box == pytest.approx(1.2 * 100.0)
+        assert r_box_km == pytest.approx(1.2 * 5000.0 / 1000.0)
+
+    def test_pinned_boxes_pass_through_verbatim(self, tmp_path):
+        z_box, r_box_km = self._box_line(tmp_path, z_box=333.0, r_box=7000.0)
+        assert z_box == pytest.approx(333.0)
+        assert r_box_km == pytest.approx(7.0)

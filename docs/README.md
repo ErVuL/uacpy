@@ -14,14 +14,20 @@ package, see [`DEV.md`](DEV.md).
 
 ## Start here
 
+After `./install.sh`, check which engines were built:
+
+```bash
+python -m uacpy        # one row per engine binary; exit status 1 if an engine has none
+```
+
 ```python
 import numpy as np
 import uacpy
-from uacpy.models import Bellhop, RunMode
+from uacpy.models import Bellhop
 
 env = uacpy.Environment(
     bathymetry=100.0,
-    ssp=[(0.0, 1500.0), (100.0, 1490.0)],
+    ssp=1500.0,                                  # isovelocity water, m/s
     bottom=uacpy.BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=1650.0, density=1.8, attenuation=0.6,
@@ -31,14 +37,17 @@ source = uacpy.Source(depths=25.0, frequencies=200.0)
 receiver = uacpy.Receiver(depths=np.linspace(1, 99, 100),
                           ranges=np.linspace(50, 5000, 250))
 
-tl = Bellhop().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-tl.plot(env=env, source=source)
+field = Bellhop().run(env, source, receiver)          # complex pressure, Pa
+field.plot(env=env, source=source)
 ```
 
 Three carriers in — [environment](guide/environment.md),
 [source and receiver](guide/source-receiver.md) — one
 [result](guide/results.md) out, which [plots itself](guide/plotting.md).
-Every model in the package follows that shape.
+Every model in the package follows that shape. The water is isovelocity: a
+profile of `(depth, speed)` pairs bends the rays into caustics, which
+Bellhop's default beams draw as thin bright streaks
+([Bellhop §1](models/bellhop.md#1-what-it-solves)).
 
 ---
 
@@ -131,7 +140,7 @@ Cross-references and page structure are gated by the test suite, not by that
 script: `uacpy/tests/test_documentation.py` runs
 [`check_links.py`](check_links.py) and [`check_structure.py`](check_structure.py)
 over this tree on every `pytest` run — a dead link, an unbalanced fence, a
-duplicated block or a code sample that no longer parses fails CI. Both also run
+duplicated block or a code sample that does not parse fails CI. Both also run
 standalone:
 
 ```bash

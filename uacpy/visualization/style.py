@@ -2,7 +2,6 @@
 the sediment palette. Importing this module does not touch ``rcParams``."""
 
 
-# Professional color schemes
 # Heatmap colormap for a Field's dB view, keyed by ``Field.kind``. A rendering
 # choice only — what each quantity *is*, and how it is labelled, lives in
 # uacpy/core/results/quantities.py, which must not depend on this module.

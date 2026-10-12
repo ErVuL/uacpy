@@ -2,8 +2,9 @@
 merged receiver/tabulation depths, the maximum range, the range segments of a
 field run and the size limits of field.exe's tabulation and ``.mod`` file."""
 
+import math
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from uacpy.models._budget import memory_budget
 from uacpy.core.run_settings import Notice
 from uacpy.core.run_settings import RunMode
@@ -16,17 +17,20 @@ from uacpy.io.oalib_writer import (
 )
 from uacpy.models.kraken._settings import KrakenLaunch
 from uacpy.models.kraken._segments import segment_environment_by_range
-from uacpy.models.kraken._window import _HALF_SPACE_RULE, phase_speed_window
+from uacpy.models.kraken._window import phase_speed_window
 
 
-#: Kraken's deck RMax over the farthest receiver range: 5 % past it
-#: for one frequency, ×3 for a band solved off one mesh sequence
-#: (:func:`resolve_rmax_m`). A margin on range for the mesh tolerance;
-#: not the phase-speed window's ``C_HIGH_FACTOR``, which is also 1.05.
-KRAKEN_RMAX_MULTIPLIER = 1.05
-KRAKEN_RMAX_MULTIPLIER_BAND = 3.0
-#: m — RMax when no receiver range is positive.
-KRAKEN_RMAX_FALLBACK_M = 100_000.0
+#: m — Kraken's deck RMax when no receiver range is positive (``compute_modes``
+#: takes no receiver). uacpy guidance, measured: 0, ``doc/kraken.htm`` (8)'s
+#: documented alternative ("If you set it to zero, then no mesh doublings will
+#: be performed ... even if you set it to zero the results will usually be
+#: reasonable"; ``tests/Munk/MunkK.env`` writes 0), ends the refinement on the
+#: first mesh (``kraken.f90:80``). Against a converged run at 100 Hz to 10 km
+#: it gave 0.27 dB median, 3.7 dB max |dTL| and a 1.09 rad mode phase error at
+#: 10 km on a 100 m Pekeris guide (1700 m/s), 0.016 dB median, 0.17 dB max and
+#: 0.24 rad over a 1550 m/s mud seabed, where 100 km gave none
+#: (AUDIT_2026-10-10_fresh/IMPL_fix3_misc.md, Round 14).
+KRAKEN_RMAX_NO_RANGE_M = 100_000.0
 
 
 #: ``KrakenField/field.f90:24`` declares ``MaxNfreq = 1000``, allocates
@@ -66,8 +70,9 @@ _FIELD_MAX_TABULATION_DEPTHS = 100001
 # medium — ``deltaz = c / freq0 / 20``, "default sampling: 20 points per
 # wavelength".
 #
-# The floor keeps a low-frequency run from getting a coarser grid than the
-# historical fixed density.
+# The floor keeps a low-frequency run's grid at 1.5 points per metre or
+# finer, whatever its wavelength (uacpy guidance, unmeasured; no manual
+# sets one).
 MODE_POINTS_PER_WAVELENGTH = 10.0
 MODE_POINTS_PER_METER_FLOOR = 1.5
 
@@ -193,8 +198,8 @@ def mode_points_per_meter(env, frequencies, *, pinned_mode_points_per_meter
     the two halves of the same reduction disagreeing about which ranges
     count.
 
-    That correction is a rule-compliance fix, and the honest measurement
-    is that its effect here is small. On a four-profile deck whose water
+    The block minimum is what the manuals' rule asks for, and its effect
+    on the field is small. On a four-profile deck whose water
     runs 1500 m/s at r=0 to 1000 m/s at 10 km, at 2 kHz, the range-0
     reading gives 13.33 pts/m (6.7 points per wavelength in the slowest
     water, 2934 grid depths at dz = 0.0750 m) against 20 pts/m from the
@@ -235,9 +240,8 @@ def mode_points_per_meter(env, frequencies, *, pinned_mode_points_per_meter
                 f"{freq_max:g} Hz, under the ~{MODE_POINTS_PER_WAVELENGTH:g} "
                 f"the KRAKEN and FIELD manuals require for the mode "
                 f"tabulation grid. Mode shapes and coupling integrals are "
-                f"interpolated from this grid, so the TL error is silent — "
-                f"measured 8.2 dB against Scooter at 1600 Hz. Pass "
-                f"{needed:.3g} or leave mode_points_per_meter=None to "
+                f"interpolated from this grid, so the error is silent. "
+                f"Pass {needed:.3g} or leave mode_points_per_meter=None to "
                 f"derive it.", NumericsWarning)
         return ppm, notice
     return max(MODE_POINTS_PER_METER_FLOOR, needed), None
@@ -254,7 +258,7 @@ def dense_mode_depths(env, source, *, pinned_mode_depths,
     a sparse one leaves too few samples per mode to plot or to reconstruct a
     field from. ``pinned_mode_depths`` verbatim when set, else
     ``max(100, total_depth * mode_points_per_meter)`` points linearly spaced
-    from 0 to the total media depth.
+    from 0 to the total media depth (the 100 is uacpy guidance, unmeasured).
 
     ``env`` is the environment the caller passed. The modes are solved on
     its r = 0 profile, so the grid spans THAT water column plus THAT
@@ -277,89 +281,53 @@ def dense_mode_depths(env, source, *, pinned_mode_depths,
     return np.linspace(0.0, float(total_depth), n_pts), notice
 
 
-def mode_count_check_mesh(env, media, n_mesh: int, frequency: float, *,
-                           backend: str, c_high_origin: str
-                           ) -> Optional[int]:
-    """The mesh of the second solve a krakenc launch of an elastic
-    problem under the half-space window is checked against
-    (:meth:`_check_mode_count`), or ``None``.
-
-    KRAKENC refines its mesh (``NV = 1, 2, 4, 8, 16``, ``krakenc.f90:44``)
-    and seeds each refined solve from the previous ones; a root that
-    wanders outside ``[cLow, cHigh]`` ends the mode search there, and
-    every mode above it is dropped with no message
-    (``krakenc.f90:392-419``, ``MaxTries = 1``). Measured on a 100 m
-    guide over a hard elastic half-space (cp 3000, cs 1400, rho 2.2) at
-    100 Hz, against Scooter: 12 modes and 0.05-0.5 dB median at most
-    meshes, but 9-11 modes and 2.9 dB median (7.4 dB range-averaged at
-    99 m) at n_mesh 200, 400, 1000, 2000 and 4000 — refining made it
-    worse. KRAKENC's own remedy, the root-finder restarts of
-    TopOpt(5:5) '.', kept every mode there but draws its restart points
-    from an unseeded ``RANDOM_NUMBER``: on a range-dependent elastic
-    seabed repeated identical runs differed by up to 9.4 dB, so no deck
-    asks for it. This second solve instead, on AT's coarsest accepted
-    mesh (``at_mesh_floor``, half the automatic one), says so when the
-    run's count is lower: the count dropped as the mesh was refined
-    (:meth:`_check_mode_count` has the measured hit rate). ``None`` when
-    the pinned mesh is that floor, and under the other windows (a
-    reflection table, a rigid or vacuum floor under an ice canopy, leaky
-    modes), where counts moved between meshes with the field
-    unchanged."""
-    if (backend != 'krakenc' or c_high_origin != _HALF_SPACE_RULE
-            or not (env.bottom.is_elastic or env.surface.is_elastic)):
-        return None
-    floor = at_mesh_floor(media, frequency)
-    return floor if n_mesh <= 0 or n_mesh > floor else None
-
-
-def compute_rmax_m(
-    receiver, fallback_m: float = KRAKEN_RMAX_FALLBACK_M, *,
-    multiplier: float = KRAKEN_RMAX_MULTIPLIER,
-) -> float:
-    """Derive the mode solver's RMax (m) from the receiver ranges.
+def compute_rmax_m(receiver) -> float:
+    """The mode solver's RMax (m) from the receiver ranges: the farthest
+    one — ``doc/kraken.htm`` (8), 678: "the largest range for which a field
+    calculation will be desired" — or :data:`KRAKEN_RMAX_NO_RANGE_M` (100 km)
+    when there is no receiver or no positive range.
 
     RMax scales the Richardson mesh-convergence test
-    (``kraken.f90:80``: ``Error·1000·RMax < 1``), so it should be at
-    least the longest range the modes will be propagated to —
-    the outermost receiver. ``multiplier`` adds margin on top;
-    raising it only tightens the tolerance (finer mesh, longer
-    solve), never loosens it. Falls back to ``fallback_m`` if the
-    receiver has no range vector.
+    (``kraken.f90:80``: ``Error·1000·RMax < 1``): a larger value is a
+    tighter tolerance (finer mesh, longer solve).
     """
-    if receiver is None:
-        return float(fallback_m)
-    ranges = getattr(receiver, 'ranges', None)
-    if ranges is None or len(np.atleast_1d(ranges)) == 0:
-        return float(fallback_m)
-    rmax_m = float(np.max(np.asarray(ranges, dtype=float)))
-    if rmax_m <= 0:
-        return float(fallback_m)
-    return rmax_m * float(multiplier)
+    farthest = _farthest_range_m(receiver)
+    return KRAKEN_RMAX_NO_RANGE_M if farthest is None else farthest
 
 
-def resolve_rmax_m(receiver, *, band: bool, pinned_rmax_m) -> Tuple[float,
-                                                                    str]:
-    """``(rmax_m, origin)``: the deck's ``RMax`` and where it came from.
+def _farthest_range_m(receiver) -> Optional[float]:
+    """The farthest positive receiver range (m), ``None`` when there is no
+    receiver or no positive range."""
+    ranges = getattr(receiver, 'ranges', None) if receiver is not None else None
+    if ranges is None:
+        return None
+    ranges = np.atleast_1d(np.asarray(ranges, dtype=float))
+    farthest = float(np.max(ranges)) if ranges.size else 0.0
+    return farthest if farthest > 0.0 else None
 
-    RMax sets the mesh-convergence tolerance (see
-    :func:`compute_rmax_m`): 5 % past the outermost receiver for
-    narrowband, ×3 for a band on one deck, which solves every frequency
-    off one mesh sequence and so gets the tighter tolerance as accuracy
-    margin. A receiver with no positive range falls back to 100 km.
-    """
+
+def rmax_zero_notice(rmax_m, *, model_name) -> Optional[Notice]:
+    """``(note, warning)`` for an ``rmax_m`` of 0 the caller set, else
+    ``None``: the mode solver's refinement loop ends on its first mesh
+    (``kraken.f90:80`` / ``krakenc.f90:82``, ``Error*1000*RMax < 1``)."""
+    if rmax_m is None or float(rmax_m) != 0.0:
+        return None
+    return Notice(
+        "RMax 0: no mesh doubling",
+        f"{model_name}(rmax_m=0): no mesh doublings will be performed "
+        f"(doc/kraken.htm (8); kraken.f90:80 ends the refinement on the "
+        f"first mesh).", NumericsWarning)
+
+
+def resolve_rmax_m(receiver, *, pinned_rmax_m) -> Tuple[float, str]:
+    """``(rmax_m, origin)``: the deck's ``RMax`` (:func:`compute_rmax_m`,
+    or the caller's) and where it came from."""
     if pinned_rmax_m is not None:
-        return pinned_rmax_m, _RMAX_PINNED
-    multiplier = (KRAKEN_RMAX_MULTIPLIER_BAND if band
-                  else KRAKEN_RMAX_MULTIPLIER)
-    rmax_m = compute_rmax_m(receiver, fallback_m=KRAKEN_RMAX_FALLBACK_M,
-                            multiplier=multiplier)
-    ranges = np.atleast_1d(np.asarray(
-        getattr(receiver, 'ranges', None) if receiver is not None
-        else [], dtype=float))
-    if not ranges.size or float(np.max(ranges)) <= 0.0:
+        return float(pinned_rmax_m), _RMAX_PINNED
+    rmax_m = compute_rmax_m(receiver)
+    if _farthest_range_m(receiver) is None:
         return rmax_m, "100 km: the receiver has no positive range"
-    return rmax_m, (f"{multiplier:g} × the farthest receiver range"
-                    + (" (a band on one deck)" if band else ""))
+    return rmax_m, "the farthest receiver range (doc/kraken.htm (8))"
 
 
 def resolve_modes_launch(env, source, receiver, *, tabulation_depths,
@@ -378,8 +346,8 @@ def resolve_modes_launch(env, source, receiver, *, tabulation_depths,
     # instead rejected meshes the binary would have run.
     freq0 = float(np.atleast_1d(
         np.asarray(source.frequencies, dtype=float))[0])
-    reject_coarse_at_mesh('Kraken', pinned_n_mesh, env, freq0)
-    rmax_m, rmax_origin = resolve_rmax_m(receiver, band=False,
+    n_mesh = single_profile_n_mesh(env, pinned_n_mesh, freq0)
+    rmax_m, rmax_origin = resolve_rmax_m(receiver,
                                          pinned_rmax_m=pinned_rmax_m)
     c_low, c_highs, c_low_origin, c_high_origin = \
         phase_speed_window(env, [env], backend=backend,
@@ -395,13 +363,63 @@ def resolve_modes_launch(env, source, receiver, *, tabulation_depths,
         c_low=c_low,
         c_high=c_highs,
         rmax_m=rmax_m,
-        n_mesh=int(pinned_n_mesh),
+        n_mesh=n_mesh,
         field_option=None,
-        check_n_mesh=mode_count_check_mesh(
-            env, at_env_media(env), int(pinned_n_mesh), freq0,
-            backend=backend, c_high_origin=c_high_origin),
     )
     return launch, c_low_origin, c_high_origin, rmax_origin
+
+
+def single_profile_n_mesh(env, pinned_n_mesh, freq0
+                          ) -> Union[int, Tuple[int, ...]]:
+    """``NG`` of a single-profile deck from the caller's ``n_mesh``: 0 when
+    it is unset (the binary sizes each medium), else the value as given — one
+    count for every medium, or one per medium, water first — after the
+    checks the reader stops on: one count per medium of the deck
+    (:func:`at_env_media`), and no count under half of what AT sizes that
+    medium at the deck's frequency line ``freq0``
+    (``misc/ReadEnvironmentMod.f90:110-112``, *Mesh is too coarse*)."""
+    if pinned_n_mesh is None:
+        return 0
+    if not isinstance(pinned_n_mesh, (list, tuple, np.ndarray)):
+        reject_coarse_at_mesh('Kraken', int(pinned_n_mesh), env, freq0)
+        return int(pinned_n_mesh)
+    counts = tuple(int(n) for n in pinned_n_mesh)
+    media = at_env_media(env)
+    if len(counts) != len(media):
+        raise ConfigurationError(
+            f"Kraken(n_mesh={counts}) gives {len(counts)} count(s) for the "
+            f"deck's {len(media)} media (the water column first, then each "
+            f"sediment layer).",
+            remediation="Pass one count per medium, one count for every "
+                        "medium, or leave n_mesh unset.")
+    for number, (count, medium) in enumerate(zip(counts, media), start=1):
+        floor = at_mesh_floor([medium], freq0)
+        if 0 < count < floor:
+            raise ConfigurationError(
+                f"Kraken(n_mesh={counts}) gives medium {number} {count} "
+                f"points, below the {floor} misc/ReadEnvironmentMod.f90:110-112 "
+                f"requires of it at {freq0:.4g} Hz; the run would stop with "
+                f"'Mesh is too coarse'.",
+                remediation=f"Pass at least {floor} for medium {number}, 0 "
+                            f"to let KRAKEN size it, or leave n_mesh unset.")
+    return counts
+
+
+def band_mesh_floor_notice(counts, *, deck_frequency, lowest_frequency,
+                           model_name) -> Notice:
+    """``(note, warning)`` for an ``n_mesh`` of 0 the caller set on a band
+    deck where :func:`band_n_mesh` would give ``counts``: some medium is
+    solved on fewer than AT's 10 points at the band's lowest frequency."""
+    freq0, lowest = float(deck_frequency), float(lowest_frequency)
+    return Notice(
+        f"n_mesh=0 leaves a medium under 10 points at {lowest:g} Hz",
+        f"{model_name}(n_mesh=0): AT sizes each medium at the deck's "
+        f"frequency line, {freq0:g} Hz, and solves the band's {lowest:g} Hz "
+        f"on that count x {lowest:g}/{freq0:g} (kraken.f90:75, "
+        f"krakenc.f90:77), under the 10 points per medium "
+        f"misc/ReadEnvironmentMod.f90:105 requires. Leave n_mesh unset for "
+        f"the counts that keep 10 points there ({counts}, water first).",
+        NumericsWarning)
 
 
 def multi_profile_n_mesh(segments, freq, *, pinned_n_mesh) -> int:
@@ -424,7 +442,15 @@ def multi_profile_n_mesh(segments, freq, *, pinned_n_mesh) -> int:
     and an elastic sediment's shear wavelength can be an order of
     magnitude shorter than its compressional one.
     """
-    if pinned_n_mesh <= 0:
+    if isinstance(pinned_n_mesh, (list, tuple, np.ndarray)):
+        raise ConfigurationError(
+            f"Kraken(n_mesh={tuple(int(n) for n in pinned_n_mesh)}) gives one "
+            f"count per medium; a range-dependent run's deck "
+            f"(write_multi_profile_env) writes one count on every medium line "
+            f"of every profile, and its profiles carry different media.",
+            remediation="Pass one count for every medium, or leave n_mesh "
+                        "unset.")
+    if pinned_n_mesh is None or pinned_n_mesh <= 0:
         return 0
     floor = at_mesh_floor(multi_profile_media(segments), freq)
     if pinned_n_mesh < floor:
@@ -438,6 +464,39 @@ def multi_profile_n_mesh(segments, freq, *, pinned_n_mesh) -> int:
                         f"itself.",
         )
     return int(pinned_n_mesh)
+
+
+#: AT's least mesh count per medium, ``Nneeded = MAX( Nneeded, 10 )``
+#: (``misc/ReadEnvironmentMod.f90:105``).
+_AT_MESH_MIN_POINTS = 10
+
+
+def band_n_mesh(env, *, deck_frequency, lowest_frequency
+                ) -> Union[int, Tuple[int, ...]]:
+    """``NG`` of a band deck whose ``n_mesh`` is unset: one count per
+    medium, water first, or ``0`` when every medium is left to the binary.
+
+    AT sizes each medium once, at the deck's frequency line ``freq0``:
+    ``Nneeded = MAX( INT( thickness / ( c / freq0 / 20 ) ), 10 )``
+    (``misc/ReadEnvironmentMod.f90:101-108``), and solves every frequency of
+    the band on ``INT( NG * NV * freq / freq0 )`` points
+    (``Kraken/kraken.f90:75``, ``Kraken/krakenc.f90:77``), so a frequency
+    below ``freq0`` gets fewer points than the 10 the reader requires. A
+    medium whose own ``Nneeded`` leaves fewer than 10 at the band's lowest
+    frequency gets the least count that leaves 10 there, computed as the
+    binary computes ``N``; every other medium gets 0 and the binary's own
+    count. ``(thickness, c)`` per medium is :func:`at_env_media`.
+    """
+    freq0 = float(deck_frequency)
+    lowest = float(lowest_frequency)
+    count = math.ceil(_AT_MESH_MIN_POINTS * freq0 / lowest)
+    while int(count * lowest / freq0) < _AT_MESH_MIN_POINTS:
+        count += 1
+    counts = tuple(
+        count if count > max(int(20.0 * thickness * freq0 / c),
+                             _AT_MESH_MIN_POINTS) else 0
+        for thickness, c in at_env_media(env))
+    return counts if any(counts) else 0
 
 
 def multi_profile_media(segments):
@@ -579,10 +638,10 @@ def build_field_option(is_range_dependent: bool,
       source (cylindrical), 'X' line source (Cartesian), 'S' scaled
       point source.
     * pos 2: coupling — 'C' coupled modes, 'A' adiabatic.
-      For NProf > 1 we honour ``mode_coupling``; for range-independent
-      runs we default to 'C' (coupled) so the option string is fully
-      populated rather than containing a padding blank. AT's
-      field.f90 treats NProf == 1 identically for 'A' and 'C'.
+      For NProf > 1 it is ``mode_coupling``; a range-independent run
+      writes 'A', ``doc/field.htm``'s default ("'A' Adiabatic mode theory
+      (default)."), which field.f90 does not read there: with NProf == 1
+      it calls ``Evaluate`` (``field.f90:214-215``).
     * pos 3: source beam pattern — '*' when ``source.beam_pattern`` is
       set, else ' ' (omnidirectional). Field.exe rejects any other character
       (``field.f90:83-90``), so the elastic Comp selector (H/V/T/N)
@@ -597,10 +656,9 @@ def build_field_option(is_range_dependent: bool,
     if is_range_dependent:
         pos2 = 'C' if mode_coupling.lower() == 'coupled' else 'A'
     else:
-        # Range-independent: AT doesn't require 'A'/'C', but setting
-        # 'C' keeps the option string fully specified and matches what
-        # AT's own field.f90 does internally when NProf == 1.
-        pos2 = 'C'
+        # Range-independent: field.htm's default; field.f90:214-215 calls
+        # Evaluate when NProf == 1 and reads neither 'A' nor 'C'.
+        pos2 = 'A'
     # pos3: '*' => field.exe reads <base>.sbp, else omnidirectional.
     pos3 = '*' if source.beam_pattern is not None else ' '
     pos4 = 'I' if run_mode == RunMode.INCOHERENT_TL else 'C'

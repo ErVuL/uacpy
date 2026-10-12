@@ -1,6 +1,6 @@
 # Communications — digital modems for the underwater channel
 
-> `uacpy.comms` · 84 public names · modulation, coding, equalisation,
+> `uacpy.comms` · 85 public names · modulation, coding, equalisation,
 > synchronisation, OFDM, DSSS, Doppler, and the NATO JANUS standard
 
 `uacpy.comms` is a digital-communications toolbox built for the one channel
@@ -54,13 +54,20 @@ bits ◀── decoding ◀── demodulation ◀── equalisation ◀── 
                                                       synchronisation ◀───┘
 ```
 
-Four sub-modules carry it, split by where a stage sits in that chain:
+Eleven sub-modules carry it, split by where a stage sits in that chain:
 
 | Sub-module | The question it answers | What it holds |
 |---|---|---|
-| `modulate` | what goes on the wire | symbol mapping (PSK/QAM/DPSK/FSK), payload framing, OFDM symbol construction, convolutional coding and interleaving, DSSS spreading |
-| `link` | what the wire does to it | channel models (AWGN, multipath, fading), pulse shaping and the passband conversion, the `Transmitter`/`CommsReceiver` pair, and the end-to-end `simulate_link`/`ber_sweep` harness |
-| `receive` | what do I get back out | synchronisation, Doppler estimation and compensation, channel estimation, equalisation (`DFE`, LMS, RLS, MMSE), and the link-quality metrics |
+| `coding` | what protects and packs the bits | payload framing, convolutional coding and interleaving, DSSS spreading |
+| `constellations` | what goes on the wire | symbol mapping (PSK/QAM/DPSK/FSK), the scheme table and the slicer |
+| `phy` | how symbols become samples | pulse shaping and the passband conversion |
+| `channel` | what the wire does to it | channel models (AWGN, multipath, fading), the Eb/N0 ↔ SNR conversion |
+| `sync` | where the transmission starts | preamble detection, timing recovery, Doppler estimation and compensation |
+| `equalize` | how the delay spread is undone | channel estimation and equalisation (`DFE`, LMS, RLS, MMSE) |
+| `ofdm` | the multicarrier route | OFDM modulation and demodulation, Schmidl-Cox synchronisation, the pilot channel estimate |
+| `metrics` | how good the link was | bit and symbol error rates, EVM, theoretical BER |
+| `link` | what a link achieves end to end | the `simulate_link` / `ber_sweep` harness |
+| `transceiver` | the whole chain as objects | the `Transmitter` / `CommsReceiver` and `OFDMTransmitter` / `OFDMReceiver` pairs |
 | `janus` | the standard beacon | NATO STANAG 4748 encode/decode, FH-BFSK modulation, detection, and the one-call transmit/receive pair |
 
 You will not type those names: every public name is re-exported from
@@ -196,9 +203,9 @@ sps, BAUD = 8, 1000.0
 symbols = comms.Modulator('qpsk').modulate(rng.integers(0, 2, 8000))
 tx = comms.pulse_shape(symbols, sps, rolloff=0.25, span=8)
 
-channel = comms.multipath_channel([1.0, 0.7, 0.45],          # the same three
-                                  [0.0, 2 / BAUD, 5 / BAUD], sample_rate=# paths, sampled
-                                  BAUD * sps)                # at the waveform rate
+# the same three paths, sampled at the waveform rate
+channel = comms.multipath_channel([1.0, 0.7, 0.45], [0.0, 2 / BAUD, 5 / BAUD],
+                                  sample_rate=BAUD * sps)
 clean = comms.rrc_matched_filter(comms.awgn(tx, 25.0, rng=rng), sps)
 faded = comms.rrc_matched_filter(
     comms.awgn(comms.apply_channel(tx, channel), 25.0, rng=rng), sps)
@@ -233,9 +240,9 @@ the stochastic and time-varying parts, and the noise.
 | Call | Channel |
 |---|---|
 | `multipath_channel(amplitudes, delays_s, *, sample_rate)` | static FIR taps from sparse arrivals |
-| `pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc', rolloff, sps, span)` | the same arrivals laid down through the modem's **own pulse** (raised cosine or root raised cosine) rather than on the nearest sample — what a symbol-rate equalizer actually sees; a `ChannelTaps`, the type `Arrivals.channel_taps` returns, so `simulate_link(channel=...)` and `plot_channel` take it whole |
+| `pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc', rolloff=0.25, sps=1, span=8)` | the same arrivals laid down through the modem's **own pulse** (raised cosine or root raised cosine) rather than on the nearest sample — what a symbol-rate equalizer actually sees; a `ChannelTaps`, the type `Arrivals.channel_taps` returns, so `simulate_link(channel=...)` and `plot_channel` take it whole |
 | `Arrivals.channel_taps(symbol_rate, fc=…)` | the same taps straight from a propagation result, carrier rotation and pulse included ([§14](#14-driving-the-modem-with-a-modelled-channel)) |
-| `apply_channel(signal, h)` | convolve with a static channel |
+| `apply_channel(signal, h)` | convolve with a static channel — the linear convolution by FFT overlap-add (`acoustic_signal.apply_impulse_response`; the direct sum below 19 taps), so a long recording through a long channel costs `O(N log M)` |
 | `fading_taps(n_taps, n_samples, doppler_hz, *, sample_rate, rician_k=..., rng=...)` | time-varying tap gains, Rayleigh or Rician |
 | `apply_fading_channel(signal, taps, delays_samples)` | apply the time-varying tap-delay line |
 | `awgn(signal, snr_dB, rng=...)` | additive white noise at a target SNR over the whole sampled band (an oversampled signal's in-band SNR is higher by `10·log10(fs/B)`, 8.06 dB for a complex RRC baseband at `sps=8`, `rolloff=0.25`) |
@@ -271,7 +278,7 @@ Before anything can be equalised, the frame has to be found.
 | `matched_filter_metric(received, preamble)` | energy-normalised correlation in `[0, 1]` |
 | `detect_preamble(received, preamble, threshold)` | `(start_index_or_None, metric)` |
 | `detect_frames(received, preamble, threshold, min_gap)` | `(list_of_starts, metric)` |
-| `schmidl_cox_preamble(n_subcarriers, cp_len)` | an OFDM training symbol, two identical halves |
+| `schmidl_cox_preamble(n_subcarriers, cp_len, *, rng=None)` | an OFDM training symbol, two identical halves; `rng=None` draws one fixed PN sequence, so both ends of a link rebuild the same symbol |
 | `schmidl_cox_metric(received, n_subcarriers)` | the timing metric `M(d) = \|P(d)\|²/R(d)²` over the record; windows under a quarter of the peak energy read 0 |
 | `schmidl_cox_sync(received, n_subcarriers)` | `(start_or_None, cfo)` — the plateau start of `schmidl_cox_metric` |
 
@@ -298,8 +305,8 @@ the pilot channel estimate downstream.
 Schmidl-Cox pays for that with a free carrier-frequency estimate: the phase of
 the half-symbol correlation is the fractional CFO, here recovered as
 `+2.02×10⁻³` cycles/sample against a true `2.0×10⁻³`. `schmidl_cox_sync`
-returns `(start, cfo)` only — the metric plotted above is recomputed by
-`_sc_metric` in the figure module with the same cumulative-sum formula.
+returns `(start, cfo)` only; the metric plotted above is
+`comms.schmidl_cox_metric(baseband, 256)`, the curve it searches.
 
 The general theory of matched filtering, and the chirps and m-sequences that
 make good preambles, live in [signal processing](signal.md).
@@ -353,8 +360,9 @@ coded = comms.ber_sweep('qpsk', ebn0_coded, 20000, code=code, rng=rng)
 
 A `BerCurve` unpacks as `ebn0_dB, ber = ...`, and carries the sweep's
 `scheme`, `n_bits`, `channel`, `equalizer`, `code` and `n_train` as
-attributes. Its `.plot()` hands `n_bits` to `plot_ber_curve`, so a point with
-no errors is drawn as the `1/n_bits` bound it is, and overlays the closed-form
+attributes. Its `.plot()` — the same call as `plot_ber_curve(curve)` — reads
+`n_bits` off it, so a point with no errors is drawn as the `1/n_bits` bound
+it is, and overlays the closed-form
 AWGN curve of `scheme` only for an uncoded link with no channel, the one link
 that curve describes.
 
@@ -446,15 +454,16 @@ symbols late at 0.45 — are enough to close a QPSK constellation completely
 Nothing about the channel changed; only the receiver.
 
 The learning curve on the right is why you would choose one adaptation rule
-over the other. RLS is within 1 dB of its own MSE floor after about 150
-symbols; LMS at `step=0.005` needs about 800 (median of eight seeds, on a
-200-symbol running average), and costs a fraction of the arithmetic per symbol
-to get there. They then settle a third of a dB apart —
-RLS 0.34 dB lower on the same channel and the same noise — so what RLS buys is
-convergence *rate*, not steady-state accuracy. That last third of a dB is LMS
+over the other. RLS is within 1 dB of its own MSE floor after about 250
+symbols; LMS at `step=0.005` needs about 1100 (median of eight seeds; the floor
+is the mean MSE over the second half of the record, the convergence point where
+the 200-symbol running average comes within 1 dB of it), and costs a fraction of
+the arithmetic per symbol to get there. They then settle a fifth of a dB apart —
+RLS 0.21 dB lower on the same channel and the same noise — so what RLS buys is
+convergence *rate*, not steady-state accuracy. That last fifth of a dB is LMS
 misadjustment, and the step size sets it: `step=0.002` closes the gap to
-0.22 dB and converges in ~1500 symbols, `step=0.02` opens it to 1.7 dB and
-converges in ~330. On a channel that stays put, both are fine; on one that
+0.14 dB and converges in ~2100 symbols, `step=0.02` opens it to 1.0 dB and
+converges in ~510. On a channel that stays put, both are fine; on one that
 changes inside a packet, the convergence rate *is* the performance.
 
 `mmse_equalizer` is the one-shot alternative when you already know `h`: a
@@ -633,7 +642,7 @@ significant fraction of its centre frequency.
 | Call | Purpose |
 |---|---|
 | `doppler_from_speed(speed_mps, sound_speed=1500)` | `a = v/c` (a float for a scalar speed, an array for an array of speeds) |
-| `estimate_doppler_scale(received, template, scales=None)` | `(best_scale, scales, peak_metric)` |
+| `estimate_doppler_scale(received, template, scales=None)` | a `DopplerEstimate(best_scale, scales, peak_metric)` record (it unpacks as the three); its `.plot()` draws the ambiguity curve with `best_scale` marked |
 | `compensate_doppler(signal, scale)` | resample back to the transmit time base |
 
 ```python
@@ -655,8 +664,10 @@ clean = comms.compensate_doppler(record, a_hat)        # back on the transmit cl
 The estimator compensates the *received* record by each candidate scale and
 scores it against the template with the same energy-normalised matched-filter
 metric the preamble detector uses, so the scores are comparable across
-candidates. The peak is the estimate; the curve around it is the ambiguity
-function, and its width tells you how confidently you can call it.
+candidates. The estimate is the centre of the curve's highest plateau (the
+metric is a staircase in `a`, as below), marked on the left panel; the curve
+around it is the ambiguity function, and its width tells you how confidently
+you can call it.
 
 Two practical limits are visible. First, **resolution is set by the probe's
 duration times its bandwidth**, not by its sample count: the main lobe is
@@ -943,11 +954,12 @@ plotters in `uacpy.visualization`. The comms family:
 | `plot_sync_metric(metric, ax, threshold=)` | a synchronisation metric |
 | `plot_channel(taps, (ax_h, ax_f))` or `plot_channel(h, sample_rate, …)` | `\|h\|` and `\|H(f)\|` side by side; a `ChannelTaps` carries both the rate (`symbol_rate × sps`) and the delay axis (`delays_s`, which opens `span/2` symbols ahead of the first arrival), while bare arrays get the index axis |
 | `plot_subcarriers(channel, n_subcarriers, ax)` | the OFDM channel response |
-| `plot_doppler_ambiguity(scales, peak_metric, ax)` | the Doppler ambiguity curve |
+| `plot_doppler_ambiguity(estimate, ax)` | the Doppler ambiguity curve of a `DopplerEstimate`, its `best_scale` marked |
 
-All of them take plain arrays, accept `ax` as the last positional argument —
-directly after the data, so it sits second in the one-array signatures and
-third in the two-array ones, as the table shows — and return `(fig, ax)`, the
+All of them take plain arrays (`plot_doppler_ambiguity` takes the
+`DopplerEstimate` record whole), accept `ax` as the last positional argument —
+directly after the data, so it sits second in the one-array and record
+signatures and third in the two-array ones, as the table shows — and return `(fig, ax)`, the
 convention described in [plotting](plotting.md). The `uacpy.comms` modules themselves never import
 matplotlib.
 
@@ -963,17 +975,19 @@ shift; applying `-10·log₁₀(rate)` yourself counts it twice.
 Viterbi decoder runs. Expect roughly 2 dB less coding gain than a soft-decision
 decoder would deliver.
 
-**`ConvCode` remembers its own last payload length.** `decode` uses it to strip
-the interleaver's padding. That is right for loopback and for a codec object
-shared by both ends; a receiver holding its own codec must pass `info_len`.
+**`ConvCode.decode` returns the payload plus the block padding unless you pass
+`info_len=`.** The codec holds no per-message state, so a loopback test compares
+`code.decode(coded, info_len=bits.size)` with `bits`; a framed payload needs no
+`info_len`, since `unpack_frame` reads its length from the header.
 
 **`mmse_equalizer` is circular.** It is an FFT solution, so give it a
 cyclic-prefixed block or discard the first `len(h)-1` outputs.
 
 **A DFE cannot cancel what it cannot reach.** `n_fb` must span the channel's
 post-cursor spread in symbols. On the modelled channel of
-[§14](#14-driving-the-modem-with-a-modelled-channel) that means 32 feedback
-taps for 33 ms at 1 kBd — halve the symbol rate and you halve the taps.
+[§14](#14-driving-the-modem-with-a-modelled-channel) the 25 ms of structure
+needs at least 25 feedback taps at 1 kBd (its 32 leave a margin) — halve the
+symbol rate and you halve the taps.
 
 **Doppler-scale resolution is `≈3/(B·T)`, set by the probe's bandwidth and
 duration, not by its sample rate.** The 1 s, 4 kHz probe of

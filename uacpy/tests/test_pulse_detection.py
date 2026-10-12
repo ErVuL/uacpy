@@ -57,8 +57,17 @@ class TestProcessingGain:
         assert processing_gain_dB(3000.0, 0.02) == pytest.approx(10 * np.log10(60.0))
 
     def test_nonpositive_raises(self):
-        with pytest.raises(ConfigurationError, match=r'B\*T must be > 0'):
+        with pytest.raises(ConfigurationError, match=r'B and T must each be > 0'):
             processing_gain_dB(0.0, 1.0)
+
+    @pytest.mark.parametrize('bandwidth, duration', [(-100.0, -1.0),
+                                                     (np.nan, 1.0),
+                                                     (100.0, np.inf)])
+    def test_each_factor_is_checked_on_its_own(self, bandwidth, duration):
+        """Two negatives make a positive product, and a NaN fails no
+        comparison of the product, so each factor is checked."""
+        with pytest.raises(ConfigurationError, match=r'B and T must each be > 0'):
+            processing_gain_dB(bandwidth, duration)
 
     def test_the_two_gain_forms_carry_one_name_each(self):
         """The BT form is ``acoustic_signal.processing_gain_dB`` and the

@@ -17,13 +17,14 @@ from typing import Optional
 import numpy as np
 from scipy.signal import get_window
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
-from uacpy.core.exceptions import ConfigurationError, ValidityWarning
+from uacpy.core.exceptions import (ConfigurationError, FallbackWarning,
+                                   ValidityWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._beamforming import (
     loaded_inverse, quadratic_form, snapshot_covariance,
 )
-from uacpy._log import log_message
 from uacpy.acoustic_signal._results import PlottedResult, ResultTuple
+from uacpy.core._export import join_complex
 from uacpy.core.acoustics.arrays import steering_vectors
 from uacpy.core._validate import (
     require_finite_signal, require_positive_finite_scalar,
@@ -60,6 +61,16 @@ class BeamformResult(ResultTuple,
 
     def _field_units(self):
         return {"snr": "dB", "angles": "deg", "peak_snr": "dB"}
+
+    def _declared_dims(self):
+        # snr leads the fields, so its axes are named here rather than
+        # matched by length against the fields after it.
+        rest = "ranges" if self.ranges is not None else "snr_dim1"
+        return {"snr": ("angles", rest)}
+
+    def _axis_coords(self):
+        return ({} if self.ranges is None
+                else {"ranges": (np.asarray(self.ranges, dtype=float), "m")})
 
 
 class Snapshots(ResultTuple, namedtuple("Snapshots", "frequency data")):
@@ -116,9 +127,11 @@ def snapshots(data, sample_rate, frequency, *, nperseg, noverlap=None,
         ``frequency``) and the snapshot count (hence whether an adaptive
         estimator has enough). There is no defensible default for both.
     noverlap : int, optional
-        Overlap between segments. Defaults to ``nperseg // 2``, matching
-        :func:`fk_transform`. Overlapped segments are correlated, so they
-        buy fewer independent snapshots than their count suggests.
+        Overlap between segments. Defaults to the window's own overlap, as on
+        :func:`fk_transform` and :func:`welch` (half a segment for a
+        rectangular or Hann window, 78 % for flat-top). Overlapped segments
+        are correlated, so they buy fewer independent snapshots than their
+        count suggests.
     window : array_like or str, optional
         Time taper, as :func:`fk_transform` takes it. Default ``None``, a
         rectangular window (as on :func:`fk_transform`): an on-bin tone keeps
@@ -232,8 +245,10 @@ def _unit_rows(weights):
     zeros stays zero: it is a candidate a forward model put no energy at (a
     shadow-zone cell of a ray or PE replica bank, a source depth on a
     pressure-release boundary), and dividing it by 1 lets :func:`bartlett`
-    score it as a genuine zero and :func:`mvdr` as undefined, instead of the
-    0/0 that would put a NaN and a RuntimeWarning in either surface."""
+    score it as a genuine zero and :func:`mvdr` and :func:`music_spectrum` as
+    undefined, instead of the 0/0 that would put a NaN and a RuntimeWarning
+    in either surface (or, in MUSIC's ``1/denom``, a ``+inf`` that reads as
+    the strongest peak)."""
     norm = np.linalg.norm(weights, axis=-1, keepdims=True)
     return weights / np.where(norm > 0, norm, 1.0)
 
@@ -404,52 +419,90 @@ def mvdr(covariance, weights, *, diagonal_loading: float = 1e-6,
         denom = quadratic_form(loaded_inverse(R[f], diagonal_loading), W[f])
         with np.errstate(divide='ignore', invalid='ignore'):
             out[f] = np.where(denom > 0, 1.0 / denom, np.nan)
-    if normalize == 'max' and not np.all(np.isnan(out)):
-        peak = np.nanmax(out)
-        if peak and np.isfinite(peak):
-            out = out / peak
+    if normalize == 'max':
+        out = _scaled_to_peak(out)
     shape = np.shape(weights)[:-1]
     return out.reshape(shape) if stacked else out[0].reshape(shape)
 
 
-def music_spectrum(covariance, steering, n_sources: int):
+def _scaled_to_peak(out):
+    """``out`` divided by its largest finite value, so it peaks at 1; as it
+    is when it holds no finite positive value."""
+    finite = out[np.isfinite(out)]
+    peak = finite.max() if finite.size else 0.0
+    return out / peak if peak > 0 else out
+
+
+def music_spectrum(covariance, weights, n_sources: int, *,
+                   normalize: Optional[str] = None):
     """MUSIC pseudospectrum vs angle.
 
     ``P(theta) = 1 / (e^H E_n E_n^H e)`` where ``E_n`` spans the noise subspace
     (eigenvectors of the element ``covariance`` beyond the ``n_sources``
     largest eigenvalues).
-    ``steering`` is the ``(n_angles, n_elements)`` matrix from
-    :func:`steering_vectors`.
+
+    Laid out as :func:`bartlett` and :func:`mvdr`: ``weights`` is row-major,
+    ``(..., N)`` — the ``(n_angles, N)`` matrix from :func:`steering_vectors`,
+    or a replica bank — each row scaled to unit norm, so a bank's row norms
+    do not tilt the pseudospectrum; against an ``(F, N, N)`` covariance stack
+    it is ``(F, ..., N)``, one bank per matrix. The output has shape
+    ``weights.shape[:-1]``.
+
+    ``normalize``: ``None`` leaves the pseudospectrum unscaled; ``'max'``
+    divides it by its largest finite value, as :func:`mvdr` does (a
+    pseudo-power has no trace-bounded form, so ``'trace'`` is not offered).
+    A row exactly orthogonal to the noise subspace scores ``+inf``, the
+    intended MUSIC peak, and stays ``+inf``. A row of zeros (a candidate the
+    forward model put no energy at, as in a ray or PE replica bank's shadow)
+    has no direction to score and is NaN, as in :func:`mvdr`; its ``1/0``
+    would otherwise be the strongest peak of the surface.
 
     Parameters
     ----------
     covariance : ndarray
-        ``(N, N)`` element covariance.
-    steering : ndarray
-        ``(n_angles, N)`` steering vectors.
+        ``(N, N)`` element covariance, or an ``(F, N, N)`` stack.
+    weights : ndarray
+        Weight (steering or replica) rows ``(..., N)``, or ``(F, ..., N)``
+        against a stack.
     n_sources : int
         Signal-subspace dimension.
+    normalize : {None, 'max'}, optional
+        Scale of the output (see above).
     """
-    R = np.asarray(covariance, dtype=complex)
-    n = R.shape[0]
+    if normalize not in (None, 'max'):
+        raise ConfigurationError(
+            f"music_spectrum: normalize must be None or 'max'; got "
+            f"{normalize!r}.")
+    R, E, stacked = _weight_slices(covariance, weights, 'music_spectrum')
+    n = R.shape[-1]
     if not 1 <= n_sources < n:
         raise ConfigurationError(
             f"music_spectrum: n_sources must be in [1, {n - 1}], got {n_sources}."
         )
-    e = np.asarray(steering, dtype=complex)
-    if _powerless_covariance(R, "music_spectrum"):
-        return np.full(e.shape[0], np.nan)
-    # np.linalg.eigh returns eigenvalues in ascending order, so the leading
-    # n - n_sources columns are the smallest eigenvalues: the noise subspace.
-    evals, evecs = np.linalg.eigh(R)
-    noise = evecs[:, : n - n_sources]
-    proj = e.conj() @ noise
-    denom = np.sum(np.abs(proj) ** 2, axis=1)
-    # denom -> 0 at a true source direction (steering orthogonal to the noise
-    # subspace) is the *intended* sharp MUSIC peak -> 1/denom -> +inf; do NOT
-    # clamp it, just silence the spurious divide warning.
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return 1.0 / denom
+    out = np.empty(E.shape[:2], dtype=float)
+    for f in range(R.shape[0]):
+        who = (f"music_spectrum (frequency bin {f})" if stacked
+               else "music_spectrum")
+        if _powerless_covariance(R[f], who):
+            out[f] = np.nan
+            continue
+        # np.linalg.eigh returns eigenvalues in ascending order, so the
+        # leading n - n_sources columns are the smallest eigenvalues: the
+        # noise subspace.
+        evals, evecs = np.linalg.eigh(R[f])
+        noise = evecs[:, : n - n_sources]
+        denom = np.sum(np.abs(E[f].conj() @ noise) ** 2, axis=1)
+        # denom -> 0 at a true source direction (steering orthogonal to the
+        # noise subspace) is the *intended* sharp MUSIC peak -> 1/denom ->
+        # +inf; do NOT clamp it, just silence the spurious divide warning.
+        # A zero row's denom is 0 too, with no direction behind it: NaN.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out[f] = np.where(np.any(E[f] != 0, axis=1), 1.0 / denom,
+                              np.nan)
+    if normalize == 'max':
+        out = _scaled_to_peak(out)
+    shape = np.shape(weights)[:-1]
+    return out.reshape(shape) if stacked else out[0].reshape(shape)
 
 
 def shading_taper(n_elements: int, window: str = "hann"):
@@ -541,7 +594,7 @@ def beamform(
         ``(snr, angles, peak_snr)``, with ``ranges`` as an attribute:
     snr : ndarray
         Signal-to-noise ratio in dB with shape (n_angles, n_ranges).
-    angles_out : ndarray
+    angles : ndarray
         Angles used for beamforming (degrees from broadside).
     peak_snr : float
         Maximum value of ``snr``.
@@ -590,12 +643,10 @@ def beamform(
     beamformed = e.conj() @ pressure
     mag = np.abs(beamformed)
     if not np.any(mag):
-        log_message(
-            "beamform",
-            "all beam outputs are zero (all-zero pressure?); SNR is -inf at "
-            "every angle — check the input pressure.",
-            level="warning",
-        )
+        warnings.warn(
+            "beamform: all beam outputs are zero (all-zero pressure?); SNR is "
+            "-inf at every angle — check the input pressure.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
     with np.errstate(divide='ignore'):
         snr = 20 * np.log10(mag) + float(source_level_dB) - float(noise_level_dB)
     peak_snr = np.max(snr)
@@ -612,6 +663,12 @@ def _shaded_steering(positions_m, angles_deg, frequency, sound_speed, weights,
     the noise along with the signal, and the peak of a matched plane wave
     would no longer be the array gain the taper leaves.
     """
+    # Checked here so a refusal names the caller's function, not the
+    # steering_vectors helper it reaches.
+    frequency = require_positive_finite_scalar(frequency, who, "frequency",
+                                               " Hz")
+    sound_speed = require_positive_finite_scalar(sound_speed, who,
+                                                 "sound_speed", " m/s")
     e = steering_vectors(positions_m, angles_deg, frequency, sound_speed)
     if weights is None:
         return e
@@ -698,14 +755,18 @@ class BeamformedField(PlottedResult, _BeamformedFields):
 
     @property
     def best_angle(self):
-        """Look angle (deg) that won at each point.
+        """Look angle (deg) that won at each point; NaN at a point with no
+        beam (a blank cell of the field).
 
         On a multi-mode arrival this hops between +/- theta rather than
         migrating smoothly, because the modes arrive in up- and down-going
         pairs and the interference decides which one wins.
         """
-        return np.asarray(self.angles, dtype=float)[
-            np.argmax(self.power, axis=0)]
+        power = self.power
+        angle = np.asarray(self.angles, dtype=float)[
+            np.argmax(power, axis=0)]
+        # A point with no beam (NaN power) has no winning angle.
+        return np.where(np.isnan(power).any(axis=0), np.nan, angle)
 
     def array_gain(self):
         """Realised array gain (dB) at each point:
@@ -732,6 +793,45 @@ class BeamformedField(PlottedResult, _BeamformedFields):
         # steered and summed, unscaled.
         return {"response": None, "angles": "deg", "element_power": None,
                 "frequencies": "Hz"}
+
+    def _grid_dims(self):
+        """The grid axes' names: ``grid_coords``' keys, else
+        ``grid_dim<i>``."""
+        n_grid = (np.ndim(self.response) - 1
+                  - (self.frequencies is not None))
+        names = list(self.grid_coords) if self.grid_coords else []
+        return tuple(names if len(names) == n_grid
+                     else [f"grid_dim{i}" for i in range(n_grid)])
+
+    def _declared_dims(self):
+        # response leads the fields, so its axes are named here: the look
+        # angle, the grid, and the band when there is one.
+        band = ("frequencies",) if self.frequencies is not None else ()
+        grid = self._grid_dims()
+        return {"response": ("angles",) + grid + band,
+                "element_power": grid + band}
+
+    def _axis_coords(self):
+        return {name: (np.asarray(values, dtype=float), "")
+                for name, values in (self.grid_coords or {}).items()}
+
+    def _export_attrs(self):
+        # grid_coords, the one attribute, travels as the grid's coordinates.
+        return {}
+
+    @classmethod
+    def from_xarray(cls, obj):
+        """The result :meth:`to_xarray` wrote, its grid coordinates back in
+        ``grid_coords``."""
+        obj = join_complex(obj)
+        out = super().from_xarray(obj)
+        grid = obj["response"].dims[1:]
+        if out.frequencies is not None:
+            grid = grid[:-1]
+        if grid and all(d in obj.coords for d in grid):
+            out.grid_coords = {d: np.asarray(obj.coords[d].values)
+                               for d in grid}
+        return out
 
     def to_time_trace(self, angle_deg, *, range, source_spectrum=None,
                       source_waveform=None, sample_rate=None, window='auto',
@@ -762,7 +862,10 @@ class BeamformedField(PlottedResult, _BeamformedFields):
         either the result is the channel's band-limited impulse response
         through the beam.
 
-        ``window``, ``nfft`` and ``t_start`` are :meth:`Field.to_time_trace`'s:
+        ``sample_rate``, ``window``, ``nfft`` and ``t_start`` are
+        :meth:`Field.to_time_trace`'s — the trace comes back at exactly
+        ``sample_rate`` when one is given, and a record shorter than the
+        waveform is refused;
         ``window='auto'`` (the default) picks ``'hann'`` for the bare impulse
         response and no window with a source; ``None`` is always rectangular.
         ``t_start`` is worth setting: the default window is anchored on a
@@ -773,8 +876,9 @@ class BeamformedField(PlottedResult, _BeamformedFields):
         # beamforming.py is imported on nearly every uacpy path.
         from uacpy.core.results import Field, PhaseReference
         from uacpy.acoustic_signal._synthesis import (
-            check_source_spectrum, synthesis_grid, synthesize_trace,
-            warn_band_edge_cuts_spectrum, waveform_spectrum_on)
+            check_source_spectrum, refuse_record_shorter_than_waveform,
+            synthesis_grid, synthesize_trace, warn_band_edge_cuts_spectrum,
+            waveform_spectrum_on)
         who = "BeamformedField.to_time_trace"
         if self.frequencies is None:
             raise ConfigurationError(
@@ -809,9 +913,15 @@ class BeamformedField(PlottedResult, _BeamformedFields):
                                    - float(angle_deg))))
         separation = float(range)
         plan = synthesis_grid(freqs, window=window, nfft=nfft,
-                              sample_rate=None, n_samples_floor=0,
+                              sample_rate=sample_rate, n_samples_floor=0,
                               who=who)
-        warn_band_edge_cuts_spectrum(spectrum, window, who)
+        if source_waveform is not None:
+            refuse_record_shorter_than_waveform(
+                plan.df, np.asarray(source_waveform, dtype=float),
+                sample_rate, who)
+        warn_band_edge_cuts_spectrum(spectrum, window, who, freqs=freqs,
+                                     waveform=source_waveform,
+                                     sample_rate=sample_rate)
         time, trace = synthesize_trace(
             np.asarray(self.response)[idx], spectrum, plan, range=separation,
             t_start=t_start, c_max=0.0, c0=0.0, c_slow=0.0,
@@ -896,6 +1006,9 @@ def beamform_field(pressure, positions_m, angles_deg, frequency, *,
     (20.0, 12.04)
     """
     p = np.asarray(pressure)
+    if p.dtype == object or p.size == 0:
+        # Refuses an empty or non-numeric pressure in the shared words.
+        require_finite_signal(pressure, "beamform_field", "pressure")
     pos = np.asarray(positions_m, dtype=float).ravel()
     if p.ndim < 1 or p.shape[0] != pos.size:
         raise ConfigurationError(
@@ -932,9 +1045,6 @@ def beamform_field(pressure, positions_m, angles_deg, frequency, *,
         grid_coords = _checked_grid_coords(
             grid_coords, p.shape[1:-1] if freqs is not None else p.shape[1:],
             freqs is not None)
-    # One matrix product over the element axis, with every grid axis folded
-    # into a single column axis and restored afterwards, so the same code
-    # serves a range line and a depth-range plane.
     if freqs is None:
         # One matrix product over the element axis, with every grid axis
         # folded into a single column axis and restored afterwards, so the
@@ -953,7 +1063,29 @@ def beamform_field(pressure, positions_m, angles_deg, frequency, *,
                                    "beamform_field")
             resp[:, :, i] = e_i.conj() @ flat[:, :, i]
         resp = np.reshape(resp, (angles.size,) + p.shape[1:])
-    return BeamformedField(resp, angles, np.mean(np.abs(p) ** 2, axis=0),
+    element_power = np.mean(np.abs(p) ** 2, axis=0)
+    # A grid point (a bin of it, on a band) with a non-finite element sample
+    # — a blank cell of a modelled field: a ray shadow, a cell below the
+    # seafloor — has no beam: its column of the product is NaN and stays
+    # local to it, so the other points are unaffected.
+    blank = ~np.all(np.isfinite(p), axis=0)
+    if blank.any():
+        points = blank.any(axis=-1) if freqs is not None else blank
+        if points.all():
+            raise ConfigurationError(
+                f"beamform_field: every grid point of pressure holds a "
+                f"non-finite element sample, so no beam can be formed.",
+                remediation="Pass a field with finite samples on every "
+                            "element at the points to beamform.")
+        resp[:, blank] = np.nan
+        element_power = np.where(blank, np.nan, element_power)
+        warnings.warn(
+            f"beamform_field: {int(points.sum())} of {points.size} grid "
+            f"points hold a non-finite element sample (a blank cell of the "
+            f"field, such as a ray shadow or a cell below the seafloor); "
+            f"their beams and element power are NaN.",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return BeamformedField(resp, angles, element_power,
                            freqs, grid_coords=grid_coords)
 
 
@@ -1217,14 +1349,12 @@ def _decorrelation_spacing(positions_m, weights, frequency, sound_speed,
     af = np.abs(np.exp(-1j * k * np.outer(grid, z)) @ w)
     rising = np.flatnonzero(np.diff(np.sign(np.diff(af))) > 0)
     if rising.size == 0:
-        log_message(
-            "independent_beams",
-            "these weights give a beam with no null within 8 unshaded "
-            "cells, so the resolution cell cannot be measured; falling back "
-            "to the unshaded spacing, which OVER-counts the looks and so "
-            "sets a stricter threshold than needed.",
-            level="warning",
-        )
+        warnings.warn(
+            "independent_beams: these weights give a beam with no null within "
+            "8 unshaded cells, so the resolution cell cannot be measured; "
+            "falling back to the unshaded spacing, which OVER-counts the looks "
+            "and so sets a stricter threshold than needed.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
         return unshaded
     return float(grid[rising[0] + 1])
 
@@ -1241,8 +1371,8 @@ def independent_beams(positions_m, angles_deg, frequency,
     not buy 361 looks. Over the whole visible region a half-wavelength array
     of N sensors gives exactly N, which is Stergiopoulos's count: "with any
     array of (2N + 1) sensors, we may produce a beamforming network with
-    (2N + 1) orthogonal beam ports ... [they] represent 2N independent look
-    directions, one per beam" (*Advanced Signal Processing Handbook*, 2).
+    (2N + 1) orthogonal beam ports" (*Advanced Signal Processing Handbook*,
+    ch. 2, adaptive beamformer, the orthogonal-beam set).
 
     Pass ``weights`` and the count becomes taper-aware. Shading widens the
     cell, so a shaded scan holds FEWER independent looks than the DFT count

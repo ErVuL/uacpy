@@ -46,9 +46,13 @@ conventional = bartlett(covariance, replicas)
 capon = mvdr(covariance, replicas)
 music = music_spectrum(covariance, replicas, n_sources=2)
 
+# A bearing is a local maximum of the spectrum; the two highest are the
+# estimates (the two highest samples would both sit on the strongest lobe).
 for name, spectrum in (('Bartlett', conventional), ('MVDR', capon),
                        ('MUSIC', music)):
-    peaks = angles[np.argsort(spectrum)[-2:]]
+    maxima = np.flatnonzero((spectrum[1:-1] > spectrum[:-2])
+                            & (spectrum[1:-1] >= spectrum[2:])) + 1
+    peaks = angles[maxima[np.argsort(spectrum[maxima])[-2:]]]
     print(f"  {name:9s} two strongest bearings: "
           f"{np.sort(peaks)[0]:+.1f}°, {np.sort(peaks)[1]:+.1f}° "
           f"(true {true_angles[0]:+.0f}°, {true_angles[1]:+.0f}°)")

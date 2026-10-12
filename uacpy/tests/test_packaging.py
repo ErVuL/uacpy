@@ -586,7 +586,8 @@ _MIN_MARKDOWN_CITATIONS_CHECKED = 40
 _OASES_TREE = _REPO_ROOT / "uacpy" / "third_party" / "oases"
 _OASES_CITED_FILES = frozenset({
     "comdat.f", "compar.f", "comvol.f", "noiprm.f", "trford.f",
-    "oasaun31.f", "oaseun31.f", "oasfun22.f", "oasgun21.f", "oashun21.f",
+    "oasaun31.f", "oascun31.f", "oaseun31.f", "oasfun22.f", "oasgun21.f",
+    "oashun21.f",
     "oasiun22.f", "oasiun23.f", "oasjun21.f", "oaskun21.f", "oasmun21_bin.f",
     "oasnun22.f", "oassun26.f", "oasvun31.f",
     "unoasn22.f", "unoasp22.f", "unoasr21.f", "unoass21.f", "unoassp30.f",
@@ -2483,6 +2484,10 @@ _CROSS_PACKAGE_PRIVATES = {
      '_arrival_transfer_function'),
     ('core/results/rays.py', 'uacpy.acoustic_signal.channel',
      '_simulate_arrival_grid'),
+    # The labelled twin of arrival_grid_impulse_response, so a refusal names
+    # Arrivals.impulse_response and its output_duration= knob.
+    ('core/results/rays.py', 'uacpy.acoustic_signal.channel',
+     '_arrival_cells_impulse_response'),
     ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
      '_channel_regime'),
     ('core/results/rays.py', 'uacpy.acoustic_signal.delay_profile',
@@ -2517,21 +2522,6 @@ _CROSS_PACKAGE_PRIVATES = {
     # BOUNCE's .irc is rescaled to the absolute density scale once, where the
     # file is made; the fixed-width row layout belongs to the reader module.
     ('models/bounce/_model.py', 'uacpy.io.refl_io', '_scale_irc_impedance'),
-    # The one weighted sum of a field's slabs, which refuses a weight the
-    # field cannot take: ``ResultStack.superpose`` forms it, and the n = 1
-    # weight ``PropagationModel.run`` applies (models/) calls it so a bad
-    # weight is refused in the caller's own terms. It lives beside
-    # superpose in core/results/stack.py and stays private because a user
-    # asks superpose, not the sum behind it.
-    ('models/_stacking.py', 'uacpy.core.results.stack', '_weighted_slab_sum'),
-    # The weaker of the same pair: a stack is not weighted when it is built,
-    # so it refuses only what no sum of it could use and the rest waits for
-    # superpose. Both callers are in models/.
-    ('models/_stacking.py', 'uacpy.core.results.stack', '_check_stack_weightable'),
-    # The dB arm of the same rule, as an exception: a one-depth weight the
-    # run would apply to a field it declares as dB is refused in stage 3,
-    # before the engine runs, with the words superpose uses.
-    ('models/_stacking.py', 'uacpy.core.results.stack', '_dB_weight_refusal'),
     # The (FREQ1, FREQ2, NFREQ) an OAST/OASN deck carries, and its refusal of
     # a sweep that is not uniform: the settings stage records and refuses
     # with the one rule the writer applies.
@@ -2745,8 +2735,8 @@ def test_the_private_name_sweep_reads_the_shipped_tree():
     """The sweep itself, so an empty collection cannot pass as a green gate."""
     found = _cross_package_private_imports()
     assert len(found) >= 10
-    assert ('models/_stacking.py', 'uacpy.core.results.stack',
-            '_weighted_slab_sum') in found
+    assert ('models/bounce/_model.py', 'uacpy.io.refl_io',
+            '_scale_irc_impedance') in found
 
 
 # ── MODIFICATIONS.md diff blocks vs the vendored source they describe ──────

@@ -13,8 +13,8 @@ Three products, three consumers:
 | Product | Function | Feeds |
 |---|---|---|
 | Ambient spectrum | `WenzNoise` | the `NL` term of the [sonar equation](sonar.md) |
-| Ship source level | `monopole_source_level` | a propagation run, as the source |
-| Auditory weighting | `weighted_level` | impact assessment |
+| Ship source level | `monopole_source_level` (measured, band levels); `ship_source_level_wales_heitmeyer` (the mean merchant ship, a spectral density level, dB re 1 µPa² m²/Hz) | a propagation run, as the source |
+| Auditory weighting | `weighted_level`; `weighting=` on every SEL | impact assessment |
 
 Nothing in `uacpy.noise` imports matplotlib: it is pure computation, and the
 matching plotters — `plot_wenz`, `plot_weighting`, `plot_source_level` — live
@@ -149,7 +149,7 @@ Wind speed is in **knots**, the unit `uacpy.data.fetch_wind` returns and
 in this family is fitted in knots (DRDC-RDDC-2022-D051 §2.3 eq. 8); the one
 stated in m/s (Coates) converts inside, and the unit rule for every wind
 argument is in [§5](#wind-speed-from-a-beaufort-force-or-a-sea-state). A
-reading in m/s converts with `uacpy.core.units.ms_to_knots`. That is why the
+reading in m/s converts with `uacpy.units.ms_to_knots`. That is why the
 argument carries the `_kn` suffix, the same one
 `sonar.chapman_harris_surface(wind_speed_kn=…)` uses, and why it is
 **keyword-only**: a positional `WenzNoise(f, 10)` states no unit at all, and a
@@ -168,7 +168,7 @@ a solver:
 | `models` | the submodel name chosen per component |
 | `as_psd()` | linear PSD in SI Pa²/Hz; `10·log10(as_psd() / 1e-12)` returns `total` to round-off |
 | `band_level(freq_min, freq_max, *, component='total')` | band level, dB re 1 µPa²: the spectrum integrated over the band (submodels re-evaluated at 100 points per decade, so independent of `frequencies`) — the sonar-equation `NL` for a band source level |
-| `decidecade_levels(freq_min, freq_max, *, component='total')` | `BandLevels(centres, levels)`: `band_level` of every decidecade band overlapping the range, with the band edges and `ref` = 1 µPa |
+| `decidecade_levels(freq_min, freq_max, *, component='total')` | `BandLevels(centers, levels)`: `band_level` of every decidecade band overlapping the range, with the band edges and `ref` = 1 µPa |
 
 **A switched-off source is `-inf`, not zero.** `shipping_level='no'`,
 `rain_rate='no'` and `wind_speed_kn=0` all return `-inf` dB at every frequency, so
@@ -233,10 +233,8 @@ from uacpy.noise import wind_noise_level
 wind_noise_level(f, wind_speed_kn=15.0, water_depth='deep')             # dB re 1 µPa²/Hz
 ```
 
-`band_integrate=True` is the one place on the ambient side of `uacpy.noise`
-that hands back a **band** level rather than a spectral level, and it wants
-analysis-band centres rather than a plotting grid like this `f` — see
-[§6](#6-spectral-level-vs-band-level).
+It returns a spectral level, as every `WenzNoise` component does;
+[§6](#6-spectral-level-vs-band-level) turns spectral levels into band levels.
 
 ---
 
@@ -268,7 +266,7 @@ physical — a shallow waveguide cuts off the lowest frequencies, so the
 distant-traffic contribution that survives to the receiver is higher in
 frequency. Set it to match the water you are in; it is not derived from `env`.
 The two spellings are matched exactly and case-sensitively — `'SHALLOW'` and
-any typo raise rather than fall back on `'deep'`, which used to hand back a
+any typo raise rather than fall back on `'deep'`, which would hand back a
 spectrum 3.0 dB from the one asked for with nothing to say so. `'deep'` stays
 the default for an *omitted* argument, which is what makes it wrong for an
 unrecognised one.
@@ -437,14 +435,15 @@ it: the Wenz family (`WenzNoise`, `wind_noise_level`),
 `sonar.chapman_harris_surface`, `sonar.apl_uw_surface_backscatter`,
 `bubble_surface_loss` and `generate_sea_surface` all name it `wind_speed_kn`;
 the fits stated in m/s convert inside. A speed read in m/s converts first.
-`uacpy.core.units` carries the bridge: `ms_to_knots` / `knots_to_ms`, plus
+`uacpy.units` carries the bridge: `ms_to_knots` / `knots_to_ms` (the factor
+is `KNOTS_PER_M_PER_S`, 3600/1852), plus
 `beaufort_to_wind_speed`, `sea_state_to_wind_speed` and
 `wind_speed_to_beaufort` over the Urick (1983) `BEAUFORT_SCALE`. Passing a m/s
 value as knots is worth a measured **5.7 dB** at 1 kHz for 10 m/s, understating
 the total.
 
 ```python
-from uacpy.core.units import beaufort_to_wind_speed, sea_state_to_wind_speed
+from uacpy.units import beaufort_to_wind_speed, sea_state_to_wind_speed
 from uacpy.data import fetch_wind
 
 point, date = (45.6, -6.2), '2026-07-15'
@@ -477,111 +476,34 @@ density. `radiated_noise_level` and `monopole_source_level` in
 integrated over a decidecade band. Differencing one against the other is a
 `10·log₁₀(w)` error, where `w` is the bandwidth — 20 dB over a 100 Hz band.
 
-Two ways across:
+The exact way across integrates the spectrum over each band:
+
+```python
+from uacpy.noise import WenzNoise
+
+wind = WenzNoise(wind_speed_kn=15.0)
+bands = wind.decidecade_levels(100.0, 1000.0, component='wind')  # BandLevels
+nl = wind.band_level(100.0, 1000.0, component='wind')            # any one band
+```
+
+`decidecade_levels` integrates every true decidecade band (IEC 61260-1 edges,
+100 points per decade), and `band_level` any band you name; neither depends on
+a frequency grid. From spectral levels at the band centres, the explicit form
+adds each band's own bandwidth:
 
 ```python
 from uacpy.acoustic_signal import decidecade_bands
 from uacpy.noise import wind_noise_level
 
-lower, centres, upper = decidecade_bands(100.0, 1000.0)
-wind_noise_level(centres, wind_speed_kn=15.0, band_integrate=True)    # spectral -> band
-spectral_level = wind_noise_level(centres, wind_speed_kn=15.0)
+lower, centers, upper = decidecade_bands(100.0, 1000.0)
+spectral_level = wind_noise_level(centers, wind_speed_kn=15.0)
 band_level = spectral_level + 10 * np.log10(upper - lower)            # its own bandwidth
 ```
 
-**These two are peers only when `f` is a set of band centres.** The second form
-states its bandwidth. The first *infers* one: `band_integrate=True` sets each
-band's width from the midpoints between consecutive entries of the `f` you
-passed, so each returned level is a property of your frequency **grid** as much
-as of the ocean. Hand it band centres and that inference is right, because the
-grid spacing *is* the band structure. Hand it a plotting grid and each "band"
-becomes a PSD sample multiplied by whatever sliver of bandwidth the grid
-happened to carry there — a number with no analysis band behind it.
-
-Measured on `wind_speed_kn=15.0` wind noise, reading the same 316.23 Hz point off three
-grids spanning the same 100 Hz – 1 kHz decade:
-
-| `f` passed | Spectral level | `band_integrate=True` at 316.23 Hz | Sum over the decade |
-|---|--:|--:|--:|
-| the 11 decidecade centres of the decade | 64.97 dB | **83.63 dB** | 94.09 dB |
-| `np.logspace(2, 3, 21)` | 64.97 dB | 80.59 dB | 94.09 dB |
-| `np.logspace(2, 3, 1201)` — a plotting grid | 64.97 dB | 62.80 dB | 94.10 dB |
-
-The spectral level is the same number every time, as it must be. The per-band
-level swings 20.8 dB across the three, purely on point count.
-
-**Read the last two columns together — that is the whole trap.** The *sum* is
-grid-invariant: incoherently adding the bands returns 94.1 dB whatever grid you
-used, because the widths still tile the same decade and the total energy in it
-does not care how you slice it. So a reader who sanity-checks the total will
-find it correct on every row, and conclude the per-band numbers are fine. They
-are not. Only the first row's per-band levels mean anything; on the third row
-the sum is right and every individual level in it is meaningless. Never quote,
-plot, difference or feed a sonar equation a per-band level off a plotting grid
-just because its total came out right.
-
-The first row is the one that checks out term by term: the 316.23 Hz decidecade
-band is 72.98 Hz wide, and `64.97 + 10·log₁₀(72.98) = 83.60 dB` — the explicit
-formula and `band_integrate=True` agree to 0.03 dB.
-
-That last 0.03 dB is not rounding, and it is the residual you should expect. The
-midpoint rule infers this band's width as half the span from its two neighbours,
-`(398.11 − 251.19) / 2 = 73.46 Hz`, where the decidecade's own edges give
-`354.81 − 281.84 = 72.98 Hz`; `10·log₁₀(73.46 / 72.98) = 0.03 dB`. It is the
-same number for every interior band whatever the frequency: on a log grid of
-ratio `ρ` the inferred width is `f·(ρ − 1/ρ)/2` and the true one is
-`f·(√ρ − 1/√ρ)`, so their ratio is `(√ρ + 1/√ρ)/2` — the
-arithmetic-over-geometric-mean gap, which `f` cancels out of entirely and which
-AM-GM puts at `≥ 1` for every `ρ > 1`. Midpoints therefore fall *outside* the
-true edges always, not just on this grid, and **away from the two end bands** a
-disagreement bigger than a few hundredths of a dB means you are not on band
-centres.
-
-**The first and last entries are the exception — they are not band levels at
-all.** An outer band has only one neighbour, so it is given half the gap to it
-(`(f₁ − f₀)/2`, `(f_last − f_prev)/2`). On the 11-centre vector above that makes
-them **2.51 dB and 3.51 dB low** — opposite in sign to the interior `+0.03 dB`
-and roughly a hundred times its size:
-
-| band | centre | decidecade width | width used | error |
-|---|--:|--:|--:|--:|
-| first | 100 Hz | 23.08 Hz | 12.95 Hz | **−2.51 dB** |
-| interior | — | — | — | +0.03 dB |
-| last | 1000 Hz | 230.77 Hz | 102.84 Hz | **−3.51 dB** |
-
-This is deliberate, and it is the *same* choice that makes the sum come out
-right: the widths are trapezoidal weights, so they tile the interval exactly —
-they total 900.000 Hz across 100 Hz – 1 kHz, which is why the last column of the
-table above is grid-invariant — while the two end weights are not the decidecade
-widths of their own centres. Sum the vector and you get the correct total;
-read its first or last entry as a band level and you are several dB low. Pad
-one band beyond the range you care about and discard the ends.
-
-`wind_noise_level` will tell you when you are on the wrong side of this: it
-emits a `NumericsWarning` whenever consecutive frequencies come **closer together
-than one decidecade** — the narrowest analysis band uacpy defines
-([`decidecade_bands`](signal.md#3-spectra-levels-and-bands), IEC 61260-1).
-Centres at decidecade spacing or wider stay silent. Treat that warning as
-saying "these are not band levels", not as a formatting nit.
-
-So: pass `band_integrate=True` your **analysis-band centres**, never a plotting
-or FFT grid —
-
-```python
-from uacpy.acoustic_signal import decidecade_bands
-
-RHO = 10 ** 0.1                                       # one decidecade
-_, fc, _ = decidecade_bands(100.0 / RHO, 1000.0 * RHO)   # 13 centres: pad both ends
-nl_band = wind_noise_level(fc, wind_speed_kn=15.0, band_integrate=True)[1:-1]
-```
-
-Padding one band past each end and slicing the ends off is what leaves all 11
-retained levels — 100 Hz to 1 kHz — as true band levels, each at the same
-`+0.03 dB`. Ask for `decidecade_bands(100.0, 1000.0)` directly and the two you
-care most about, the edges of your range, are the two that are wrong.
-
-— and if you cannot say what bandwidth each returned level covers, you are on
-the wrong grid: use the explicit `+ 10·log₁₀(w)` form instead.
+Against `decidecade_levels` at 15 kn, 100 Hz – 1 kHz, it is within 0.03 dB in
+every band: it holds the centre's spectral level across the band, where
+`decidecade_levels` integrates the curve over it. If you cannot say what
+bandwidth a level covers, it is not a band level.
 
 The rule for the sonar equation is that `SL`, `NL` and `RL` must all sit on the
 same side — all spectral or all band. [`uacpy.sonar`](sonar.md) states and owns
@@ -664,6 +586,45 @@ figure maps the two published band groups onto the full decidecade set by
 treating everything from 125 Hz to below 20 kHz as `mid` — the standard leaves
 16–20 kHz unnamed.)
 
+### Without a measurement: the mean merchant-ship spectrum
+
+`ship_source_level_wales_heitmeyer(frequency)` is a **spectral density level,
+dB re 1 µPa² m²/Hz (per hertz)**: the mean monopole source spectrum of a
+merchant ship that Wales and Heitmeyer (2002) fitted to 272 ships in the
+Mediterranean and the eastern Atlantic, as Ainslie (*Principles of Sonar
+Performance Modelling*, 2010, Eq. 8.195) gives it:
+
+```
+SL_mp,f = 230.0 − 35.94·log₁₀ f + 9.17·log₁₀[1 + (f/340)²]   dB re 1 µPa² m²/Hz
+```
+
+It was measured between 30 Hz and 1200 Hz. Above 1200 Hz it continues with the
+−23 dB per decade Ainslie extrapolates it with (§8.3.1.4), joined at 1200 Hz, up
+to 15 kHz; that gradient was fitted to one cargo ship at low speed, and the
+extrapolated curve agrees with it near 12 kn. A frequency outside 30 Hz–15 kHz
+is refused. 158.45 dB at 100 Hz, 131.21 dB at 1 kHz.
+
+It is an ensemble mean with **no speed or length term**: Ainslie states none
+for it, and one ship's spectrum moves with its speed (Ainslie's Fig. 8.16). Nor is it
+a bound: the Scrimger and Heitmeyer (1991) mean over 50 ships at 14 kn lies
+6–12 dB above it. Use it where a measured spectrum is missing, and say so.
+
+It is a **density**, dB re 1 µPa² m²/Hz, where `monopole_source_level` returns
+band levels. A decidecade band level is the density integrated over the band
+(`uacpy.acoustics.band_level`), within 0.06 dB of the level at the band centre
+plus `10·log₁₀(bandwidth)` from 40 Hz to 1 kHz:
+
+```python
+from uacpy.acoustic_signal import decidecade_bands
+from uacpy.acoustics import band_level
+from uacpy.noise import ship_source_level_wales_heitmeyer
+
+low, fc, high = decidecade_bands(40.0, 1000.0)
+f = np.geomspace(low[0], high[-1], 4000)
+density = ship_source_level_wales_heitmeyer(f)   # dB re 1 µPa² m²/Hz
+msl = np.array([band_level(density, f, lo, hi) for lo, hi in zip(low, high)])
+```
+
 Chaining an MSL through a real propagation run to a receiver is
 [example 36](../../uacpy/examples/example_36_noise_impact_modeled.py); the
 spreading-law version is
@@ -691,10 +652,29 @@ W(f) = C + 10·log₁₀[ (f/f₁)^2a / ( (1+(f/f₁)²)^a · (1+(f/f₂)²)^b )
 
 `f₁` and `f₂` set the low and high corners, the roll-off slopes are `+20a` and
 `−20b` dB/decade, and `C` normalises the peak to 0 dB. `WEIGHTING_PARAMS`
-carries all five plus the published `K` (the vertical position of the
-**non-impulsive TTS** exposure function — Southall Table 5; PTS onset is
-derived from it via TTS growth rates, not read off it). `uacpy` does not use
-`K`; it is there for callers setting their own criteria.
+carries all five plus the published `K`, the vertical position of the
+**non-impulsive TTS** exposure function (Southall Table 5). The weighted TTS
+threshold is `Tw = C + K` (Southall, discussion of their Eqs. 2-3), which
+rounds to the Table 6 value in every group.
+
+`EXPOSURE_THRESHOLDS` holds the criteria a weighted SEL is compared against:
+Southall Table 6 (non-impulsive noise, weighted SEL) and Table 7 (impulsive
+noise, weighted SEL and unweighted peak SPL), TTS and PTS onset, as
+`EXPOSURE_THRESHOLDS[group][kind][onset][metric]` in dB. SEL is re 1 µPa²·s
+and peak re 1 µPa under water; the in-air groups `PCA` and `OCA` are re
+(20 µPa)²·s and re 20 µPa.
+
+```python
+from uacpy.noise import EXPOSURE_THRESHOLDS
+
+EXPOSURE_THRESHOLDS['VHF']['impulsive']['TTS']   # {'SEL': 140, 'peak': 196}
+EXPOSURE_THRESHOLDS['LF']['non_impulsive']['PTS']  # {'SEL': 199}
+```
+
+A weighted SEL map is compared with the SEL entry of its own group
+(`sound_exposure_level(..., weighting='VHF')` against
+`EXPOSURE_THRESHOLDS['VHF'][...]['TTS']['SEL']`); a peak level is compared
+unweighted.
 
 | Key | Group |
 |---|---|
@@ -746,7 +726,19 @@ underwater spectrum.
 finely you sampled the frequency axis — a bare sum over samples would scale
 with the number of bins. Hand it decidecade band levels and the result is
 meaningless; use `apply_weighting` per band and sum the band energies instead,
-which is what examples 35 and 36 do.
+`10·log₁₀(Σ 10^(L_w/10))`, which is `uacpy.acoustics.sum_levels_dB` along the
+band axis:
+
+```python
+from uacpy.acoustics import sum_levels_dB
+from uacpy.noise import WenzNoise, apply_weighting
+
+bands = WenzNoise(wind_speed_kn=15.0).decidecade_levels(100.0, 1000.0)
+band_weighted = apply_weighting(bands.levels, frequency=bands.centers, group='LF')
+weighted_total = sum_levels_dB(band_weighted, axis=-1)   # one weighted level
+```
+
+Examples 35 and 36 print that weighted band sum for each group.
 
 ```python
 from uacpy.noise import apply_weighting, weighted_level
@@ -765,7 +757,7 @@ apply_weighting(wenz.total, frequency=f, group='LF')   # the weighted spectrum i
 One ambient spectrum — 10 kn, medium shipping — heard six ways. Broadband it is
 97.6 dB re 1 µPa². A baleen whale receives 94.0 dB of that (−3.5 dB: it hears
 almost all of it, because the energy is where its hearing is). A porpoise
-receives 83.5 dB (−14.2 dB). Nothing about the ocean changed between those two
+receives 83.5 dB (−14.1 dB). Nothing about the ocean changed between those two
 numbers.
 
 The left panel shows where the difference comes from. `LF` tracks the
@@ -776,6 +768,135 @@ practical consequence: quietening a ship at 30 Hz moves the `LF` number and
 leaves the `VHF` one essentially unchanged, because `VHF` had already
 discarded that band. You can only see that by weighting *before* you integrate,
 never after.
+
+### Weighting an exposure: a record, a map, or your own curve
+
+The three functions above work on **spectra**. An exposure criterion is
+written on the **weighted SEL** — the integral of the squared
+frequency-weighted pressure (Southall et al. 2019) — and every SEL entry point
+takes the weighting as one argument, `weighting=`: a group name, **your own
+function** `W(frequency_Hz) -> dB`, or **your own table** `(frequencies_Hz,
+W_dB)`. A table carries no weight outside its span, so one typed in kHz keeps
+almost nothing; a table that leaves more than half of the energy outside its
+span warns with the share it keeps, and says so when the table in Hz would
+keep more.
+
+```python
+import numpy as np
+from uacpy.acoustic_signal import tone_burst
+from uacpy.acoustics import sound_exposure_level, frequency_weighting
+from uacpy.core.results import Field
+
+fs = 8000.0
+recording = np.random.default_rng(0).standard_normal(8000)      # 1 s of p(t), Pa
+f = np.arange(25.0, 4000.0, 25.0)
+r = np.array([100.0, 200.0])
+H = Field(data=(np.exp(-2j * np.pi * np.outer(r, f) / 1500.0) / r[:, None])[None],
+          coords={'depth': [10.0], 'range': r, 'frequency': f})   # free-field H(f)
+waveform = tone_burst(500.0, 5, sample_rate=fs)[1]
+
+
+def my_W(f):
+    return -20.0 * np.log10(1.0 + f / 2000.0)                    # your own curve, dB
+
+
+sound_exposure_level(recording, fs, weighting='VHF')            # a record
+H.sound_exposure_level(source_waveform=waveform, sample_rate=fs,
+                       weighting='LF')             # a model map
+sound_exposure_level(recording, fs, weighting=lambda f: my_W(f))  # yours
+frequency_weighting(f, ([100.0, 1e3, 1e4], [-30.0, 0.0, -10.0]))  # look at it
+```
+
+The weighting is applied to the spectrum exactly, so a tone at `f` loses
+`W(f)` to 0.002 dB even 105 dB down the VHF skirt. Accumulating the weighted
+exposure over a record, over several events and along a moving source's track
+is in [Results §6b](results.md#6b-weighted-accumulated-and-moving-source-exposure),
+and example 47 runs it for a survey line.
+
+### A noise-impact assessment, end to end
+
+The steps live on three pages and four namespaces; these are the calls in
+order, for one pile strike seen by very-high-frequency cetaceans (Southall
+`'VHF'`, the NMFS "HF" group).
+
+```python
+import numpy as np
+import uacpy
+from uacpy.models import Bellhop, RunMode
+from uacpy.acoustics import sum_levels_dB
+from uacpy.noise import EXPOSURE_THRESHOLDS
+from uacpy.sonar import detection_ranges
+
+fs = 48000.0
+t = np.arange(int(0.1 * fs)) / fs
+pulse = np.sin(2 * np.pi * 200.0 * t) * np.exp(-t / 0.015)      # your strike, any shape
+u = pulse / np.sqrt(np.sum(pulse ** 2) / fs)                     # unit energy: ∫u² dt = 1
+esl = 210.0                                                      # ESL, dB re 1 µPa²·s·m²
+waveform = u * 1e-6 * 10 ** (esl / 20.0)                         # Pa at 1 m
+
+env = uacpy.Environment(bathymetry=30.0, ssp=1500.0, bottom='sand',
+                        absorption=uacpy.Thorp())
+src = uacpy.Source(depths=15.0, frequencies=500.0)
+rcv = uacpy.Receiver(depths=np.array([5.0, 15.0, 25.0]),
+                     ranges=np.linspace(50.0, 5000.0, 100))
+f = np.arange(2.0, 4000.0, 2.0)                                  # the pulse's support
+H = Bellhop().run(env, src, rcv, run_mode=RunMode.BROADBAND, frequencies=f)
+
+sel = H.sound_exposure_level(source_waveform=waveform, sample_rate=fs,
+                             weighting='VHF')                    # one strike, weighted
+peak = H.peak_sound_pressure_level(source_waveform=waveform, sample_rate=fs)
+worst_sel = np.nanmax(np.asarray(sel.data), axis=0)              # worst depth per range
+worst_peak = np.nanmax(np.asarray(peak.data), axis=0)
+criteria = EXPOSURE_THRESHOLDS['VHF']['impulsive']               # {'TTS': ..., 'PTS': ...}
+reach = {effect: float(np.fmax(                                  # either metric is enough
+    detection_ranges(sel.ranges, signal_excess_dB=worst_sel - c['SEL']),
+    detection_ranges(peak.ranges, signal_excess_dB=worst_peak - c['peak'])))
+    for effect, c in criteria.items()}                           # m; nan: never reached
+strikes = sum_levels_dB(np.repeat(worst_sel[None], 3000, axis=0), axis=0)  # 3000 strikes
+```
+
+1. **The source.** The level rides on the waveform's amplitude: a waveform of
+   unit energy times `1e-6 * 10**(ESL/20)` carries an energy source level ESL
+   (dB re 1 µPa²·s·m²); for a source given as an rms level SL over a pulse,
+   see [Results §6a](results.md#6a-the-level-a-signal-with-bandwidth-or-duration-reaches). A
+   vessel's spectrum comes from a measurement (§7 converts a measured RNL to
+   the monopole level a model takes) or, without one, from the mean
+   merchant-ship spectrum `ship_source_level_wales_heitmeyer` (§7), an
+   ensemble mean with no speed term.
+2. **The channel.** A `RunMode.BROADBAND` run over the waveform's support;
+   the `1/Δf` record must hold the pulse and the channel's spread
+   ([Results §6](results.md#6-from-hf-to-pt)). This strike's spectrum is
+   still −19.5 dB at 0 Hz, so its support runs down to the first bin: a band
+   from 25 Hz moves the pulse's own peak 0.36 dB, and the peak map warns so,
+   naming the support (0–681 Hz) and what a Hann band window would cost
+   instead (−34.5 dB at the spectrum's 200 Hz peak, which takes every peak
+   range here to "never").
+3. **The two metrics.** The weighted SEL (`weighting=` the group) and the
+   unweighted peak; Southall's impulsive criteria are the pair, and either
+   one exceeded is enough.
+4. **The range a criterion is reached.** `detection_ranges` reads the level
+   minus the threshold as a signal excess: the outermost range where it is
+   at least 0, `inf` when the map still exceeds it at its last range, `nan`
+   when it never does. `np.nanmax(..., axis=0)` is the worst case over
+   depth, and `np.fmax` takes the farther of the SEL and peak ranges (a
+   `nan` "never" gives way to the other). For this strike the weighted SEL
+   never reaches the VHF TTS criterion (120 dB at worst against 140 dB),
+   while the peak reaches 196 dB out to 200 m and the PTS peak, 202 dB, out
+   to 70 m: reading the SEL alone would report no TTS at all.
+5. **More than one event.** `N` identical strikes add `10·log10(N)`
+   (`sum_levels_dB`); a source moving along a line is `sel.track_exposure(
+   positions, closest_approach=...)`, with a plan view
+   ([Results §6b](results.md#6b-weighted-accumulated-and-moving-source-exposure),
+   example 47). A **continuous** moving source is one event per interval
+   `Δt`, positions `v·Δt` apart, each event's SEL the received level plus
+   `10·log10(Δt)`: the received-level map of the band route
+   (`H.broadband_loss(source_spectrum=...).at_source_level(SL)`) goes to
+   `level.track_exposure(..., event_duration=Δt)`, or `Δt` seconds of its
+   noise (`acoustic_signal.synthesize_noise_from_psd`) through
+   `H.sound_exposure_level(..., weighting=)` make the per-event SEL map
+   ([Results §6b](results.md#6b-weighted-accumulated-and-moving-source-exposure)).
+   A record you already hold accumulates with
+   `acoustics.cumulative_sound_exposure_level`.
 
 ---
 
@@ -823,7 +944,9 @@ correction you under-predict the low-frequency field by 10 dB or more for a
 near-surface source. [§7](#7-ship-radiated-noise-iso-17208).
 
 **Do not weight with the in-air groups underwater.** `PCA` and `OCA` are for
-hauled-out animals.
+hauled-out animals, and their thresholds are re (20 µPa)²·s, 26 dB from the
+underwater 1 µPa²·s. An SEL weighted with either at the underwater reference
+(the default `ref`) warns; pass `ref=20e-6` for a record made in air.
 
 **`weighted_level` needs a density.** Band levels in, nonsense out. Use
 `apply_weighting` for per-band work.

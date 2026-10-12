@@ -287,9 +287,9 @@ def test_environment_copernicus_absorption_row_is_in_situ_temperature(
         salinity=35.0, theta=5.0,
         pressure_dbar=depth_to_pressure_dbar(1000.0, 30.0)))
     assert expected != 5.0
-    t_pairs = env.absorption.temperature
-    at_1000 = int(np.flatnonzero(t_pairs[:, 0] == 1000.0)[0])
-    assert t_pairs[at_1000, 1] == pytest.approx(expected)
+    t_profile = env.absorption.temperature
+    at_1000 = int(np.flatnonzero(t_profile.depths == 1000.0)[0])
+    assert t_profile.values[at_1000] == pytest.approx(expected)
 
 
 def test_environment_bgc_failure_falls_back(monkeypatch, tmp_path):
@@ -793,6 +793,14 @@ def test_the_ssp_date_gap_keeps_its_own_wording(monkeypatch):
     assert "ssp_sources='woa23'" in (excinfo.value.remediation or '')
 
 
+def test_the_copernicus_date_guard_takes_whole_days_only():
+    da = _TimeDAStub([1.5], '2021-01-15')
+    assert copernicus._snapped_date(da, '2021-01-20', 31.0) == '2021-01-15'
+    with pytest.raises(ConfigurationError,
+                       match='Copernicus: max_days must be a whole number'):
+        copernicus._snapped_date(da, '2021-01-20', 30.5)
+
+
 # ── the date rule on the Copernicus fetchers ────────────────────────────────
 
 def _date_warnings(fetch):
@@ -809,6 +817,52 @@ def test_a_daily_field_warns_past_3_days(monkeypatch, requested, warns):
     _install_fake_toolbox(monkeypatch, _DSStub(_DEPTH, _T, _S, time='2021-01-15'))
     msgs = _date_warnings(lambda: copernicus.fetch_ssp_operational(
         (30.0, -40.0), date=requested, max_days=30))
+    assert len(msgs) == int(warns)
+
+
+class _MonthStartBGCStub:
+    """A monthly BGC product with its steps stamped at month start: one pH
+    column per step, and ``ph.sel(time=..., method='nearest')`` picks the
+    nearest stamp, as xarray does."""
+
+    class _Axis:
+        def __init__(self, values):
+            self.values = values
+
+    class _PH:
+        def __init__(self, stub):
+            self._stub = stub
+
+        def sel(self, method=None, time=None, **_point):
+            t = self._stub.times
+            i = int(np.argmin(np.abs(t - np.datetime64(time, 'ns'))))
+            return _TimeDAStub(self._stub.columns[i], t[i])
+
+    def __init__(self, stamps, columns):
+        self.times = np.array(stamps, dtype='datetime64[ns]')
+        self.columns = columns
+
+    def __getitem__(self, key):
+        if key == 'time':
+            return self._Axis(self.times)
+        if key == 'depth':
+            return _DAStub([0.0, 500.0, 2000.0])
+        return self._PH(self)
+
+
+@pytest.mark.parametrize('requested, ph, warns', [
+    ('2021-06-28', 8.00, False),     # June's mean, not the nearer July stamp
+    ('2021-06-01', 8.00, False),
+    ('2021-08-10', 7.90, True)])     # no August step: the nearest, announced
+def test_a_monthly_ph_product_stamped_at_month_start_gives_the_dates_month(
+        monkeypatch, requested, ph, warns):
+    _install_fake_toolbox(monkeypatch, _MonthStartBGCStub(
+        ['2021-06-01', '2021-07-01'],
+        [[8.05, 8.00, 7.95], [7.95, 7.90, 7.85]]))
+    got = []
+    msgs = _date_warnings(lambda: got.append(copernicus.fetch_ph_operational(
+        (30.0, -40.0), date=requested, max_days=60)))
+    assert got == [pytest.approx(ph)]
     assert len(msgs) == int(warns)
 
 

@@ -20,12 +20,14 @@ Bathymetry / altimetry / 3-D boundary files live in
 
 import shutil
 import warnings
+from dataclasses import dataclass
 
 import numpy as np
 from pathlib import Path
 from typing import Optional, Union
 
 from uacpy._log import log_message
+from uacpy.core._export import ExportRecord
 from uacpy.core.units import deg_to_rad, rad_to_deg
 from uacpy.core.deck_limits import SBP_ANGLE_RESOLUTION_DEG
 from uacpy.core.results import ReflectionCoefficient
@@ -158,11 +160,55 @@ def read_reflection_coefficient(
         ) from e
 
 
+@dataclass(frozen=True, eq=False)
+class BeamPatternTable(ExportRecord):
+    """A ``.sbp`` source beam pattern as :func:`read_source_beam_pattern`
+    reads it (``misc/beampattern.f90:33-44``).
+
+    Attributes
+    ----------
+    angles : ndarray
+        The declination angles (degrees), one per row of the file, in file
+        order.
+    levels_dB : ndarray
+        The level at each angle (dB re peak), as written; the engines convert
+        it to a linear amplitude (``10**(dB/20)``, ``beampattern.f90:59``)
+        after reading.
+    """
+
+    angles: np.ndarray
+    levels_dB: np.ndarray
+
+    _REPR_UNITS = {'angles': 'deg'}
+
+    _ARRAY_FIELDS = ('angles', 'levels_dB')
+    _TABLE_FIELDS = ('angles', 'levels_dB')
+    _XARRAY_FIELDS = {'levels_dB': 'levels_dB', 'angle': 'angles'}
+
+    def _payload(self):
+        return {'levels_dB': (self.levels_dB, ('angle',), 'dB')}
+
+    def _coords(self):
+        return {'angle': (self.angles, 'deg')}
+
+    def __array__(self, dtype=None, copy=None):
+        """The ``(N, 2)`` ``[angle_deg, level_dB]`` table this record holds:
+        the array :attr:`uacpy.Source.beam_pattern` and
+        :func:`~uacpy.plot.plot_beam_pattern` read, so either takes the record
+        itself. Built on request, so ``copy=False`` cannot be honoured."""
+        if copy is False:
+            raise ValueError("BeamPatternTable: the (N, 2) table is built on "
+                             "request, so it cannot be returned without a "
+                             "copy.")
+        table = np.column_stack([self.angles, self.levels_dB])
+        return table if dtype is None else table.astype(dtype)
+
+
 @typed_format_error
 def read_source_beam_pattern(
     filepath: Union[str, Path],
     verbose: Union[bool, str] = False,
-) -> np.ndarray:
+) -> BeamPatternTable:
     """
     Read source beam pattern from file.
 
@@ -176,10 +222,11 @@ def read_source_beam_pattern(
 
     Returns
     -------
-    beam_pattern : ndarray
-        Beam pattern array, shape (N, 2):
-        - Column 0: Angles in degrees
-        - Column 1: level in dB re peak
+    BeamPatternTable
+        ``angles`` (degrees) and ``levels_dB`` (dB re peak), one entry per
+        row of the file. ``Source(beam_pattern=t)`` and
+        :func:`~uacpy.plot.plot_beam_pattern` take the record itself;
+        ``np.asarray(t)`` is its ``(N, 2)`` ``[angle_deg, level_dB]`` table.
 
     Raises
     ------
@@ -257,7 +304,8 @@ def read_source_beam_pattern(
             verbose=verbose, level='debug',
         )
 
-    return beam_pattern
+    return BeamPatternTable(angles=beam_pattern[:, 0],
+                            levels_dB=beam_pattern[:, 1])
 
 
 def write_reflection_coefficient(
@@ -681,7 +729,7 @@ def stage_source_beam_pattern(
         # array form so the guard does not depend on which way the caller
         # happened to supply the pattern.
         from uacpy.core._validate import require_strictly_increasing
-        angles = read_source_beam_pattern(src)[:, 0]
+        angles = read_source_beam_pattern(src).angles
         # A one- or zero-row table survives every guard on both sides:
         # ``_require_strictly_increasing`` returns early for ``size <= 1``, and
         # ``misc/monotonicMod.f90:30`` pre-sets ``.TRUE.`` then returns for

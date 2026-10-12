@@ -20,6 +20,7 @@ from uacpy.comms.equalize import DFE, complex_gain
 from uacpy.comms.metrics import bit_error_rate, evm
 from uacpy.core._export import CarrierExport
 from uacpy.core._repr import FieldsRepr
+from uacpy.core._validate import require_generator
 from uacpy.core.exceptions import ConfigurationError
 
 
@@ -135,7 +136,7 @@ def simulate_link(scheme, ebn0_dB, n_bits=20000, *, channel=None,
         BER, EVM, the transmitted and received symbols, and the equaliser's
         learning curve when one was used.
     """
-    rng = np.random.default_rng() if rng is None else rng
+    rng = require_generator(rng, "simulate_link")
     if isinstance(channel, ChannelTaps):
         if int(channel.sps) != 1:
             raise ConfigurationError(
@@ -223,15 +224,14 @@ class BerCurve(PlottedResult, namedtuple("BerCurve", "ebn0_dB ber")):
     ``code`` and ``n_train``, as :func:`simulate_link` took them.
 
     :meth:`plot` draws it with
-    :func:`~uacpy.plot.plot_ber_curve`, marking zero-error points
-    at ``1/n_bits``; the closed-form AWGN curve of ``scheme`` is overlaid
-    only for an uncoded link with no channel, the one link it describes.
+    :func:`~uacpy.plot.plot_ber_curve`, which takes the curve whole: it
+    marks zero-error points at ``1/n_bits`` and overlays the closed-form
+    AWGN curve of ``scheme`` only for an uncoded link with no channel, the
+    one link it describes.
     """
 
     _attrs = ("scheme", "n_bits", "channel", "equalizer", "code", "n_train")
     _plotter = "plot_ber_curve"
-    _plot_fields = ("ebn0_dB", "ber")
-    _plot_defaults = ("n_bits",)
 
     def __new__(cls, ebn0_dB, ber, *, scheme, n_bits, channel=None,
                 equalizer=None, code=None, n_train=400):
@@ -243,11 +243,6 @@ class BerCurve(PlottedResult, namedtuple("BerCurve", "ebn0_dB ber")):
         self.code = code
         self.n_train = n_train
         return self
-
-    def plot(self, **kwargs):
-        if self.code is None and self.channel is None:
-            kwargs.setdefault("scheme", self.scheme)
-        return super().plot(**kwargs)
 
     def _field_units(self):
         return {"ebn0_dB": "dB", "ber": ""}
@@ -296,7 +291,7 @@ def ber_sweep(scheme, ebn0_dB, n_bits=50000, *, channel=None,
         one per entry of ``ebn0_dB``, with the sweep's settings as
         attributes.
     """
-    rng = np.random.default_rng() if rng is None else rng
+    rng = require_generator(rng, "ber_sweep")
     ber = np.array([
         simulate_link(scheme, e, n_bits, channel=channel, equalizer=equalizer,
                       code=code, n_train=n_train, rng=rng).ber

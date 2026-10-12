@@ -42,7 +42,7 @@ fig, axes = plt.subplots(3, 3, figsize=(18, 11))
 for ax, time, signal, title, colour in (
         (axes[0, 0], t_lfm[:500], lfm[:500], 'LFM chirp (100-1000 Hz)', 'b'),
         (axes[0, 1], t_hfm[:500], hfm[:500], 'HFM chirp (100-1000 Hz)', 'r'),
-        (axes[0, 2], t[:1000], ricker[:1000], 'Ricker wavelet (500 Hz)', 'g'),
+        (axes[0, 2], t[:100], ricker[:100], 'Ricker wavelet (500 Hz)', 'g'),
         (axes[1, 0], t, gaussian, 'Gaussian pulse', 'm')):
     ax.plot(time, signal, colour, linewidth=1)
     ax.set_title(title, fontweight='bold')
@@ -69,7 +69,7 @@ axes[1, 2].set_xlim([0, min(2000, frequencies[-1])])
 # Constant-Q: the sweep traces a curve whose resolution scales with frequency.
 cqt = constant_q_spectrogram(lfm, fs, freq_min=80, freq_max=2000, bins_per_octave=24,
                              scaling='spectrum')
-# dB re 1 µPa: the chirp peaks near 116 dB, so a 60 dB window shows the sweep
+# dB re 1 µPa: the chirp peaks near 114 dB, so a 60 dB window shows the sweep
 # hot while pushing the weak low-frequency constant-Q leakage (long windows at
 # low freq_min) to the floor instead of saturating everything above 60 dB.
 uacpy.plot.plot_constant_q_spectrogram(cqt.frequencies, cqt.times, cqt.power,
@@ -80,9 +80,9 @@ axes[2, 0].set_title('LFM constant-Q spectrogram', fontweight='bold')
 
 cq_psd = constant_q(lfm, fs, scaling='spectrum', freq_min=80, freq_max=2000,
                              bins_per_octave=24)
-# The same 60 dB window as the spectrogram: the in-band bins peak near 107 dB.
-uacpy.plot.plot_constant_q_psd(cq_psd.frequencies, cq_psd.power,
-                               ax=axes[2, 1], ymin=60, ymax=120,
+# The same 60 dB window as the spectrogram: the in-band bins peak near 104 dB.
+# Passed whole, so the axis reads the estimate's own scaling (band power).
+uacpy.plot.plot_constant_q_psd(cq_psd, ax=axes[2, 1], ymin=60, ymax=120,
                                title='LFM constant-Q band power')
 axes[2, 1].title.set_fontweight('bold')          # as the other eight panels
 

@@ -2225,7 +2225,7 @@ fi
 echo ""
 if [[ "$OVERALL" == "ok" ]]; then
     echo "Quick test (from this directory):"
-    echo "  python -c \"import uacpy; print(uacpy.__version__)\""
+    echo "  python -m uacpy      # the engine binaries found, one row each"
     echo "  python uacpy/examples/example_01_basic_shallow_water.py"
     echo ""
 fi

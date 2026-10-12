@@ -294,10 +294,12 @@ def _tl_array_from_field(tl_field, who: str) -> np.ndarray:
     should not see; it is accepted with a warning naming the incoherent
     routes. Whether it is coherent is :attr:`Field.coherent`'s answer, the
     one decider the package has: it reads a producer's stamp first (an
-    incoherent ``superpose`` of coherent slabs says ``False``), then a phase
-    reference (a ``BROADBAND`` result sliced at one frequency, or coherent
-    pressure after :meth:`~Field.to_dB`) or a ``COHERENT_TL`` run mode
-    (OAST's coherent TL, stored as real dB).
+    incoherent ``superpose`` of coherent sources and
+    :meth:`~Field.broadband_loss` say ``False``), then a phase reference (a
+    ``BROADBAND`` result sliced at one frequency) or a ``COHERENT_TL`` run
+    mode (OAST's coherent TL, stored as real dB). A derived Field inherits
+    the answer, so coherent pressure after :meth:`~Field.to_dB` is still
+    coherent.
     """
     if not isinstance(tl_field, Field):
         raise ConfigurationError(
@@ -374,7 +376,12 @@ def _require_scalar_dB(value, who: str, label: str) -> float:
     budget dict *after* the signal excess had already been computed, raising
     ``TypeError: only 0-dimensional arrays can be converted to Python
     scalars`` — no function name, no argument name, and the work thrown away.
+    A ``None`` or non-finite term is refused: ``float(None)`` through numpy
+    is ``nan``, which would turn every cell of the budget into ``nan``.
     """
+    if value is None:
+        raise ConfigurationError(
+            f"{who}: {label} is None; the budget needs a finite dB level.")
     arr = np.asarray(value, dtype=float)
     if arr.ndim != 0:
         raise ConfigurationError(
@@ -382,6 +389,9 @@ def _require_scalar_dB(value, who: str, label: str) -> float:
             f"{arr.shape}. reverberation_level_dB is the one per-range term of "
             f"this budget — for a range-varying background, pass the profile "
             f"there, or evaluate the field once per {label} value.")
+    if not np.isfinite(arr):
+        raise ConfigurationError(
+            f"{who}: {label} must be a finite dB level; got {float(arr)!r}.")
     return float(arr)
 
 
@@ -414,13 +424,16 @@ def _keep_no_energy_marker(se, tl_dB):
 
 def _spawn_se_field(tl_field, se: np.ndarray, budget: dict) -> Field:
     """Wrap ``se`` in a Field carrying the TL field's identity, the band
-    it averaged and its sub-cutoff bin count, and the budget
+    it averaged and its no-mode bins, and the budget
     (:meth:`SonarBudget.to_dict`) as its ``sonar_budget``.
 
     The ``kind`` matters: signal excess is dB but it is not pressure and
     not a loss, so leaving it to derive would both mislabel it and make
-    :meth:`Field.max` report the *worst* cell as the best."""
+    :meth:`Field.max` report the *worst* cell as the best. The map's
+    ``source_level_dB`` is the budget's, the level it was computed at,
+    whatever the TL field's run recorded."""
     kwargs = tl_field.id_kwargs()
+    kwargs['source_level_dB'] = budget['source_level_dB']
     kwargs['kind'] = 'signal_excess'
     # A complex TL field's unit is Pa; the excess built from it is dB.
     kwargs['unit'] = 'dB'
@@ -429,7 +442,7 @@ def _spawn_se_field(tl_field, se: np.ndarray, budget: dict) -> Field:
         coords={k: v.copy() for k, v in tl_field.coords.items()},
         pinned=dict(tl_field.pinned),
         band_hz=tl_field.band_hz,
-        sub_cutoff_bins=tl_field.sub_cutoff_bins,
+        no_mode_bins=tl_field.no_mode_bins,
         sonar_budget=budget,
         **kwargs,
     )
@@ -744,6 +757,22 @@ class SonarBudget(FieldsRepr):
         return hash(repr(self.to_dict()))
 
 
+def _budget_source_level(source_level_dB, tl_field, who: str):
+    """``source_level_dB``, or ``tl_field``'s own
+    :attr:`~uacpy.core.results.Field.source_level_dB` when it is ``None``;
+    refused when neither states one."""
+    if source_level_dB is None:
+        source_level_dB = tl_field.source_level_dB
+    if source_level_dB is None:
+        raise ConfigurationError(
+            f"{who}: no source level to evaluate the budget at, and "
+            f"tl_field carries none.",
+            remediation="Pass source_level_dB=, or set Source("
+                        "source_level_dB=...) on the run so its results "
+                        "carry it.")
+    return source_level_dB
+
+
 def _signal_excess_map(tl_field, tl_dB, budget: SonarBudget,
                        who: str) -> Field:
     """``budget`` evaluated over the TL grid of ``tl_field``, as a
@@ -762,7 +791,7 @@ def _signal_excess_map(tl_field, tl_dB, budget: SonarBudget,
 def passive_signal_excess_field(
     tl_field,
     *,
-    source_level_dB,
+    source_level_dB=None,
     noise_level_dB,
     detection_threshold_dB,
     directivity_index_dB=None,
@@ -783,8 +812,11 @@ def passive_signal_excess_field(
         ``run_mode=RunMode.INCOHERENT_TL`` or ``Field.broadband_loss()``
         (a coherent field is accepted with a warning, since its fringes
         move the detection range).
-    source_level_dB : float
-        Target radiated level SL, at 1 m.
+    source_level_dB : float, optional
+        Target radiated level SL, at 1 m. ``None`` (default) is
+        ``tl_field``'s own :attr:`~uacpy.core.results.Field.source_level_dB`
+        (``Source(source_level_dB=...)`` on the run); refused when neither
+        states one.
     noise_level_dB : float
         Ambient noise level NL at the array, in the same band reference as
         ``source_level_dB`` — see :func:`noise_background`.
@@ -811,13 +843,15 @@ def passive_signal_excess_field(
     Field
         Signal excess (dB) on the same coords/pinned grid; ``SE >= 0``
         marks the detectable region. ``result.sonar_budget`` is
-        the :meth:`SonarBudget.to_dict` of the budget evaluated. Plot with
+        the :meth:`SonarBudget.to_dict` of the budget evaluated, and
+        ``result.source_level_dB`` its SL. Plot with
         :func:`uacpy.visualization.plots.plot_signal_excess`.
     """
     who = 'passive_signal_excess_field'
     tl_dB = _tl_array_from_field(tl_field, who)
     budget = SonarBudget._checked(
-        who, mode='passive', source_level_dB=source_level_dB,
+        who, mode='passive',
+        source_level_dB=_budget_source_level(source_level_dB, tl_field, who),
         noise_level_dB=noise_level_dB,
         detection_threshold_dB=detection_threshold_dB,
         directivity_index_dB=directivity_index_dB,
@@ -828,7 +862,7 @@ def passive_signal_excess_field(
 def active_signal_excess_field(
     tl_field,
     *,
-    source_level_dB,
+    source_level_dB=None,
     target_strength_dB,
     detection_threshold_dB,
     noise_level_dB=None,
@@ -852,8 +886,10 @@ def active_signal_excess_field(
     ----------
     tl_field : Field
         One-way TL field from any model run.
-    source_level_dB : float
-        Projector source level SL, at 1 m.
+    source_level_dB : float, optional
+        Projector source level SL, at 1 m. ``None`` (default) is
+        ``tl_field``'s own :attr:`~uacpy.core.results.Field.source_level_dB`;
+        refused when neither states one.
     target_strength_dB : float
         Target strength TS (dB).
     noise_level_dB : float, optional
@@ -884,12 +920,14 @@ def active_signal_excess_field(
     Field
         Signal excess (dB) on the same coords/pinned grid;
         ``result.sonar_budget`` is the
-        :meth:`SonarBudget.to_dict` of the budget evaluated.
+        :meth:`SonarBudget.to_dict` of the budget evaluated, and
+        ``result.source_level_dB`` its SL.
     """
     who = 'active_signal_excess_field'
     tl_dB = _tl_array_from_field(tl_field, who)
     budget = SonarBudget._checked(
-        who, mode='active', source_level_dB=source_level_dB,
+        who, mode='active',
+        source_level_dB=_budget_source_level(source_level_dB, tl_field, who),
         target_strength_dB=target_strength_dB,
         detection_threshold_dB=detection_threshold_dB,
         noise_level_dB=noise_level_dB,
@@ -992,7 +1030,7 @@ def transition_probability_field(se_field, *, sigma_dB) -> Field:
     The log-normal approximation is most accurate near ``SE = 0`` and
     optimistic in the tails; as ``sigma_dB → 0`` it degenerates to a
     step at ``SE = 0`` rather than the deterministic-signal ROC
-    (Abraham §2.3.5.6). For fluctuation statistics beyond Gaussian-in-dB
+    (Abraham §2.3.7.1). For fluctuation statistics beyond Gaussian-in-dB
     (e.g. the gamma-fluctuating-intensity model), compute ``P_D`` from
     the detector statistics directly via :mod:`uacpy.sonar.detection`.
     """
@@ -1021,7 +1059,7 @@ def transition_probability_field(se_field, *, sigma_dB) -> Field:
         coords={k: v.copy() for k, v in se_field.coords.items()},
         pinned=dict(se_field.pinned),
         band_hz=se_field.band_hz,
-        sub_cutoff_bins=se_field.sub_cutoff_bins,
+        no_mode_bins=se_field.no_mode_bins,
         sonar_budget=se_field.sonar_budget,
         sigma_dB=sigma,
         **kwargs,
@@ -1340,8 +1378,8 @@ def _detection_range(r, se, crossing):
                 and se[known][-1] >= 0.0:
             return np.inf, None
         return first[1], None
-    # NaN marks a cell the propagation model never filled (no ray reached it),
-    # not a cell where the target is undetectable, so the crossing is sought
+    # NaN marks a cell the propagation model never filled (no data), not a
+    # cell where the target is undetectable, so the crossing is sought
     # among the sampled ranges only — the same no-data handling as
     # :meth:`Field.max`.
     known = np.isfinite(se)

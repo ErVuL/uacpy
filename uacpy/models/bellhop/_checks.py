@@ -7,6 +7,7 @@ narrower than the launch fan."""
 
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -16,10 +17,11 @@ from uacpy.core.exceptions import (
 )
 from uacpy.core.run_settings import RunMode
 from uacpy.io.bellhop_writer import (
-    BELLHOP_RAY_BOX_FACTOR, CERVENY_DEFAULTS, validate_beam_shape,
+    BELLHOP_RAY_BOX_FACTOR, cerveny_knobs, validate_beam_shape,
     validate_beam_type,
 )
 from uacpy.core._validate import equally_spaced
+from uacpy.models._knobs import is_whole_number
 from uacpy.io.refl_io import read_source_beam_pattern
 from uacpy.models.bellhop._plan import _STEP_PER_DEPTH
 from uacpy.models.bellhop._tables import (
@@ -30,21 +32,23 @@ from uacpy.models.bellhop._tables import (
 
 
 def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
-                n_beams, grid_type, launch_angles, ray_step, z_box, r_box, n_freqs,
-                bandwidth_factor) -> None:
+                n_beams, grid_type, launch_angles, ray_step, z_box, r_box,
+                n_frequencies, bandwidth_factor) -> None:
     """Refuse a constructor knob no run could use: an unknown beam type
     or beam shape letter, a beam count that is not a whole number >= 0,
     a grid type other than 'R'/'I', a launch fan that is not an
     ascending pair of numbers, a negative or non-finite step, a ray box
-    that is not a positive number, a band of fewer than two bins or a
-    non-positive width.
+    that is not a positive number, a band of fewer than two bins (or a
+    fractional count) or a width outside (0, 2).
 
     Run at construction and again by every run (stage 2), since the
     attributes can be reassigned in between.
     """
     validate_beam_type(beam_type, 'Bellhop')
-    validate_beam_shape(beam_width_type, beam_curvature,
-                        component, 'Bellhop')
+    shape = cerveny_knobs(beam_width_type=beam_width_type,
+                          beam_curvature=beam_curvature, component=component)
+    validate_beam_shape(shape['beam_width_type'], shape['beam_curvature'],
+                        shape['component'], 'Bellhop')
     if n_beams is not None and (
             isinstance(n_beams, bool)
             or not isinstance(n_beams, (int, np.integer))):
@@ -79,17 +83,19 @@ def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
     if not (alpha_lo < alpha_hi):
         raise ConfigurationError(
             f"Bellhop(launch_angles={launch_angles!r}) limits must satisfy "
-            f"min_deg < max_deg. SubTab (misc/subtabulate.f90:41-45) "
-            f"fills the fan uniformly from alpha(1) to alpha(2); a "
-            f"reversed pair traces a negative-width fan."
+            f"min_deg < max_deg: give the lower limit first. Both backends "
+            f"sort the fan after sub-tabulating it (angleMod.f90:60-61; "
+            f"bellhopcuda rayangles.hpp:89-90), so a reversed pair would "
+            f"trace the same fan; the order is required so the settings "
+            f"record states the fan as traced, and an equal pair has no "
+            f"width."
         )
-    if not np.isfinite(ray_step) or ray_step < 0:
+    if ray_step is not None and (not np.isfinite(ray_step) or ray_step < 0):
         raise ConfigurationError(
-            f"Bellhop(ray_step={ray_step!r}) must be >= 0 and finite. 0 defers "
-            f"to the automatic step (env.depth / "
-            f"{_STEP_PER_DEPTH:g}); "
-            f"the deck writes the value as the ray-marching step size "
-            f"in meters."
+            f"Bellhop(ray_step={ray_step!r}) must be >= 0 and finite: the "
+            f"deck writes it as the ray-marching step in metres, and 0 lets "
+            f"BELLHOP choose (bellhop.f90:170-174, depth/10). None (the "
+            f"default) is env.depth / {_STEP_PER_DEPTH:g}."
         )
     for name, value in (('z_box', z_box), ('r_box', r_box)):
         if value is None:
@@ -100,28 +106,32 @@ def check_knobs(*, beam_type, beam_width_type, beam_curvature, component,
                 or not np.isfinite(value) or value <= 0):
             raise ConfigurationError(
                 f"Bellhop({name}={value!r}) must be a positive number of "
-                f"metres, or None for 1.2 x the extent the rays must "
-                f"cover. bellhop.f90:571-572 drops a ray once "
+                f"metres, or None for {BELLHOP_RAY_BOX_FACTOR:g} x the "
+                f"extent the rays must cover. bellhop.f90:571-572 drops a ray once "
                 f"ABS(x) exceeds the box, so a box at or below zero "
                 f"drops every ray and the run returns an all-NaN field "
                 f"at exit 0."
             )
-    if n_freqs < 2:
+    if n_frequencies is not None and not is_whole_number(n_frequencies):
         raise ConfigurationError(
-            f"Bellhop(n_freqs={n_freqs}) cannot span a frequency "
+            f"Bellhop(n_frequencies={n_frequencies!r}) must be a whole "
+            f"number of frequencies in the band.")
+    if n_frequencies is not None and n_frequencies < 2:
+        raise ConfigurationError(
+            f"Bellhop(n_frequencies={n_frequencies}) cannot span a frequency "
             f"band: the grid a BROADBAND run expands a single centre "
             f"frequency to needs at least its two edges.",
-            remediation=("Use n_freqs >= 2, or pass frequencies=[fc] "
+            remediation=("Use n_frequencies >= 2, or pass frequencies=[fc] "
                          "to run a single bin."),
         )
-    if not (np.isfinite(bandwidth_factor)
-            and bandwidth_factor > 0):
+    if bandwidth_factor is not None and not (
+            np.isfinite(bandwidth_factor) and 0 < bandwidth_factor < 2):
         raise ConfigurationError(
             f"Bellhop(bandwidth_factor={bandwidth_factor:g}) must "
-            f"be a positive number: the band a BROADBAND run expands a "
+            f"lie in (0, 2): the band a BROADBAND run expands a "
             f"single centre frequency to is fc*(1 +/- "
-            f"bandwidth_factor/2).",
-            remediation="Use bandwidth_factor > 0 (default 0.5).",
+            f"bandwidth_factor/2), whose lower edge reaches 0 Hz from 2 up.",
+            remediation="Use 0 < bandwidth_factor < 2 (default 0.5).",
         )
 
 
@@ -177,9 +187,8 @@ def warn_on_ignored_cerveny_knobs(*, beam_type, beam_width_type,
                                   beam_curvature, eps_multiplier, r_loop,
                                   n_image, ib_win) -> None:
     """The Cerveny beam knobs are written only for ``beam_type`` in
-    {'C', 'R'} (ReadEnvironmentBell.f90). Warn if any is set to a
-    non-default value while a non-Cerveny beam is selected, since it
-    would otherwise be silently ignored.
+    {'C', 'R'} (ReadEnvironmentBell.f90). Warn if any is set while a
+    non-Cerveny beam is selected, since the run does not use it.
 
     ``component`` is narrower still — ray-centred Cerveny only — and is
     handled by :func:`check_component` on every beam type.
@@ -191,8 +200,7 @@ def warn_on_ignored_cerveny_knobs(*, beam_type, beam_width_type,
              'beam_curvature': beam_curvature,
              'eps_multiplier': eps_multiplier, 'r_loop': r_loop,
              'n_image': n_image, 'ib_win': ib_win}
-    ignored = [name for name, default in CERVENY_DEFAULTS.items()
-               if name != 'component' and knobs[name] != default]
+    ignored = [name for name, value in knobs.items() if value is not None]
     if ignored:
         warnings.warn(
             f"Bellhop: Cerveny beam knobs {', '.join(ignored)} are "
@@ -218,10 +226,10 @@ def reject_source_outside_the_medium(env, source) -> None:
     sloping bottom a source can be buried at its own range while sitting
     well above ``env.depth`` — a check against ``env.depth`` misses it.
 
-    Bellhop-only. Kraken, Scooter and RAM all return finite, continuous
-    fields for a source at or below the seabed (measured -96.8, -58.6 and
-    -101.2 dB on the same environment), so this must not go on the shared
-    funnel.
+    Bellhop-only. Kraken and Scooter return finite, continuous fields for a
+    source at or below the seabed (measured -96.8 and -58.6 dB on the same
+    environment), so this must not go on the shared funnel; RAM refuses a
+    source below the seafloor at r = 0 by its own output convention.
     """
     seafloor = float(np.asarray(env.bathymetry.eval(range=0.0)).flat[0])
     zs = np.atleast_1d(np.asarray(source.depths, dtype=float))
@@ -234,8 +242,8 @@ def reject_source_outside_the_medium(env, source) -> None:
             f"(Bellhop/bellhop.f90:488-492, 'source must be within the "
             f"medium'), so the run would return an all-NaN field at exit 0.",
             remediation="Move the source above the seafloor, or use "
-                        "Kraken / Scooter / RAM, which resolve a source at "
-                        "or below the seabed.")
+                        "Kraken / Scooter, which resolve a source at or "
+                        "below the seabed.")
 
     # Top half of the same Fortran test: bellhop.f90:488-492 rejects
     # DistBegTop <= 0 symmetrically with the bottom. The top boundary at
@@ -322,9 +330,8 @@ def check_beam_type_supports_run_mode(run_mode, *, beam_type) -> None:
             f"root of the sum (:779) and scales it by "
             f"const = -Dalpha*SQRT(freq)/c (:772, :774), which is linear "
             f"in the beam spacing. The returned level therefore falls as "
-            f"n_beams**-0.5, 4.8 dB per tripling of the beam count "
-            f"(measured +10.0 / +14.6 / +19.4 dB against Kraken at "
-            f"500 / 1500 / 4500 beams), so it is no transmission loss.",
+            f"n_beams**-0.5, 4.8 dB per tripling of the beam count, so "
+            f"it is no transmission loss.",
             remediation=(
                 f"Use a geometric beam, beam_type='G', 'B' or 'g', for "
                 f"{run_mode.name}; keep beam_type={beam_type!r} for "
@@ -434,7 +441,7 @@ def check_beam_pattern_spans_the_fan(pattern, *, launch_angles) -> None:
     which makes this the only available guard.
     """
     if isinstance(pattern, (str, Path)):
-        angles = read_source_beam_pattern(pattern)[:, 0]
+        angles = read_source_beam_pattern(pattern).angles
     else:
         angles = np.asarray(pattern, dtype=float)[:, 0]
     lo, hi = float(np.min(angles)), float(np.max(angles))
@@ -456,42 +463,35 @@ def check_beam_pattern_spans_the_fan(pattern, *, launch_angles) -> None:
         )
 
 
-def reject_ray_box_inside_the_domain(env, receiver, mode, z_box,
-                                     r_box) -> None:
-    """Refuse a ray box that cuts rays the receivers need.
+def ray_box_notice(env, receiver, mode, z_box, r_box) -> Optional[str]:
+    """The notice of a pinned ray box that drops rays the receivers need,
+    or ``None``.
 
     ``bellhop.f90:571-572`` stops a ray once ``ABS(x(2)) > Box%z`` or
-    ``ABS(x(1)) > Box%r``. A ``z_box`` at or above the deepest seafloor
-    drops every path that reaches it (measured on a 100 m Pekeris at
-    500 Hz: ``z_box=50`` reads 16-21 dB low at a 60 m receiver, with no
-    warning), and an ``r_box`` short of the farthest receiver returns
-    NaN beyond it. A RAYS run has no receiver to reach, so its box, in
-    depth and in range, is the trace extent the caller chose."""
+    ``ABS(x(1)) > Box%r``: the box is the caller's control over how far
+    rays are traced, and BELLHOP honours it. A ``z_box`` at or above the
+    deepest seafloor drops every path that reflects deeper (measured on a
+    100 m Pekeris at 500 Hz: ``z_box=50`` read 16-21 dB low at a 60 m
+    receiver), and an ``r_box`` short of the farthest receiver leaves the
+    receivers beyond it without a ray. The run goes ahead with the box as
+    given; this says what it does. A RAYS run has no receiver to reach."""
     if mode == RunMode.RAYS:
-        return
+        return None
     seafloor = float(env.depth)
+    said = []
     if z_box <= seafloor:
-        raise ConfigurationError(
-            f"Bellhop(z_box={z_box:g}) does not reach below the seafloor, "
-            f"which sits at {seafloor:g} m: bellhop.f90:571-572 drops a "
-            f"ray once its depth exceeds z_box, so every path that "
-            f"reflects off the bottom deeper than {z_box:g} m is lost "
-            f"and the field comes back tens of dB low with no warning.",
-            remediation=(f"Leave z_box=None "
-                         f"({BELLHOP_RAY_BOX_FACTOR:g} x env.depth = "
-                         f"{BELLHOP_RAY_BOX_FACTOR * seafloor:g} m), "
-                         f"or pin it above "
-                         f"{seafloor:g} m."),
-        )
+        said.append(
+            f"z_box={z_box:g} m does not reach below the seafloor at "
+            f"{seafloor:g} m, so every path that reflects off the bottom "
+            f"deeper than {z_box:g} m is dropped")
     if r_box < receiver.range_max:
-        raise ConfigurationError(
-            f"Bellhop(r_box={r_box:g}) stops short of the farthest "
-            f"receiver at {receiver.range_max:g} m: bellhop.f90:571-572 "
-            f"drops a ray once its range exceeds r_box, so every "
-            f"receiver beyond it comes back NaN.",
-            remediation=(f"Leave r_box=None "
-                         f"({BELLHOP_RAY_BOX_FACTOR:g} x "
-                         f"receiver.range_max), "
-                         f"or pin it at or beyond "
-                         f"{receiver.range_max:g} m."),
-        )
+        said.append(
+            f"r_box={r_box:g} m stops short of the farthest receiver at "
+            f"{receiver.range_max:g} m, so the receivers beyond it get no "
+            f"ray (the 600 dB no-energy marker)")
+    if not said:
+        return None
+    return (f"Bellhop: BELLHOP drops a ray once it leaves the ray box "
+            f"(bellhop.f90:571-572); {'; '.join(said)}. Leave z_box / r_box "
+            f"None for {BELLHOP_RAY_BOX_FACTOR:g} x env.depth and "
+            f"{BELLHOP_RAY_BOX_FACTOR:g} x receiver.range_max.")

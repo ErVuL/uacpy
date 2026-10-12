@@ -99,8 +99,8 @@ def pade_order():
 
     Every order resolves this waveguide, so the TL curves lie on top of one
     another. What changes is the range step the grid optimiser can afford at
-    a fixed accuracy budget — two Padé terms need a 1.6 m step, eight need
-    almost 60 m.
+    a fixed accuracy budget — two Padé terms need a 1.0 m step, eight need
+    38 m.
     """
     env, source, _ = shallow_water()
     line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))

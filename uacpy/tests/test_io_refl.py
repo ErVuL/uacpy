@@ -65,8 +65,57 @@ class TestSourceBeamPatternRoundTrip:
         path = tmp_path / 'beam.sbp'
         write_source_beam_pattern(path, angles, levels)
         back = read_source_beam_pattern(path)
-        assert np.allclose(back[:, 0], angles)
-        assert np.allclose(back[:, 1], levels)
+        assert np.allclose(back.angles, angles)
+        assert np.allclose(back.levels_dB, levels)
+
+    def test_the_table_record_exports_its_levels_on_the_angle_axis(
+            self, tmp_path):
+        """The record names its columns and units: ``values()`` is the dB
+        levels, ``to_xarray`` puts them on ``angle`` in degrees, the table
+        is one row per angle, and ``to_dict`` / ``from_dict`` rebuild it."""
+        from uacpy.io import BeamPatternTable
+        from uacpy.io.refl_io import (
+            read_source_beam_pattern, write_source_beam_pattern)
+        path = tmp_path / 'beam.sbp'
+        write_source_beam_pattern(path, np.array([-30.0, 0.0, 30.0]),
+                                  np.array([-6.0, 0.0, -6.0]))
+        table = read_source_beam_pattern(path)
+        assert isinstance(table, BeamPatternTable)
+        assert np.array_equal(table.values(), [-6.0, 0.0, -6.0])
+        assert not table.angles.flags.writeable
+        back = BeamPatternTable.from_dict(table.to_dict())
+        assert np.array_equal(back.angles, table.angles)
+        pytest.importorskip('xarray')
+        ds = table.to_xarray()
+        assert ds['levels_dB'].dims == ('angle',)
+        assert ds['levels_dB'].attrs['units'] == 'dB'
+        assert ds['angle'].attrs['units'] == 'deg'
+        pytest.importorskip('pandas')
+        assert table.to_dataframe().shape == (3, 2)
+
+    def test_a_source_takes_the_record_the_reader_returns(self, tmp_path):
+        """Source(beam_pattern=) takes the BeamPatternTable as it took its
+        (N, 2) array, and stores that array; np.asarray of the record is the
+        table; a copy-free view cannot be asked for, since the table is built
+        on request."""
+        import uacpy
+        from uacpy.io.refl_io import (
+            read_source_beam_pattern, write_source_beam_pattern)
+        angles = np.array([-90.0, -30.0, 0.0, 30.0, 90.0])
+        levels = np.array([-20.0, -6.0, 0.0, -6.0, -20.0])
+        write_source_beam_pattern(tmp_path / 'beam.sbp', angles, levels)
+        table = read_source_beam_pattern(tmp_path / 'beam.sbp')
+        expected = np.column_stack([angles, levels])
+        assert np.array_equal(np.asarray(table), expected)
+        source = uacpy.Source(depths=10.0, frequencies=100.0,
+                              beam_pattern=table)
+        assert isinstance(source.beam_pattern, np.ndarray)
+        assert np.array_equal(source.beam_pattern, expected)
+        np.testing.assert_allclose(source.element_directivity([0.0, 30.0]),
+                                   [1.0, 10 ** (-6.0 / 20.0)])
+        with pytest.raises(ValueError, match='cannot be returned without a '
+                                             'copy'):
+            np.asarray(table, copy=False)
 
     def test_root_name_without_extension_resolves(self, tmp_path):
         from uacpy.io.refl_io import (
@@ -74,7 +123,7 @@ class TestSourceBeamPatternRoundTrip:
         write_source_beam_pattern(tmp_path / 'beam.sbp', np.array([-10.0, 10.0]),
                                   np.array([-3.0, -6.0]))
         back = read_source_beam_pattern(tmp_path / 'beam')
-        assert np.allclose(back[:, 1], [-3.0, -6.0])
+        assert np.allclose(back.levels_dB, [-3.0, -6.0])
 
 
 class TestStagedBeamPatternNeedsTwoRows:
@@ -328,8 +377,8 @@ class TestSourceBeamPatternNeedsTwoRows:
         write_source_beam_pattern(p, np.array([-10.0, 10.0]),
                                   np.array([-3.0, -6.0]))
         back = read_source_beam_pattern(p)
-        assert np.allclose(back[:, 0], [-10.0, 10.0])
-        assert np.allclose(back[:, 1], [-3.0, -6.0])
+        assert np.allclose(back.angles, [-10.0, 10.0])
+        assert np.allclose(back.levels_dB, [-3.0, -6.0])
 
     def test_a_repeated_angle_raises_configurationerror(self, tmp_path):
         from uacpy.io.refl_io import write_source_beam_pattern
@@ -394,8 +443,8 @@ class TestSourceBeamPatternRequiresOneLevelPerAngle:
         write_source_beam_pattern(out, np.array([-90.0, 0.0, 90.0]),
                                   np.array([0.0, -3.0, 0.0]))
         back = read_source_beam_pattern(out)
-        assert back.shape == (3, 2)
-        assert np.allclose(back[:, 1], [0.0, -3.0, 0.0])
+        assert back.angles.shape == back.levels_dB.shape == (3,)
+        assert np.allclose(back.levels_dB, [0.0, -3.0, 0.0])
 
     def test_a_column_shaped_pattern_raises_configurationerror(self, tmp_path):
         # (N, 1) formats as an array in the row loop rather than a float.

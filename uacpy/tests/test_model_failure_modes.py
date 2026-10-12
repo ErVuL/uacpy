@@ -18,7 +18,7 @@ child's chdir fails; the user goes hunting for a binary that is fine.
 re-raises EACCES on 3.13, and both ``read_prt`` and ``cleanup_work_dir`` call
 it outside the ``try`` their docstrings promise covers it — so a
 ``ModelExecutionError`` in flight was demoted to ``__context__``, or (via
-``_attach_prt_tail``, which runs before ``raise exc``) lost outright.
+``attach_prt_tail``, which runs before ``raise exc``) lost outright.
 
 **F24-7** a read-only work directory died with a raw ``PermissionError`` at
 deck-write time, because the typed writability check validated the work
@@ -78,6 +78,16 @@ class TestUnrunnableBinaryIsTyped:
         assert str(dud) in str(excinfo.value)
         assert excinfo.value.__cause__.errno == errno.ENOEXEC
 
+    def test_a_binary_missing_at_launch_is_typed(self, tmp_path):
+        """A binary gone since the model resolved it (a rebuild in another
+        shell) raises what the constructor raises for a missing binary."""
+        gone = tmp_path / 'ramgeo'
+        with pytest.raises(ExecutableNotFoundError,
+                           match='executable not found') as excinfo:
+            self._model()._run_subprocess([str(gone)], cwd=tmp_path)
+        assert str(gone) in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+
     def test_a_directory_where_the_binary_belongs_is_typed(self, tmp_path):
         dud = tmp_path / 'ramgeo'
         dud.mkdir()
@@ -135,8 +145,9 @@ class TestUnrunnableBinaryIsTyped:
         good.chmod(0o755)
 
         monkeypatch.setattr(_launch, '_PACKAGE_DIR', tmp_path)
-        found = model._find_executable_in_paths(
-            'probe', bin_subdirs=['first', 'second'])
+        found = _launch.find_executable_in_paths(
+            'probe', bin_subdirs=['first', 'second'],
+            model_name=model.model_name)
         assert found == good
 
 

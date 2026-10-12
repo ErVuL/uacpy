@@ -2,8 +2,10 @@
 
 A 20 Hz source at 1000 m in a 5500 m Munk profile, whose channel axis sits at
 1300 m, run to 150 km by four models. Low frequency and a deep sound channel
-are what buy the range: energy is trapped by refraction, meets the abyssal
-bottom rarely, and re-focuses into convergence zones along the way.
+are what buy the range: the paths that leave the source within about 14° of
+the horizontal turn by refraction before they reach the surface or the
+seafloor, and stay in the channel. The abyssal plain here is hard and
+low-loss, so the steeper paths come back from it too and fill the field in.
 OAST needs OASES (./install.sh --oases yes); without it the example runs
 the other models and says so.
 
@@ -37,8 +39,9 @@ env = uacpy.Environment(
 source = uacpy.Source(depths=1000.0,      # in the channel, 300 m above its axis
                       frequencies=20.0)   # low frequency buys the range
 # Ranges start at 4 km: closer in, the deepest receivers see direct and
-# surface-reflected paths steeper than the 60° the spectral window keeps.
-receiver = uacpy.Receiver(depths=np.linspace(100, 5400, 30),
+# surface-reflected paths steeper than the 60° Kraken's mode window keeps.
+# Depths in 100 m steps, so the source depth and the channel axis are samples.
+receiver = uacpy.Receiver(depths=np.linspace(100, 5400, 54),
                           ranges=np.linspace(4000, 150000, 147))
 
 # OAST is the optional fourth: it needs the OASES binaries, and without them
@@ -53,7 +56,9 @@ except uacpy.ExecutableNotFoundError:
     print("  OAST skipped: OASES executable not found (./install.sh --oases yes)")
 
 # .at() takes labels, not indices, and snaps to the nearest sample on each
-# axis — so the on-axis level at 100 km is one call per model.
+# axis — so the on-axis level at 100 km is one call per model. It is one
+# coherent sample: in an interference null the models' small phase differences
+# become level differences of several dB, so the cuts below show the agreement.
 print("On-axis TL at 100 km (channel axis 1300 m):")
 for name, field in fields.items():
     print(f"  {name:8s} {float(field.at(depth=1300.0, range=100000.0).dB):5.1f} dB")

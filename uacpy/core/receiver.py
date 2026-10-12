@@ -13,7 +13,7 @@ from uacpy.core.deck_limits import (
     DECK_DEPTH_RESOLUTION_M, DECK_RANGE_RESOLUTION_M,
 )
 from uacpy.core._validate import (
-    reject_complex, require_non_negative, require_strictly_increasing,
+    require_non_negative, require_real_array, require_strictly_increasing,
 )
 from uacpy.core._carrier import (
     DeepCopyMixin, RevalidateOnAssignMixin, carrier,
@@ -138,17 +138,16 @@ class Receiver(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             # the atleast_1d cast below turns either into the same array([0.]).
             object.__setattr__(self, 'ranges', np.zeros(1))
 
-        # Ahead of the float64 casts below, which discard an imaginary part —
-        # see _reject_complex for the two ways they do it.
-        reject_complex(self.depths, "receiver depths")
-        reject_complex(self.ranges, "receiver ranges")
-        # Stored with object.__setattr__: a plain store to a set field is an
-        # assignment, which rebuilds the Receiver through this method
-        # (_RevalidateOnAssignMixin).
-        object.__setattr__(self, 'depths', np.atleast_1d(
-            np.array(self.depths, dtype=np.float64)))
-        object.__setattr__(self, 'ranges', np.atleast_1d(
-            np.array(self.ranges, dtype=np.float64)))
+        # Read by the package's one rule for numbers, whose guard makes the
+        # float64 cast. Stored with object.__setattr__: a plain store to a
+        # set field is an assignment, which rebuilds the Receiver through
+        # this method (_RevalidateOnAssignMixin).
+        object.__setattr__(self, 'depths', np.atleast_1d(require_real_array(
+            self.depths, "receiver depths",
+            hint="metres, positive down from surface")))
+        object.__setattr__(self, 'ranges', np.atleast_1d(require_real_array(
+            self.ranges, "receiver ranges",
+            hint="metres, outward from source")))
         for name in ('depths', 'ranges'):
             shape = getattr(self, name).shape
             if len(shape) != 1:

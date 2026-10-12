@@ -44,11 +44,12 @@ munk = uacpy.Environment(name="Munk profile", bathymetry=5000.0,
                          ssp=uacpy.SoundSpeedProfile.from_munk(5000.0))
 source = uacpy.Source(depths=1000.0,     # in the channel, above the 1300 m axis
                       frequencies=50.0)
-receiver = uacpy.Receiver(depths=np.linspace(100, 4900, 40),
+# Depths in 100 m steps, so the 1000 m cut below is a receiver depth.
+receiver = uacpy.Receiver(depths=np.linspace(100, 4900, 49),
                           ranges=np.linspace(1000, 50000, 80))
 
-# The first Bellhop call in a process pays binary and library load — about
-# 1.8 s here — which would be charged entirely to whichever mode ran first.
+# The first Bellhop call in a process pays binary and library load, which
+# would be charged entirely to whichever mode ran first.
 uacpy.Bellhop(backend='fortran').run(munk, source, receiver,
                     run_mode=uacpy.RunMode.COHERENT_TL)
 
@@ -97,8 +98,9 @@ rays.plot(env=munk, ax=axes[0],
 axes[0].set_xlim(0, 100)
 # 20-40 km is the axial crossing region, not a convergence zone: a CZ is the
 # near-surface refocusing of bottom-limited rays from a near-surface source.
-# This source sits inside the channel with a ±15° fan, so every ray here is
-# channel-trapped and never reaches the bottom.
+# This source sits inside the channel: every ray of the fan turns by
+# refraction except the two outermost, which at ±15° just reach the surface
+# and the bottom (the legend counts them).
 rays.plot(env=munk, ax=axes[1],
           title='Ray paths — zoom on the axial crossings (20-40 km)')
 axes[1].set_xlim(20, 40)
@@ -171,10 +173,8 @@ for ray in paths.rays:
     print(f"    {ray['launch_angle']:>10.3f} {ray['miss_distance_m']:>9.3f} "
           f"{ray['n_top_bounces']:>4d} {ray['n_bot_bounces']:>4d}")
 
-fig, ax = paths.plot(env=pekeris)
-ax.plot(target_range / 1000.0, target_depth, 'ro', markersize=10,
-        markeredgecolor='black', label='Receiver')
-ax.legend(loc='lower right')
+fig, ax = paths.plot(env=pekeris,
+                     title=f'{len(paths.rays)} eigenrays at 3 km / 80 m')
 fig.savefig(OUT / 'example_11d_compute_eigenrays_pekeris.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)

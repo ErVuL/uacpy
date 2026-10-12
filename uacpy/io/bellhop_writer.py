@@ -34,7 +34,7 @@ from uacpy.core.deck_limits import (
     DECK_DEPTH_FMT, DECK_DEPTH_RESOLUTION_M, NO_RECEIVER_RANGE_FALLBACK_M,
 )
 from uacpy.io.oalib_writer import (
-    biological_edge_nodes, compose_topopt, deck_depth, format_halfspace_row,
+    _biological_edge_nodes, compose_topopt, deck_depth, format_halfspace_row,
     get_top_bc_code, quote_fortran_title, resolve_ssp_topopt,
     ssp_row_attenuation_texts, write_absorption_block, write_receiver_depths,
     write_receiver_ranges, write_source_depths, write_ssp,
@@ -60,19 +60,49 @@ from uacpy.core.engine_defaults import (
 BELLHOP_SSP_GUARD_RANGE_FACTOR = 1.1
 
 
-#: The ray box past the seafloor and the farthest receiver, as a
-#: factor on each (:func:`bellhop_ray_box`).
+#: The ray box past the seafloor and the farthest receiver, as a factor on
+#: each (:func:`bellhop_ray_box`). uacpy guidance, measured: BELLHOP drops a
+#: ray once ABS(x(1)) > Box%r (bellhop.f90:571-572), and paths that turn back
+#: from beyond the farthest receiver need room to turn. On the ASA ideal wedge
+#: (25 Hz, receivers to 3 km, apex at 4 km), Bellhop against the analytic
+#: field reads median |dTL| 3.06 dB with r_box = 1.01 x 3 km, whose up-slope
+#: rays are killed before they turn, and 0.57 dB with 1.2 x; a ray-centred
+#: 'R' beam's last column at 1.2 km moves 0.1-0.3 dB between the two. The
+#: documented alternative is doc/bellhop.htm's "Make ZBOX, RBOX a bit (say
+#: 1%) roomy too make sure rays are not killed the moment they hit the
+#: bottom or are just reaching your furthest receiver." (the toolbox's decks
+#: write 1.01-1.03).
 BELLHOP_RAY_BOX_FACTOR = 1.2
 
 
-#: The advanced Cerveny beam knobs (``beam_type`` 'C' or 'R') and their
-#: defaults: the only ``**kwargs`` the beam block of
-#: :func:`write_bellhop_env_file` reads, and the defaults
-#: :class:`~uacpy.models.Bellhop` declares.
+#: The advanced Cerveny beam knobs (``beam_type`` 'C' or 'R') and the
+#: values an unset one takes: the only ``**kwargs`` the beam block of
+#: :func:`write_bellhop_env_file` reads (``None`` reads this table), and what
+#: :class:`~uacpy.models.Bellhop`'s ``None`` defaults resolve to.
+#: ``eps_multiplier`` 1, ``n_image`` 1, ``ib_win`` 5, ``component`` 'P' and
+#: the curvature 'S' are BELLHOP's own built-in values (bellhopMod.f90:22-25,
+#: ``Type = 'G S '``). The width 'F' (space filling) is uacpy guidance,
+#: measured: the documented alternative is the 'M' (minimum width) every
+#: Cerveny deck of the toolbox writes, whose width is set at the range
+#: ``r_loop`` (bellhop.f90:378-380). On a 100 m Pekeris guide at 100 Hz to
+#: 5 km, median TL off KRAKENC ('C' / 'R' beams): 'F' 5.90 / 5.46 dB; 'M' with
+#: ``r_loop`` 1 km 11.1 / 10.5 dB, 5 km 6.97 / 6.30, 100 km 5.93 / 5.48 — 'M'
+#: needs ``r_loop`` near 100 km to match 'F'; the curvature and window change
+#: nothing there. ``r_loop`` has no built-in value (read in km; used only by
+#: 'M'): 1 km
+#: is uacpy guidance, the toolbox's calib decks (5 km receivers) — its 100 km
+#: Munk / Dickins decks write 25-100 km.
 CERVENY_DEFAULTS = {
-    'beam_width_type': 'F', 'beam_curvature': 'D', 'component': 'P',
-    'eps_multiplier': 1.0, 'r_loop': 1000.0, 'n_image': 1, 'ib_win': 4,
+    'beam_width_type': 'F', 'beam_curvature': 'S', 'component': 'P',
+    'eps_multiplier': 1.0, 'r_loop': 1000.0, 'n_image': 1, 'ib_win': 5,
 }
+
+
+def cerveny_knobs(**given) -> dict:
+    """The Cerveny knobs a deck carries: each given value, and
+    :data:`CERVENY_DEFAULTS` for every one given as ``None`` or not at all."""
+    return dict(CERVENY_DEFAULTS,
+                **{k: v for k, v in given.items() if v is not None})
 
 # Beam-type letters honoured by the Bellhop env reader (case-significant).
 # Anything else maps to the geometric-hat DEFAULT case in
@@ -250,13 +280,14 @@ def bellhop_ray_box(env, receiver, *, z_box: Optional[float] = None,
     """``(z_box, r_box)``: the ray box a Bellhop deck traces rays in
     (``Box%z`` in m, ``Box%r`` in m), each pinned value kept as given.
 
-    ``z_box`` defaults to 1.2 x ``env.depth``. ``r_box`` defaults to 1.2 x the
-    receiver range extent, or 10 km when every receiver range is 0. Box%r is
-    a horizontal-range cut-off for ray integration: a ray reaching a
-    receiver at range_max has horizontal range == range_max, so the 1.2 x pad
-    already captures every arrival at the outer receivers; enlarging it
-    further only risks rays leaving the range window where a range-dependent
-    .ssp defines the sound speed (BHC_ERR_OUTSIDE_SSP).
+    ``z_box`` defaults to :data:`BELLHOP_RAY_BOX_FACTOR` (1.2) x
+    ``env.depth``. ``r_box`` defaults to 1.2 x the receiver range extent, or
+    10 km when every receiver range is 0. Box%r is a horizontal-range cut-off
+    for ray integration: the 20 % pad leaves room for the paths that turn
+    back from beyond the farthest receiver (measured on an up-slope wedge,
+    :data:`BELLHOP_RAY_BOX_FACTOR`); enlarging it further only risks rays
+    leaving the range window where a range-dependent .ssp defines the sound
+    speed (BHC_ERR_OUTSIDE_SSP).
     """
     if z_box is None:
         z_box = BELLHOP_RAY_BOX_FACTOR * env.depth
@@ -313,20 +344,6 @@ def _check_bellhop_env(env, interp_ssp) -> str:
     """Refuse an environment the deck cannot describe to Bellhop; return the
     ``TopOpt(1)`` SSP letter."""
     interp_char = resolve_ssp_topopt(env, interp_ssp)
-    # TopOpt 'Q' makes Bellhop unconditionally open <root>.ssp
-    # (ReadEnvironmentBell.f90:262-268) and abort when it is absent, and the
-    # quad file is only written from a range-dependent SSP — so a
-    # range-independent env with interp_ssp='quad' is a deck the binary
-    # cannot run.
-    if interp_char == 'Q' and not env.ssp.is_range_dependent:
-        raise ConfigurationError(
-            "write_bellhop_env_file: interp_ssp='quad' (TopOpt 'Q') "
-            "needs a range-dependent SSP to build the .ssp file "
-            "Bellhop unconditionally opens "
-            "(ReadEnvironmentBell.f90:262-268); this environment's SSP "
-            "is range-independent.",
-            remediation="Use interp_ssp='linear'/'pchip'/'spline', or "
-                        "give env.ssp a range axis.")
     # ReadEnvironmentBell.f90:459 accepts the 'P' (precalculated IRC) letter
     # but bellhop.f90:681's boundary SELECT CASE has no 'P' branch, so its
     # CASE DEFAULT (:779) aborts the run at the first bottom bounce.
@@ -452,7 +469,7 @@ def _bellhop_ssp(env, *, has_altimetry: bool, interp_char: str):
     # A Biological law is evaluated at SSP nodes only
     # (Bellhop/sspMod.f90:906): a node pair across each layer edge, in
     # the .env rows and the .ssp matrix alike, confines it to the layer.
-    ssp_depths, ssp_matrix = biological_edge_nodes(
+    ssp_depths, ssp_matrix = _biological_edge_nodes(
         ssp_depths, ssp_matrix, env.absorption, interp_char,
         who='write_bellhop_env_file')
     return ssp_depths, ssp_matrix, z_max
@@ -487,10 +504,14 @@ def _warn_if_quad_rows_hold_range0_absorption(env, ssp_matrix) -> None:
 
 def _write_quad_ssp_beside(filepath: Path, env, ssp_matrix, *, r_box,
                            receiver, verbose) -> None:
-    """The ``.ssp`` of a range-dependent profile (``TopOpt(1) == 'Q'``),
-    padded so its range axis brackets the ray box on both sides."""
+    """The ``.ssp`` a ``TopOpt(1) == 'Q'`` deck needs, which Bellhop opens
+    unconditionally (``ReadEnvironmentBell.f90:262-268``), padded so its
+    range axis brackets the ray box on both sides. A range-independent
+    profile is its one column at ``r = 0``, held over the box by the same
+    padding."""
     ssp_file = filepath.with_suffix('.ssp')
-    ssp_ranges = np.asarray(env.ssp.ranges, dtype=float)
+    ssp_ranges = np.asarray(
+        env.ssp.ranges if env.ssp.is_range_dependent else [0.0], dtype=float)
     ssp_data = ssp_matrix.copy()
     # Bellhop drops a ray once it passes Box%r, and a ray landing on
     # the last SSP range is still flagged "outside the soundspeed box",
@@ -506,7 +527,8 @@ def _write_quad_ssp_beside(filepath: Path, env, ssp_matrix, *, r_box,
     # the held-constant column is the sound speed a returned value
     # was computed in. The padding out to r_box above is not such a
     # choice — no receiver lies in that margin.
-    if ssp_ranges.size and ssp_max < receiver.range_max:
+    if (env.ssp.is_range_dependent and ssp_ranges.size
+            and ssp_max < receiver.range_max):
         warnings.warn(
             f"Bellhop: the range-dependent SSP spans to {ssp_max:.0f} m "
             f"but receivers reach {receiver.range_max:.0f} m; the last "
@@ -514,8 +536,9 @@ def _write_quad_ssp_beside(filepath: Path, env, ssp_matrix, *, r_box,
             f"the outer receivers is computed in a range-independent "
             f"column. Define SSP profiles out to at least "
             f"{receiver.range_max:.0f} m, or shorten receiver.ranges. "
-            f"Rays are traced to the box at {r_box:.0f} m (1.2 x "
-            f"receiver.range_max unless r_box= says otherwise); "
+            f"Rays are traced to the box at {r_box:.0f} m "
+            f"({BELLHOP_RAY_BOX_FACTOR:g} x receiver.range_max unless r_box= "
+            f"says otherwise); "
             f"profiles beyond the box are never read.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
@@ -681,7 +704,7 @@ def _write_beam_block(f, beam_type: str, *, n_beams: int, launch_angles, ray_ste
     # ray-centered variant).
     if beam_type.upper() not in ('C', 'R'):
         return
-    knobs = dict(CERVENY_DEFAULTS, **cerveny)
+    knobs = cerveny_knobs(**cerveny)
     validate_beam_shape(knobs['beam_width_type'], knobs['beam_curvature'],
                         knobs['component'], 'write_bellhop_env_file')
     # Bellhop's RLoop column expects km; uacpy keeps everything in
@@ -744,10 +767,13 @@ def write_bellhop_env_file(
         - E: Eigenrays
         - R: Ray trace
     beam_type : str, optional
-        Beam type (position 2): 'B'/'R'/'C'/'g'/'G'/'S'. Default is 'B'.
-        Case is significant: lowercase 'g' is the ray-centered variant
-        (ReadEnvironmentBell.f90:387-395), uppercase are Cartesian.
-        - B: Geometric Gaussian, Cartesian (recommended)
+        Beam type (position 2): 'B'/'R'/'C'/'g'/'G'/'S'. Default is 'G',
+        the geometric hat beam that is also Bellhop's own default
+        (:data:`~uacpy.core.engine_defaults.BELLHOP_BEAM_TYPE`;
+        ReadEnvironmentBell.f90:394-396). Case is significant: lowercase
+        'g' is the ray-centered variant (ReadEnvironmentBell.f90:387-395),
+        uppercase are Cartesian.
+        - B: Geometric Gaussian, Cartesian
         - R: Cerveny Gaussian, ray-centered
         - C: Cerveny Gaussian, Cartesian
         - g: Geometric hat, ray-centered
@@ -758,9 +784,11 @@ def write_bellhop_env_file(
     grid_type : str, optional
         Grid type (position 5): 'R' (rectilinear), 'I' (irregular). Default is 'R'.
     interp_ssp : str, optional
-        SSP connection scheme when ``env.ssp.kind == 'measured'``
-        (drives ``TopOpt(1)``): ``'linear'`` (default), ``'pchip'``,
-        ``'spline'``, ``'quad'``, ``'n2linear'``.
+        SSP connection scheme (drives ``TopOpt(1)``): ``'linear'``,
+        ``'pchip'``, ``'spline'``, ``'quad'``, ``'n2linear'``. Default
+        ``None`` is automatic: ``'quad'`` (a ``.ssp`` file is written) for a
+        range-dependent ``env.ssp``, ``'linear'`` otherwise. An isovelocity
+        ``env.ssp`` writes ``'C'`` whatever is asked.
     interp_bathymetry : str, optional
         ``.bty`` interpolation: ``'linear'`` (default) or ``'curvilinear'``.
     interp_altimetry : str, optional
@@ -784,19 +812,21 @@ def write_bellhop_env_file(
     ray_step : float, optional
         Step size in meters. If 0, uses automatic. Default is 0.
     z_box : float, optional
-        Maximum depth for ray box. If None, uses 1.2 * env.depth.
+        Maximum depth for ray box. If None, uses 1.2 * env.depth
+        (:data:`BELLHOP_RAY_BOX_FACTOR`).
     r_box : float, optional
         Maximum range for ray box. If None, uses 1.2 * receiver.range_max.
     verbose : bool or str, optional
         Print verbose output. Default is False.
     **kwargs
-        Advanced Cerveny beam parameters (for beam_type 'C' or 'R'):
-        - beam_width_type (str): 'F'/'M'/'W'
-        - beam_curvature (str): 'D'/'S'/'Z'
-        - eps_multiplier (float): Epsilon multiplier
-        - r_loop (float): Range (m) for choosing beam width
-        - n_image (int): Number of images
-        - ib_win (int): Beam windowing
+        Advanced Cerveny beam parameters (for beam_type 'C' or 'R'); one
+        absent or ``None`` takes :data:`CERVENY_DEFAULTS`:
+        - beam_width_type (str): 'F'/'M'/'W' (default 'F')
+        - beam_curvature (str): 'D'/'S'/'Z' (default 'S')
+        - eps_multiplier (float): Epsilon multiplier (default 1)
+        - r_loop (float): Range (m) for choosing beam width (default 1000)
+        - n_image (int): Number of images (default 1)
+        - ib_win (int): Beam windowing (default 5)
         - component (str): 'P' pressure (default), 'V' vertical,
           'H' horizontal
 
@@ -864,7 +894,7 @@ def write_bellhop_env_file(
             ati_code=ati_code, verbose=verbose)
         ssp_depths, ssp_matrix, z_max = _bellhop_ssp(
             env, has_altimetry=has_altimetry, interp_char=interp_char)
-        if interp_char == 'Q' and env.ssp.is_range_dependent:
+        if interp_char == 'Q':
             _write_quad_ssp_beside(filepath, env, ssp_matrix, r_box=r_box,
                                    receiver=receiver, verbose=verbose)
             _warn_if_quad_rows_hold_range0_absorption(env, ssp_matrix)

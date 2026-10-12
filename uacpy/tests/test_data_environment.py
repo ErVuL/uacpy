@@ -103,6 +103,54 @@ def test_bottom_from_class_name(stub_fetchers):
     assert env.bottom.acoustic_type == 'half-space'
 
 
+@pytest.mark.parametrize('name', ['sand', 'basalt'])
+def test_a_bottom_class_name_is_the_fluid_preset_environment_reads(
+        stub_fetchers, name):
+    fetched = env_mod.fetch_environment((43.2, 7.5), bottom=name)
+    built = Environment(bathymetry=2000.0, bottom=name)
+    halfspace = fetched.bottom.columns[0].halfspace
+    assert halfspace == built.bottom.columns[0].halfspace
+    assert halfspace.shear_speed == 0.0
+
+
+@pytest.mark.parametrize('phi', [1800.0, 20.5, -20.5, float('nan'),
+                                 float('inf')])
+def test_a_bottom_number_that_is_no_grain_size_is_refused_before_any_fetch(
+        monkeypatch, phi):
+    calls = _block_all_fetchers(monkeypatch)
+    with pytest.raises(ConfigurationError, match='sound speed'):
+        env_mod.fetch_environment((43.2, 7.5), bottom=phi)
+    assert calls == []
+
+
+@pytest.mark.parametrize('phi', [20.0, -20.0])
+def test_a_bottom_number_at_twenty_phi_is_a_grain_size(stub_fetchers, phi):
+    env = env_mod.fetch_environment((43.2, 7.5), bottom=phi)
+    assert env.bottom.columns[0].halfspace.grain_size_phi == phi
+
+
+def test_a_literal_cast_shallower_than_the_seafloor_is_announced(
+        stub_fetchers):
+    """The stubbed seafloor is 2000 m; a 500 m cast passed as ``ssp=`` is
+    held at its deepest speed over 1500 m, and the call says so."""
+    from uacpy.core.exceptions import FallbackWarning
+    cast = SoundSpeedProfile(depths=[0.0, 200.0, 500.0],
+                             sound_speed=[1510.0, 1495.0, 1490.0])
+    with recorded_warnings() as caught:
+        env = env_mod.fetch_environment((43.2, 7.5), ssp=cast, bottom=2.0)
+    assert env.depth == 2000.0
+    assert [w for w in caught if issubclass(w.category, FallbackWarning)
+            and 'held constant over the bottom 1500 m' in str(w.message)]
+
+
+def test_a_fractional_max_days_is_refused_before_any_fetch(monkeypatch):
+    calls = _block_all_fetchers(monkeypatch)
+    with pytest.raises(ConfigurationError,
+                       match='fetch_environment: max_days must be a whole'):
+        env_mod.fetch_environment((43.2, 7.5), max_days=1.5)
+    assert calls == []
+
+
 def test_bottom_passthrough(stub_fetchers):
     bp = BoundaryProperties(acoustic_type='half-space', sound_speed=1700, density=1.8)
     env = env_mod.fetch_environment((43.2, 7.5), bottom=bp)
@@ -415,15 +463,15 @@ def test_range_dependent_bottom_requires_transect(stub_fetchers):
 
 def test_with_absorption(monkeypatch, stub_fetchers):
     from uacpy.core.absorption import FrancoisGarrison
+    from uacpy.core._water import WaterProfile
     monkeypatch.setattr(env_mod, '_fetch_ts_profile_backend',
                         lambda point, **kw: _ts_record())
     env = env_mod.fetch_environment((43.2, 7.5), with_absorption=True)
     assert isinstance(env.absorption, FrancoisGarrison)
     # The whole fetched column, each depth with its own water.
-    np.testing.assert_array_equal(env.absorption.temperature,
-                                  [[0.0, 18.0], [50.0, 16.0]])
-    np.testing.assert_array_equal(env.absorption.salinity,
-                                  [[0.0, 36.0], [50.0, 36.1]])
+    assert env.absorption.temperature == WaterProfile([0.0, 50.0],
+                                                      [18.0, 16.0])
+    assert env.absorption.salinity == WaterProfile([0.0, 50.0], [36.0, 36.1])
 
 
 @pytest.mark.parametrize('resolution', ['1.00', '0.25'])
@@ -469,7 +517,7 @@ def test_with_absorption_under_a_literal_ssp_reads_woa23_cache_first(
     env = env_mod.fetch_environment((43.2, 7.5), bathymetry=2000.0,
                                     ssp=1500.0, with_absorption=True)
     assert tried == expected
-    np.testing.assert_array_equal(env.absorption.temperature[:, 1],
+    np.testing.assert_array_equal(env.absorption.temperature.values,
                                   [18.0, 16.0])
 
 
@@ -617,6 +665,10 @@ def test_fetch_bottom_forwards_the_sources_own_options(monkeypatch):
     (('crust1', 'pelagic'), {'use_globsed': False},
      "'pelagic' takes no option 'use_globsed'"),
     ('crust1', {'cache_only': True}, "is set by fetch_bottom itself"),
+    # No fetcher takes 'environment' and fetch_bottom has no such parameter,
+    # so it is an unknown option, not one fetch_bottom sets.
+    ('crust1', {'environment': 'abyssal-plain'},
+     "'crust1' takes no option 'environment'"),
 ])
 def test_a_source_option_no_fetcher_takes_is_refused_before_any_fetch(
         monkeypatch, source, options, match):
@@ -664,7 +716,8 @@ def test_an_argo_cast_is_continued_by_woa23_through_a_blend(monkeypatch):
                                     bottom='sand')
     z = np.asarray(env.ssp.depths)
     c = np.asarray(env.ssp.sound_speed)[:, 0]
-    top = 2000.0 - env_mod.CAST_BLEND_M
+    from uacpy.data.sound_speed import CAST_BLEND_M
+    top = 2000.0 - CAST_BLEND_M
     assert np.all(c[z <= top] == 1490.0)
     assert np.all(c[z >= 2000.0] == 1500.0)
     blend = (z > top) & (z < 2000.0)
@@ -1065,16 +1118,19 @@ def test_an_abyssal_environment_reaches_a_phi_literal_and_is_refused_with_apl_uw
         warnings.simplefilter('ignore')
         terrace = env_mod.fetch_environment((30.0, -40.0), **kwargs)
         abyssal = env_mod.fetch_environment((30.0, -40.0),
-                                         bottom_environment='abyssal-plain',
+                                         bottom_hamilton_fit='abyssal-plain',
                                          **kwargs)
     rho = [e.bottom.columns[0].halfspace.density for e in (terrace, abyssal)]
     assert rho[1] < rho[0]          # the abyssal fit is lighter at 8.5 ϕ
     assert abs(rho[1] - 1.39) < 0.02
-    with pytest.raises(ConfigurationError, match='has no'):
+    with pytest.raises(ConfigurationError, match='has no') as refused:
         env_mod.fetch_environment((30.0, -40.0), bottom='sand',
                                bathymetry=4000.0, ssp=1500.0,
                                bottom_model='apl-uw',
-                               bottom_environment='abyssal-hill')
+                               bottom_hamilton_fit='abyssal-hill')
+    # The remedy names the caller's own arguments.
+    assert 'drop bottom_hamilton_fit=' in str(refused.value)
+    assert 'bottom_model=DEFAULT_GRAIN_SIZE_MODEL' in str(refused.value)
 
 
 @pytest.mark.parametrize('preset', ['auto', 'local'])
@@ -1097,10 +1153,10 @@ def test_grain_size_sample_beats_pelagic_ooze_off_cape_hatteras(preset):
             order, point, transect=False, cache_only=True, depth=40.0)
     assert source == 'grainsize'
     assert bottom.sound_speed == pytest.approx(sample.sound_speed, rel=1e-9)
-    # The sample is coarse sand, and coarse of ~1 ϕ the grain-size conversion
-    # evaluates the Hamilton & Bachman (T) regression where it used to hold the
-    # table's 0.92 ϕ end row, so this baseline moved up with it. The ratio is
-    # carried back to the package's one water, the nominal 1500 m/s.
+    # The sample is coarse sand, and coarse of 1 ϕ the grain-size conversion
+    # evaluates the Hamilton & Bachman (T) regression on TR 9407's coarse
+    # branch. The ratio is carried back to the package's one water, the
+    # nominal 1500 m/s.
     assert bottom.sound_speed == pytest.approx(1805.5, abs=0.5)
     assert bottom.density == pytest.approx(2.152, abs=0.01)
 
@@ -1210,7 +1266,7 @@ def test_bottom_model_selects_the_grain_size_relations_for_a_phi_literal():
     assert apl.attenuation == pytest.approx(expected['attenuation'])
     assert apl.sound_speed != pytest.approx(ham.sound_speed)
     assert env_mod._resolve_bottom('sand', model='apl-uw') == \
-        bottom_from_class('sand')
+        bottom_from_class('sand', elastic=False)
 
 
 def test_an_unknown_bottom_model_is_refused_before_any_fetch(monkeypatch):
@@ -1287,7 +1343,7 @@ def test_source_names_resolve_in_any_case_on_every_route(
             seen.append(order)
             raise env_mod.DataFetchError('stubbed bottom fetch')
         monkeypatch.setattr(env_mod, '_fetch_bottom', _spy)
-        env_mod.fetch_environment((43.2, 7.5), bottom=1650.0,
+        env_mod.fetch_environment((43.2, 7.5), bottom=2.0,
                                   **{axis: spelling})
         assert seen and seen[0] == (spelling.lower(),)
         return
@@ -1348,20 +1404,27 @@ def test_the_fetch_path_scales_sound_speed_in_situ_and_density_by_the_default():
 class TestFetchEnvironmentGivesOneProvenanceNotice:
     """Every provenance notice the fetchers give inside one
     ``fetch_environment`` call is folded into ONE ``ProvenanceWarning``
-    naming each; any other warning passes on as it came."""
+    naming each; any other warning passes on as it came. ``'P'`` is a
+    provenance notice, ``'PF'`` a fallback that says where a value came
+    from, ``'F'`` any other fallback."""
 
     @staticmethod
     def _notices(*emitted):
         import warnings
         from uacpy.core.exceptions import FallbackWarning, ProvenanceWarning
-        from uacpy.data._provenance_notice import one_provenance_notice
+        from uacpy.data._provenance_notice import (
+            one_provenance_notice, provenance_fallback, provenance_notice)
 
         @one_provenance_notice(subject="this environment's data",
                                record='uacpy.data.citations(env)')
         def fetch_environment():
-            for category, text in emitted:
-                warnings.warn(text, {'P': ProvenanceWarning,
-                                     'F': FallbackWarning}[category])
+            for kind, text in emitted:
+                if kind == 'P':
+                    provenance_notice(text)
+                elif kind == 'PF':
+                    provenance_fallback(text)
+                else:
+                    warnings.warn(text, FallbackWarning)
             return 'env'
 
         with recorded_warnings() as rec:
@@ -1378,12 +1441,13 @@ class TestFetchEnvironmentGivesOneProvenanceNotice:
                   'max_distance_km= to refuse data that far.'),
             ('P', 'CRUST1.0 has no formal licence — cite Laske et al. 2013 '
                   'and verify the terms. See uacpy.data.citations().'),
-            ('F', 'local sediment DB: 3 of 5 transect waypoints have no '
-                  'seabed data and were filled from the nearest covered '
-                  'waypoint, up to 281 km away. Narrow the transect.'),
-            ('F', 'sound-speed profile ends at 2900 m but the seafloor is at '
-                  '3344 m; extrapolated the last 444 m along the profile\'s '
-                  'deep gradient to 1502.1 m/s. Supply a measured profile.'))
+            ('PF', 'local sediment DB: 3 of 5 transect waypoints have no '
+                   'seabed data and were filled from the nearest covered '
+                   'waypoint, up to 281 km away. Narrow the transect.'),
+            ('PF', 'sound-speed profile ends at 2900 m but the seafloor is '
+                   'at 3344 m; extrapolated the last 444 m along the '
+                   'profile\'s deep gradient to 1502.1 m/s. Supply a '
+                   'measured profile.'))
         assert notice.startswith('fetch_environment: 4 note(s)')
         assert '206.5 km away: beyond 25 km;' in notice
         assert ('(2) CRUST1.0 has no formal licence — cite Laske et al. 2013 '
@@ -1432,14 +1496,14 @@ class TestATransectGivesOneProvenanceNotice:
         assert fetch.__code__.co_name == 'fetch_with_one_provenance_notice'
 
     def test_a_transect_of_point_notices_gives_one_notice(self, monkeypatch):
-        import warnings
         from uacpy.core.exceptions import ProvenanceWarning
         from uacpy.data import graw_local
+        from uacpy.data._provenance_notice import provenance_notice
 
         def node(lat, lon, **kw):
-            warnings.warn(f"fetch_seabed_density: the data come from the "
-                          f"node {lat:.2f} N, 30 km away. Pass "
-                          f"max_distance_km=.", ProvenanceWarning)
+            provenance_notice(f"fetch_seabed_density: the data come from the "
+                              f"node {lat:.2f} N, 30 km away. Pass "
+                              f"max_distance_km=.")
             return 1.8
         monkeypatch.setattr(graw_local, 'graw_node', node)
         with recorded_warnings() as rec:
@@ -1452,19 +1516,18 @@ class TestATransectGivesOneProvenanceNotice:
             in notice
 
     def test_a_summarised_fetch_inside_another_passes_its_notices_up(self):
-        import warnings
-        from uacpy.core.exceptions import ProvenanceWarning
-        from uacpy.data._provenance_notice import one_provenance_notice
+        from uacpy.data._provenance_notice import (one_provenance_notice,
+                                                   provenance_notice)
 
         @one_provenance_notice(subject='the samples', record='x')
         def inner():
-            warnings.warn('inner one. More.', ProvenanceWarning)
-            warnings.warn('inner two. More.', ProvenanceWarning)
+            provenance_notice('inner one. More.')
+            provenance_notice('inner two. More.')
 
         @one_provenance_notice(subject='the data', record='y')
         def outer():
             inner()
-            warnings.warn('outer. More.', ProvenanceWarning)
+            provenance_notice('outer. More.')
 
         with recorded_warnings() as rec:
             outer()
@@ -1472,3 +1535,59 @@ class TestATransectGivesOneProvenanceNotice:
         assert notice == ('outer: 3 note(s) on where the data come from: '
                           '(1) inner one; (2) inner two; (3) outer. Each '
                           "source's full record is in y.")
+
+    def test_two_threads_fetching_at_once_each_summarise_their_own_notices(
+            self):
+        """The windows overlap: A opens, B opens, A gives its notice, B gives
+        its notice, B closes, A closes. Each summary lists its own fetch's
+        notice and no other."""
+        import threading
+        from uacpy.core.exceptions import ProvenanceWarning
+        from uacpy.data._provenance_notice import (one_provenance_notice,
+                                                   provenance_notice)
+        a_in, b_in, a_gave, b_gave = (threading.Event() for _ in range(4))
+
+        @one_provenance_notice(subject='the data', record='x')
+        def fetch_a():
+            a_in.set()
+            b_in.wait(5)
+            provenance_notice('A note. More.')
+            a_gave.set()
+            b_gave.wait(5)
+
+        @one_provenance_notice(subject='the data', record='x')
+        def fetch_b():
+            b_in.set()
+            a_gave.wait(5)
+            provenance_notice('B note. More.')
+            b_gave.set()
+
+        def run_b():
+            a_in.wait(5)
+            fetch_b()
+
+        with recorded_warnings() as rec:
+            thread_a = threading.Thread(target=fetch_a)
+            thread_b = threading.Thread(target=run_b)
+            thread_a.start(); thread_b.start()
+            thread_a.join(10); thread_b.join(10)
+        notices = sorted(str(w.message) for w in rec
+                         if issubclass(w.category, ProvenanceWarning))
+        assert notices == [
+            'fetch_a: 1 note(s) on where the data come from: (1) A note. '
+            "Each source's full record is in x.",
+            'fetch_b: 1 note(s) on where the data come from: (1) B note. '
+            "Each source's full record is in x."]
+
+    def test_a_summarised_fetch_leaves_the_warning_filters_alone(self):
+        import warnings
+        from uacpy.data._provenance_notice import one_provenance_notice
+        seen = []
+
+        @one_provenance_notice(subject='the data', record='x')
+        def fetch():
+            seen.append(list(warnings.filters))
+
+        before = list(warnings.filters)
+        fetch()
+        assert seen == [before]

@@ -24,7 +24,7 @@ from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
 from uacpy.core._grid import nearest_index_on_axis
 from uacpy.core._repr import axis, build
 from uacpy.core._validate import (
-    require_non_negative, require_strictly_increasing, reject_complex,
+    require_non_negative, require_real_array, require_strictly_increasing,
 )
 from uacpy.core.collapse import RANGE_COLLAPSE_METHODS, _method_list
 from uacpy.core._provenance import dedupe_provenance
@@ -103,10 +103,8 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # never reaches it.
         self.nodes = [_copy.deepcopy(p) for p in self.nodes]
         if self.ranges is not None:
-            # Ahead of the float64 cast below, which discards an imaginary
-            # part — see _reject_complex for the two ways it does it.
-            reject_complex(self.ranges, "Surface.ranges")
-            self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
+            self.ranges = require_real_array(
+                self.ranges, "Surface.ranges", hint="metres").reshape(-1)
             if self.ranges.size != len(self.nodes):
                 raise ConfigurationError(
                     f"Surface: ranges ({self.ranges.size}) and nodes "
@@ -171,9 +169,9 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             nodes = []
         if nodes and all(isinstance(n, (tuple, list)) and len(n) == 2
                          and isinstance(n[1], BoundaryProperties) for n in nodes):
-            ranges = [float(r) for r, _ in nodes]
+            ranges = [r for r, _ in nodes]
             props = [p for _, p in nodes]
-            return cls(nodes=props, ranges=np.asarray(ranges, dtype=float))
+            return cls(nodes=props, ranges=ranges)
         raise ConfigurationError(
             "Surface: expected None, a BoundaryProperties, a Surface, or a list "
             "of (range_m, BoundaryProperties) nodes; got "
@@ -207,8 +205,10 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                    for p in self.nodes)
 
     # ── slicing ─────────────────────────────────────────────────────────────
-    def _nearest_index(self, range: float) -> int:
-        return nearest_index_on_axis(self.ranges, range)
+    def _nearest_index(self, range: float, who: str) -> int:
+        return nearest_index_on_axis(self.ranges, range, who=who,
+                                     several=", or index positions with "
+                                             "isel()")
 
     def at(self, *, range: float) -> BoundaryProperties:
         """Copy of the nearest surface :class:`BoundaryProperties` to ``range``
@@ -226,7 +226,8 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         range : float
             Range (m), a finite scalar.
         """
-        return _copy.deepcopy(self.nodes[self._nearest_index(range)])
+        return _copy.deepcopy(self.nodes[self._nearest_index(range,
+                                                              "Surface.at")])
 
     def isel(self, *, range: int) -> BoundaryProperties:
         """Copy of the surface :class:`BoundaryProperties` at integer index
@@ -247,7 +248,9 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     def collapse_range(self, method: str = 'r0') -> 'Surface':
         """Collapse a range-dependent surface to a single uniform boundary.
 
-        Returns ``self`` (not a copy) when the surface is already uniform.
+        Returns a copy, also when the surface is already uniform (as
+        :meth:`Bottom.collapse_range` does), so editing the result never
+        edits this surface.
 
         ``'r0'`` / ``'rmax'`` keep the first / last node. ``'mean'`` /
         ``'median'`` numerically average the boundary properties across nodes,
@@ -265,8 +268,8 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             The reduction (see above). Default ``'r0'``.
         """
         # Validated before the early return: a range-independent
-        # carrier has nothing to reduce, and returning self first
-        # made a typo silent until the user switched to a
+        # carrier has nothing to reduce, and returning before the check
+        # would leave a typo silent until the user switched to a
         # range-dependent environment — the moment they are least
         # looking for one.
         if method not in RANGE_COLLAPSE_METHODS:
@@ -274,7 +277,7 @@ class Surface(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 f"Surface.collapse_range: unknown method={method!r}; "
                 f"valid: {_method_list(RANGE_COLLAPSE_METHODS)}.")
         if not self.is_range_dependent:
-            return self
+            return self.copy()
         if method == 'r0':
             return Surface(nodes=[_copy.deepcopy(self.nodes[0])])
         if method == 'rmax':

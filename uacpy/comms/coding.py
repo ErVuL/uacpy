@@ -183,8 +183,11 @@ def viterbi_decode(coded, polys=DEFAULT_POLYS, constraint_length=DEFAULT_CONSTRA
 
 
 def viterbi_hard(bm0, bm1, prev0, prev1, n_states, bit_of_state):
-    """Hard-decision Viterbi over a rate-1/2 butterfly trellis.
+    """Hard-decision Viterbi add-compare-select over a binary-input trellis.
 
+    The rate-1/n core of :func:`viterbi_decode`, which feeds it any number of
+    generator polynomials: every state has two predecessors for any k = 1
+    code, so only the branch metrics depend on the rate.
     ``bm0[k]``/``bm1[k]`` are the branch metrics into every state at step
     ``k`` from its two predecessors ``prev0``/``prev1``; ``bit_of_state``
     reads the input bit off the arriving state. Starts and ends in state 0

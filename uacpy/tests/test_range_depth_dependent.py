@@ -212,7 +212,7 @@ class TestModelWithRangeDependence:
         )
 
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        result = bellhop.compute_field(env=env, source=source, receiver=receiver)
 
         assert isinstance(result, Field)
         assert result.shape == (3, 3)
@@ -245,7 +245,7 @@ class TestModelWithRangeDependence:
         )
 
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        result = bellhop.compute_field(env=env, source=source, receiver=receiver)
 
         assert isinstance(result, Field)
 
@@ -358,14 +358,14 @@ class TestRangeDependentLayeredBottom:
 
     def _make_rdl(self):
         near = SeabedColumn(
-            layers=[SedimentLayer(5, 1500, 1.2, 1.0),
-                    SedimentLayer(15, 1550, 1.4, 0.8)],
+            layers=[SedimentLayer(5, sound_speed=1500, density=1.2, attenuation=1.0),
+                    SedimentLayer(15, sound_speed=1550, density=1.4, attenuation=0.8)],
             halfspace=BoundaryProperties(acoustic_type='half-space',
                                          sound_speed=1700, density=1.8, attenuation=0.2),
         )
         far = SeabedColumn(
-            layers=[SedimentLayer(3, 1650, 1.8, 0.3),
-                    SedimentLayer(10, 1750, 2.0, 0.2)],
+            layers=[SedimentLayer(3, sound_speed=1650, density=1.8, attenuation=0.3),
+                    SedimentLayer(10, sound_speed=1750, density=2.0, attenuation=0.2)],
             halfspace=BoundaryProperties(acoustic_type='half-space',
                                          sound_speed=2200, density=2.5, attenuation=0.05),
         )
@@ -398,7 +398,7 @@ class TestRangeDependentLayeredBottom:
 
     def test_validation_length_mismatch(self):
         lb = SeabedColumn(
-            layers=[SedimentLayer(5, 1500, 1.2)],
+            layers=[SedimentLayer(5, sound_speed=1500, density=1.2)],
             halfspace=BoundaryProperties(acoustic_type='half-space',
                                          sound_speed=1700, density=1.8),
         )
@@ -547,7 +547,7 @@ class TestIntegrationLayeredBottom:
         """Kraken produces a valid TL field over a layered bottom."""
         from uacpy.models import Kraken
         kf = Kraken(verbose=False)
-        result = kf.compute_tl(layered_env, source, receiver)
+        result = kf.compute_field(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
         assert 30 < np.nanmin(result.dB) < 100
         assert 50 < np.nanmax(result.dB) < 200
@@ -557,7 +557,7 @@ class TestIntegrationLayeredBottom:
         """Scooter should produce valid TL with layered bottom."""
         from uacpy.models import Scooter
         scooter = Scooter(verbose=False)
-        result = scooter.compute_tl(layered_env, source, receiver)
+        result = scooter.compute_field(layered_env, source, receiver)
         assert result.data.shape == (20, 20)
         assert 30 < np.nanmin(result.dB) < 100
 
@@ -565,7 +565,7 @@ class TestIntegrationLayeredBottom:
     def test_kraken_layered_modes(self, layered_env, source, receiver):
         """``Kraken.run`` returns a populated Field over a layered bottom.
 
-        ``run`` and ``compute_tl`` both yield a Field; ``compute_modes`` is the
+        ``run`` and ``compute_field`` both yield a Field; ``compute_modes`` is the
         entry point that returns a ``Modes``. This asserts only that the
         layered deck marches to a non-empty result — the values are bounded by
         ``test_kraken_layered`` above.

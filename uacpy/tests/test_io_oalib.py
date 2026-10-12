@@ -313,10 +313,14 @@ class TestFieldFlpWriter:
         assert all(float(v) == 0.0 for v in values)
 
 
-class TestShdNoDataCells:
-    """Exact-zero SHD pressure cells — grid points the engine never wrote
-    (Bellhop no-ray cells, an empty KRAKEN modal sum) — surface as NaN,
-    uacpy's no-data convention."""
+class TestShdPressureIsTheFileAsWritten:
+    """``read_shd_bin`` returns the pressure records as the writer stored
+    them. An exact zero is usually the writer's own answer — an empty beam
+    sum (``Bellhop/bellhop.f90:240-241``), an empty KRAKEN modal sum
+    (``KrakenField/EvaluateMod.f90:27-31``), a Dirichlet surface receiver in
+    Scooter's ``fields.exe`` (``Scooter/scooter.f90:635-638``) — and the
+    reader cannot tell which engine wrote the file, so it keeps every value;
+    the model wrappers mark the cells their engine never evaluates."""
 
     @staticmethod
     def _write_bin(path, rows):
@@ -363,20 +367,19 @@ class TestShdNoDataCells:
         assert shd.pressure.shape == (1, 1, 2, 2)
         assert shd.pressure_frequency == 100.0
 
-    def test_read_shd_bin_zero_pressure_is_nan(self, tmp_path):
+    def test_read_shd_bin_returns_an_exact_zero_as_zero(self, tmp_path):
         from uacpy.io.oalib_reader import read_shd_bin
-        # The (depth 0, range 0) cell is an exact complex zero = no data.
         rows = [
-            [0.0, 0.0, 0.5, 0.25],     # depth 10 m: no-data, 0.5+0.25j
+            [0.0, 0.0, 0.5, 0.25],     # depth 10 m: 0+0j, 0.5+0.25j
             [1.0, 0.0, 2.0, -1.0],     # depth 20 m: 1+0j, 2-1j
         ]
         pr = read_shd_bin(
             str(self._write_bin(tmp_path / 't.shd', rows))).pressure[0, 0]
+        expected = np.array([[0.0, 0.5 + 0.25j], [1.0, 2.0 - 1.0j]],
+                            dtype=np.complex64)
         assert pr.shape == (2, 2)
-        assert np.isnan(pr[0, 0])
-        assert pr[0, 1] == pytest.approx(0.5 + 0.25j)
-        assert pr[1, 0] == pytest.approx(1.0 + 0.0j)
-        assert pr[1, 1] == pytest.approx(2.0 - 1.0j)
+        assert not np.isnan(pr).any()
+        np.testing.assert_array_equal(pr, expected)
 
 
 class TestReaderCorruptFileRaises:
@@ -661,6 +664,31 @@ class TestPhaseSpeedBoundsForParameterFreeBottoms:
         assert c_high == 1700.0
 
 
+class TestThePhaseSpeedLineIsWrittenExactly:
+    """``ReadEnvironmentMod.f90:133`` reads cLow/cHigh list-directed into
+    REAL(KIND=8), so the deck states each bound as the text that reads back
+    as the same double."""
+
+    @pytest.mark.parametrize('c_low, c_high', [
+        (1400.37, 1987.654321), (1400.0, 1e9), (0.0, 2000.0)])
+    def test_the_pair_reads_back_as_the_given_doubles(self, c_low, c_high):
+        import io
+        from uacpy.io.oalib_writer import write_phase_speed_and_rmax
+        buf = io.StringIO()
+        write_phase_speed_and_rmax(buf, rmax_m=5000.0, c_low=c_low,
+                                   c_high=c_high)
+        speeds = buf.getvalue().splitlines()[0].split()
+        assert [float(v) for v in speeds] == [c_low, c_high]
+
+    def test_a_fractional_bound_keeps_every_digit(self):
+        import io
+        from uacpy.io.oalib_writer import write_phase_speed_and_rmax
+        buf = io.StringIO()
+        write_phase_speed_and_rmax(buf, rmax_m=5000.0, c_low=1400.37,
+                                   c_high=1987.654321)
+        assert buf.getvalue().splitlines()[0] == '1400.37 1987.654321'
+
+
 class TestMultiProfileEnvKeepsLayerThickness:
     """``write_multi_profile_env`` holds every profile to one total media depth.
     That stretch must land on a transparent halfspace-property pad, never on a
@@ -804,17 +832,227 @@ class TestFlpOptionValidation:
         assert (tmp_path / 'bare.flp').exists()
 
 
-class TestBinaryArrivalsRejected:
-    """``read_arr_file`` only parses the ASCII ``.arr``; the binary layout
-    (RunType 'a') is file content this reader cannot parse, so it raises
-    the typed :class:`FileFormatError` like every other unreadable file."""
+class TestSingleProfileDecksHoldOneProfile:
+    """KRAKEN, SCOOTER, SPARC and BOUNCE read one SSP through
+    ``misc/ReadEnvironmentMod.f90``, whose ``ReadTopOpt`` has no ``'Q'``
+    case: their public writers refuse a range-dependent ``env.ssp`` by name
+    rather than write Bellhop's auto ``'Q'`` and the range-0 profile, and
+    ``interp_ssp=None`` on a single profile writes ``'C'``."""
 
-    def test_binary_arrivals_raises_fileformaterror(self, tmp_path):
+    @staticmethod
+    def _env(range_dependent, writer=''):
+        if range_dependent:
+            ssp = SoundSpeedProfile(depths=[0.0, 50.0, 100.0],
+                                    sound_speed=[[1500.0, 1505.0],
+                                                 [1495.0, 1500.0],
+                                                 [1490.0, 1495.0]],
+                                    ranges=[0.0, 5000.0])
+        else:
+            ssp = [(0.0, 1500.0), (50.0, 1495.0), (100.0, 1490.0)]
+        # SPARC takes only a vacuum or rigid bottom (sparc.f90:101-104).
+        bottom = (BoundaryProperties(acoustic_type='rigid')
+                  if writer == 'write_sparc_env_file' else 'sand')
+        return Environment(bathymetry=100.0, ssp=ssp, bottom=bottom)
+
+    @staticmethod
+    def _write(writer, path, env, interp_ssp=None):
+        from uacpy.core import Receiver
+        from uacpy.io import oalib_writer as w
+        src = Source(depths=25.0, frequencies=100.0)
+        rcv = Receiver(depths=[50.0], ranges=[1000.0, 2000.0])
+        common = dict(interp_ssp=interp_ssp, c_low=1400.0, c_high=2000.0)
+        if writer == 'write_bounce_input_file':
+            w.write_bounce_input_file(path, env, src, n_mesh=0, rmax_m=5000.0,
+                                      **common)
+        elif writer == 'write_sparc_env_file':
+            w.write_sparc_env_file(path, env, src, rcv, pulse_type='P   ',
+                                   freq_min=50.0, freq_max=150.0,
+                                   n_time_samples=256, time_max=1.0,
+                                   march_start=0.0, courant_factor=1.0,
+                                   **common)
+        else:
+            getattr(w, writer)(path, env, src, rcv, **common)
+
+    WRITERS = ['write_kraken_env_file', 'write_scooter_env_file',
+               'write_sparc_env_file', 'write_bounce_input_file']
+
+    @pytest.mark.parametrize('writer', WRITERS)
+    def test_a_range_dependent_ssp_is_refused_by_the_writers_name(
+            self, tmp_path, writer):
+        with pytest.raises(ConfigurationError,
+                           match=rf'^{writer}: env.ssp is range-dependent'):
+            self._write(writer, tmp_path / 'rd.env', self._env(True, writer))
+
+    @pytest.mark.parametrize('writer', WRITERS)
+    def test_the_default_interpolation_of_one_profile_is_c_linear(
+            self, tmp_path, writer):
+        path = tmp_path / 'ri.env'
+        self._write(writer, path, self._env(False, writer))
+        # Title, frequency, NMedia, then TopOpt.
+        topopt = path.read_text().splitlines()[3]
+        assert topopt.strip().strip("'")[0] == 'C', topopt
+
+    def test_bounce_refuses_an_explicit_quad(self, tmp_path):
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        with pytest.raises(UnsupportedFeatureError, match="'quad'"):
+            self._write('write_bounce_input_file', tmp_path / 'q.env',
+                        self._env(False), interp_ssp='quad')
+
+
+class TestSparcSourceSeriesFitsWhatSparcReads:
+    """``write_sparc_source_time_series`` pads the waveform to ``rows`` and
+    SPARC reads at most MaxNST = 10_000_000 values (rows x source depths,
+    tslib/sourceMod.f90:7, :116): a waveform longer than ``rows`` and a
+    file past MaxNST are refused by name; both bounds pinned on each side."""
+
+    @staticmethod
+    def _write(tmp_path, n_wave, rows, depths=(10.0,)):
+        from uacpy.io.oalib_writer import write_sparc_source_time_series
+        write_sparc_source_time_series(
+            tmp_path / 's.sts', Source(depths=list(depths), frequencies=100.0),
+            np.ones(n_wave), 1000.0, rows)
+
+    def test_a_waveform_that_fills_rows_exactly_is_written(self, tmp_path):
+        self._write(tmp_path, 8, 8)
+        assert len((tmp_path / 's.sts').read_text().splitlines()) == 2 + 8
+
+    def test_a_waveform_longer_than_rows_is_refused(self, tmp_path):
+        with pytest.raises(ConfigurationError,
+                           match='^write_sparc_source_time_series: waveform '
+                                 'has 9 samples but rows=8'):
+            self._write(tmp_path, 9, 8)
+
+    @pytest.mark.parametrize('rows, refused', [(8, False), (9, True)])
+    def test_the_values_sparc_reads_are_bounded(self, tmp_path, monkeypatch,
+                                                rows, refused):
+        """With MaxNST lowered to 16: 8 rows x 2 depths is written, 9 rows
+        x 2 depths is refused (the real bound, 10 million values, is the
+        module constant this replaces)."""
+        from uacpy.io import oalib_writer
+        assert oalib_writer._SPARC_MAX_SOURCE_VALUES == 10_000_000
+        monkeypatch.setattr(oalib_writer, '_SPARC_MAX_SOURCE_VALUES', 16)
+        if refused:
+            with pytest.raises(ConfigurationError, match='MaxNST'):
+                self._write(tmp_path, 4, rows, depths=(10.0, 20.0))
+        else:
+            self._write(tmp_path, 4, rows, depths=(10.0, 20.0))
+
+
+class TestBinaryArrivalsReadAsTheAsciiOnes:
+    """RunType 'a' writes the arrivals as Fortran sequential records
+    (``Bellhop/ArrMod.f90:136-178``): the same header and the same eight
+    values per arrival as the ASCII file, the receiver ranges REAL*8 and
+    the rest REAL*4. ``read_arr_file`` reads it, in either byte order, into
+    the result the ASCII file gives; a file that is neither layout is
+    refused by name."""
+
+    # Two source depths, one receiver depth, two ranges; one cell empty.
+    CELLS = [[[(0.5, 30.0, 0.001, -2.5e-6, -5.0, 5.0, 0.0, 1.0)],
+              []],
+             [[(0.25, -45.0, 0.0015, 0.0, -7.0, 7.0, 1.0, 2.0),
+               (0.125, 90.0, 0.002, -1.0e-6, 9.0, -9.0, 2.0, 2.0)],
+              [(0.375, 0.0, 0.0025, 0.0, 3.0, -3.0, 0.0, 0.0)]]]
+    SZ, RZ, RR = [20.0, 50.0], [75.0], [500.0, 1000.0]
+
+    def _ascii(self, path):
+        lines = ["'2D'", "100.0", f"2 {self.SZ[0]} {self.SZ[1]}",
+                 f"1 {self.RZ[0]}", f"2 {self.RR[0]} {self.RR[1]}"]
+        for cells in self.CELLS:
+            lines.append(str(max(len(c) for c in cells)))
+            for cell in cells:
+                lines.append(str(len(cell)))
+                # The REAL*4 values the binary holds, printed exactly.
+                lines += [' '.join(repr(float(np.float32(v))) for v in row)
+                          for row in cell]
+        path.write_text('\n'.join(lines) + '\n')
+
+    def _binary(self, path, endian):
+        import struct
+
+        def record(payload):
+            marker = struct.pack(endian + 'i', len(payload))
+            return marker + payload + marker
+        out = record(b"'2D'") + record(struct.pack(endian + 'f', 100.0))
+        out += record(struct.pack(endian + 'i2f', 2, *self.SZ))
+        out += record(struct.pack(endian + 'if', 1, *self.RZ))
+        out += record(struct.pack(endian + 'i2d', 2, *self.RR))
+        for cells in self.CELLS:
+            out += record(struct.pack(endian + 'i',
+                                      max(len(c) for c in cells)))
+            for cell in cells:
+                out += record(struct.pack(endian + 'i', len(cell)))
+                for row in cell:
+                    out += record(struct.pack(endian + '8f', *row))
+        path.write_bytes(out)
+
+    @pytest.mark.parametrize('endian', ['<', '>'])
+    def test_a_binary_file_reads_as_its_ascii_twin(self, tmp_path, endian):
+        import uacpy.io._fortran_helpers as fh
+        from uacpy.io.oalib_reader import read_arr_file
+        self._ascii(tmp_path / 'text.arr')
+        self._binary(tmp_path / 'bin.arr', endian)
+        emitted = fh._ENDIAN_WARN_EMITTED
+        try:
+            fh._ENDIAN_WARN_EMITTED = True
+            got = read_arr_file(tmp_path / 'bin.arr')
+        finally:
+            fh._ENDIAN_WARN_EMITTED = emitted
+        want = read_arr_file(tmp_path / 'text.arr')
+        assert got.coordinate.tolist() == self.SZ
+        for g, w in zip(got.slabs, want.slabs):
+            assert g.receiver_ranges.tolist() == self.RR
+            assert float(g.frequencies[0]) == 100.0
+            for gc, wc in zip(g.by_receiver[0][0], w.by_receiver[0][0]):
+                assert gc.keys() == wc.keys()
+                for key in gc:
+                    np.testing.assert_array_equal(gc[key], wc[key])
+        assert got.slabs[1].by_receiver[0][0][0]['n_arrivals'] == 2
+
+    def test_a_file_in_neither_layout_is_refused(self, tmp_path):
         from uacpy.io.oalib_reader import read_arr_file
         p = tmp_path / 'run.arr'
-        p.write_bytes(b'\x04\x00\x00\x00' + b'\x00' * 32)
-        with pytest.raises(FileFormatError, match="RunType 'A'"):
+        marker = b'\x04\x00\x00\x00'
+        p.write_bytes(marker + b'NOPE' + marker + b'\x00' * 32)
+        with pytest.raises(FileFormatError, match='neither the ASCII'):
             read_arr_file(p)
+
+    @pytest.mark.requires_binary
+    def test_bellhops_binary_and_ascii_arrivals_agree(self, tmp_path):
+        """The same deck run with RunType 'a' and 'A': every cell agrees to
+        the ASCII file's printed precision."""
+        import subprocess
+        from uacpy.core import Receiver
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        from uacpy.io.oalib_reader import read_arr_file
+        exe = Path(uacpy.__file__).parent / 'bin' / 'oalib' / 'bellhop.exe'
+        if not exe.is_file():
+            pytest.skip('bellhop.exe is not built')
+        env = Environment(bathymetry=100.0, ssp=[(0, 1500), (100, 1490)],
+                          bottom='sand')
+        src = Source(depths=[20.0, 50.0], frequencies=200.0)
+        rcv = Receiver(depths=[30.0, 60.0], ranges=[500.0, 1000.0, 2000.0])
+        out = {}
+        for run_type in ('A', 'a'):
+            work = tmp_path / run_type
+            work.mkdir()
+            write_bellhop_env_file(work / 'arr.env', env, src, rcv,
+                                   run_type=run_type, n_beams=101)
+            subprocess.run([str(exe), 'arr'], cwd=work, check=True,
+                           capture_output=True, timeout=300)
+            out[run_type] = read_arr_file(work / 'arr.arr')
+        n_cells = 0
+        for text, binary in zip(out['A'].slabs, out['a'].slabs):
+            for t_row, b_row in zip(text.by_receiver[0], binary.by_receiver[0]):
+                for t, b in zip(t_row, b_row):
+                    assert t['n_arrivals'] == b['n_arrivals']
+                    n_cells += t['n_arrivals'] > 0
+                    for key in ('amplitudes', 'phases', 'delays',
+                                'source_angles', 'receiver_angles'):
+                        np.testing.assert_allclose(b[key], t[key],
+                                                   rtol=1e-6, atol=1e-12)
+                    np.testing.assert_array_equal(b['n_bot_bounces'],
+                                                  t['n_bot_bounces'])
+        assert n_cells == 12
 
 
 class TestSedimentLayerColumnOrder:
@@ -1957,9 +2195,9 @@ class TestInterfaceRoughnessGoesToItsOwnInterface:
         assert all(float(ln.split()[1]) == 0.0 for ln in mesh[:2])
 
 
-class TestRtsToPressureFftOnly:
-    """``rts_to_pressure`` accepts only ``method='fft'``; any other
-    selector, 'goertzel' included, raises a typed error naming it."""
+class TestRtsToPressureEstimatesTheToneAtItsFrequency:
+    """``rts_to_pressure`` without ``pulse_type`` returns the Hann-windowed
+    steady-tone phasor at the frequency asked for."""
 
     @staticmethod
     def _tone(amp, phase, n_t=512, fs=1000.0, bin_index=8):
@@ -1976,15 +2214,9 @@ class TestRtsToPressureFftOnly:
         from uacpy.models.sparc import rts_to_pressure
         amp, phase = 3.0, 0.700
         rts, freq = self._tone(amp, phase)
-        p, _ = rts_to_pressure(rts, freq, method='fft')
+        p, _ = rts_to_pressure(rts, freq)
         assert abs(p[0]) == pytest.approx(amp, rel=1e-4)
         assert np.angle(p[0]) == pytest.approx(phase, abs=1e-4)
-
-    def test_a_goertzel_selector_is_refused(self):
-        from uacpy.models.sparc import rts_to_pressure
-        rts, freq = self._tone(2.5, -1.1)
-        with pytest.raises(ConfigurationError, match='goertzel'):
-            rts_to_pressure(rts, freq, method='goertzel')
 
 
 class TestFieldFlpProfileRangeCollapse:
@@ -2072,7 +2304,7 @@ class TestOneEnvironmentOneWaterDepth:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 try:
-                    model(work_dir=work, cleanup=False).compute_tl(
+                    model(work_dir=work, cleanup=False).compute_field(
                         self._env(), src, rcv)
                 except Exception:
                     pass                      # the deck is what matters here
@@ -2105,7 +2337,7 @@ class TestOneEnvironmentOneWaterDepth:
                                           attenuation=0.3))
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                return np.asarray(uacpy.Scooter().compute_tl(
+                return np.asarray(uacpy.Scooter().compute_field(
                     env, uacpy.Source(depths=50.0, frequencies=200.0),
                     uacpy.Receiver(depths=[75.0],
                                    ranges=np.linspace(1000.0, 10000.0, 91))
@@ -2140,6 +2372,17 @@ class TestReadPrt:
         p = tmp_path / 'run.prt'
         p.write_text('short log')
         assert read_prt(p, tail_bytes=4096) == 'short log'
+
+
+def test_a_scooter_fields_flp_is_refused_by_its_layout(tmp_path):
+    """Scooter's fields.exe .flp (option first, then ranges in km;
+    Scooter/fields.f90:61-97) is not field.exe's layout: read_flp names it
+    instead of calling the file malformed; a field.exe file reads."""
+    from uacpy.io.oalib_reader import read_flp
+    path = tmp_path / 'scooter.flp'
+    path.write_text("'RP'\n3\n1.0 2.0 3.0 /\n")
+    with pytest.raises(FileFormatError, match='Scooter fields.exe layout'):
+        read_flp(path)
 
 
 def test_read_flp_accepts_list_directed_records_and_sorts(tmp_path):
@@ -2309,10 +2552,11 @@ class TestPhaseSpeedBoundsStayContractedToRangeZero:
             return spy
 
         def window_spy_in(label):
-            def spy(env, *, c_low, c_high, model_name):
+            def spy(env, *, c_low, c_high, c_high_unbounded, model_name):
                 seen.append((label, env.ssp.n_ranges, c_low is None,
                              c_high is None))
                 return real_window(env, c_low=c_low, c_high=c_high,
+                                   c_high_unbounded=c_high_unbounded,
                                    model_name=model_name)
             return spy
 
@@ -2711,7 +2955,8 @@ class TestAnIrregularShdIsStridedByItsOwnLayout:
     """
 
     @staticmethod
-    def _build(path, *, three_d, nfreq=1, ntheta=2, nsz=2, nrz=3, nrr=4):
+    def _build(path, *, three_d, nfreq=1, ntheta=2, nsz=2, nrz=3, nrr=4,
+               source_depths=None):
         import struct
         recl = 41
         record_bytes = recl * 4
@@ -2729,7 +2974,8 @@ class TestAnIrregularShdIsStridedByItsOwnLayout:
         record(np.arange(ntheta, dtype='<f8').tobytes())
         record(np.zeros(1, dtype='<f8').tobytes())
         record(np.zeros(1, dtype='<f8').tobytes())
-        record(np.zeros(nsz, dtype='<f4').tobytes())
+        record((np.zeros(nsz) if source_depths is None
+                else np.asarray(source_depths)).astype('<f4').tobytes())
         record(np.zeros(nrz, dtype='<f4').tobytes())
         record(np.arange(nrr, dtype='<f8').tobytes())
         per_block = nrz if three_d else 1
@@ -2782,7 +3028,24 @@ class TestAnIrregularShdIsStridedByItsOwnLayout:
         field = read_shd_file(path)
         assert field.data.shape == (3,)
         assert 'depth' not in field.coords
+        assert 'source_depth' not in field.coords
         assert field.aux_coords['receiver_depth'][1].size == 3
+
+    def test_read_shd_file_puts_several_source_depths_on_one_axis(
+            self, tmp_path):
+        """A file carrying two source depths is one Field over a leading
+        ``source_depth`` axis, as a multi-depth run returns it, each plane
+        the file's block for that depth (the blocks are tagged 1, 2)."""
+        from uacpy.io.oalib_reader import read_shd_file
+        path = tmp_path / 'two_sources.shd'
+        self._build(path, three_d=False, ntheta=1, nsz=2, nrz=3, nrr=3,
+                    source_depths=[20.0, 70.0])
+        field = read_shd_file(path)
+        assert list(field.coords) == ['source_depth', 'range']
+        np.testing.assert_array_equal(field.coords['source_depth'],
+                                      [20.0, 70.0])
+        np.testing.assert_array_equal(field.source_depths, [20.0, 70.0])
+        np.testing.assert_array_equal(np.real(field.data[:, 0]), [1.0, 2.0])
 
 
 class TestRtsFileParsesEveryFortranRealSpelling:
@@ -2985,12 +3248,12 @@ class TestRamDecksCarryTheWaterDensityRatio:
         model = self._ram()
         seg = ram_collins.collins_range_segments(
             water_density_env(), 'ramgeo', 150.0, 400.0,
-            knobs=model._knob_record(), speed_bounds=model._speed_bounds)[0]
+            knobs=model._knob_record())[0]
         assert all(v == pytest.approx(1.5 / 1.027) for _, v in seg['bottom_rho'])
         model = self._ram()
         seg = ram_collins.collins_range_segments(
             water_density_env(water_density=1.0), 'ramgeo', 150.0, 400.0,
-            knobs=model._knob_record(), speed_bounds=model._speed_bounds)[0]
+            knobs=model._knob_record())[0]
         assert all(v == 1.5 for _, v in seg['bottom_rho'])
 
     def test_mpirams_density_row_is_rho_b_over_rho_w(self, tmp_path):
@@ -3253,13 +3516,13 @@ class TestBiologicalLayerEdgesGetANodePair:
         assert self._depths(env) == [0.0, 100.0]
 
     def test_the_added_rows_follow_the_deck_interpolation(self):
-        from uacpy.io.oalib_writer import biological_edge_nodes
+        from uacpy.io.oalib_writer import _biological_edge_nodes
         env = self._env([(30.0, 70.0, 300.0, 4.0, 0.125)])
         z = np.array([0.0, 100.0])
         c = np.array([1520.0, 1500.0])
-        zc, cc = biological_edge_nodes(z, c, env.absorption, 'C', who='t')
+        zc, cc = _biological_edge_nodes(z, c, env.absorption, 'C', who='t')
         np.testing.assert_allclose(cc, np.interp(zc, z, c), rtol=0, atol=1e-9)
-        zn, cn = biological_edge_nodes(z, c, env.absorption, 'N', who='t')
+        zn, cn = _biological_edge_nodes(z, c, env.absorption, 'N', who='t')
         np.testing.assert_allclose(
             cn, 1.0 / np.sqrt(np.interp(zn, z, 1.0 / c ** 2)),
             rtol=0, atol=1e-9)
@@ -3474,3 +3737,38 @@ class TestARowLawIsWrittenIntoEachWaterRow:
                                      **kw)[1]
         assert 'z_bar = 300 m' in msg and 'up to 0.055' in msg
         assert 'sediment layers and half-spaces' in msg
+
+
+class TestAMeshCountSequenceIsOnePerMedium:
+    """``n_mesh=`` as a sequence gives one count per medium, the water column
+    first; a sequence of another length is refused in the writer's name and
+    counted in media."""
+
+    @staticmethod
+    def _two_media():
+        return Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=SeabedColumn(
+                layers=[SedimentLayer(thickness=10.0, sound_speed=1600.0,
+                                      density=1.7)],
+                halfspace=BoundaryProperties(acoustic_type='half-space',
+                                             sound_speed=1800.0,
+                                             density=2.0)))
+
+    @pytest.mark.parametrize('counts, ok', [([60, 12], True),
+                                            ([60], False),
+                                            ([60, 12, 7], False)])
+    def test_the_count_matches_the_media(self, tmp_path, counts, ok):
+        from uacpy.io import write_kraken_env_file
+        call = lambda: write_kraken_env_file(
+            tmp_path / 'k.env', self._two_media(),
+            Source(depths=[20.0], frequencies=100.0),
+            uacpy.Receiver(depths=[10.0, 50.0], ranges=[1000.0]),
+            n_mesh=counts, rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+        if ok:
+            call()
+        else:
+            with pytest.raises(ConfigurationError,
+                               match=rf'write_kraken_env_file: n_mesh has '
+                                     rf'{len(counts)} count\(s\) for 2 media'):
+                call()

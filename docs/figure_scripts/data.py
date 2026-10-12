@@ -110,12 +110,10 @@ def grain_size_conversion():
 
     fig, axes = plt.subplots(1, 3, figsize=(11.0, 4.0))
     for model, colour in (('hamilton', 'C0'), ('apl-uw', 'C3')):
-        rows = [uacpy.core.sediment.grain_size_to_geoacoustics(
-            p, model=model, water_sound_speed=water_c, water_density=water_rho)
-            for p in phi]
+        geo = uacpy.data.grain_size_to_geoacoustics(
+            phi, model=model, water_sound_speed=water_c, water_density=water_rho)
         for ax, key in zip(axes, ('sound_speed', 'density', 'attenuation')):
-            ax.plot(phi, [r[key] for r in rows], color=colour, linewidth=1.7,
-                    label=model)
+            ax.plot(phi, geo[key], color=colour, linewidth=1.7, label=model)
 
     axes[0].axhline(water_c, color='0.4', linestyle='--', linewidth=0.9)
     axes[0].annotate('seawater', (9.0, water_c), color='0.4', fontsize=8,

@@ -481,6 +481,39 @@ def test_plotter_unit_label_switches_with_scaling():
     plt.close("all")
 
 
+def test_the_psd_plotter_labels_bare_arrays_with_the_estimators_default_scaling():
+    """``constant_q`` returns a density by default, so the bare-array call
+    made from its output labels a density, not band power."""
+    p = constant_q(_tone(440.0, dur=1.0), FS, freq_min=100, freq_max=2000,
+                   bins_per_octave=12)
+    assert p.scaling == "density"
+    _, ax = plot_constant_q_psd(p.frequencies, p.power)
+    assert ax.get_ylabel().endswith("Pa²/Hz)"), ax.get_ylabel()
+    assert ax.get_title() == "Constant-Q PSD"
+    plt.close("all")
+
+
+@pytest.mark.parametrize("scaling, unit", [("density", "Pa²/Hz)"),
+                                           ("spectrum", "Pa²)")])
+def test_the_psd_plotter_reads_the_scaling_off_an_estimate_passed_whole(
+        scaling, unit):
+    p = constant_q(_tone(440.0, dur=1.0), FS, freq_min=100, freq_max=2000,
+                   bins_per_octave=12, scaling=scaling)
+    _, ax = plot_constant_q_psd(p)
+    assert ax.get_ylabel().endswith(unit), ax.get_ylabel()
+    np.testing.assert_allclose(ax.lines[0].get_ydata(),
+                               10.0 * np.log10(p.power / 1e-12))
+    plt.close("all")
+
+
+def test_the_psd_plotter_refuses_a_scaling_that_contradicts_the_estimate():
+    p = constant_q(_tone(440.0, dur=1.0), FS, freq_min=100, freq_max=2000,
+                   bins_per_octave=12)
+    with pytest.raises(ConfigurationError, match="contradicts the SpectralEstimate"):
+        plot_constant_q_psd(p, scaling="spectrum")
+    plt.close("all")
+
+
 def test_spectrum_calibration_is_exact_on_a_bin_centre():
     """The 'spectrum' scaling promises a tone of amplitude A peaks at A**2/2.
     That holds on a bin centre; between centres the filterbank scallops, by at
@@ -793,7 +826,8 @@ class TestConstantQKernelConstruction:
         (Nk, ker, _), = _cq_kernels(np.array([fk]), Q, fs, "hann")
         assert Nk == int(np.ceil(Q * fs / fk))
         w = get_window("hann", Nk, fftbins=True)
-        n = np.arange(Nk)
+        # Phase referenced to the frame's centre sample, Nk // 2.
+        n = np.arange(Nk) - Nk // 2
         want = (w * np.exp(-2j * np.pi * fk * n / fs)) / float(np.sum(w))
         np.testing.assert_allclose(ker, want, rtol=0, atol=1e-15)
 
@@ -980,3 +1014,74 @@ class TestConstantQHopInnerFloor:
     def test_short_signal_with_long_window(self):
         from uacpy.acoustic_signal.cqt import _resolve_hop
         assert _resolve_hop(None, [(24, None, None)], 8, "t") == 1
+
+
+class TestConstantQAveragesWithoutHoldingEveryFrame:
+    """``constant_q`` sums each bin's frame powers block by block: the mean is
+    the one the per-frame powers give, and no bin's frames are held whole."""
+
+    def test_the_streamed_mean_is_the_mean_of_the_frame_powers(self):
+        from uacpy.acoustic_signal import cqt
+        x = np.random.default_rng(5).standard_normal(int(4 * FS))
+        est = constant_q(x, FS, freq_min=100, freq_max=2000,
+                         bins_per_octave=12)
+        _, _, _, kernels = cqt._cq_setup(x, FS, 100, 2000, 12, "hann",
+                                         "constant_q", drops_short_bins=True)
+        frames = cqt._cq_bin_powers(x, kernels, "density")
+        np.testing.assert_allclose(est.power, [p.mean() for p in frames],
+                                   rtol=1e-12)
+
+    def test_no_bin_holds_more_than_one_block_of_frames(self, monkeypatch):
+        from uacpy.acoustic_signal import cqt
+        monkeypatch.setattr(cqt, "_CQ_BLOCK_SAMPLES", 4096)
+        sizes = []
+        real = cqt._cq_band_power
+
+        def spy(coeffs, *args):
+            sizes.append(np.size(coeffs))
+            return real(coeffs, *args)
+
+        monkeypatch.setattr(cqt, "_cq_band_power", spy)
+        x = np.random.default_rng(6).standard_normal(int(4 * FS))
+        constant_q(x, FS, freq_min=100, freq_max=2000, bins_per_octave=12)
+        _, _, _, kernels = cqt._cq_setup(x, FS, 100, 2000, 12, "hann",
+                                         "constant_q", drops_short_bins=True)
+        # One block holds 4096 // Nk frames of a bin; the shortest kernel
+        # (2000 Hz, ~68 samples at 8 kHz) has ~1900 frames in the record.
+        assert max(sizes) <= max(4096 // Nk for Nk, _, _ in kernels)
+
+
+@pytest.mark.parametrize("f0, phase", [(500.0, 0.0), (1000.0, 0.7),
+                                       (250.0, -1.2)])
+def test_a_tone_reads_half_its_amplitude_at_its_phase_at_the_centre_sample(
+        f0, phase):
+    """Every bin's phase is referenced to the frame's centre sample, so a
+    tone on a bin centre reads ``(A/2)·exp(jφ)`` with ``t = 0`` there,
+    whatever the bin's kernel length."""
+    n = 8192
+    t = (np.arange(n) - n // 2) / FS
+    x = 2.0 * np.cos(2 * np.pi * f0 * t + phase)
+    cqt = constant_q_transform(x, FS, freq_min=250.0, freq_max=2000.0,
+                               bins_per_octave=24)
+    k = int(np.argmin(np.abs(cqt.frequencies - f0)))
+    assert cqt.frequencies[k] == pytest.approx(f0)
+    np.testing.assert_allclose(cqt.coefficients[k], np.exp(1j * phase),
+                               atol=2e-3)
+
+
+@pytest.mark.parametrize("estimator", [constant_q, constant_q_transform,
+                                       constant_q_spectrogram])
+def test_an_empty_range_is_refused_by_the_function_called(estimator):
+    with pytest.raises(ConfigurationError,
+                       match=rf"^{estimator.__name__}: require 0 < freq_min"):
+        estimator(_tone(440.0, dur=1.0), FS, freq_min=500.0, freq_max=400.0)
+
+
+@pytest.mark.parametrize('scaling', ['density', 'spectrum'])
+def test_a_constant_q_spectrogram_level_is_power_to_dB_of_its_panel(scaling):
+    from uacpy.core.acoustics import power_to_dB
+    res = constant_q_spectrogram(_tone(440.0, dur=1.0), FS, freq_min=200.0,
+                                 freq_max=2000.0, scaling=scaling)
+    np.testing.assert_array_equal(res.level_dB(), power_to_dB(res.power))
+    np.testing.assert_array_equal(res.level_dB(2e-5),
+                                  power_to_dB(res.power, 2e-5))

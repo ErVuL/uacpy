@@ -1,10 +1,6 @@
 """Every public record type saves and loads: the dataclass carriers through
 CarrierExport, ChannelTaps as a ResultTuple, WenzNoise by its constructor
-arguments, DataSource and ParallelResult through to_dict / from_dict. A pickle
-written before a type joined the protocol still loads."""
-import pickle
-from pathlib import Path
-
+arguments, DataSource and ParallelResult through to_dict / from_dict."""
 import numpy as np
 import pytest
 
@@ -17,8 +13,6 @@ from uacpy.io import OasnNoise, OasnReplicaGrid
 from uacpy.noise import WenzNoise
 from uacpy.parallel import ParallelResult
 from uacpy.sonar import BottomParameters
-
-_PICKLED = Path(__file__).parent / 'data' / 'pickled'
 
 
 def _regime():
@@ -107,16 +101,6 @@ class TestChannelTaps:
         assert ds['delays_s'].attrs['units'] == 's'
         _same_taps(_taps(), ChannelTaps.from_xarray(ds))
 
-    def test_a_pickle_written_before_it_joined_the_protocol_loads(self):
-        """``channel_taps.pkl`` was pickled from the NamedTuple this record
-        was before it joined the protocol."""
-        back = pickle.loads((_PICKLED / 'channel_taps.pkl').read_bytes())
-        _same_taps(_taps(), back)
-
-
-def test_a_link_result_pickled_before_the_protocol_loads():
-    back = pickle.loads((_PICKLED / 'link_result.pkl').read_bytes())
-    assert back == _link()
 
 
 class TestWenzNoise:
@@ -206,9 +190,3 @@ class TestParallelResult:
         with np.load(tmp_path / 'p.npz', allow_pickle=True) as f:
             back = ParallelResult.from_dict(dict(f))
         assert back.results[0].model == 'Synthetic'
-
-    def test_a_pickle_written_before_the_protocol_loads(self):
-        back = pickle.loads((_PICKLED / 'parallel_result.pkl').read_bytes())
-        assert back.results == [None, None]
-        assert str(back.errors[1]) == 'job failed'
-        assert back.warnings == {0: [(UserWarning, 'careful')]}

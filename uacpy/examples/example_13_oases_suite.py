@@ -83,7 +83,7 @@ plt.close(fig)
 # travel, so it fits.
 transfer = uacpy.OASP(n_time_samples=1024, freq_max=120).run(
     env, source,
-    uacpy.Receiver(depths=np.linspace(5, 95, 20),
+    uacpy.Receiver(depths=np.linspace(5, 95, 19),     # 5 m steps: 50 m is one
                    ranges=np.linspace(500, 5000, 30)),
     run_mode=uacpy.RunMode.BROADBAND)
 frequencies = transfer.coords['frequency']

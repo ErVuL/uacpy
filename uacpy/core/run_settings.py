@@ -23,7 +23,6 @@ loading a model.
 from __future__ import annotations
 
 import dataclasses
-import importlib
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Mapping, NamedTuple, Optional, Tuple
@@ -31,7 +30,9 @@ from typing import Any, Dict, Mapping, NamedTuple, Optional, Tuple
 import numpy as np
 
 from uacpy.core import exceptions as _exceptions
-from uacpy.core._export import require_extra, saved_class_path
+from uacpy.core._export import (
+    _resolve_class, require_extra, saved_class_path,
+)
 from uacpy.core._records import FrozenMapping, FrozenRecord, array_summary
 from uacpy.core._repr import build, extent
 from uacpy.core.exceptions import ConfigurationError, UACPYWarning
@@ -230,34 +231,21 @@ class Notice(NamedTuple):
 
 
 def _saved_notice(item) -> Notice:
-    """``item`` as a :class:`Notice`: one already, the ``{note, message,
-    category}`` dict :meth:`EngineSettings.to_dict` writes (``category`` by
-    class name; a name that is not a uacpy warning class reads as
-    :class:`UACPYWarning`), or a plain message string, as a record saved
-    before notices carried their class wrote them (:class:`UACPYWarning`, no
-    note)."""
+    """``item`` as a :class:`Notice`: one already, or the ``{note, message,
+    category}`` dict :meth:`EngineSettings.to_dict` writes, ``category`` the
+    name of a uacpy warning class (any other name is refused)."""
     if isinstance(item, Notice):
         return item
-    if isinstance(item, str):
-        return Notice(None, item, UACPYWarning)
-    category = getattr(_exceptions, str(item.get('category')), None)
+    category = (getattr(_exceptions, str(item.get('category')), None)
+                if isinstance(item, Mapping) else None)
     if not (isinstance(category, type) and issubclass(category, UACPYWarning)):
-        category = UACPYWarning
+        raise ConfigurationError(
+            f"EngineSettings.from_dict: the notice {item!r} is not a "
+            f"{{note, message, category}} record naming a uacpy warning "
+            f"class.",
+            remediation="Read only records this version wrote; re-run the "
+                        "computation to get its record.")
     return Notice(item.get('note'), item['message'], category)
-
-
-def _with_saved_notes(notices, notes):
-    """The notices of a record saved with a separate ``notes`` tuple. Its
-    writer kept one note per notice that had one, in order, so equal
-    counts pair them one to one; otherwise which message a note belonged to
-    was not saved, and each note is kept as a notice of its own."""
-    notices = [_saved_notice(n) for n in notices]
-    notes = list(notes)
-    if not notes:
-        return notices
-    if len(notes) == len(notices):
-        return [n._replace(note=note) for n, note in zip(notices, notes)]
-    return notices + [Notice(note, note, UACPYWarning) for note in notes]
 
 
 def _block(name: str, lines) -> str:
@@ -336,25 +324,17 @@ class EngineSettings(FrozenRecord):
 
     def to_dict(self) -> Dict[str, Any]:
         """The record as plain types: each notice as ``{note, message,
-        category}``, the category by class name; ``knobs`` is left out when
-        it is empty, as on a record saved before the knobs were recorded, so
-        such a record writes back what was saved."""
+        category}``, the category by class name."""
         d = super().to_dict()
         d['notices'] = [{'note': n.note, 'message': n.message,
                          'category': n.category.__name__}
                         for n in self.notices]
-        if not d['knobs']:
-            del d['knobs']
         return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'EngineSettings':
-        """Rebuild the record from :meth:`to_dict` output, or from a record
-        saved with the notes beside the notices (see :func:`_with_saved_notes`)."""
-        d = dict(d)
-        if 'notes' in d:
-            d['notices'] = _with_saved_notes(d.get('notices', ()), d.pop('notes'))
-        return cls(**d)
+        """Rebuild the record from :meth:`to_dict` output."""
+        return cls(**dict(d))
 
     def summary_lines(self):
         """One ``(name, text)`` pair per field, for the multi-line repr,
@@ -407,14 +387,15 @@ class RunSettings(FrozenRecord):
         The source level (dB re 1 µPa at 1 m) the result is referenced to.
     depth_loop : str
         ``'single'`` (one source depth), ``'per_depth'`` (one engine run
-        per depth, stacked into a ``ResultStack``) or ``'engine'`` (every
-        depth handed to the engine, which stacks them itself).
+        per depth, joined over ``source_depth``: one Field, or a
+        ``ResultStack`` of rays or arrivals) or ``'engine'`` (every depth
+        handed to the engine, which splits them itself).
     source_weights : ndarray or None
         The source's complex weights; ``None`` for unit weights.
     weights_applied : bool
         Whether this mode applies ``source_weights`` (a field mode). A
-        one-depth run scales the returned field; a stack records them for
-        ``ResultStack.superpose``.
+        one-depth run scales the returned field; a multi-depth field
+        records them for ``Field.superpose``.
     time : TimeSettings or None
         The TIME_SERIES request; ``None`` in every other mode.
     waveguide : WaveguideSpeeds or None
@@ -545,8 +526,11 @@ class RunSettings(FrozenRecord):
         engine = d.get('engine')
         if engine is not None:
             engine = dict(engine)
-            module, _, name = engine.pop('__class__').rpartition('.')
-            d['engine'] = getattr(importlib.import_module(module),
-                                  name).from_dict(engine)
+            # A saved file names the class to rebuild: a uacpy
+            # EngineSettings, or one from a module the program has already
+            # imported; nothing outside uacpy is imported on its say-so.
+            klass = _resolve_class(engine.pop('__class__'), EngineSettings,
+                                   already_imported=True)
+            d['engine'] = klass.from_dict(engine)
         d['notes'] = tuple(d.get('notes', ()))
         return cls(**d)

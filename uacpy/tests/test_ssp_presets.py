@@ -47,7 +47,8 @@ class TestMackenzie:
         assert np.all(np.diff(ssp.sound_speed[:, 0]) > 0)
 
     def test_shape_mismatch_raises(self):
-        with pytest.raises(ConfigurationError, match="must share shape"):
+        with pytest.raises(ConfigurationError,
+                           match=r"temperature has shape \(1,\)"):
             SoundSpeedProfile.from_temperature_salinity(
                 depths=np.array([0.0, 100.0]),
                 temperature=np.array([15.0]),
@@ -96,7 +97,7 @@ class TestIsovelocityShapeMustBeTrue:
 
 class TestMackenzieIsEvaluatedOnTheDepthsGiven:
     """Mackenzie is stated in depth, so a profile built with it at any
-    latitude equals ``sound_speed_mackenzie(T, S, z)`` exactly; the latitude
+    latitude equals ``sound_speed_mackenzie(T, S, depth=z)`` exactly; the latitude
     only enters the pressure-stated equations (TEOS-10 moves by ~0.3 m/s at
     6 km between 0 and 80 deg)."""
 
@@ -112,7 +113,7 @@ class TestMackenzieIsEvaluatedOnTheDepthsGiven:
         from uacpy.core.acoustics import sound_speed_mackenzie
         np.testing.assert_array_equal(
             self._build('mackenzie', lat),
-            sound_speed_mackenzie(2.0, 34.7, self.z))
+            sound_speed_mackenzie(2.0, 34.7, depth=self.z))
 
     def test_a_pressure_equation_reads_the_latitude(self):
         spread = self._build('teos10', 80.0) - self._build('teos10', 0.0)

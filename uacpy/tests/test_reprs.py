@@ -17,6 +17,7 @@ import pytest
 
 import uacpy
 from uacpy.core.run_settings import EngineSettings, RunSettings
+from uacpy.models import EngineStatus
 
 
 def _instances():
@@ -29,6 +30,7 @@ def _instances():
     from uacpy.core.bathymetry import Bathymetry
     from uacpy.core.altimetry import Altimetry
     from uacpy.core import absorption as A
+    from uacpy.core._water import WaterProfile
     from uacpy.core.provenance import DataProvenance, DataSource
     from uacpy.core.results import (Field, Arrivals, Modes, Rays,
                                     GreensFunction, Covariance, Replicas,
@@ -39,7 +41,7 @@ def _instances():
     from uacpy.acoustic_signal import (bands, beamforming, cqt, detect, frf,
                                        gathers, spectral, timefreq,
                                        delay_profile)
-    from uacpy.comms import channel, janus, link, transceiver
+    from uacpy.comms import channel, janus, link, sync, transceiver
     from uacpy.noise import ambient
     from uacpy.sonar import bottom_scattering, sonar_equation
 
@@ -84,6 +86,10 @@ def _instances():
     c['Surface'] = lambda: Surface(nodes=[BoundaryProperties('vacuum')])
     c['Thorp'] = lambda: A.Thorp()
     c['FrancoisGarrison'] = lambda: A.FrancoisGarrison(10.0, 35.0, 8.0)
+    c['WaterProfile'] = lambda: WaterProfile([0.0, 60.0, 200.0],
+                                             [22.0, 12.0, 10.0])
+    c['FrancoisGarrison_profile'] = lambda: A.FrancoisGarrison(
+        [(0.0, 22.0), (60.0, 12.0), (200.0, 10.0)], 35.0, 8.0)
     c['ConstantAbsorption'] = lambda: A.ConstantAbsorption(0.01)
     c['BiologicalLayer'] = lambda: A.BiologicalLayer(z_top_m=100.0, z_bottom_m=300.0,
                                                      f0_hz=5000.0, Q=10.0, a0=0.5)
@@ -136,10 +142,11 @@ def _instances():
         model='Bounce', frequencies=50.0)
     def _stack():
         def slab(z):
-            return Field(data=np.ones((1, 1), dtype=complex),
-                         coords={'depth': np.array([10.0]), 'range': np.array([100.0])},
-                         model='Bellhop', frequencies=100.0,
-                         source_depths=np.array([z]))
+            return Rays(rays=[{'r': np.array([0.0, 3.0]),
+                               'z': np.array([z, 5.0]), 'launch_angle': -10.0,
+                               'n_top_bounces': 0, 'n_bot_bounces': 1}],
+                        model='Bellhop', frequencies=100.0,
+                        source_depths=np.array([z]))
         return ResultStack(slabs=[slab(10.0), slab(20.0)], coordinate=[10.0, 20.0])
     c['ResultStack'] = _stack
     c['MediaTable'] = lambda: MediaTable(water_density=1.0, tops=np.array([100.0]),
@@ -156,7 +163,7 @@ def _instances():
                                             coherent=True)
     c['Notice'] = lambda: RS.Notice('rays clipped', 'rays clipped at 80 deg')
     # signal
-    c['BandLevels'] = lambda: bands.BandLevels(centres=np.array([125.0, 250.0, 500.0, 1000.0, 2000.0]),
+    c['BandLevels'] = lambda: bands.BandLevels(centers=np.array([125.0, 250.0, 500.0, 1000.0, 2000.0]),
                                                 levels=np.array([80.0, 78.0, 75.0, 72.0, 70.0]),
         lower=np.array([111.0, 223, 445, 891, 1782]), upper=np.array([140.0, 281, 561, 1122, 2245]),
         band_type='octave', ref=1e-6)
@@ -210,6 +217,9 @@ def _instances():
     c['BerCurve'] = lambda: link.BerCurve(ebn0_dB=np.arange(0.0, 12.0, 2.0),
                                           ber=np.logspace(-1, -6, 6), scheme='qpsk', n_bits=100000)
     c['JanusReception'] = lambda: janus.JanusReception(bits=np.zeros(64, int), crc_ok=True)
+    c['DopplerEstimate'] = lambda: sync.DopplerEstimate(
+        best_scale=0.0015, scales=np.linspace(0.0, 3e-3, 61),
+        peak_metric=np.linspace(0.0, 1.0, 61))
     # noise / sonar
     c['NoiseComponents'] = lambda: ambient.NoiseComponents(
         total=np.ones(12), wind=np.ones(12), shipping=np.ones(12), rain=None,
@@ -218,10 +228,17 @@ def _instances():
     c['BottomParameters'] = lambda: bottom_scattering.BottomParameters(
         density_ratio=1.845, speed_ratio=1.178, loss_parameter=0.0122,
         volume_parameter=0.002, spectral_strength=0.0041, spectral_exponent=3.25)
-    # models
-    c['Bellhop'] = lambda: uacpy.Bellhop()
-    c['Bellhop_knobs'] = lambda: uacpy.Bellhop(beam_type='B', n_beams=500)
+    # models: a pinned build, as an auto-selected one names the build this
+    # machine installed (test_bellhop.py pins that form)
+    c['Bellhop'] = lambda: uacpy.Bellhop(backend='fortran')
+    c['Bellhop_knobs'] = lambda: uacpy.Bellhop(backend='fortran', beam_type='B',
+                                               n_beams=500)
     c['RAM'] = lambda: uacpy.RAM()
+    c['EngineStatus'] = lambda: uacpy.models.EngineStatus(
+        engine=('Bellhop', 'Bellhop'), backend=('cuda', 'fortran'),
+        binary=('bellhopcuda', 'bellhop'), install=('base', 'base'),
+        found=(False, True), path=('', '/opt/uacpy/bin/oalib/bellhop.exe'),
+        default=(False, True))
 
     # data / io / misc records
     from uacpy.data._geo import AlongTrack
@@ -232,8 +249,10 @@ def _instances():
     from uacpy.data.sediment import SeabedSample
     from uacpy.data.sound_speed import TSProfile
     from uacpy.data.waves import SeaStateRecord
-    from uacpy.io.bathy_io import BoundaryTable
+    from uacpy.io.bathy_io import Boundary3dFile, BoundaryTable
     from uacpy.io.oalib_reader import ShdFile, SspTable
+    from uacpy.io.refl_io import BeamPatternTable
+    from uacpy.io.audio_io import WavInfo
     from uacpy.io.ramsurf_reader import PeGrid
     from uacpy.models.provenance import MODEL_PROVENANCE
     from uacpy import parallel
@@ -262,6 +281,13 @@ def _instances():
     c['SeaStateRecord'] = lambda: SeaStateRecord(hs=1.5, tp=7.0, provenance=prov)
     c['BoundaryTable'] = lambda: BoundaryTable(kind='bathymetry', path='env.bty',
         interpolation='L', ranges=np.array([0.0, 5000.0]), depths=np.array([100.0, 200.0]))
+    c['Boundary3dFile'] = lambda: Boundary3dFile(interpolation='R',
+        x=np.array([0.0, 1000.0, 2000.0]), y=np.array([0.0, 1000.0]),
+        depths=np.array([[100.0, 90.0, 100.0], [110.0, 95.0, 110.0]]))
+    c['BeamPatternTable'] = lambda: BeamPatternTable(
+        angles=np.array([-30.0, 0.0, 30.0]), levels_dB=np.array([-6.0, 0.0, -6.0]))
+    c['WavInfo'] = lambda: WavInfo(encoding='pcm24', bits=24, n_channels=4,
+        sample_rate=96000.0, n_frames=345600000)
     c['ShdFile'] = lambda: ShdFile(title='shelf', plot_type='rectilin  ',
         frequencies=np.array([200.0]), source_frequency=200.0,
         stabilizing_attenuation=0.0, bearings=np.array([0.0]), source_x=None,
@@ -395,6 +421,10 @@ EXPECTED = {
         'Thorp()',
     'FrancoisGarrison':
         'FrancoisGarrison(10 °C, 35 psu, pH 8)',
+    'WaterProfile':
+        'WaterProfile(depths [0, 60, 200] m, values [22, 12, 10])',
+    'FrancoisGarrison_profile':
+        'FrancoisGarrison(T 10–22 °C (3 depths), 35 psu, pH 8)',
     'ConstantAbsorption':
         'ConstantAbsorption(0.01 dB/λ)',
     'BiologicalLayer':
@@ -434,7 +464,7 @@ EXPECTED = {
     'ReflectionCoefficient':
         'ReflectionCoefficient(Bounce, frequency 50 Hz, 91 angles 0–90 deg)',
     'ResultStack':
-        'ResultStack(2 Field slabs, source depths [10, 20] m)',
+        'ResultStack(2 Rays slabs, source depths [10, 20] m)',
     'MediaTable':
         'MediaTable(water_density=1 g/cm³, tops 100 m, densities 1.9 g/cm³, bottom_depth=100 m, halfspace_density=1.9 g/cm³)',
     'SoundSpeeds':
@@ -448,7 +478,7 @@ EXPECTED = {
     'Notice':
         "Notice('rays clipped', 'rays clipped at 80 deg', UACPYWarning)",
     'BandLevels':
-        'BandLevels(5 centres 125–2000 Hz, 5 levels 70–80 dB re 1 µPa², band_type=octave, ref=1e-06)',
+        'BandLevels(5 centers 125–2000 Hz, 5 levels 70–80 dB re 1 µPa², band_type=octave, ref=1e-06)',
     'SpectralEstimate':
         'SpectralEstimate(257 frequencies 0–4000 Hz, 257 power 1 Pa²/Hz, scaling=density, method=welch)',
     'ProbabilisticSpectralEstimate':
@@ -491,6 +521,8 @@ EXPECTED = {
         'BerCurve(6 ebn0_dB 0–10 dB, 6 ber 1e-06–0.1, scheme=qpsk, n_bits=100000, n_train=400)',
     'JanusReception':
         'JanusReception(64 bits 0, crc_ok=True, doppler_scale=0)',
+    'DopplerEstimate':
+        'DopplerEstimate(best_scale=0.0015, 61 scales 0–0.003, 61 peak_metric 0–1)',
     'NoiseComponents':
         'NoiseComponents(12 total 1 dB re 1 µPa²/Hz, 12 wind 1 dB re 1 µPa²/Hz, 12 shipping 1 dB re 1 µPa²/Hz, 12 thermal 1 dB re 1 µPa²/Hz, 12 turbulence 1 dB re 1 µPa²/Hz)',
     'WenzNoise':
@@ -498,9 +530,15 @@ EXPECTED = {
     'BottomParameters':
         'BottomParameters(density_ratio=1.845, speed_ratio=1.178, loss_parameter=0.0122, volume_parameter=0.002, spectral_strength=0.0041)',
     'Bellhop':
-        'Bellhop()',
+        "Bellhop(backend='fortran')",
     'Bellhop_knobs':
-        "Bellhop(beam_type='B', n_beams=500)",
+        "Bellhop(backend='fortran', beam_type='B', n_beams=500)",
+    'EngineStatus':
+        'EngineStatus(\n'
+        '  engine   backend  default  found  path\n'
+        '  Bellhop  cuda              no     not found: bellhopcuda\n'
+        '  Bellhop  fortran  yes      yes    /opt/uacpy/bin/oalib/bellhop.exe\n'
+        ')',
     'RAM':
         'RAM()',
     'AlongTrack':
@@ -521,6 +559,12 @@ EXPECTED = {
         'SeaStateRecord(hs=1.5 m, tp=7 s, provenance=gebco)',
     'BoundaryTable':
         'BoundaryTable(kind=bathymetry, path=env.bty, interpolation=L, ranges [0, 5000] m, depths [100, 200] m)',
+    'Boundary3dFile':
+        'Boundary3dFile(interpolation=R, x [0, 1000, 2000] m, y [0, 1000] m, depths 2×3 m)',
+    'BeamPatternTable':
+        'BeamPatternTable(angles [-30, 0, 30] deg, levels_dB [-6, 0, -6] dB)',
+    'WavInfo':
+        'WavInfo(encoding=pcm24, bits=24, n_channels=4, sample_rate=96000 Hz, n_frames=345600000)',
     'ShdFile':
         'ShdFile(title=shelf, frequencies 200 Hz, source_depths 20 m, 12 receiver_depths 5–95 m, 20 receiver_ranges 100–10000 m, pressure 1×1×1×12×20 complex)',
     'SspTable':
@@ -556,9 +600,9 @@ EXPECTED = {
     'OFDMReceiver':
         "OFDMReceiver(modulation='qpsk')",
     'RamGrid':
-        'RamGrid(frequency=200 Hz, dr=25.4846 m, dz=0.2589 m, zmax=321.812 m, n_depth_points=1244)',
+        'RamGrid(frequency=200 Hz, dr=57.3403 m, dz=0.2589 m, zmax=321.812 m, n_depth_points=1244)',
     'KrakenLaunch':
-        'KrakenLaunch(deck_frequency=200 Hz, 162 tabulation_depths 0–100 m, c_low=0 m/s, c_high 1732.5 m/s, rmax_m=10500 m, n_mesh=0, field_option=RC C)',
+        'KrakenLaunch(deck_frequency=200 Hz, 162 tabulation_depths 0–100 m, c_low=0 m/s, c_high 1732.5 m/s, rmax_m=10000 m, n_mesh=0, field_option=RA C)',
     'ModelSpec':
         'ModelSpec(8 modes, 5 supports, source_types [line, point])',
     'Surface_rd':
@@ -663,7 +707,9 @@ def test_every_public_class_prints_one_line_without_a_nested_constructor(built):
         for obj in objs:
             text = repr(obj)
             head = f"{cls.__name__}("
-            if isinstance(obj, (RunSettings, EngineSettings)):
+            # A run record and the engine status table print one aligned
+            # line per entry between ``Name(`` and ``)``.
+            if isinstance(obj, (RunSettings, EngineSettings, EngineStatus)):
                 ok = (text.startswith(head + '\n') and text.endswith('\n)'))
             else:
                 inner = text[len(head):-1]

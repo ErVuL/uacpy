@@ -16,11 +16,10 @@ class ScooterSettings(EngineSettings):
     ----------
     c_low, c_high : float
         The phase-speed window (m/s) of the wavenumber integration, the
-        deck's ``cLow`` / ``cHigh``. Unpinned, ``c_low = 0.95 × min(SSP)``
-        and ``c_high = 1.05 × max(SSP, seabed sound speed)``; a vacuum,
-        rigid, ``'file'`` or ``'precalc'`` seabed has no half-space speed to
-        cap on, so an unpinned ``c_high`` there is the unbounded
-        ``DEFAULT_C_MAX_UNBOUNDED`` (1e9 m/s). The default ``c_low`` reads the
+        deck's ``cLow`` / ``cHigh``. Unpinned, ``c_low = 0.9 × min(SSP)``
+        and ``c_high`` is the unbounded ``DEFAULT_C_MAX_UNBOUNDED`` (1e9 m/s,
+        ``k_min = 0``, Jensen et al., ch. 4 App. 1) over every seabed. The
+        default ``c_low`` reads the
         water only, so seabed interface (Scholte) waves slower than it are
         outside the window.
     c_low_origin, c_high_origin : str
@@ -32,7 +31,7 @@ class ScooterSettings(EngineSettings):
         The multiplier that ``rmax_m`` was built with.
     rmax_factor_origin : str
         Where ``rmax_factor`` came from: the constructor, or the default
-        of the run mode (2.0 for ``COHERENT_TL``, 3.0 broadband).
+        (2.0 in every run mode, the toolbox's Scooter decks).
     n_mesh : int
         The mesh points per medium the deck asks for (``0``: the binary
         sizes each medium itself).

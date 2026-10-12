@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from uacpy.core.exceptions import ExecutableNotFoundError
+import uacpy.models._launch as launch_mod
 from uacpy.models.oases import OASN
 
 pytestmark = pytest.mark.requires_oases
@@ -50,21 +51,20 @@ class TestExecutableSearchOrder:
         wrapper.touch()
         wrapper.chmod(0o755)
 
-        def fake_find(self, names, bin_subdirs=None, dev_subdir=None,
-                      try_exe_suffix=True):
+        def fake_find(names, bin_subdirs=None, dev_subdir=None, *,
+                      model_name):
             names = [names] if isinstance(names, str) else list(names)
             calls.append((names, list(bin_subdirs or []), dev_subdir))
             return tmp_path / names[0]
 
-        monkeypatch.setattr(OASN, '_find_executable_in_paths', fake_find)
+        monkeypatch.setattr(launch_mod, 'find_executable_in_paths',
+                            fake_find)
         OASN(verbose=False)
         assert (['oasn2_bin_bash', 'oasn2_bin'], ['oases', 'oalib'],
                 'oases') in calls
 
     def test_bash_wrapper_outranks_the_bare_binary_across_dirs(
             self, monkeypatch):
-        import uacpy.models._launch as launch_mod
-
         base_dir = launch_mod._PACKAGE_DIR
         bash_oases = base_dir / 'bin' / 'oases' / 'oasn2_bin_bash'
         bare_oalib = base_dir / 'bin' / 'oalib' / 'oasn2_bin'
@@ -75,13 +75,11 @@ class TestExecutableSearchOrder:
                             lambda path: str(path) in runnable)
         monkeypatch.setattr(launch_mod.shutil, 'which', lambda name: None)
 
-        model = OASN.__new__(OASN)      # only the search helper is exercised
-        model.model_name = 'OASN'
-
         def find():
-            return model._find_executable_in_paths(
+            return launch_mod.find_executable_in_paths(
                 ['oasn2_bin_bash', 'oasn2_bin'],
-                bin_subdirs=['oases', 'oalib'], dev_subdir='oases')
+                bin_subdirs=['oases', 'oalib'], dev_subdir='oases',
+                model_name='OASN')
 
         # Both present: the _bash wrapper wins even though the bare binary
         # exists in an earlier-tried directory for its own name.

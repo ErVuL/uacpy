@@ -82,10 +82,10 @@ class TestPadeError:
     # Δξ = h(Δz)/k₀² ≈ 2e-12 at k₀ = 2 — six orders below the ±1e-6 ξ window,
     # the tightest used here, so what is left is the Padé term alone.
     TINY_DZ = 1e-5
-    THETA = np.deg2rad(30.0)
+    THETA = 30.0
 
     def _pade_only(self, **kwargs):
-        return combined_error(dz=self.TINY_DZ, angle_max=self.THETA, **kwargs)
+        return combined_error(dz=self.TINY_DZ, angle_max_deg=self.THETA, **kwargs)
 
     def test_zero_at_origin(self):
         """The Padé approximation is exact at ξ = 0."""
@@ -112,17 +112,27 @@ class TestPadeError:
 class TestNumerovError:
     """``h(Δz)`` from Eq. (13)."""
 
+    def test_the_angle_is_in_degrees(self):
+        """30 is thirty degrees, as on optimal_c0 / optimize_grid: it scores
+        what the radian form of thirty degrees scores, and less than the
+        near-grazing 89.9 degrees."""
+        from uacpy.models.pe_grid import _numerov_error
+        k0 = 2 * np.pi * 500 / 1500
+        assert numerov_error(0.5, k0, 30.0) == pytest.approx(
+            _numerov_error(0.5, k0, np.deg2rad(30.0)), rel=1e-15)
+        assert numerov_error(0.5, k0, 30.0) < numerov_error(0.5, k0, 89.9)
+
     def test_4th_order_beats_2nd_order(self):
         """At small Δz the Numerov correction (α=1/12) is much more accurate."""
         k0 = 2 * np.pi * 500 / 1500
-        h2 = numerov_error(dz=0.1, k0=k0, angle_max=np.deg2rad(30), alpha=0.0)
-        h4 = numerov_error(dz=0.1, k0=k0, angle_max=np.deg2rad(30), alpha=1 / 12)
+        h2 = numerov_error(dz=0.1, k0=k0, angle_max_deg=30.0, alpha=0.0)
+        h4 = numerov_error(dz=0.1, k0=k0, angle_max_deg=30.0, alpha=1 / 12)
         assert h4 < h2 / 100  # 4th-order is at least 100× tighter at this dz
 
     def test_grows_with_dz(self):
         k0 = 2 * np.pi * 500 / 1500
         errs = [
-            numerov_error(dz=dz, k0=k0, angle_max=np.deg2rad(30), alpha=0.0)
+            numerov_error(dz=dz, k0=k0, angle_max_deg=30.0, alpha=0.0)
             for dz in [0.05, 0.1, 0.5, 1.0]
         ]
         assert all(errs[i] < errs[i + 1] for i in range(len(errs) - 1))
@@ -213,6 +223,36 @@ class TestOptimizeGrid:
         assert min(rungs) == pytest.approx(DZ_MIN)
         assert max(rungs) == pytest.approx(DZ_MAX)
         assert rungs == sorted(rungs, reverse=True)
+
+
+class TestOneHeldStepIsSearchedAgainst:
+    """``grid=(dr, None)`` / ``(None, dz)`` holds the given step and searches
+    the other on its ladder under ``eps`` — the grid a pinned ``accuracy``
+    marches beside a pinned step (``ram.grid.grid_for_pinned_accuracy``)."""
+
+    KW = dict(frequency=200.0, c_min=1500.0, c_max=1591.0, x_max=5000.0,
+              c0=1591.0, angle_max=30.0, p=6, alpha=0.0, c_max_all=1600.0)
+
+    def test_a_held_range_step_is_kept_and_the_depth_step_searched(self):
+        res = optimize_grid(eps=1e-2, grid=(10.0, None), **self.KW)
+        assert res['dr'] == 10.0
+        assert res['predicted_error'] < 1e-2
+        # The coarsest dz on the ladder that meets it at that dr.
+        free = optimize_grid(eps=1e-2, **self.KW)
+        assert res['dz'] >= free['dz']
+
+    def test_a_held_depth_step_is_kept_and_the_range_step_searched(self):
+        res = optimize_grid(eps=0.5, grid=(None, 0.2), **self.KW)
+        assert res['dz'] == 0.2 and res['predicted_error'] < 0.5
+
+    def test_a_held_step_no_partner_meets_is_refused(self):
+        with pytest.raises(GridInfeasibleError, match='satisfies'):
+            optimize_grid(eps=1e-2, grid=(None, 0.5), **self.KW)
+
+    def test_a_full_pair_is_scored_whatever_its_error(self):
+        res = optimize_grid(eps=1e-9, grid=(25.0, 1.0), **self.KW)
+        assert (res['dr'], res['dz']) == (25.0, 1.0)
+        assert res['predicted_error'] > 1e-9
 
 
 class TestGridError:
@@ -343,10 +383,9 @@ class TestPadeBuildIsHoistedOutOfTheDepthLadder:
     @pytest.mark.parametrize('dx', [1.0, 7.5, 60.0, 400.0])
     @pytest.mark.parametrize('dz', [0.01, 0.1, 1.0, 5.0])
     def test_a_prebuilt_approximant_scores_identically(self, dx, dz):
-        theta = np.deg2rad(30.0)
-        built_here = combined_error(dx, dz, self._K0, 6, angle_max=theta,
+        built_here = combined_error(dx, dz, self._K0, 6, angle_max_deg=30.0,
                                     **self._XI)
-        passed_in = combined_error(dx, dz, self._K0, 6, angle_max=theta,
+        passed_in = combined_error(dx, dz, self._K0, 6, angle_max_deg=30.0,
                                    pade=_propagator_pade(dx, self._K0, 6),
                                    **self._XI)
         assert repr(passed_in) == repr(built_here)
@@ -496,8 +535,8 @@ class TestTauMemoAcrossTheRelaxationLadder:
     def test_the_relaxation_ladder_returns_its_recorded_values(self):
         """Pinned to the values the ladder produces, on a case that walks the
         full ε ladder at 30° and succeeds at 20°; the Δz ladder reaches
-        λ/200 = 7.5 mm at 1 kHz (``dz_ladder_end``)."""
-        model = RAM(verbose=False)
+        λ/200 = 7.5 mm at 1 kHz (``dz_ladder_end``), at Padé order 6."""
+        model = RAM(n_pade=6, verbose=False)
         result, eps_used, theta_used = ram_grid.optimize_grid_relaxing(
             frequency=1000.0, c_min=1500.0, c_max=1700.0, max_range=50000.0,
             c0_pe=1600.0, eps0=1e-4, theta0=30.0, kind='ramgeo',
@@ -519,13 +558,14 @@ class TestTauMemoAcrossTheRelaxationLadder:
 
 
 def _spectrum(c_min, c_max, angle_max_deg=30.0, freq=100.0):
-    """``(k0, xi_min, xi_max, theta_rad)`` for a water/seabed speed pair."""
+    """``(k0, xi_min, xi_max, angle_max_deg)`` for a water/seabed speed
+    pair."""
     c0 = optimal_c0(c_min, c_max, angle_max_deg)
     theta = np.deg2rad(angle_max_deg)
     return (2.0 * np.pi * freq / c0,
             -np.sin(theta) ** 2 + (c0 / c_max) ** 2 - 1.0,
             (c0 / c_min) ** 2 - 1.0,
-            theta)
+            angle_max_deg)
 
 
 class TestPadeErrorSurvivesAnEvanescentSpectrum:
@@ -732,10 +772,10 @@ class TestTheStabilityBandIsHeldNonAmplifyingOnly:
 
     def test_tau_ignores_the_stability_band_for_accuracy(self):
         k0 = 2 * np.pi * 200.0 / 2047.0
-        band = combined_error(2.0, 0.1, k0, 6, -0.86, 0.86, np.deg2rad(30))
+        band = combined_error(2.0, 0.1, k0, 6, -0.86, 0.86, 30.0)
         with_stab = combined_error(2.0, 0.1, k0, 6, -0.86, 0.86,
-                                   np.deg2rad(30), xi_stab_min=-1.11)
-        hull = combined_error(2.0, 0.1, k0, 6, -1.11, 0.86, np.deg2rad(30))
+                                   30.0, xi_stab_min=-1.11)
+        hull = combined_error(2.0, 0.1, k0, 6, -1.11, 0.86, 30.0)
         assert with_stab == pytest.approx(band, rel=1e-9)
         assert hull > 10 * band
 
@@ -757,17 +797,17 @@ class TestTheStabilityBandIsHeldNonAmplifyingOnly:
         P, Q = mod._propagator_pade(2.0, k0, 6)
         monkeypatch.setattr(mod, '_eval_poly', amplified)
         assert mod.combined_error(2.0, 0.1, k0, 6, -0.86, 0.86,
-                                  np.deg2rad(30), pade=(P, Q),
+                                  30.0, pade=(P, Q),
                                   xi_stab_min=-1.11) == float('inf')
 
     def test_numerov_error_takes_the_band_edge_wavenumber(self):
         """``kz_max`` overrides the aperture: the critical-angle component
         of a fast seabed has ``k_z > k₀ sin θ`` and costs more."""
         k0 = 2 * np.pi * 200.0 / 1799.0
-        at_aperture = numerov_error(0.25, k0, np.deg2rad(30.0))
-        at_kz = numerov_error(0.25, k0, np.deg2rad(30.0), kz_max=0.936 * k0)
+        at_aperture = numerov_error(0.25, k0, 30.0)
+        at_kz = numerov_error(0.25, k0, 30.0, kz_max=0.936 * k0)
         assert at_kz > 5 * at_aperture
-        assert numerov_error(0.25, k0, np.deg2rad(30.0),
+        assert numerov_error(0.25, k0, 30.0,
                              kz_max=k0 * np.sin(np.deg2rad(30.0))) == \
             pytest.approx(at_aperture)
 

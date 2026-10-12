@@ -249,18 +249,33 @@ which is invisible until something interferes two of them. Verified
 against a two-path `H`: with the rotation the round trip
 reproduces it to `max|err| = 0.0000`; without it, 3.16.
 
-**Exact on the grid the trace came from.** The inverse returns the
-rfft bins `k·Δf` of the record. When the synthesised band started
-on a multiple of `Δf` those ARE the model's frequencies and the
-round trip closes to rounding (4.7e-16 relative, measured on a
-two-path `H` over 25-999 Hz at `Δf = 1` Hz). When it did not —
-`to_time_trace` places such a band with a common bin offset — the
-spectrum comes back on the integer-`Δf` grid instead, so its
-frequencies are not the model's, and the offset band's non-integer
-cycles per record leak: measured on the same `H` started at
-25.3 Hz, 2.5e-3 relative inside the band and 3.1e-2 at its edge bin.
-Compare such a round trip after interpolating, or build the model
-grid on multiples of `Δf`.
+**Exact on the grid the trace came from.** An `rfft` of the record
+returns the bins `k·Δf`. When the synthesised band started on a
+multiple of `Δf` those ARE the model's frequencies and the round
+trip closes to rounding (4.7e-16 relative, measured on a two-path
+`H` over 25-999 Hz at `Δf = 1` Hz). When it did not — every
+default BROADBAND grid, `linspace(0.75 fc, 1.25 fc, 128)`, starts
+190.5 bins up — `to_time_trace` places the band with a common bin
+offset, so its lines are not whole cycles per record and an
+`rfft` leaks each one into every bin (Jacobsen & Juhl,
+*Fundamentals of General Linear Acoustics*, App. B.7.2: a line
+between two spectral samples gives "false" components), on an
+axis shifted from the model's by the offset. The inverse therefore
+evaluates the trace at its identity grid whenever that grid is
+spaced the record's resolution `1/(N·dt)`, as every synthesised
+trace's is: rotating the record by the offset puts the lines back
+on bins, and the mirror image the real record carries at the
+negative frequencies — whose lines still sit between bins — is
+removed by fixed-point passes, each shrinking the error by the
+image's leakage into the band (~1e-3 a few hundred bins above
+0 Hz). Measured on a two-path `H`: 2.2e-14 relative on the default
+grid shape, 7e-16 on a quarter-bin offset, 6e-15 from 25.3 Hz.
+Within a bin of 0 Hz or of the Nyquist frequency, where a line and
+its image barely differ in one record, the passes stall and the
+same equations are solved directly; a warning gives the accuracy
+when even that is limited (a line 1e-5 of a bin from 0 Hz). The
+array form is `transfer_function_from_impulse_response(h, fs,
+frequencies=grid)`.
 
 **The band is restricted, not extended.** An `rfft` of an
 `N`-sample record returns bins from 0 to the Nyquist frequency,
@@ -285,12 +300,13 @@ one, and why this needs the synthesis that
 **Unlike SEL, it depends on the output sample rate.** A maximum is
 a sample, not an integral, so a coarse grid can miss the true crest
 between samples. Measured on a two-path channel with a 5-cycle
-500 Hz burst, sweeping `nfft` from 320 to 65536 (8 kHz to 1.6 MHz
-of output rate): the peak moved **0.0615 dB** and the SEL of the
-same traces moved **0.0000 dB**, Parseval holding it exactly. The
-peak is converged by about `nfft` = 4096; the automatic size lands
-within 0.004 dB of that here. Raise `nfft` if a fraction of a
-decibel matters, and note the cost is only in the transform length.
+500 Hz burst, synthesising at output rates from 8 kHz to 1.6 MHz:
+the peak moved **0.0615 dB** and the SEL of the same traces moved
+**0.0000 dB**, Parseval holding it exactly; the peak is converged by
+about 100 kHz. The synthesis returns the waveform's own rate, so the
+peak is the one a recorder at that rate reads; a waveform sampled
+faster (the same pulse, resampled before it is passed) reads the
+continuous crest more closely, at the cost only of a longer record.
 
 ## The synthesis band of an arrival set (`Arrivals.synthesis_band`)
 
@@ -299,8 +315,8 @@ way the textbook formulation puts it: "it is convenient to properly
 select the time windowing T and sampling dt needed to represent the
 response at all the receivers. This, in turn, constrains the
 frequency sampling" (Jensen, Kuperman, Porter and Schmidt,
-*Computational Ocean Acoustics*, sect. 8.2). Pass `record` to state
-that window. Leave it out and it is derived from the arrivals: the
+*Computational Ocean Acoustics*, sect. 8.2). Pass `output_duration` to
+state that window. Leave it out and it is derived from the arrivals: the
 span holding `energy_fraction` of their energy
 (`energy_support`), times `margin`.
 
@@ -314,6 +330,11 @@ simply summing up the echoes" (Bellhop User Guide sect. 9). That is
 `RunMode.TIME_SERIES` (`to_time_series`),
 where an echo past the window is omitted rather than folded — the
 honest truncation, at the cost of giving up the transfer function.
+A waveform need not fit the record either: the channel's impulse
+response (`Field.impulse_response`, `Arrivals.impulse_response`) is
+one record long, and `.apply()` convolves a signal of any length with
+it linearly — overlap-and-add, Abraham sect. 4.9.4 — so the record has
+to hold the channel's dispersion and nothing of the signal.
 
 There is a third way, which keeps the whole arrival set on the
 frequency route and makes the wrap-around harmless instead: displace the
@@ -369,6 +390,16 @@ by an overall `−1`, which neither `−20·log10|P|` nor a phase
 *difference* across the grid can see.
 
 ## The finite-difference group velocity (`Modes.group_velocity_between`)
+
+Two modal results at nearby frequencies give `v_g = Δω/Δk_r` mode by
+mode, second-order accurate at the midpoint frequency. That difference
+has an accuracy-optimal step, and it is not the smallest one. Its
+truncation error falls as Δf², but `k_r` arrives quantized (KRAKEN's
+`.mod` record is `COMPLEX*8`), so the difference carries about one
+float32 step of noise however small Δf is, and the storage contributes
+`spacing(k_r)/|Δk_r|` relative. The two balance at
+
+`Δf ≈ (spacing(k_r)·v_g / (2π·|d²k_r/dω²|))^(1/3)`,
 
 which moves with frequency and mode order: on a 100 m Pekeris guide
 (c 1500/1800 m/s, ρ 1.0/1.8) at 100 Hz the optimum is Δf = 1 Hz, at

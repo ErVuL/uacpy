@@ -792,11 +792,11 @@ def test_ram_stepped_waveguide_matches_coupled_mode_reference():
     ram = RAM(backend='mpirams', dr=5.0, dz=0.25, n_pade=6, timeout=900)
     ref = _reference(D2_WEAK)
 
-    med, p90, mx = _abs_dtl(ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, ref)
+    med, p90, mx = _abs_dtl(ram.compute_field(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, ref)
     assert med < 0.35, f"median |dTL|={med:.3f} dB"
     assert p90 < 0.9, f"p90 |dTL|={p90:.3f} dB"
 
-    n_med, n_p90, _ = _abs_dtl(ram.compute_tl(_stepped_env(D1, _SOFT), src, rcv).dB, ref)
+    n_med, n_p90, _ = _abs_dtl(ram.compute_field(_stepped_env(D1, _SOFT), src, rcv).dB, ref)
     assert n_med > 1.5 and n_p90 > 3.0, (
         f"step-removed run is only {n_med:.3f} dB median / {n_p90:.3f} dB p90 "
         f"from the stepped reference: this benchmark cannot tell the step's "
@@ -814,27 +814,25 @@ def test_ramgeo_stepped_waveguide_matches_coupled_mode_reference():
     with the coupled-mode field to under a tenth of a dB is what rules out a
     shared uacpy-side transcription error in the stepped-bathymetry writer.
 
-    This leg does NOT run on the ``dr = 5 m`` it is handed. uacpy warns and
-    reduces it: "dr=5 m exceeds the closest profile-section spacing (1 m), so
-    the binary could consume only part of the 4-section environment ... dr has
-    been reduced to 1 m" (one section per range step, ``ramgeo1.5.f:194-195``).
-    The step in ``_stepped_env`` is written as two control points 1 m apart, so
-    ramgeo's effective ``dr`` is pinned to that ramp width rather than to the
-    constructor argument. The measurement is unaffected — 0.078/0.255 either
-    way — but a change to ``ramp`` moves this backend's grid with it.
+    This leg pins ``dr = 1 m``, not the 5 m the mpiramS leg takes. The step in
+    ``_stepped_env`` is written as two control points 1 m apart, ramgeo takes
+    one bathymetry node per range step (``ramgeo1.5.f:348``) and the manual
+    bounds ``dr`` by the smallest region (``ram.pdf`` p.8), so a pinned 5 m is
+    refused; a change to ``ramp`` has to move this grid with it. Measured at
+    0.9999 m: 0.081 / 0.256 dB; at 0.5 m: 0.184 / 0.494 dB.
 
     NULL CONTROL, asserted below: step removed, 2.696 dB median / 10.141 dB
     p90 against the stepped reference.
     """
     src, rcv = _src_rcv()
-    ram = RAM(backend='ramgeo', dr=5.0, dz=0.25, n_pade=6, timeout=900)
+    ram = RAM(backend='ramgeo', dr=1.0, dz=0.25, n_pade=6, timeout=900)
     ref = _reference(D2_WEAK)
 
-    med, p90, mx = _abs_dtl(ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, ref)
+    med, p90, mx = _abs_dtl(ram.compute_field(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, ref)
     assert med < 0.4, f"median |dTL|={med:.3f} dB"
     assert p90 < 1.0, f"p90 |dTL|={p90:.3f} dB"
 
-    n_med, n_p90, _ = _abs_dtl(ram.compute_tl(_stepped_env(D1, _SOFT), src, rcv).dB, ref)
+    n_med, n_p90, _ = _abs_dtl(ram.compute_field(_stepped_env(D1, _SOFT), src, rcv).dB, ref)
     assert n_med > 1.5 and n_p90 > 3.0, (
         f"step-removed run is only {n_med:.3f} dB median / {n_p90:.3f} dB p90 "
         f"from the stepped reference: this benchmark cannot tell the step's "
@@ -867,11 +865,11 @@ def test_bellhop_stepped_waveguide_matches_coupled_mode_reference():
     bh = Bellhop(n_beams=8000, timeout=900)
     ref = _reference(D2_WEAK)
 
-    med, p90, mx = _abs_dtl(bh.compute_tl(_stepped_env(D2_WEAK, _VACUUM), src, rcv).dB, ref)
+    med, p90, mx = _abs_dtl(bh.compute_field(_stepped_env(D2_WEAK, _VACUUM), src, rcv).dB, ref)
     assert med < 1.45, f"median |dTL|={med:.3f} dB"
     assert p90 < 3.9, f"p90 |dTL|={p90:.3f} dB"
 
-    n_med, n_p90, _ = _abs_dtl(bh.compute_tl(_stepped_env(D1, _VACUUM), src, rcv).dB, ref)
+    n_med, n_p90, _ = _abs_dtl(bh.compute_field(_stepped_env(D1, _VACUUM), src, rcv).dB, ref)
     assert n_med > 1.45 and n_p90 > 3.9, (
         f"step-removed run is only {n_med:.3f} dB median / {n_p90:.3f} dB p90 "
         f"from the stepped reference: this benchmark cannot tell the step's "
@@ -900,9 +898,9 @@ def test_a_one_way_pe_loses_the_stepped_field_once_the_step_reflects():
     src, rcv = _src_rcv()
     ram = RAM(backend='mpirams', dr=5.0, dz=0.25, n_pade=6, timeout=900)
     weak, _, _ = _abs_dtl(
-        ram.compute_tl(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, _reference(D2_WEAK))
+        ram.compute_field(_stepped_env(D2_WEAK, _SOFT), src, rcv).dB, _reference(D2_WEAK))
     strong, _, _ = _abs_dtl(
-        ram.compute_tl(_stepped_env(D2_STRONG, _SOFT), src, rcv).dB, _reference(D2_STRONG))
+        ram.compute_field(_stepped_env(D2_STRONG, _SOFT), src, rcv).dB, _reference(D2_STRONG))
     assert weak < 0.35, f"weak-coupling median |dTL|={weak:.3f} dB"
     assert strong > 4 * weak, (
         f"strong-coupling median |dTL|={strong:.3f} dB is not clearly worse "

@@ -35,7 +35,7 @@ from uacpy.core._export import Exportable
 from uacpy.core._plotting import plotter
 from uacpy.core._repr import axis, build, qty
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, NumericsWarning, ValidityWarning,
+    ConfigurationError, FallbackWarning, ValidityWarning,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.acoustics import band_level, sum_levels_dB
@@ -57,42 +57,6 @@ class NoiseComponents(ResultTuple, namedtuple(
 
     def _field_units(self):
         return {name: "dB re 1 µPa²/Hz" for name in self._fields}
-
-
-# IEC 61260-1 base-10 decidecade ("1/3-octave") bands run 10**(±1/20) about
-# their centre — 0.1 decade wide, so consecutive centres sit 0.1 decade apart
-# (:func:`uacpy.acoustic_signal.decidecade_bands`). It is the narrowest
-# analysis band uacpy defines, and so the yardstick for whether a frequency
-# vector is a set of band centres or a plotting grid.
-_DECIDECADE_DECADES = 0.1
-
-# The canonical vector this threshold has to accept — ``decidecade_bands``'
-# own centres, the call docs/guide/noise.md section 6 teaches — lands ON it,
-# and ``log10`` of ``1000 * 10**(n/10)`` reproduces the 0.1 step only to a few
-# ulp: over 100 Hz - 1 kHz the tightest gap computes as
-# 0.09999999999999964, short by 3.6e-16 (relative 3.6e-15). A bare ``<`` then
-# warns about the very usage the warning recommends. Relative to the spacing
-# being tested, per the package's epsilon rule, not an absolute floor: the
-# comparison lives in decades, so its tolerance has to scale with the band
-# width. 1e-9 clears that float shortfall by six orders while staying far
-# below any real grid difference — one extra point across the same decade
-# (12 against 11) is 9% finer, seven orders above this tolerance.
-_BAND_SPACING_RTOL = 1e-9
-
-
-def _tightest_spacing_in_decades(f):
-    """Smallest gap (decades) between consecutive positive frequencies.
-
-    ``np.nan`` when fewer than two positive frequencies are present. Symmetric
-    in the sign of the step, so a descending vector is measured the same way.
-    Non-positive entries are dropped rather than treated as a gap of their own:
-    that only widens the apparent spacing, so the test it feeds never fires on
-    their account.
-    """
-    pos = f[f > 0]
-    if pos.size < 2:
-        return np.nan
-    return float(np.min(np.abs(np.diff(np.log10(pos)))))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,8 +83,7 @@ def _positive_frequencies(frequencies, who):
     return f
 
 
-def wind_noise_level(frequencies, *, wind_speed_kn, water_depth='deep',
-                      band_integrate=False):
+def wind_noise_level(frequencies, *, wind_speed_kn, water_depth='deep'):
     """
     Wind-driven ambient noise level (dB re 1 µPa²/Hz), with the
     Piggott (1964) shallow-water adjustment.
@@ -147,31 +110,14 @@ def wind_noise_level(frequencies, *, wind_speed_kn, water_depth='deep',
         case-sensitively; anything else raises rather than falling back on
         'deep', which would hand back a spectrum 3.0 dB from the one asked for
         (50 Hz, 'shallow') with nothing to say so.
-    band_integrate : bool
-        If True, return the band-integrated SPL (dB re 1 µPa²) where each
-        band's bandwidth is set by the midpoints between consecutive
-        input frequencies in ascending order — ``frequencies`` need not be
-        pre-sorted, and each level comes back at its frequency's own position
-        in the input. Default False — return the spectral level
-        (dB re 1 µPa²/Hz). Use the band form to pair wind noise with a
-        band-integrated source level; :class:`WenzNoise` is spectral-only.
-        The first and last entries are half-bands — their outer edge is the
-        vector's own end — and so sit 2.5-3.5 dB below a full band; see the
-        noise guide for the band-edge rule.
-
-        Because the widths come from the vector's own spacing,
-        ``frequencies`` has to be a set of analysis-band **centres** for the
-        result to be band levels. A vector finer than decidecade spacing is a
-        plotting grid, and the levels then move with its density — 18.0 dB
-        between 20 and 1200 points over one decade — so that case raises a
-        ``NumericsWarning``.
 
     Returns
     -------
     NL : ndarray
-        Wind noise spectral level (dB re 1 µPa²/Hz), or band-integrated
-        SPL (dB re 1 µPa²) if ``band_integrate=True``. Always shaped
-        ``(len(f),)`` (1-D, even for scalar ``f``).
+        Wind noise spectral level (dB re 1 µPa²/Hz), shaped ``(len(f),)``
+        (1-D, even for scalar ``f``). For a band level, integrate it over
+        the band (:meth:`WenzNoise.decidecade_levels`,
+        :meth:`WenzNoise.band_level`).
 
     Notes
     -----
@@ -221,72 +167,6 @@ def wind_noise_level(frequencies, *, wind_speed_kn, water_depth='deep',
     if u == 0:
         NL = np.full_like(f, -np.inf)
     else:
-        n_freq = f.size
-        if band_integrate:
-            if n_freq < 2:
-                raise ConfigurationError(
-                    "wind_noise_level(band_integrate=True) needs at least two "
-                    "frequencies to define band edges; got one. Use "
-                    "band_integrate=False for a scalar spectral level."
-                )
-            # The band form exists to pair wind noise with a band-integrated
-            # source level, so ``frequencies`` has to be a set of analysis-band
-            # CENTRES. Below decidecade spacing it is a plotting grid instead,
-            # and each returned level is a PSD sample scaled by whatever sliver
-            # of bandwidth the grid happens to carry: over one decade,
-            # 100 Hz - 1 kHz at u = 10 kn, the loudest band reads 80.60 dB at
-            # 20 points and 62.60 dB at 1200, an 18.0 dB swing on the same
-            # physics. (The band SUM is grid-invariant — 90.47 dB either way —
-            # it is the per-band level that moves.)
-            tightest = _tightest_spacing_in_decades(f)
-            floor = _DECIDECADE_DECADES * (1.0 - _BAND_SPACING_RTOL)
-            if np.isfinite(tightest) and tightest < floor:
-                # A repeated frequency gives a zero-width band, so the
-                # points-per-decidecade count it would otherwise report is
-                # unbounded; name the duplication instead.
-                density = (
-                    f"about {_DECIDECADE_DECADES / tightest:.0f} of these "
-                    f"frequencies fall inside one decidecade"
-                    if tightest > 0 else
-                    "frequencies are repeated, so those bands have zero width"
-                )
-                # Reachable only from a user's own call: the one in-package
-                # caller, ``_wind_merklinger``, passes three positional
-                # arguments, so ``band_integrate`` is always False there and
-                # this branch is dead on that path.
-                warnings.warn(
-                    f"wind_noise_level(band_integrate=True): consecutive "
-                    f"frequencies come as close as {tightest:.4g} decades, "
-                    f"finer than the {_DECIDECADE_DECADES:g}-decade decidecade "
-                    f"band (uacpy.acoustic_signal.decidecade_bands) — "
-                    f"{density}. Each band's width is taken from this "
-                    f"vector's own spacing, so at this density the returned "
-                    f"levels are spectral levels scaled by an arbitrary "
-                    f"bandwidth and move with the grid (measured 18.0 dB "
-                    f"between 20 and 1200 points over one decade). Pass "
-                    f"analysis-band centres for band levels, or "
-                    f"band_integrate=False for the spectral level.",
-                    NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
-                )
-            # Band edges at the midpoints between consecutive frequencies in
-            # ascending order; the two outer bands span only the half-spacing
-            # to their single neighbour (df[0]=(f[1]-f[0])/2,
-            # df[-1]=(f[-1]-f[-2])/2). A leading 0 / symmetric extrapolation
-            # would over-weight the end bands. The widths are computed on the
-            # sorted grid and scattered back through the argsort, so each
-            # frequency keeps its own bandwidth at the caller's ordering — a
-            # descending vector returns the ascending band levels reversed,
-            # where edges taken from the raw vector gave negative widths and an
-            # all-NaN spectrum.
-            order = np.argsort(f)
-            f_sorted = f[order]
-            mids = (f_sorted[1:] + f_sorted[:-1]) / 2
-            edges = np.concatenate(([f_sorted[0]], mids, [f_sorted[-1]]))
-            band_low = np.empty_like(f)
-            band_high = np.empty_like(f)
-            band_low[order] = edges[:-1]
-            band_high[order] = edges[1:]
-        df = np.ones_like(f)
 
         # Symbols follow DRDC-RDDC-2022-D051 §2.3: f0w/L0w the peak frequency
         # and peak level of the wind curve (eqs. 8, 9), s1w/s2w its rising and
@@ -333,7 +213,7 @@ def wind_noise_level(frequencies, *, wind_speed_kn, water_depth='deep',
         with np.errstate(invalid='ignore', divide='ignore'):
             blend = 1 + (L1w / L2w) ** (-a)
             Lw = np.where(blend > 0, L1w * np.abs(blend) ** (1 / a), -np.inf)
-        NL[i_wind] = 10 ** (Lw / 10) * df[i_wind]
+        NL[i_wind] = 10 ** (Lw / 10)
 
         # Meld with a sensible line at freqs greater than 2000 Hz, per DRDC
         # eq. (18)-(19): K = Lw,2000 - m0*(10 log10 2000), Lw = K + m0*10 log10 f.
@@ -352,18 +232,10 @@ def wind_noise_level(frequencies, *, wind_speed_kn, water_depth='deep',
                 Lc = (L1c * abs(blend_c) ** (1 / a)
                       if blend_c > 0 else -np.inf)
             prop_const = 10 ** (Lc / 10) / f_wind ** slope
-            NL[~i_wind] = prop_const * f[~i_wind] ** slope * df[~i_wind]
+            NL[~i_wind] = prop_const * f[~i_wind] ** slope
 
         with np.errstate(divide='ignore'):
             NL = 10 * np.log10(NL)
-        if band_integrate:
-            # Each frequency's band holds its spectral level across the band
-            # (band_level of the flat density); a zero-width band, from a
-            # repeated frequency, carries no power.
-            NL = np.array([
-                band_level(np.array([level, level]), np.array([lo, hi]))
-                if hi > lo else -np.inf
-                for level, lo, hi in zip(NL, band_low, band_high)])
 
     return NL
 
@@ -882,7 +754,7 @@ class WenzNoise(Exportable):
     one against a band-integrated source level in the sonar equation is a
     ``10·log10(w)`` error — 20 dB over a 100 Hz band; see
     :func:`uacpy.sonar.noise_background` for the rule and
-    :func:`wind_noise_level` (``band_integrate=True``) for a band level.
+    :meth:`band_level` / :meth:`decidecade_levels` for a band level.
 
     Parameters
     ----------
@@ -1088,7 +960,8 @@ class WenzNoise(Exportable):
     @classmethod
     def from_dict(cls, d):
         """The spectrum :meth:`to_dict` wrote; ``d`` may be the mapping
-        ``np.load(path, allow_pickle=True)`` returns.
+        ``np.load(path, allow_pickle=True)`` returns (load such a file only if
+        you wrote it: that load unpickles).
 
         Parameters
         ----------
@@ -1175,6 +1048,9 @@ class WenzNoise(Exportable):
         return NoiseComponents(self.total, self.wind, self.shipping,
                                self.rain, self.thermal, self.turbulence)
 
+    #: The plotter that draws this spectrum (``.plot()``).
+    _plotter = 'plot_wenz'
+
     def plot(self, **kwargs):
         """Draw this spectrum through :func:`uacpy.plot.plot_wenz`.
 
@@ -1185,7 +1061,7 @@ class WenzNoise(Exportable):
         ``(fig, ax)``, as every plotter in the package does.
         """
         self._spectrum('total')
-        return plotter('plot_wenz')(self, **kwargs)
+        return plotter(self._plotter)(self, **kwargs)
 
     def band_level(self, freq_min, freq_max, *, component='total'):
         """Band level (dB re 1 µPa²) over ``[freq_min, freq_max]`` Hz.

@@ -177,7 +177,7 @@ def _eval_poly(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
 
 
 def numerov_error(
-    dz: float, k0: float, angle_max: float,
+    dz: float, k0: float, angle_max_deg: float,
     alpha: float = 0.0, n_samples: int = 401,
     kz_max: Optional[float] = None,
 ) -> float:
@@ -185,9 +185,8 @@ def numerov_error(
     or on ``[-kz_max, 0]`` when ``kz_max`` (rad/m, the accuracy band's
     steepest component, :func:`_bands`) is given.
 
-    ``angle_max`` is in **radians** here, unlike :func:`optimal_c0` /
-    :func:`optimize_grid` / :func:`grid_error`, whose ``angle_max`` is the
-    user-facing one in degrees — those convert before calling in.
+    ``angle_max_deg`` is in degrees, the unit of every angle of this
+    module's public functions.
 
     Lytaev (2023), Eq. (13) — *Mesh Optimization for the Acoustic
     Parabolic Equation*, https://doi.org/10.3390/jmse11030496.
@@ -200,19 +199,28 @@ def numerov_error(
         Depth step (m).
     k0 : float
         Reference wavenumber (rad/m).
-    angle_max : float
-        Maximum propagation angle, in radians.
+    angle_max_deg : float
+        Maximum propagation angle, in degrees.
     alpha : float, optional
         Operator correction; 1/12 is Numerov. Default 0.
     n_samples : int, optional
         Samples of the ``k_z`` interval. Default 401.
     kz_max : float, optional
         Steepest component (rad/m) of the accuracy band, in place of
-        ``k0 sin(angle_max)``.
+        ``k0 sin(angle_max_deg)``.
     """
+    return _numerov_error(dz, k0, np.deg2rad(float(angle_max_deg)),
+                          alpha=alpha, n_samples=n_samples, kz_max=kz_max)
+
+
+def _numerov_error(dz: float, k0: float, angle_max_rad: float, *,
+                   alpha: float = 0.0, n_samples: int = 401,
+                   kz_max: Optional[float] = None) -> float:
+    """:func:`numerov_error` with the angle in radians."""
     if dz <= 0:
         return float("inf")
-    kz_min = -(k0 * np.sin(angle_max) if kz_max is None else float(kz_max))
+    kz_min = -(k0 * np.sin(angle_max_rad) if kz_max is None
+               else float(kz_max))
     kz = np.linspace(kz_min, 0.0, n_samples)
     s = np.sin(0.5 * kz * dz)
     # Continuous: Δz²·k_z².  Discrete (with optional Numerov α):
@@ -232,7 +240,7 @@ _EVANESCENT_GROWTH_TOL = 1e-9
 def _step_error(
     dx: float, dz: float, k0: float, p: int,
     xi_min: float, xi_max: float,
-    angle_max: float, alpha: float = 0.0,
+    angle_max_rad: float, alpha: float = 0.0,
     n_xi: int = 161, n_offsets: int = 5,
     pade: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     kz_max: Optional[float] = None,
@@ -245,8 +253,8 @@ def _step_error(
     growth is ``max |P/Q| − 1`` over the stability band outside the
     accuracy band (``0`` when there is none).
 
-    ``angle_max`` is in **radians** (passed straight to
-    :func:`numerov_error`, together with ``kz_max`` when given).
+    ``angle_max_rad`` is in radians (passed to :func:`_numerov_error`,
+    together with ``kz_max`` when given).
     ``xi_stab_min`` / ``xi_stab_max`` widen the sampled interval to the
     stability band (:func:`_bands`), on which the approximant is not held
     to ``f``: its evanescent part (``ξ < −1``) only has to be
@@ -265,7 +273,7 @@ def _step_error(
     build out of its Δz ladder. It must have been built at this call's
     ``(dx, k0, p)``; ``None`` builds it here.
     """
-    h = numerov_error(dz, k0, angle_max, alpha=alpha, kz_max=kz_max)
+    h = _numerov_error(dz, k0, angle_max_rad, alpha=alpha, kz_max=kz_max)
     delta_xi = h / (k0 ** 2)
 
     # Depends only on (dx, k0, p) — see _propagator_pade.
@@ -289,12 +297,12 @@ def _step_error(
     # whenever sin(angle_max) > sqrt(2)·c_min/c_max — with the shipped 30°
     # default, any seabed faster than ~2.83× the water speed (basalt, granite,
     # limestone under a slope). A REAL sqrt returns NaN there, `abs(NaN - pq)`
-    # is NaN, and `NaN > err_max` is False, so err_max kept its 0.0 initialiser
-    # and EVERY candidate grid scored a perfect zero: optimize_grid then took
-    # the coarsest rung of both ladders (dx = x_max/2, dz = DZ_MAX) and the
-    # march came back 360 dB rms from Scooter while the run logged "predicted
-    # error 0.00e+00". The complex branch evaluates the evanescent propagator
-    # exp(-k0·dx·|Im√|) that belongs there.
+    # is NaN, and `NaN > err_max` is False, so err_max would keep its 0.0
+    # initialiser and EVERY candidate grid score a perfect zero: optimize_grid
+    # would take the coarsest rung of both ladders (dx = x_max/2,
+    # dz = DZ_MAX), a march measured 360 dB rms from Scooter under a logged
+    # "predicted error 0.00e+00". The complex branch evaluates the evanescent
+    # propagator exp(-k0·dx·|Im√|) that belongs there.
     f_xi1 = np.exp(1j * k0 * dx
                    * (np.sqrt((1.0 + xi1_grid).astype(complex)) - 1.0))
     # Accuracy is required only where the propagator OSCILLATES (ξ ≥ -1).
@@ -338,10 +346,50 @@ def _step_error(
     return err_max, growth
 
 
-def combined_error(*args, **kwargs) -> float:
-    """Per-step error τ(Δx, Δz) alone — :func:`_step_error`'s first value,
-    same arguments."""
-    return _step_error(*args, **kwargs)[0]
+def combined_error(
+    dx: float, dz: float, k0: float, p: int,
+    xi_min: float, xi_max: float,
+    angle_max_deg: float, alpha: float = 0.0,
+    n_xi: int = 161, n_offsets: int = 5,
+    pade: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    kz_max: Optional[float] = None,
+    xi_stab_min: Optional[float] = None,
+    xi_stab_max: Optional[float] = None,
+) -> float:
+    """Per-step error τ(Δx, Δz) of a PE march step: the worst case of
+    ``|f(ξ₁) − P(ξ₂)/Q(ξ₂)|`` over the accuracy band ``[xi_min, xi_max]``
+    widened by the depth operator's spread (Lytaev 2023, τ formula above
+    Eq. 14 — https://doi.org/10.3390/jmse11030496).
+
+    Parameters
+    ----------
+    dx, dz : float
+        Range and depth steps (m).
+    k0 : float
+        Reference wavenumber (rad/m).
+    p : int
+        Padé order.
+    xi_min, xi_max : float
+        The accuracy band of ``ξ``.
+    angle_max_deg : float
+        Maximum propagation angle, in degrees.
+    alpha : float, optional
+        Depth-operator correction; 1/12 is Numerov. Default 0.
+    n_xi, n_offsets : int, optional
+        Samples of the band and of the ``ξ`` spread. Defaults 161 and 5.
+    pade : (ndarray, ndarray), optional
+        A ``(P, Q)`` already built at ``(dx, k0, p)``; ``None`` builds it.
+    kz_max : float, optional
+        Steepest component (rad/m) of the band, in place of
+        ``k0 sin(angle_max_deg)``.
+    xi_stab_min, xi_stab_max : float, optional
+        The stability band, on which the approximant must not amplify;
+        ``None`` takes the accuracy band.
+    """
+    return _step_error(
+        dx, dz, k0, p, xi_min, xi_max, np.deg2rad(float(angle_max_deg)),
+        alpha=alpha, n_xi=n_xi, n_offsets=n_offsets, pade=pade,
+        kz_max=kz_max, xi_stab_min=xi_stab_min, xi_stab_max=xi_stab_max)[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -524,6 +572,10 @@ def optimize_grid(
     grid : (float, float), optional
         A ``(dr, dz)`` to score in place of the ladders; the result then
         describes that pair whatever its error (``inf`` when unusable).
+        With one of the two ``None`` the other is held and only the
+        ``None`` one is searched on its ladder under ``eps``: the coarsest
+        ``dz`` for a given ``dr`` (``(dr, None)``), or ``dr`` for a given
+        ``dz`` (``(None, dz)``).
 
     Returns
     -------
@@ -558,12 +610,15 @@ def optimize_grid(
     # Candidate ladders, scanned in full; the pair maximising ``dx·dz``
     # among those inside the budget wins.
     dx_top = x_max * 0.5
-    if grid is not None:
-        dx_candidates, dz_candidates = [float(grid[0])], [float(grid[1])]
+    held = (None, None) if grid is None else tuple(grid)
+    score_only = None not in held
+    dx_candidates = ([float(held[0])] if held[0] is not None else
+                     _ladder(max(0.5, c0_use / frequency / 8.0), dx_top))
+    if held[1] is not None:
+        dz_candidates = [float(held[1])]
     else:
-        dx_candidates = _ladder(max(0.5, c0_use / frequency / 8.0), dx_top)
         # The ladder deliberately runs below any caller's own Δz floor. Floors
-        # are applied to the RESULT (RAM's ``c_min/(16 f)`` cost floor,
+        # are applied to the RESULT (RAM's ``c_min/(15 f)`` cost floor,
         # ``ram.grid.compute_grid_lytaev``), so a rung under the floor still
         # selects a marchable grid once floored — and flooring the ladder
         # instead was measured to make the marched field WORSE, because the
@@ -598,7 +653,7 @@ def optimize_grid(
                 )
             tau, growth = scored
             total = tau * n_steps
-            if grid is not None or total < eps:
+            if score_only or total < eps:
                 product = dx * dz
                 if product > best_product:
                     best_product = product
@@ -697,7 +752,14 @@ def rams_dz_shear_cap(c_shear_min: float, frequency: float,
 # every grid that ran and at least 1.31 on every grid that diverged, so the
 # fluid-Rayleigh leak estimate places the threshold where it was measured.
 # On a 200 m channel 1 kHz at dr = 1 m diverged (ratio 1.85), as the halved
-# leak rate predicts. The rule replaces neither the
+# leak rate predicts. At np = 8, the RAM default, the same channel was
+# marched again against a converged dr = 0.2 m run (a grid counted as growing
+# when its field 1.5-2 km out read more than 6 dB louder than that run's):
+# every grid at a growth/leak ratio up to 0.96 ran and every grid from 1.16
+# up grew (1.5 kHz at 1 m, 2 kHz at 0.5 m, 1 kHz at 1 m in 200 m of water),
+# so the same threshold and safety hold at the higher order, which lowers
+# the growth itself (2 kHz at 0.4 m: ratio 1.26 at np = 6, 0.05 at np = 8).
+# The rule replaces neither the
 # λ/5 accuracy cap nor the shear dz cap; it binds where they do not — at
 # high frequency and in deep water, where a fixed fraction of a wavelength
 # lets the growth rate (∝ k0 at fixed k0·dr) outrun the leak. The leak
@@ -780,10 +842,11 @@ def rotated_growth_floor(xi, k0: float, n_pade: int,
     """The part of :func:`rotated_cn_growth` no range step removes: the
     per-metre amplification ``−k0·Im s(ξ)`` (Np/m) of the rotated square
     root ``s(ξ)`` itself, which is what the Crank-Nicolson step converges
-    to as ``dr → 0``. At θ = 45°, np = 6 it peaks at 3.7e-4 Np/m per kHz
-    just above cutoff (ξ ≈ −0.89) — a rotation that maps the steepest
-    propagating components slightly into the lower half-plane — and it
-    falls below 1e-6 Np/m per kHz at θ ≤ 20°, or with a higher order.
+    to as ``dr → 0``. At θ = 45° it peaks at 3.7e-4 Np/m per kHz with
+    np = 6 and 2.3e-4 with np = 8 just above cutoff (ξ ≈ −0.89) — a
+    rotation that maps the steepest propagating components slightly into
+    the lower half-plane — and it falls below 1e-6 Np/m per kHz at
+    θ ≤ 20°.
 
     Parameters
     ----------
@@ -1018,7 +1081,11 @@ def rams_stable_dr(dr_max: float, *, frequency: float, c0: float,
 #: Rotation angles tried, largest first, when the default rotation's own
 #: growth outruns the seabed's leak: Milinazzo, Zala & Brooke (1997) show the
 #: evanescent spectrum handled better the larger the angle, so the largest
-#: angle that is stable is the one to name.
+#: angle that is stable is the one to name. The same paper finds "rotation of
+#: the branch cut to higher angles implies higher-order coefficients are
+#: necessary", and NRL's RAMS guide raises theta only "to the point that you
+#: don't see NaN" (ramsurf/readme.orig) — the smallest stable angle; the
+#: largest is uacpy guidance, measured with :func:`rams_growth_margin`.
 RAMS_THETA_LADDER_DEG = (45.0, 40.0, 30.0, 25.0, 20.0, 15.0, 10.0, 5.0)
 
 

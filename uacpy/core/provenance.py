@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from uacpy.core._repr import FieldsRepr
+from uacpy.core.exceptions import ConfigurationError
 
 __all__ = ['DataSource', 'DataProvenance', 'SOURCES', 'POINT_KINDS',
            'fetch_summary_line', 'point_in_words']
@@ -124,7 +125,6 @@ class DataProvenance(FieldsRepr):
 
     def __post_init__(self):
         if self.point_kind is not None and self.point_kind not in POINT_KINDS:
-            from uacpy.core.exceptions import ConfigurationError
             raise ConfigurationError(
                 f"DataProvenance: point_kind must be one of {POINT_KINDS} or "
                 f"None; got {self.point_kind!r}.")
@@ -156,7 +156,15 @@ class DataProvenance(FieldsRepr):
         """The record :meth:`to_dict` wrote, its source looked up in the
         catalogue :data:`SOURCES` by id."""
         fields = {k: v for k, v in dict(d).items() if v is not None}
-        source = SOURCES[fields.pop('source')]
+        source_id = fields.pop('source')
+        if source_id not in SOURCES:
+            raise ConfigurationError(
+                f"DataProvenance.from_dict: the saved record names source "
+                f"{source_id!r}, which is not in this version's catalogue.",
+                remediation=f"Known sources: {sorted(SOURCES)}. A record "
+                            f"saved by another uacpy version may name a "
+                            f"source since renamed or removed.")
+        source = SOURCES[source_id]
         for key in ('data_point', 'requested_point'):
             if key in fields:
                 fields[key] = tuple(float(v) for v in fields[key])

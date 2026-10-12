@@ -11,6 +11,7 @@ stable import paths.
 
 import warnings
 import copy as _copy
+from dataclasses import KW_ONLY
 from enum import Enum
 from typing import TYPE_CHECKING, Any, List, Optional
 
@@ -22,8 +23,10 @@ from uacpy.core.exceptions import (
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.core._validate import (
-    require_attenuation_in_range, require_positive, require_non_negative,
-    require_finite, warn_speed_typed_in_km_per_s,
+    DENSITY_UNITS_SUSPECT_G_CM3, require_attenuation_in_range,
+    require_positive, require_non_negative, require_finite,
+    require_real_scalar, warn_attenuation_beyond_seabeds,
+    warn_speed_typed_in_km_per_s,
 )
 from uacpy.core._provenance import coerce_data_sources
 from uacpy.core._repr import build, qty
@@ -177,20 +180,18 @@ def _delegate_write(owner: str, nodes, name, value, *, layered=False,
             object.__setattr__(node, field, new.__dict__[field])
 
 
-# g/cm³ above which a density reads as kg/m³: no sediment or rock reaches it
-# (Hamilton's tables top out below 3), and the smallest kg/m³ value a user
-# could plausibly type (fresh water, 1000) is fifty times over it.
-_DENSITY_UNITS_SUSPECT_G_CM3 = 20.0
 
 
-def _warn_implausible_geoacoustics(owner: str, density: float,
+def _check_geoacoustic_plausibility(owner: str, density: float,
                                    sound_speed: float, shear_speed: float):
-    """``ValidityWarning`` for a value the constructor accepts but no seabed has.
+    """Refuse a density typed in kg/m³; warn on a value the constructor
+    accepts but no seabed has.
 
-    Three checks, each a plausibility bound rather than a validity rule, so
-    they warn and never raise: a density over
-    :data:`_DENSITY_UNITS_SUSPECT_G_CM3` (the number was typed in kg/m³), a
-    compressional speed typed in km/s
+    A density over :data:`~uacpy.core._validate.DENSITY_UNITS_SUSPECT_G_CM3`
+    is a kg/m³ number in a g/cm³ slot and is refused, as
+    :func:`~uacpy.core.acoustics.reflection_coeff` and the water density of
+    :class:`~uacpy.core.environment.Environment` refuse it. Two plausibility
+    bounds warn and never raise: a compressional speed typed in km/s
     (:func:`~uacpy.core._validate.warn_speed_typed_in_km_per_s`), and a shear
     speed above the compressional speed (no real solid: Poisson's ratio
     bounds ``c_s < c_p / sqrt(2)``).
@@ -202,12 +203,11 @@ def _warn_implausible_geoacoustics(owner: str, density: float,
     ``layer.density = …`` and from the in-package factories
     (``Bottom.range_dependent``, the CRUST1 and GRAW readers,
     ``SeabedColumn.collapse_layers``) alike."""
-    if density > _DENSITY_UNITS_SUSPECT_G_CM3:
-        warnings.warn(
-            f"{owner}: density={density:g} looks like kg/m³; uacpy takes "
-            f"g/cm³ ({density / 1000.0:g}). Every deck writes the value as "
-            f"given, so a seabed this dense reflects like a rigid wall.",
-            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    if density > DENSITY_UNITS_SUSPECT_G_CM3:
+        raise ConfigurationError(
+            f"{owner}: density={density:g} reads as kg/m³; the argument is "
+            f"g/cm³.",
+            remediation=f"Pass density={density / 1000.0:g}.")
     warn_speed_typed_in_km_per_s(sound_speed, f"{owner} sound_speed")
     if shear_speed > sound_speed:
         warnings.warn(
@@ -287,11 +287,12 @@ class SedimentLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
     Notes
     -----
-    A density above 20 g/cm³ (a kg/m³ value typed into a g/cm³ field) and a
-    shear speed above the compressional speed each raise a ``ValidityWarning``
-    at construction and on assignment; both are accepted, since neither
-    breaks a deck. An assignment rebuilds the layer through the
-    constructor, so ``layer.thickness = -1`` is refused as
+    Every argument after ``thickness`` is keyword-only, so a speed and a
+    density cannot swap places. A density above 20 g/cm³ (a kg/m³ value
+    typed into a g/cm³ field) is refused; a shear speed above the
+    compressional speed raises a ``ValidityWarning`` and is accepted. Both
+    checks run at construction and on assignment: an assignment rebuilds the
+    layer through the constructor, so ``layer.thickness = -1`` is refused as
     ``SedimentLayer(thickness=-1, …)`` is.
 
     Examples
@@ -300,6 +301,7 @@ class SedimentLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     >>> clay = SedimentLayer(thickness=50, sound_speed=1550, density=1.5, attenuation=0.2)
     """
     thickness: float
+    _: KW_ONLY
     sound_speed: float
     density: float
     attenuation: float = 0.5
@@ -309,12 +311,14 @@ class SedimentLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     name: Optional[str] = None
 
     def __post_init__(self):
-        # float()-coerce before validating, as BoundaryProperties does: the
-        # validators below check a converted copy, so without this a str
-        # value would pass them and be stored unconverted.
+        # Each field stored as the float it reads as, by the package's one
+        # rule for a scalar (as BoundaryProperties does): a bool, a complex
+        # value or text is refused rather than stored as 1, its real part or
+        # what it spells.
         for attr in ('thickness', 'sound_speed', 'density', 'attenuation',
                      'shear_speed', 'shear_attenuation', 'roughness'):
-            setattr(self, attr, float(getattr(self, attr)))
+            setattr(self, attr, require_real_scalar(
+                getattr(self, attr), f"SedimentLayer {attr}"))
         require_positive(self.thickness, "SedimentLayer thickness", hint="m")
         require_positive(self.sound_speed, "SedimentLayer sound_speed", hint="m/s")
         require_positive(self.density, "SedimentLayer density", hint="g/cm^3")
@@ -325,7 +329,11 @@ class SedimentLayer(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             self.attenuation, "SedimentLayer attenuation")
         require_attenuation_in_range(
             self.shear_attenuation, "SedimentLayer shear_attenuation")
-        _warn_implausible_geoacoustics(
+        warn_attenuation_beyond_seabeds(
+            self.attenuation, "SedimentLayer attenuation")
+        warn_attenuation_beyond_seabeds(
+            self.shear_attenuation, "SedimentLayer shear_attenuation")
+        _check_geoacoustic_plausibility(
             "SedimentLayer", self.density, self.sound_speed, self.shear_speed)
 
     def __repr__(self) -> str:
@@ -392,6 +400,8 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     Carries acoustic properties only — boundary geometry lives on
     ``Environment.bathymetry`` (bottom) or is fixed at z=0 (surface;
     rough surfaces use ``Environment.altimetry``).
+
+    Every argument after ``acoustic_type`` is keyword-only.
 
     Attributes
     ----------
@@ -471,6 +481,7 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     """
 
     acoustic_type: str = _TYPE_NOT_GIVEN
+    _: KW_ONLY
     density: Optional[float] = None
     sound_speed: Optional[float] = None
     attenuation: Optional[float] = None
@@ -560,7 +571,8 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         if self.grain_size_phi is not None:
             # Signed (gravel is negative), so no sign rule; a finite number
             # all the same — NaN/inf/str stored here reads back as data.
-            self.grain_size_phi = float(self.grain_size_phi)
+            self.grain_size_phi = require_real_scalar(
+                self.grain_size_phi, "BoundaryProperties grain_size_phi")
             require_finite(self.grain_size_phi,
                            "BoundaryProperties grain_size_phi", hint="ϕ units")
 
@@ -572,7 +584,8 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             if getattr(self, name) is None:
                 setattr(self, name, default)
             else:
-                setattr(self, name, float(getattr(self, name)))
+                setattr(self, name, require_real_scalar(
+                    getattr(self, name), f"BoundaryProperties {name}"))
 
         require_positive(self.density, "BoundaryProperties density", hint="g/cm^3")
         # roughness is an RMS magnitude and the OASES writers put it in a
@@ -585,6 +598,10 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         require_attenuation_in_range(
             self.attenuation, "BoundaryProperties attenuation")
         require_attenuation_in_range(
+            self.shear_attenuation, "BoundaryProperties shear_attenuation")
+        warn_attenuation_beyond_seabeds(
+            self.attenuation, "BoundaryProperties attenuation")
+        warn_attenuation_beyond_seabeds(
             self.shear_attenuation, "BoundaryProperties shear_attenuation")
 
         # Explicitly passed acoustic params drive both the auto-inference
@@ -658,7 +675,7 @@ class BoundaryProperties(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # but every deck accepts. Only a half-space carries the numbers it
         # is about; the parameter-free and file types hold the defaults.
         if self.acoustic_type == 'half-space':
-            _warn_implausible_geoacoustics(
+            _check_geoacoustic_plausibility(
                 "BoundaryProperties", self.density, self.sound_speed,
                 self.shear_speed)
 
@@ -858,18 +875,9 @@ def _reduce_uniform_nodes(nodes: List[BoundaryProperties], method: str,
             f"{who}({method!r}) needs a single boundary type to average; "
             f"got {sorted(types)}. Boundary types cannot be blended — use "
             f"'r0' or 'rmax'.")
-    # Refused rather than assumed. ``np.mean if method == 'mean' else
-    # np.median`` makes every unrecognised method a median, which is a
-    # silently wrong boundary rather than an error. Both callers already
-    # reject anything outside ('mean','median') before reaching here, so
-    # this is defence in depth and not a path anyone can currently take —
-    # it exists so that a caller added later cannot reopen one.
-    if method not in ('mean', 'median'):
-        raise ConfigurationError(
-            f"{who}({method!r}) is not a numeric reduction of a range axis; "
-            f"this reducer implements 'mean' and 'median'. Pick one of "
-            f"those, or 'r0'/'rmax' to keep one node whole.")
-    reduce = np.mean if method == 'mean' else np.median
+    # A mapping, not ``np.mean if method == 'mean' else np.median``: a
+    # method outside the two is a KeyError, never a silent median.
+    reduce = {'mean': np.mean, 'median': np.median}[method]
     (the_type,) = types
     if the_type in ('file', 'precalc'):
         specs = {n.reflection_file for n in nodes}

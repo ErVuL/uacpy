@@ -31,20 +31,14 @@ def _range_axis():
     oases_writer._oasp_range_axis('w', rx, None)
 
 
-def _linear_sweep_notice():
-    *_, notice = _sampling._oases_frequency_sweep(
-        _jittered(100.0, 10.0, 6), 'OASR')
-    if notice is not None:
-        raise ConfigurationError(notice)
+def _linear_sweep():
+    _sampling._oases_frequency_sweep(_jittered(100.0, 10.0, 6), 'OASR')
 
 
-def _log_sweep_notice():
+def _log_sweep():
     freqs = np.geomspace(100.0, 1000.0, 6)
     freqs[2] *= 1.0 + JITTER
-    *_, notice = _sampling._oases_frequency_sweep(freqs, 'OASR',
-                                                  log_spaced=True)
-    if notice is not None:
-        raise ConfigurationError(notice)
+    _sampling._oases_frequency_sweep(freqs, 'OASR', log_spaced=True)
 
 
 def _angles(tmp_path):
@@ -56,13 +50,13 @@ def _angles(tmp_path):
 
 
 SITES = {'frequency sweep': _freq_sweep, 'range axis': _range_axis,
-         'linear sweep notice': _linear_sweep_notice,
-         'log sweep notice': _log_sweep_notice, 'OASR angles': _angles}
+         'linear sweep': _linear_sweep,
+         'log sweep': _log_sweep, 'OASR angles': _angles}
 #: What each site's refusal or notice says about the axis.
 REFUSAL = {'frequency sweep': 'frequencies is not uniformly spaced',
            'range axis': 'ranges is not uniformly spaced',
-           'linear sweep notice': 'non-equispaced',
-           'log sweep notice': 'not log-spaced',
+           'linear sweep': 'vector is not equispaced',
+           'log sweep': 'not log-spaced',
            'OASR angles': 'angles`` is not uniformly spaced'}
 
 

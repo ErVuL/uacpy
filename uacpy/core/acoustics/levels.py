@@ -32,6 +32,10 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.constants import (NO_ENERGY_DB, PRESSURE_FLOOR,
                                   REFERENCE_PRESSURE_WATER)
 from uacpy.core.acoustics.seawater import _sequence_as_array
+from uacpy.core.acoustics.weighting import _real_pressure, _weighted_blocks
+from uacpy.core._validate import (
+    refuse_non_finite_samples, require_positive_finite_scalar,
+    warn_in_air_group_in_water)
 
 
 #: Relative slack on a band edge's comparison with a grid end, which
@@ -40,11 +44,13 @@ BAND_EDGE_RTOL = 1e-12
 
 __all__ = [
     'BAND_EDGE_RTOL',
-    'pressure',
+    'pressure_from_recording',
     'spl',
     'power_to_dB',
     'peak_level',
     'sound_exposure_level',
+    'cumulative_sound_exposure_level',
+    'track_exposure',
     'transmission_loss_dB',
     'received_level_dB',
     'no_energy_mask',
@@ -54,7 +60,7 @@ __all__ = [
 ]
 
 
-def pressure(
+def pressure_from_recording(
     x: np.ndarray,
     sensitivity: float,
     gain: float,
@@ -84,7 +90,15 @@ def pressure(
     volt_params : tuple of (int, float), optional
         If provided, (nbits, v_ref) where nbits is number of bits per sample
         and v_ref is reference voltage. Used to convert bits to voltage —
-        a WAV of signed integers goes straight through.
+        a WAV of signed integers goes straight through: counts are divided
+        by ``2**(nbits-1)``, the ADC convention. :func:`uacpy.io.read_wav`
+        returns integer samples already divided by the symmetric full scale
+        ``2**(bits-1) - 1`` (so ±1.0 round-trips through
+        :func:`~uacpy.io.write_wav`), not counts: pass such a signal as
+        ``x * v_ref`` with no ``volt_params``, or recover the counts as
+        ``x * (2**(bits-1) - 1)`` with the bit depth
+        ``uacpy.io.read_wav_info(path).bits``. The two full scales differ by
+        ``20·log10(2**(b-1) / (2**(b-1) - 1))``, 0.00027 dB at 16 bits.
 
     Returns
     -------
@@ -97,7 +111,7 @@ def pressure(
     voltage is carried across by the µPa-to-Pa factor alone:
 
     >>> x_volt = np.array([0.0, 0.5, -0.5])
-    >>> pressure(x_volt, sensitivity=0, gain=0)
+    >>> pressure_from_recording(x_volt, sensitivity=0, gain=0)
     array([ 0.e+00,  5.e-07, -5.e-07])
 
     A bit-depth input is divided by the full-scale count first, so half of
@@ -105,7 +119,7 @@ def pressure(
     on the same 0.5 V:
 
     >>> x_bits = np.array([0, 16384, -16384])
-    >>> pressure(x_bits, sensitivity=0, gain=0, volt_params=(16, 1.0))
+    >>> pressure_from_recording(x_bits, sensitivity=0, gain=0, volt_params=(16, 1.0))
     array([ 0.e+00,  5.e-07, -5.e-07])
     """
     x = _sequence_as_array(x)
@@ -196,6 +210,13 @@ def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER,
         SPL in dB re reference pressure — a scalar for ``axis=None``, and
         ``x``'s shape without ``axis`` otherwise.
 
+    Raises
+    ------
+    ConfigurationError
+        The record holds a NaN or inf: the first is named by its sample
+        (and channel, in a block of records). A level of a record with a
+        missing sample is undefined.
+
     Examples
     --------
     A 100 µPa-rms white signal — 1e-4 Pa — sits at ``20*log10(100) = 40`` dB
@@ -216,6 +237,7 @@ def spl(x: np.ndarray, ref: float = REFERENCE_PRESSURE_WATER,
     """
     rmsx = np.sqrt(np.mean(_squared_pressure(x, complex_record, 'spl'),
                            axis=axis))
+    _refuse_a_non_finite_record(rmsx, x, 'spl', axis)
     return 20 * np.log10(np.maximum(rmsx, np.sqrt(floor)) / ref)
 
 
@@ -264,10 +286,13 @@ def peak_level(x, ref: float = REFERENCE_PRESSURE_WATER, *, axis=None,
 
     The other half of the dual metric: a level that a *peak* sets, where
     :func:`spl` is set by the rms and :func:`power_to_dB` by an energy.
-    Southall et al. (2019) state injury criteria as a pair, peak SPL beside
-    an exposure, because a short transient can reach a damaging peak while
-    carrying little energy and a long one can do the reverse — neither
-    number implies the other.
+    Southall et al. (2019) state their impulsive criteria as a pair, peak
+    SPL beside an exposure, because a short transient can reach a damaging
+    peak while carrying little energy and a long one can do the reverse —
+    neither number implies the other. Their non-impulsive criteria are the
+    exposure alone: "For impulsive exposures, both criteria are defined
+    for all marine mammal groups. However, for non-impulsive exposures,
+    only frequency-weighted SEL criteria are given here".
 
     Parameters
     ----------
@@ -293,16 +318,25 @@ def peak_level(x, ref: float = REFERENCE_PRESSURE_WATER, *, axis=None,
     -------
     float or ndarray
         dB re ``ref``.
+
+    Raises
+    ------
+    ConfigurationError
+        The record holds a NaN or inf: the first is named by its sample
+        (and channel, in a block of records). A level of a record with a
+        missing sample is undefined.
     """
     peak = np.max(_peak_amplitude(x, complex_record, 'peak_level'),
                   axis=axis)
+    _refuse_a_non_finite_record(peak, x, 'peak_level', axis)
     return 20 * np.log10(np.maximum(peak, np.sqrt(floor)) / ref)
 
 
 def sound_exposure_level(pressure, sample_rate: float,
                          ref: float = REFERENCE_PRESSURE_WATER, *,
                          axis: int = -1, floor: float = PRESSURE_FLOOR,
-                         complex_record: Optional[str] = None):
+                         complex_record: Optional[str] = None,
+                         weighting=None):
     """Sound exposure level of a pressure record —
     ``10·log10( Σ p² / sample_rate / ref² )``, in dB re ``ref²``·s.
 
@@ -315,7 +349,18 @@ def sound_exposure_level(pressure, sample_rate: float,
 
     For the same energy split into standard bands and left linear (Pa²·s),
     see :func:`~uacpy.acoustic_signal.sound_exposure`. This one is the
-    total, in dB.
+    total, in dB. Its build-up over a long record is
+    :func:`cumulative_sound_exposure_level`, and the exposure several events
+    deliver together is the energy sum of theirs, :func:`sum_levels_dB`
+    (N identical events add ``10·log10(N)``).
+
+    ``weighting=`` gives the frequency-weighted SEL: the integral of the
+    squared frequency-weighted pressure
+    (:func:`~uacpy.acoustics.weighted_pressure`), the metric of Southall et
+    al. (2019). It runs block by block and never holds the weighted record.
+    The integral includes the little the weighting spreads past the record's
+    ends, so an event's weighted SEL does not depend on how much silence
+    surrounds it.
 
     Parameters
     ----------
@@ -338,25 +383,365 @@ def sound_exposure_level(pressure, sample_rate: float,
         As :func:`power_to_dB`.
     complex_record : {'analytic', 'baseband'}, optional
         Required for a complex record, ignored for a real one; as on
-        :func:`spl`.
+        :func:`spl`. A weighted level refuses a baseband record, whose
+        frequencies are offsets from a carrier it does not carry.
+    weighting : str, callable or (array_like, array_like), optional
+        Frequency weighting, unweighted by default: a hearing group of
+        :data:`~uacpy.noise.HEARING_GROUPS` (Southall et al. 2019), your own
+        function ``W(frequency_Hz) -> dB``, or a ``(frequencies_Hz, W_dB)``
+        table (see :func:`~uacpy.acoustics.weighted_pressure`).
 
     Returns
     -------
     float or ndarray
         dB re ``ref²``·s.
+
+    Raises
+    ------
+    ConfigurationError
+        The record holds a NaN or inf: the first is named by its sample
+        (and channel, in a block of records). A level of a record with a
+        missing sample is undefined.
     """
-    p2 = _squared_pressure(pressure, complex_record, 'sound_exposure_level')
-    fs = float(sample_rate)
-    if not (np.isfinite(fs) and fs > 0.0):
-        raise ConfigurationError(
-            f"sound_exposure_level: sample_rate must be a positive rate in "
-            f"Hz; got {sample_rate!r}.")
+    who = 'sound_exposure_level'
+    fs = _exposure_rate(sample_rate, who)
+    warn_in_air_group_in_water(weighting, ref, who)
+    if weighting is None:
+        p2 = _squared_pressure(pressure, complex_record, who)
+        energy = np.sum(p2, axis=axis)
+        _refuse_a_non_finite_record(energy, pressure, who, axis)
+        return power_to_dB(energy / fs, ref, floor=floor)
+    x = np.moveaxis(_real_pressure(np.asarray(pressure), complex_record, who),
+                    axis, -1)
+    rows = x.reshape(-1, x.shape[-1])
+    energy = np.zeros(rows.shape[0])
+    for channels, _start, y in _weighted_blocks(rows, fs, weighting, who=who):
+        energy[channels] += np.sum(y ** 2, axis=-1)
+    return power_to_dB(energy.reshape(x.shape[:-1]) / fs, ref, floor=floor)
+
+
+def _refuse_a_non_finite_record(level, pressure, who, axis):
+    """Refuse ``pressure`` at its first NaN or inf once ``level``, the
+    quantity reduced from it, came out non-finite
+    (:func:`~uacpy.core._validate.refuse_non_finite_samples`).
+
+    The time axis is ``axis``; ``None`` or a tuple reads the record
+    flattened. The record is scanned only on that path, a block of
+    :data:`_UNWEIGHTED_BLOCK` samples at a time, so a finite record pays
+    nothing and a ``np.memmap`` is never loaded whole. A level that
+    overflowed from finite samples finds none and passes."""
+    if np.all(np.isfinite(level)):
+        return
+    x = np.asarray(pressure)
+    if axis is None or isinstance(axis, tuple) or x.ndim == 0:
+        rows = x.reshape(1, -1)
+        label = 'sample' if x.ndim <= 1 else 'flat index'
+    else:
+        x = np.moveaxis(x, axis, -1)
+        rows = x.reshape(-1, x.shape[-1])
+        label = 'sample'
+    for start in range(0, rows.shape[-1], _UNWEIGHTED_BLOCK):
+        refuse_non_finite_samples(rows[:, start:start + _UNWEIGHTED_BLOCK],
+                                  who, start=start, n_channels=rows.shape[0],
+                                  label=label)
+
+
+def _exposure_rate(sample_rate, who):
+    """``sample_rate`` as a float rate in Hz, refusing a sample interval
+    passed by mistake."""
+    fs = require_positive_finite_scalar(sample_rate, who, "sample_rate",
+                                        " Hz")
     if fs < 1.0:
         raise ConfigurationError(
-            f"sound_exposure_level: sample_rate={fs:g} Hz reads as a sample "
+            f"{who}: sample_rate={fs:g} Hz reads as a sample "
             f"INTERVAL; the argument is the rate.",
             remediation=f"Pass sample_rate={1.0 / fs:g} (1/dt).")
-    return power_to_dB(np.sum(p2, axis=axis) / fs, ref, floor=floor)
+    return fs
+
+
+def cumulative_sound_exposure_level(pressure, sample_rate: float,
+                                    ref: float = REFERENCE_PRESSURE_WATER, *,
+                                    step: float = 1.0,
+                                    reset: Optional[float] = None,
+                                    weighting=None, axis: int = -1,
+                                    floor: float = PRESSURE_FLOOR,
+                                    complex_record: Optional[str] = None):
+    """The sound exposure level accumulated over a record, at the end of
+    every ``step`` seconds.
+
+    ``SEL(t_k) = 10·log10( ∫₀^{t_k} p(t)² dt / ref² )``. The curve rises as
+    energy arrives, and its last value is
+    :func:`sound_exposure_level` of the whole record. It answers when an
+    exposure criterion is crossed, not only whether.
+
+    ``reset`` restarts the sum every ``reset`` seconds: an accumulation period,
+    such as the 24 h after which Southall et al. (2007) proposed to "reset"
+    the accumulation. Southall et al. (2019) keep that period as a
+    precautionary choice and note that a shorter one may suit some cases.
+    The period is therefore yours to set, and unset means no reset.
+
+    The record is read one block at a time, weighted or not, so a
+    ``np.memmap`` of a multi-hour record is never loaded whole. Only the
+    curve, one value per step and channel, is held. A weighting's spread
+    past the record's ends counts in the first and last step, so the last
+    value is the weighted :func:`sound_exposure_level` exactly.
+
+    Parameters
+    ----------
+    pressure : array_like
+        Pressure record (Pa), time along ``axis``; a ``np.memmap`` streams.
+    sample_rate : float
+        Sample rate (Hz).
+    ref : float, optional
+        Reference pressure (default 1 µPa in water).
+    step : float, default 1.0
+        Seconds between curve values; the last step may be partial.
+    reset : float, optional
+        Accumulation period in seconds, a whole number of ``step``.
+    weighting : str, callable or (array_like, array_like), optional
+        As on :func:`sound_exposure_level`.
+    axis : int, default -1
+        Time axis; the curve replaces it, one value per step.
+    floor : float, optional
+        As :func:`power_to_dB`.
+    complex_record : {'analytic', 'baseband'}, optional
+        As on :func:`sound_exposure_level`.
+
+    Returns
+    -------
+    times : ndarray
+        End of each step (s from the first sample).
+    levels : ndarray
+        The accumulated SEL at each time, dB re ``ref²``·s.
+
+    Raises
+    ------
+    ConfigurationError
+        The record holds a NaN or inf: the first is named by its sample
+        (and channel, in a block of records). A level of a record with a
+        missing sample is undefined.
+
+    Examples
+    --------
+    One second of a 1 Pa rms tone, accumulated over 0.25 s steps: each
+    quarter second adds the same energy, so the curve rises by 3.01 dB,
+    then 1.76 dB, then 1.25 dB, and ends at the whole record's 120 dB:
+
+    >>> import numpy as np
+    >>> p = np.sqrt(2) * np.sin(2 * np.pi * 100.0 * np.arange(8000) / 8000)
+    >>> t, sel = cumulative_sound_exposure_level(p, 8000.0, step=0.25)
+    >>> [round(float(v), 2) for v in sel]
+    [113.98, 116.99, 118.75, 120.0]
+    """
+    who = 'cumulative_sound_exposure_level'
+    fs = _exposure_rate(sample_rate, who)
+    warn_in_air_group_in_water(weighting, ref, who)
+    step = require_positive_finite_scalar(step, who, "step", " s")
+    x = np.moveaxis(np.asarray(pressure), axis, -1)
+    n = x.shape[-1]
+    if n == 0:
+        raise ConfigurationError(f"{who}: the record is empty.")
+    per_step = step * fs
+    if per_step < 1.0:
+        raise ConfigurationError(
+            f"{who}: step={step:g} s is shorter than one sample at "
+            f"{fs:g} Hz.")
+    n_steps = int((n - 1) // per_step) + 1
+    if weighting is None:
+        rows = x.reshape(-1, n)
+        blocks = ((slice(None), start, _squared_pressure(
+            rows[:, start:start + _UNWEIGHTED_BLOCK], complex_record, who))
+                  for start in range(0, n, _UNWEIGHTED_BLOCK))
+    else:
+        rows = _real_pressure(x, complex_record, who).reshape(-1, n)
+        blocks = ((channels, start, y ** 2) for channels, start, y
+                  in _weighted_blocks(rows, fs, weighting, who=who))
+    energy = np.zeros((rows.shape[0], n_steps))
+    for channels, start, p2 in blocks:
+        k = np.clip((start + np.arange(p2.shape[-1])) // per_step, 0,
+                    n_steps - 1).astype(int)
+        first = np.flatnonzero(np.diff(k, prepend=-1))
+        energy[channels, k[first]] += np.add.reduceat(p2, first, axis=-1)
+    _refuse_a_non_finite_record(energy, x, who, -1)
+    running = np.cumsum(energy.reshape(x.shape[:-1] + (n_steps,)) / fs,
+                        axis=-1)
+    if reset is not None:
+        reset = require_positive_finite_scalar(reset, who, "reset", " s")
+        per_period = round(reset / step)
+        if per_period < 1 or abs(reset / step - per_period) > 1e-9 * per_period:
+            raise ConfigurationError(
+                f"{who}: reset={reset:g} s must be a whole number of "
+                f"steps (step={step:g} s), so each period ends on a curve "
+                f"value.")
+        k = np.arange(n_steps)
+        before = np.concatenate((np.zeros(running.shape[:-1] + (1,)),
+                                 running[..., :-1]), axis=-1)
+        running = running - before[..., (k // per_period) * per_period]
+    times = np.minimum((np.arange(n_steps) + 1) * step, n / fs)
+    return times, np.moveaxis(power_to_dB(running, ref, floor=floor), -1,
+                              axis)
+
+
+#: Samples per channel the unweighted cumulative sum reads at a time.
+_UNWEIGHTED_BLOCK = 2 ** 20
+
+
+def track_exposure(sel_dB, ranges, positions, *, closest_approach,
+                   along=None, axis: int = -1, event_duration=None):
+    """Cumulative SEL of a source moving along a straight track: the energy
+    sum, over every event on the track, of one event's SEL at that event's
+    distance.
+
+    ``sel_dB`` is the SEL one event delivers as a function of horizontal
+    range — a model's single-shot exposure map, for instance. Events sit on
+    a straight line at along-track positions ``x_i``. A receiver at
+    along-track coordinate ``a`` and distance ``d`` from the line (its
+    closest approach) is ``r_i = √(d² + (x_i − a)²)`` from event ``i``,
+    so::
+
+        SEL_cum(a, d) = 10·log10 Σ_i 10^(SEL(r_i)/10)
+
+    with ``SEL(r_i)`` interpolated linearly in range. This assumes the
+    environment is the same along the track (range-independent, or one
+    bearing standing for all).
+
+    This is the computation impact studies of survey lines make. Etter
+    (*Underwater Acoustic Modeling and Simulation*, sect. 6.16.3) summarises
+    Breitzke and Bohlen (2010), who model "cumulative sound-exposure levels
+    of multiple shots fired along a seismic line" with marine mammals as
+    "static receivers", and Lurton (2016), who integrates the received
+    intensity of an echo sounder moving along a survey line and reports the
+    ranges at which impact thresholds are reached. Breitzke and Bohlen's
+    two scalings follow from the sum. A threshold's distance from the line
+    grows as ``10·log10 r`` (cylindrical) for many shots, against
+    ``20·log10 r`` for one. Doubling the shot interval costs 3 dB.
+
+    Pulses fired every ``Δt`` from a platform at speed ``v`` sit at
+    ``positions = np.arange(-L, L, v * Δt)``. A continuous source (a vessel,
+    a vibrator) is the same sum with one event per ``Δt``, positions ``v·Δt``
+    apart, whose SEL is the received level held over it plus
+    ``10·log10(Δt / 1 s)`` — the energy of a constant-power interval
+    (Ainslie, *Principles of Sonar Performance Modelling*, sect. 3.3,
+    Eq. 3.155): pass that level map as ``sel_dB`` with
+    ``event_duration=Δt``. ``Δt`` short against the passage keeps each
+    event's range nearly constant over its interval. Several distinct events
+    at one place are :func:`sum_levels_dB`.
+
+    Parameters
+    ----------
+    sel_dB : array_like
+        Single-event SEL (dB re 1 µPa²·s) along ``axis``, one value per
+        range; any other axes (depth, …) are carried through. With
+        ``event_duration``, the received level (dB re 1 µPa) the source
+        holds over each event instead.
+    ranges : array_like
+        The strictly increasing horizontal ranges (m) of ``sel_dB``.
+    positions : array_like
+        Along-track position of each event (m), measured from the point of
+        closest approach.
+    closest_approach : float or array_like
+        Horizontal distance(s) (m) of the receiver from the track.
+    along : float or array_like, optional
+        Along-track coordinate(s) (m) of the receiver, in the frame of
+        ``positions``; 0 by default, so ``positions`` are measured from the
+        receiver's point of closest approach. An array gives the plan view
+        ``SEL_cum(along, closest_approach)``: a receiver abeam of the
+        track's end gets less than one abeam of its middle.
+    axis : int, default -1
+        The range axis of ``sel_dB``. It is replaced by an ``along`` axis
+        (when ``along`` is an array) followed by a ``closest_approach`` axis
+        (when that is an array); a scalar adds no axis.
+    event_duration : float, optional
+        Seconds each event lasts, for a continuous source: ``sel_dB`` is then
+        a received level, and each event's SEL is that level plus
+        ``10·log10(event_duration / 1 s)``. ``None`` (default) reads
+        ``sel_dB`` as single-event SELs.
+
+    Returns
+    -------
+    float or ndarray
+        Cumulative SEL, dB re 1 µPa²·s.
+
+    Raises
+    ------
+    ConfigurationError
+        An event lies outside ``[ranges[0], ranges[-1]]`` of a receiver. Its
+        exposure is unknown, and dropping it would understate the sum.
+
+    Examples
+    --------
+    Spherical spreading from a 200 dB re 1 µPa²·s·m² event, one every 10 m
+    along a 20 km track, receiver 100 m off it. The sum approaches the
+    closed form ``200 + 10·log10(π / (Δx·d))`` = 174.97 dB:
+
+    >>> import numpy as np
+    >>> r = np.geomspace(1.0, 20e3, 4000)
+    >>> x = np.arange(-10e3, 10e3 + 1, 10.0)
+    >>> round(float(track_exposure(200 - 20 * np.log10(r), r, x,
+    ...                            closest_approach=100.0)), 2)
+    174.94
+    """
+    who = 'track_exposure'
+    sel = np.moveaxis(np.asarray(sel_dB, dtype=float), axis, -1)
+    r = np.asarray(ranges, dtype=float)
+    if r.ndim != 1 or r.size < 2 or r.size != sel.shape[-1]:
+        raise ConfigurationError(
+            f"{who}: ranges must be 1-D with one value per sel_dB sample "
+            f"along axis={axis} (at least two); got {r.size} range(s) for "
+            f"{sel.shape[-1]} sample(s).")
+    if not np.all(np.diff(r) > 0):
+        raise ConfigurationError(f"{who}: ranges must strictly increase.")
+    x = np.atleast_1d(np.asarray(positions, dtype=float))
+    d = np.asarray(closest_approach, dtype=float)
+    a = np.asarray(0.0 if along is None else along, dtype=float)
+    if (x.ndim != 1 or d.ndim > 1 or a.ndim > 1
+            or not all(np.all(np.isfinite(v)) for v in (x, d, a))):
+        raise ConfigurationError(
+            f"{who}: positions is a 1-D array, and closest_approach and "
+            f"along are scalars or 1-D arrays, all finite.")
+    if np.any(d < 0):
+        raise ConfigurationError(
+            f"{who}: closest_approach is a distance, >= 0.")
+    if event_duration is not None:
+        held = require_positive_finite_scalar(event_duration, who,
+                                              "event_duration", " s")
+        # SEL of a constant level held over the interval (Ainslie Eq. 3.155).
+        sel = sel + 10.0 * np.log10(held)
+    # One receiver row of the plan view at a time: the whole
+    # (..., along, closest_approach, event) block can outgrow memory.
+    rows = []
+    for a_k in np.atleast_1d(a):
+        dist = np.hypot(np.atleast_1d(d)[:, None], x[None, :] - a_k)
+        if dist.min() < r[0] * (1 - BAND_EDGE_RTOL):
+            raise ConfigurationError(
+                f"{who}: an event passes {dist.min():g} m from a receiver, "
+                f"closer than the {r[0]:g} m the exposure starts at.",
+                remediation=f"Start closest_approach at {r[0]:g} m or more, "
+                            f"or give the exposure from a shorter range.")
+        if dist.max() > r[-1] * (1 + BAND_EDGE_RTOL):
+            raise ConfigurationError(
+                f"{who}: an event lies {dist.max():g} m from a receiver, "
+                f"past the {r[-1]:g} m the exposure reaches; its share of "
+                f"the sum is unknown, and dropping it would understate it.",
+                remediation="Give the exposure out to the farthest event "
+                            "(run the model further), or shorten the track "
+                            "or the along-track span.")
+        j = np.clip(np.searchsorted(r, dist, side='right') - 1, 0,
+                    r.size - 2)
+        t = np.clip((dist - r[j]) / (r[j + 1] - r[j]), 0.0, 1.0)
+        levels = sel[..., j] * (1.0 - t) + sel[..., j + 1] * t
+        rows.append(np.asarray(sum_levels_dB(levels, axis=-1)))
+    total = np.stack(rows, axis=-2)                  # (..., along, approach)
+    if d.ndim == 0:
+        total = total[..., 0]
+    if a.ndim == 0:
+        total = total[..., 0, :] if d.ndim else total[..., 0]
+    if total.ndim == 0:
+        return float(total)
+    added = a.ndim + d.ndim
+    position = axis % sel.ndim
+    return np.moveaxis(total, list(range(total.ndim - added, total.ndim)),
+                       list(range(position, position + added)))
 
 
 def transmission_loss_dB(pressure, *, floor: float = PRESSURE_FLOOR):

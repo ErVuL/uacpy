@@ -17,21 +17,44 @@ from uacpy.core.exceptions import (
 from uacpy.io.oalib_writer import at_env_media
 from uacpy.models._budget import memory_budget
 from uacpy.core.run_settings import Notice
+from uacpy.models._knobs import positive_finite, whole_count
 from uacpy.models._window import check_pinned_window
 from uacpy.models.sparc._pulse import _validate_pulse_type
 
 
 #: SPARC's automatic time window, in direct travel times to the
-#: farthest receiver at the slowest SSP speed.
+#: farthest receiver at the slowest SSP speed. uacpy guidance (no value in
+#: the manual); Jensen et al. (*Computational Ocean Acoustics*, Sect.
+#: 8.2.1.3) size the window from the slowest modal group speed instead,
+#: T >= r_max·(1/u_min − 1/c_max); a trace still ringing at the window's end
+#: warns.
 SPARC_WINDOW_TRAVEL_TIMES = 2.5
-#: SPARC's default ``rmax_factor``; it must exceed
-#: ``1 + SPARC_WINDOW_TRAVEL_TIMES`` (see
-#: :func:`resolve_rmax_factor`).
-SPARC_RMAX_FACTOR = 4.0
+#: The margin on the record in SPARC's unpinned ``RMax``,
+#: ``r + SPARC_RMAX_TIME_MARGIN · c_fast · time_max`` (:func:`resolve_rmax_m`):
+#: uacpy's measured margin on Jensen et al.'s criterion (*Computational Ocean
+#: Acoustics*, Sect. 8.3.2) that no replica energy reach the record. Against
+#: the exact image sum of a rigid guide, 1.0 left the replica's tails in the
+#: end of the record; 1.2, which on the auto window equals 4 × the farthest
+#: range, did not.
+SPARC_RMAX_TIME_MARGIN = 1.2
 
-# Factor above the Nyquist minimum used when naming the ``n_time_samples`` that would
-# resolve the pulse band in the aliasing warning.
-_SPARC_PULSE_OVERSAMPLE = 3.0
+#: SPARC's unpinned ``c_high`` (m/s), its "no upper limit": ``k_min = 0`` as
+#: Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1) recommend,
+#: written as every toolbox SPARC deck writes it (``tests/iso.env:9``
+#: ``1000.0  1.0E7``, ``tests/head/iso.env:12``, ``tests/head/head.env:12``)
+#: rather than the AT family's 1e9 (``doc/bounce.htm``): a ``'B'`` / ``'H'``
+#: pulse is band-passed at each wavenumber up to ``k·cHigh/2π``
+#: (``sparc.f90:398``), and ``tslib/bandpassc.f90:16`` indexes that edge as
+#: an INTEGER the 1e9 overflows on a long source series
+#: (:func:`refuse_band_pass_overflow`).
+SPARC_C_HIGH_UNBOUNDED = 1.0e7
+
+#: Output samples per period at the band top ``freq_max`` that the default
+#: ``n_time_samples`` exceeds (:func:`default_n_time_samples`): Jensen et al.
+#: (*Computational Ocean Acoustics*, Sect. 8.2.1.3), "A more appropriate
+#: value of Δt is Δt = T/N < 1/(8 f max) which corresponds to more than eight
+#: samples per period."
+SPARC_SAMPLES_PER_PERIOD = 8.0
 
 # The sampling ReadEnvironmentMod.f90:103 sizes an automatic mesh at:
 # ``deltaz = c / freq0 / 20``. Written explicitly for SPARC because sparc.f90
@@ -120,16 +143,48 @@ _LOOPED_TIME_SERIES_MODES = {
 
 
 def check_knobs(*, c_low, c_high, output_mode, pulse_type, march_start,
-                freq_min, freq_max) -> None:
-    """Refuse a constructor knob no run could use: two pinned phase-speed
-    bounds with ``c_low >= c_high``, an unknown ``output_mode`` or
+                freq_min, freq_max, courant_factor, max_launches, n_mesh,
+                rmax_factor, time_max, window_sound_speed) -> None:
+    """Refuse a constructor knob no run could use: a pinned phase-speed
+    bound that is not a positive finite speed or two with
+    ``c_low >= c_high``, an unknown ``output_mode`` or
     ``pulse_type``, a positive ``march_start``, a negative ``freq_min``, a
-    non-positive ``freq_max`` or a pinned band with ``freq_min >= freq_max``.
+    non-positive ``freq_max`` or a pinned band with ``freq_min >= freq_max``,
+    a ``courant_factor`` outside (0, 1], a pinned ``max_launches`` below 1,
+    a pinned ``n_mesh`` that is not a whole number of at least 0, an
+    ``rmax_factor`` below 1, and a non-positive or non-finite ``time_max``
+    or ``window_sound_speed``.
 
     Run at construction and again by every run (the attributes can be
     reassigned in between).
     """
     check_pinned_window('SPARC', c_low=c_low, c_high=c_high)
+    # sparc.f90:265 sets dt = courant_factor / SQRT(1/crossT² + (0.5 cMax k)²):
+    # 1 is the march's stability limit, and past it the field blows up to
+    # NaN (measured: courant_factor=1.5 on a 100 m rigid guide, every sample
+    # non-finite, at exit 0).
+    positive_finite('SPARC: courant_factor', courant_factor)
+    if courant_factor > 1.0:
+        raise ConfigurationError(
+            f"SPARC: courant_factor={courant_factor} is past the march's "
+            f"stability limit of 1 (sparc.f90:265 scales the time step by "
+            f"it), where the field grows to NaN. Use a value in (0, 1].")
+    if max_launches is not None:
+        whole_count('SPARC: max_launches', max_launches, 1)
+    if n_mesh is not None:
+        whole_count('SPARC: n_mesh', n_mesh, 0)
+    # sparc.f90:152-155 stops the run when the farthest receiver lies past
+    # RMax = rmax_factor × that range.
+    positive_finite('SPARC: rmax_factor', rmax_factor, optional=True)
+    if rmax_factor is not None and rmax_factor < 1.0:
+        raise ConfigurationError(
+            f"SPARC: rmax_factor={rmax_factor} puts RMax inside the receiver "
+            f"ranges, which sparc.f90:152-155 refuses ('Largest receiver "
+            f"range exceeds RMax'). Use rmax_factor >= 1, or leave it "
+            f"unset for an RMax that also clears the range alias.")
+    positive_finite('SPARC: time_max (s)', time_max, optional=True)
+    positive_finite('SPARC: window_sound_speed (m/s)', window_sound_speed,
+                    optional=True)
     if output_mode not in ('R', 'D', 'S'):
         raise ConfigurationError(
             f"Invalid output_mode {output_mode!r}. Valid modes "
@@ -181,10 +236,13 @@ def reject_halfspace_bottom(env: Environment) -> None:
 
     ``sparc.f90:101-104`` accepts only vacuum or rigid boundaries, and
     a rigid floor put in the half-space's place is a different
-    waveguide: Scooter on 100 m of water at 100 and 500 Hz puts the
-    rigid bottom 7.2-10.5 dB above the default half-space over 1-9 km,
-    6.5-10.4 dB above 'sand' and 12.6-33.9 dB above 'clay'. The caller
-    chooses the boundary; the model does not substitute one.
+    waveguide: it reflects every grazing angle without loss, where a
+    half-space transmits energy at every bounce steeper than its
+    critical angle (JKPS §1.6.1). As an illustration, Scooter on 100 m
+    of water at 100 and 500 Hz puts the rigid bottom 7.2-10.5 dB above
+    the default half-space over 1-9 km, 6.5-10.4 dB above 'sand' and
+    12.6-33.9 dB above 'clay'. The caller chooses the boundary; the
+    model does not substitute one.
 
     For a ``Bottom`` the ``acoustic_type`` lives on each column's
     ``.halfspace`` (per range when range-dependent), so every column is
@@ -197,8 +255,11 @@ def reject_halfspace_bottom(env: Environment) -> None:
         "SPARC's deck carries only 'vacuum' and 'rigid' bottom "
         "boundaries (sparc.f90:101-104), and this environment's bottom "
         "is a half-space. A rigid floor in its place is a different "
-        "waveguide — 7-10 dB louder over 1-9 km on the default seabed, "
-        "up to 34 dB on clay — so SPARC does not substitute one.",
+        "waveguide: it reflects every grazing angle without loss, where a "
+        "half-space transmits energy into the bottom at every bounce "
+        "steeper than its critical angle arccos(c_water/c_bottom) "
+        "(Jensen et al., Computational Ocean Acoustics §1.6.1) — so SPARC "
+        "does not substitute one.",
         remediation=(
             "Pass acoustic_type='rigid' (or 'vacuum') explicitly on the "
             "bottom's half-space if that is the waveguide you mean, or "
@@ -246,19 +307,20 @@ def resolve_run_bases(receiver, *, output_mode,
 
 def reject_oversized_loop_axis(n_runs: int, axis: str, mode_label: str, *,
                                max_launches) -> None:
-    """Cap the axis the wrapper loops the binary over.
+    """Hold the axis the wrapper loops the binary over to the caller's
+    ``max_launches`` cap, when one is pinned; ``None`` sets none.
 
     ``output_mode='R'`` runs one SPARC subprocess per receiver depth and
     ``'D'`` one per receiver range; ``'S'`` runs once and never calls this.
     """
-    if n_runs <= max_launches:
+    if max_launches is None or n_runs <= max_launches:
         return
     raise UnsupportedFeatureError(
         model_name='SPARC',
         feature=(
             f"{n_runs} receiver {axis} (SPARC {mode_label} runs one "
-            f"simulation per {axis[:-1]}; current limit is "
-            f"max_launches={max_launches})"
+            f"simulation per {axis[:-1]}, and SPARC(max_launches="
+            f"{max_launches}) caps the launches)"
         ),
         alternatives=[
             f"Reduce receiver.{axis} to at most {max_launches} entries",
@@ -306,8 +368,12 @@ def reject_oversized_snapshot(receiver, nk: int, n_time_samples: int, *,
             "instead of holding the whole cube."))
 
 
-def resolve_rmax_factor(*, rmax_factor) -> float:
-    """Pick the effective ``rmax_factor`` for this run.
+def resolve_rmax_m(r_ref: float, c_fast: float, time_max: float, *,
+                   rmax_factor) -> Tuple[float, float, str]:
+    """``(rmax_m, rmax_factor, origin)``: the deck's ``RMax`` (m), its ratio
+    to the farthest receiver range ``r_ref`` and where it came from — the
+    pinned ``rmax_factor × r_ref``, else
+    ``r_ref + SPARC_RMAX_TIME_MARGIN · c_fast · time_max``.
 
     ``RMax`` fixes SPARC's wavenumber step (``sparc.f90:116``:
     ``Nk = INT(1000·RMax_km·(kMax−kMin)/2π)`` ⇒ ``Δk ≈ 2π/RMax_m``).
@@ -322,21 +388,39 @@ def resolve_rmax_factor(*, rmax_factor) -> float:
     The fold is not only the replica sitting at ``r = RMax``: the
     receiver at range ``r`` also carries the arrival that belongs at
     ``r - RMax``, i.e. a copy of the source response from the distance
-    ``|RMax - r|``, reaching it at ``(RMax - r)/c``. Pushing ``RMax``
-    just past the receivers therefore leaves the alias *early*, not
-    late. At margin ``m`` the farthest receiver gets it at
-    ``(m-1)*r/c`` against an auto window of ``2.5*r/c``
-    (``SPARC._resolve_engine_settings``), so the margin has to exceed 3.5.
-    User-pinned values win; :func:`range_alias_notice` checks whichever
-    margin is in force against the window actually written.
+    ``|RMax - r|``, reaching it at ``(RMax - r)/c``: ``EXTRACT`` takes the
+    real part of ``U·exp(-ikr + iπ/4)`` with a real kernel ``U``
+    (``sparc.f90:595``, ``:622``), so the fold is mirrored. Pushing ``RMax``
+    just past the receivers therefore leaves the alias *early*, not late.
+
+    Jensen et al. (*Computational Ocean Acoustics*, Sect. 8.3.2) set
+    ``Δk = 2π/r_max`` with "r max is the maximum range to which the pulse
+    will propagate before the calculation is terminated", i.e.
+    ``c_fast·time_max``. Taken literally that aliases here: the mirrored
+    replica reaches the farthest receiver at ``time_max − r/c``, inside the
+    record (measured on a rigid guide: trace correlation 0.72-0.75 against
+    the exact image sum, where 4 × ``r`` gives 0.994-0.997). Their criterion
+    — no replica energy inside the record — applied to the mirrored fold is
+    ``RMax >= r + c_fast·time_max``; at equality the replica starts at
+    ``time_max`` and its tails reach back into the record (0.975-0.992), so
+    the default takes :data:`SPARC_RMAX_TIME_MARGIN` × that time. On the auto
+    window (2.5 travel times) that is 4 × ``r`` for a uniform speed; on a
+    window pinned twice as long it measured 0.995-0.997 where 4 × ``r``
+    measured 0.74-0.80. User-pinned values win; :func:`range_alias_notice`
+    checks a pinned margin against the window actually written.
 
     Scooter needs no such margin: ``scooter.f90:69`` samples four times
     as finely (``Nk = 2000*RMax_km*(kMax-kMin)/pi``, i.e.
     ``Δk ≈ π/(2·RMax)``), putting its period at ``4·RMax``.
     """
     if rmax_factor is not None:
-        return float(rmax_factor)
-    return SPARC_RMAX_FACTOR
+        return (float(rmax_factor) * r_ref, float(rmax_factor),
+                'SPARC(rmax_factor=…)')
+    rmax_m = r_ref + SPARC_RMAX_TIME_MARGIN * c_fast * time_max
+    return (rmax_m, rmax_m / r_ref,
+            f"r + {SPARC_RMAX_TIME_MARGIN:g} × c_fast × time_max: no range "
+            f"replica inside the record (Jensen et al., Sect. 8.3.2, on "
+            f"sparc.f90's mirrored fold; uacpy's measured margin)")
 
 
 def profile_speed_bounds(env: Environment, *, window_sound_speed) -> tuple:
@@ -421,7 +505,7 @@ def range_alias_notice(rmax_m: float, r_ref: float, c_fast: float,
     inside ``[0, time_max]``, else ``None``.
 
     The farthest receiver (``r_ref``) sees the fold from ``RMax - r_ref``
-    (see :func:`resolve_rmax_factor`); the earliest it can arrive
+    (see :func:`resolve_rmax_m`); the earliest it can arrive
     is that distance over the fastest speed in the profile. Inside the
     output window it is indistinguishable from a real late arrival, so
     name the ``rmax_factor`` that pushes it clear.
@@ -445,8 +529,25 @@ def range_alias_notice(rmax_m: float, r_ref: float, c_fast: float,
     )
 
 
+def default_n_time_samples(freq_max: float, time_max: float) -> int:
+    """The least output sample count whose step on the ``[0, time_max]``
+    grid the deck writes, ``time_max / (n − 1)``, is below
+    ``1 / (SPARC_SAMPLES_PER_PERIOD · freq_max)`` — Jensen et al.'s
+    "more than eight samples per period" (Sect. 8.2.1.3):
+    ``n = floor(8 · freq_max · time_max) + 2``, one more where rounding
+    leaves that step on the bound (``8 · freq_max · time_max`` a whole
+    number in exact arithmetic)."""
+    n = int(np.floor(SPARC_SAMPLES_PER_PERIOD * float(freq_max)
+                     * float(time_max))) + 2
+    if not float(time_max) / (n - 1) < 1.0 / (SPARC_SAMPLES_PER_PERIOD
+                                              * float(freq_max)):
+        n += 1
+    return n
+
+
 def resolve_n_time_samples(freq_max, time_max, *, n_time_samples):
-    """``(n_time_samples, notice)``: the caller's ``n_time_samples``, with a
+    """``(n_time_samples, notice)``: the caller's ``n_time_samples``, or
+    :func:`default_n_time_samples` when it is ``None``, with a
     ``(note, warning)`` when the resulting grid cannot resolve the pulse
     band (``None`` otherwise).
 
@@ -456,10 +557,10 @@ def resolve_n_time_samples(freq_max, time_max, *, n_time_samples):
     the whole window is discarded and the binary returns a single-sample
     p(t) at exit 0.
 
-    The native ``p(t)`` sampling is the caller's to choose, so the value is
+    A pinned ``p(t)`` sampling is the caller's to choose, so the value is
     kept verbatim. But a grid whose Nyquist sits below ``freq_max`` aliases
     silently: the returned p(t) looks perfectly plausible at the wrong
-    frequency. Say so, and name the ``n_time_samples`` that fixes it. ``SubTab``
+    frequency. Say so, and name the default count, which resolves it. ``SubTab``
     expands ``0.0 time_max /`` inclusive of both endpoints, so the step is
     ``time_max/(n_time_samples − 1)`` and the sample rate ``(n_time_samples − 1)/time_max``
     — not ``n_time_samples/time_max``, which overstates it by ``n/(n−1)``.
@@ -468,6 +569,8 @@ def resolve_n_time_samples(freq_max, time_max, *, n_time_samples):
     (``oalib_writer``), not ``march_start``, which only sets where the
     integration begins.
     """
+    if n_time_samples is None:
+        n_time_samples = default_n_time_samples(freq_max, time_max)
     if int(n_time_samples) < 2:
         raise ConfigurationError(
             f"SPARC: n_time_samples={n_time_samples} cannot express the "
@@ -482,8 +585,7 @@ def resolve_n_time_samples(freq_max, time_max, *, n_time_samples):
     if window > 0 and freq_max > 0:
         fs = (int(n_time_samples) - 1) / window
         if freq_max > 0.5 * fs:
-            n_needed = 1 + int(np.ceil(
-                window * _SPARC_PULSE_OVERSAMPLE * 2.0 * freq_max))
+            n_needed = default_n_time_samples(freq_max, window)
             notice = Notice(
                 f"output grid Nyquist {fs / 2:.1f} Hz below freq_max "
                 f"{freq_max:.0f} Hz",
@@ -491,10 +593,70 @@ def resolve_n_time_samples(freq_max, time_max, *, n_time_samples):
                 f"{fs:.1f} Hz (Nyquist {fs / 2:.1f} Hz) over a "
                 f"{window:.2f} s window, below the {freq_max:.0f} Hz "
                 f"source band — p(t) will alias. Set n_time_samples>="
-                f"{n_needed}, lower freq_max, or shorten the window via "
-                f"time_max / receiver.ranges.max().", NumericsWarning,
+                f"{n_needed} (more than eight samples per period at "
+                f"freq_max, Jensen et al. Sect. 8.2.1.3; the count an "
+                f"unset n_time_samples takes), lower freq_max, or shorten "
+                f"the window via time_max / receiver.ranges.max().",
+                NumericsWarning,
             )
     return n_time_samples, notice
+
+
+#: The largest frequency index ``tslib/bandpassc.f90:16`` can hold:
+#: ``iMax = INT( fmax / deltaf )`` is a default (4-byte) INTEGER, and a value
+#: past it converts to the most negative one, which leaves every weight of
+#: the band-pass (:32-43) at zero.
+_BANDPASS_INDEX_MAX = 2 ** 31 - 1
+
+#: ``tslib/sourceMod.f90:53-55``: a canned pulse is tabulated on
+#: ``Nt = 1024`` samples at ``deltat = 0.2 / omega``, ``omega`` the deck
+#: frequency's (``sparc.f90:96``).
+_CANNED_SERIES_SAMPLES = 1024
+_CANNED_SERIES_STEP_RADIANS = 0.2
+
+
+def refuse_band_pass_overflow(pulse: str, *, freq_max: float, c_low: float,
+                              c_high: float, deck_frequency: float,
+                              sts_rows: int, sample_rate) -> None:
+    """Refuse a deck whose per-wavenumber band-pass index overflows.
+
+    A pulse whose fourth letter is ``'H'`` or ``'B'`` is band-passed at
+    every wavenumber ``k`` up to ``fHiCut = k·cHigh/2π``
+    (``sparc.f90:398``), and ``tslib/bandpassc.f90:16`` indexes that
+    edge as ``iMax = INT(fHiCut/deltaf)`` on the source series, whose
+    frequency step is ``deltaf = 1/(Nt·deltat)`` — one over its duration. At
+    the top wavenumber ``kMax = 2π·freq_max/c_low`` (``:112``) that is
+    ``freq_max·c_high·duration/c_low``. Past :data:`_BANDPASS_INDEX_MAX`
+    the conversion wraps negative, no frequency passes, and the source is
+    silent at those wavenumbers with the run exiting 0 (measured: a 16 s
+    ``STSFIL`` at ``c_high = 1e9`` returned the trace 78 % rms off the
+    ``c_high = 1e7`` one, which a 1e8 run matched bit for bit).
+    """
+    if pulse[3] not in 'HB':
+        return
+    if pulse[0] in 'FB':
+        duration = float(sts_rows) / float(sample_rate)
+    else:
+        duration = (_CANNED_SERIES_SAMPLES * _CANNED_SERIES_STEP_RADIANS
+                    / (2.0 * np.pi * float(deck_frequency)))
+    index = float(freq_max) * float(c_high) * duration / float(c_low)
+    if index <= _BANDPASS_INDEX_MAX:
+        return
+    raise ConfigurationError(
+        f"SPARC cannot band-pass this pulse: pulse_type {pulse!r} filters "
+        f"every wavenumber k up to k·c_high/2π (sparc.f90:398), and "
+        f"tslib/bandpassc.f90:16 indexes that edge as INT(f/deltaf) on the "
+        f"{duration:.4g} s source series; at the top wavenumber "
+        f"2π·{float(freq_max):g}/{float(c_low):.1f} with c_high = "
+        f"{float(c_high):g} m/s the index is {index:.3g}, past the "
+        f"{_BANDPASS_INDEX_MAX} a 4-byte INTEGER holds, so every weight of "
+        f"the band-pass is zero there and the source is silent at exit 0.",
+        remediation=(
+            "Lower c_high (unset, it is 1e7 m/s, the toolbox's SPARC "
+            "decks' value), shorten the source_waveform, or lower freq_max. "
+            "A pulse_type ending in 'L' or 'N' sets no upper band-pass "
+            "edge."),
+    )
 
 
 def refuse_too_few_wavenumbers(nk: int, rmax_m: float, freq_min: float,
@@ -521,14 +683,17 @@ def checked_n_mesh(env, freq_max: float, *,
                    pinned_n_mesh) -> Tuple[int, ...]:
     """:func:`resolve_n_mesh` as one count per medium (a pinned count on
     every medium), refused when the deck's mesh would overrun SPARC's
-    static storage (:data:`_MAX_MESH_POINTS`)."""
+    static storage (:data:`_MAX_MESH_POINTS`). A pinned 0 asks AT for its
+    automatic mesh at the deck frequency (``ReadEnvironmentMod.f90:101-106``),
+    so it counts no points here: the binary sizes that mesh and checks it
+    against its storage itself (``sparc.f90:205-208``)."""
     n_mesh = resolve_n_mesh(env, freq_max, n_mesh=pinned_n_mesh)
     counts = (list(n_mesh) if isinstance(n_mesh, list)
               else [int(n_mesh)] * len(at_env_media(env)))
     total = sum(int(n) + 1 for n in counts)
     if total <= _MAX_MESH_POINTS:
         return tuple(counts)
-    origin = ("the pinned n_mesh" if pinned_n_mesh else
+    origin = ("the pinned n_mesh" if pinned_n_mesh is not None else
               f"the automatic mesh ({_AT_POINTS_PER_WAVELENGTH:g} points "
               f"per wavelength at the band top freq_max = {float(freq_max):g} "
               f"Hz)")
@@ -544,8 +709,10 @@ def checked_n_mesh(env, freq_max: float, *,
 
 
 def resolve_n_mesh(env, freq_max: float, *, n_mesh) -> Union[int, List[int]]:
-    """Mesh count for the deck: the caller's if pinned, else sized at the
-    band top this run actually marches. A pinned ``n_mesh`` comes back as
+    """Mesh count for the deck: the caller's if pinned — 0 included,
+    AT's automatic mesh at the deck frequency
+    (``ReadEnvironmentMod.f90:101-106``) — else sized at the band top this
+    run actually marches. A pinned ``n_mesh`` comes back as
     a single ``int`` the writer applies to every medium; the automatic
     path returns a ``list`` with one count per medium.
 
@@ -565,14 +732,14 @@ def resolve_n_mesh(env, freq_max: float, *, n_mesh) -> Union[int, List[int]]:
     the automatic count is 0.239 relative rms at 20 Hz / 500 m and 0.375 at
     60 Hz / 300 m (peak -0.86 dB), with the coarse mesh also putting the
     arrival about 1.7 ms early over 300 m. Convergence is monotone in the
-    count, so sizing at ``freq_max`` rather than ``freq0`` is the fix rather
-    than a tuning choice.
+    count, so the mesh is sized at ``freq_max``, the band's binding end.
     """
-    if n_mesh:
+    if n_mesh is not None:
         return int(n_mesh)
     f = float(freq_max)
     if not np.isfinite(f) or f <= 0.0:
-        return int(n_mesh)
+        # No positive band top to size at: 0, AT's own automatic mesh.
+        return 0
     # One count per MEDIUM, not one scalar: AT sizes each medium from its
     # OWN thickness and speed (ReadEnvironmentMod.f90:101-106), so the
     # water column's count broadcast to a 10 m sediment layer over-resolves

@@ -140,23 +140,6 @@ def eye():
 # ── 4. Finding the frame ─────────────────────────────────────────────────────
 
 
-def _sc_metric(x, n_subcarriers):
-    """Schmidl & Cox timing metric — what ``schmidl_cox_sync`` maximises.
-
-    ``schmidl_cox_sync`` returns only ``(start, cfo)``; the metric itself is
-    recomputed here so it can be plotted.
-    """
-    L = int(n_subcarriers) // 2
-    n = x.size - 2 * L
-    a = np.concatenate(([0j], np.cumsum(np.conj(x[:-L]) * x[L:])))
-    p = a[L:L + n] - a[:n]
-    e = np.concatenate(([0.0], np.cumsum(np.abs(x[L:]) ** 2)))
-    rr = e[L:L + n] - e[:n]
-    metric = np.abs(p) ** 2 / (rr ** 2 + 1e-12)
-    metric[rr < 0.25 * rr.max()] = 0.0
-    return metric
-
-
 def sync():
     """Two ways to find a frame: a preamble matched filter, and Schmidl-Cox."""
     rng = np.random.default_rng(0)
@@ -169,7 +152,7 @@ def sync():
     start, metric = comms.detect_preamble(single, preamble, threshold=0.4)
 
     baseband, _, _, _ = _ofdm_frame()
-    sc = _sc_metric(baseband, 256)
+    sc = comms.schmidl_cox_metric(baseband, 256)
     sc_start, cfo = comms.schmidl_cox_sync(baseband, 256)
 
     fig, axes = plt.subplots(1, 2, figsize=ROW2)
@@ -291,7 +274,8 @@ def doppler():
 
     speed = 2.3                                     # m/s, closing
     a_true = comms.doppler_from_speed(speed)
-    a_hat, _, peak = comms.estimate_doppler_scale(record(speed), probe, scales)
+    estimate = comms.estimate_doppler_scale(record(speed), probe, scales)
+    a_hat = estimate.best_scale
 
     speeds = np.arange(0.0, 4.1, 0.5)
     estimates = np.array([
@@ -299,7 +283,7 @@ def doppler():
         for v in speeds])
 
     fig, axes = plt.subplots(1, 2, figsize=ROW2)
-    plot_doppler_ambiguity(scales, peak, axes[0],
+    plot_doppler_ambiguity(estimate, axes[0],
                            title=f'1 s LFM probe at 10 dB SNR — '
                                  f'estimate {a_hat * 1e3:.2f} e-3')
     axes[0].axvline(a_true * 1e3, color='k', ls=':', lw=1,

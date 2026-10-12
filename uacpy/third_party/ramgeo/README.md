@@ -15,9 +15,9 @@ Range-dependent Acoustic Model (split-step Padé parabolic equation) that
   "M. Collins, NRL, 1999" and the source carries no copyright or licence notice.
   Porter merely bundles it in the Acoustics Toolbox; bundling does not
   relicense it.
-- **uacpy patches:** two, both documented in `third_party/MODIFICATIONS.md`
-  (the same pair `ramsurf1.5.f` carries): (1) enlarged array dimensions
-  `(mr,mz,mp)` so uacpy's fine grids fit; (2) an `outpt` dump of the complex
+- **uacpy patches:** two, both documented in `third_party/MODIFICATIONS.md`:
+  (1) array dimensions `(mr,mz,mp)` enlarged to `ramsurf1.5.f`'s stock ones
+  so uacpy's fine grids fit; (2) the `outpt` dump `ramsurf1.5.f` carries, of the complex
   PE envelope to `pcomplex.bin`, enabling broadband / time-series synthesis.
 - **Numerics:** split-step Padé PE, Collins, *J. Acoust. Soc. Am.* **93**,
   1736–1742 (1993). Version 1.5g (Fialkowski dimension-bug fix).

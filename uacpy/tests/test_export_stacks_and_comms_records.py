@@ -1,20 +1,19 @@
-"""The export protocol on ResultStack, comms.ReceiverDiagnostics and
-comms.JanusPacket: every save form reads back the object it saved, and a
-pickle written before these types joined the protocol still loads."""
-import pickle
-from pathlib import Path
+"""The export protocol on the field of several sources, ResultStack,
+comms.ReceiverDiagnostics and comms.JanusPacket: every save form reads back
+the object it saved."""
 
 import numpy as np
 import pytest
 
+from uacpy.tests.conftest import recorded_warnings
+
 from uacpy.comms import JanusPacket, ReceiverDiagnostics
 from uacpy.core._export import CarrierExport, ExportRecord
 from uacpy.core.results import Arrivals, Field, ResultStack
+from uacpy.core.results import stack_fields
 
-_PICKLED = Path(__file__).parent / 'data' / 'pickled'
 
-
-# ── ResultStack ───────────────────────────────────────────────────────────
+# ── the field of several sources, and ResultStack ─────────────────────────
 
 def _field(scale, *, complex_data=True):
     data = np.arange(6, dtype=float).reshape(2, 3) * scale
@@ -28,9 +27,15 @@ def _field(scale, *, complex_data=True):
                  phase_reference='travelling_wave')
 
 
-def _field_stack(**kw):
-    return ResultStack([_field(5.0, **kw), _field(15.0, **kw)], [5.0, 15.0],
-                       coordinate_name='source_depth')
+def _two_source_field(**kw):
+    """What a two-depth run returns: one Field over ``source_depth``, with
+    the Source weights recorded and one scratch path per depth."""
+    a, b = _field(5.0, **kw), _field(15.0, **kw)
+    a.metadata['shd_file'] = '/run/source_depth_5m/x.shd'
+    b.metadata['shd_file'] = '/run/source_depth_15m/x.shd'
+    field = stack_fields([a, b], [5.0, 15.0])
+    field.source_weights = np.array([1.0, -1.0 + 0.5j])
+    return field
 
 
 def _arrivals(depth):
@@ -44,6 +49,11 @@ def _arrivals(depth):
     return Arrivals(by_receiver=[[[cell]]], receiver_depths=[20.0],
                     receiver_ranges=[1000.0], frequencies=1000.0,
                     source_depths=[depth], model='Bellhop')
+
+
+def _arrival_stack():
+    return ResultStack([_arrivals(5.0), _arrivals(15.0)], [5.0, 15.0],
+                       coordinate_name='source_depth')
 
 
 def _same_stacks(a, b):
@@ -61,21 +71,117 @@ def _same_stacks(a, b):
                 assert dx[key].dtype == np.asarray(dy[key]).dtype, key
 
 
+def _same_fields(a, b, *, paths=True):
+    assert list(a.coords) == list(b.coords)
+    for name in a.coords:
+        np.testing.assert_array_equal(a.coords[name], b.coords[name])
+    np.testing.assert_array_equal(a.data, b.data)
+    np.testing.assert_array_equal(a.source_depths, b.source_depths)
+    np.testing.assert_array_equal(a.source_weights, b.source_weights)
+    if paths:
+        assert a.metadata['shd_file'] == b.metadata['shd_file']
+
+
+
+
+class TestAStackOfFieldSlabsIsNotRead:
+    """A ResultStack holds no Field, so a stack dict whose slabs are Fields
+    is no file this version writes: ``from_dict`` refuses it naming the
+    re-run. A class-less one-array NetCDF (a Field's own xarray form) reads
+    as that Field through ``Result`` and ``Field``, and ``ResultStack``
+    refuses it as a file of another class."""
+
+    def test_from_dict_refuses_field_slabs_naming_the_rerun(self):
+        from uacpy.core._export import saved_class_path
+        from uacpy.core.exceptions import ConfigurationError
+        saved = {'__class__': saved_class_path(ResultStack),
+                 'coordinate': np.array([5.0, 15.0]),
+                 'coordinate_name': 'source_depth',
+                 'slabs': [{'__class__': saved_class_path(Field),
+                            **slab.to_dict()}
+                           for slab in (_field(5.0), _field(15.0))]}
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^ResultStack\.from_dict: the saved "
+                                 r"stack holds Field slabs.*Re-run"):
+            ResultStack.from_dict(saved)
+
+    def test_a_class_less_array_reads_as_the_field_it_holds(self, tmp_path):
+        pytest.importorskip('xarray')
+        from uacpy.core._export import write_netcdf
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.core.results import Result
+        field = _two_source_field()
+        write_netcdf(field.to_xarray(), tmp_path / 's.nc')
+        for loader in (Result.from_netcdf, Field.from_netcdf):
+            _same_fields(field, loader(tmp_path / 's.nc'))
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^ResultStack\.from_netcdf: .* holds "
+                                 r"one array.*not a ResultStack"):
+            ResultStack.from_netcdf(tmp_path / 's.nc')
+
+
+class TestTheFieldOfSeveralSourcesRoundTrips:
+    """A multi-depth run's Field — its ``source_depth`` axis, the Source
+    weights and the per-depth metadata — saves and loads as any Field."""
+
+    def test_from_dict_of_to_dict_is_the_field(self):
+        field = _two_source_field()
+        _same_fields(field, Field.from_dict(field.to_dict()))
+
+    def test_the_npz_round_trip_is_the_field(self, tmp_path):
+        field = _two_source_field()
+        np.savez(tmp_path / 'f.npz', **field.to_dict())
+        with np.load(tmp_path / 'f.npz', allow_pickle=True) as f:
+            _same_fields(field, Field.from_dict(dict(f)))
+
+    def test_from_xarray_of_to_xarray_is_the_field(self):
+        """Every depth's scratch path, a list of strings, crosses as a JSON
+        attribute and comes back as the same list, with no warning."""
+        pytest.importorskip('xarray')
+        field = _two_source_field()
+        with recorded_warnings() as caught:
+            da = field.to_xarray()
+        assert not [w for w in caught if 'cannot be held' in str(w.message)]
+        assert list(da.dims) == ['source_depth', 'depth', 'range']
+        back = Field.from_xarray(da)
+        _same_fields(field, back)
+        assert back.metadata['shd_file'] == list(field.metadata['shd_file'])
+
+    @pytest.mark.parametrize('complex_data', [True, False])
+    def test_from_netcdf_reads_back_what_to_netcdf_wrote(self, tmp_path,
+                                                         complex_data):
+        pytest.importorskip('xarray')
+        field = _two_source_field(complex_data=complex_data)
+        if not complex_data:
+            field.source_weights = np.array([1.0, -1.0])
+        field.to_netcdf(tmp_path / 'f.nc')
+        back = Field.from_netcdf(tmp_path / 'f.nc')
+        _same_fields(field, back)
+        assert back.metadata['shd_file'] == list(field.metadata['shd_file'])
+
+    def test_it_sums_the_same_after_the_round_trip(self, tmp_path):
+        pytest.importorskip('xarray')
+        field = _two_source_field()
+        del field.metadata['shd_file']
+        field.to_netcdf(tmp_path / 'f.nc')
+        back = Field.from_netcdf(tmp_path / 'f.nc')
+        np.testing.assert_array_equal(back.superpose().data,
+                                      field.superpose().data)
+
+
 class TestAResultStackRoundTrips:
 
     def test_from_dict_of_to_dict_is_the_stack(self):
-        stack = _field_stack()
+        stack = _arrival_stack()
         _same_stacks(stack, ResultStack.from_dict(stack.to_dict()))
 
     def test_each_slab_is_saved_under_its_class_path(self):
-        d = _field_stack().to_dict()
+        d = _arrival_stack().to_dict()
         assert d['__class__'] == 'uacpy.core.results.ResultStack'
         assert [s['__class__'] for s in d['slabs']] == \
-            ['uacpy.core.results.Field'] * 2
+            ['uacpy.core.results.Arrivals'] * 2
 
-    def test_a_stack_of_any_slab_type_round_trips(self):
-        """Not only Field: a stack of Arrivals (which has no xarray form as
-        one array) saves and loads through to_dict."""
+    def test_a_stack_over_another_coordinate_round_trips(self):
         stack = ResultStack([_arrivals(5.0), _arrivals(5.0)], [1.0, 2.0],
                             coordinate_name='case')
         back = ResultStack.from_dict(stack.to_dict())
@@ -84,38 +190,20 @@ class TestAResultStackRoundTrips:
         _same_stacks(stack, back)
 
     def test_the_npz_round_trip_is_the_stack(self, tmp_path):
-        stack = _field_stack()
+        stack = _arrival_stack()
         np.savez(tmp_path / 's.npz', **stack.to_dict())
         with np.load(tmp_path / 's.npz', allow_pickle=True) as f:
             _same_stacks(stack, ResultStack.from_dict(dict(f)))
 
-    def test_from_xarray_of_to_xarray_is_the_stack(self):
+    def test_from_netcdf_reads_back_what_to_netcdf_wrote(self, tmp_path):
         pytest.importorskip('xarray')
-        stack = _field_stack()
-        _same_stacks(stack, ResultStack.from_xarray(stack.to_xarray()))
-
-    @pytest.mark.parametrize('complex_data', [True, False])
-    def test_the_netcdf_round_trip_is_the_stack(self, tmp_path, complex_data):
-        xr = pytest.importorskip('xarray')
-        pytest.importorskip('h5netcdf')
-        pytest.importorskip('h5py')
-        stack = _field_stack(complex_data=complex_data)
-        stack.to_netcdf(tmp_path / 's.nc')
-        with xr.open_dataarray(tmp_path / 's.nc', engine='h5netcdf') as da:
-            back = ResultStack.from_xarray(da.load())
-        _same_stacks(stack, back)
-
-    @pytest.mark.parametrize('complex_data', [True, False])
-    def test_from_netcdf_reads_back_what_to_netcdf_wrote(self, tmp_path,
-                                                         complex_data):
-        pytest.importorskip('xarray')
-        stack = _field_stack(complex_data=complex_data)
+        stack = _arrival_stack()
         stack.to_netcdf(tmp_path / 's.nc')
         _same_stacks(stack, ResultStack.from_netcdf(tmp_path / 's.nc'))
 
     def test_a_foreign_class_path_is_refused(self):
         from uacpy.core.exceptions import ConfigurationError
-        d = _field_stack().to_dict()
+        d = _arrival_stack().to_dict()
         d['slabs'][0]['__class__'] = 'os.path.join'
         with pytest.raises(ConfigurationError, match='not a uacpy class'):
             ResultStack.from_dict(d)
@@ -197,18 +285,6 @@ class TestReceiverDiagnosticsIsAnExportRecord:
         with pytest.raises(ValueError, match='read-only'):
             d.bits[0] = 0
 
-    def test_a_pickle_written_before_it_joined_the_protocol_loads(self):
-        """``receiver_diagnostics.pkl`` was pickled from the plain frozen
-        dataclass this record was before it joined the protocol."""
-        back = pickle.loads((_PICKLED / 'receiver_diagnostics.pkl')
-                            .read_bytes())
-        assert isinstance(back, ReceiverDiagnostics)
-        np.testing.assert_array_equal(back.bits, [1, 0, 1])
-        np.testing.assert_array_equal(back.symbols, [1 + 1j, -1 - 1j])
-        np.testing.assert_array_equal(back.mse, [0.1, 0.2])
-        np.testing.assert_array_equal(back.sync_metric, [0.0, 0.5, 1.0])
-        assert back.start == 1
-        assert not back.bits.flags.writeable
 
 
 # ── JanusPacket ───────────────────────────────────────────────────────────
@@ -248,10 +324,3 @@ class TestJanusPacketIsACarrier:
         p.to_netcdf(tmp_path / 'p.nc')
         with xr.open_dataset(tmp_path / 'p.nc', engine='h5netcdf') as ds:
             assert JanusPacket.from_xarray(ds.load()) == p
-
-    def test_a_pickle_written_before_it_joined_the_protocol_loads(self):
-        """``janus_packet.pkl`` was pickled from the plain dataclass this
-        carrier was before it joined the protocol."""
-        back = pickle.loads((_PICKLED / 'janus_packet.pkl').read_bytes())
-        assert back == JanusPacket(class_id=16, app_type=3,
-                                   app_data=np.arange(34) % 2, mobility=1)

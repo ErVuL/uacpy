@@ -8,6 +8,7 @@ import os
 import re
 import warnings
 from pathlib import Path
+from types import MappingProxyType
 from typing import Optional
 
 import numpy as np
@@ -16,7 +17,9 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import (
     ExecutableNotFoundError, FallbackWarning, IOWarning,
 )
-from uacpy.models._launch import _launch_single_threaded
+from uacpy.models._launch import (
+    BinarySearch, _launch_single_threaded, find_executable_in_paths,
+)
 from uacpy.models.bellhop._tables import grid_is_paired
 
 # One ``BHC_WARN_<NAME>: ...`` / ``BHC_ERR_<NAME>: ...`` line of the exit
@@ -41,6 +44,16 @@ _cuda_found_no_device = False
 
 _BELLHOP_OUTPUT_SUFFIXES = ('.shd', '.arr', '.ray')
 
+#: The Bellhop builds by backend, in auto-selection order (CUDA > C++ >
+#: Fortran), and where each is looked for: one name each, in the
+#: directories every build shares.
+BELLHOP_BINARIES = MappingProxyType({
+    backend: BinarySearch((name,), ('bellhopcuda', 'oalib', 'bellhop'),
+                          'Acoustics-Toolbox/Bellhop')
+    for backend, name in (('cuda', 'bellhopcuda'), ('cxx', 'bellhopcxx'),
+                          ('fortran', 'bellhop'))
+})
+
 #: bellhopcxx / bellhopcuda size an ARRIVALS table from the memory budget,
 #: not from the grid: ``MaxNArr = remaining budget / (sources x receivers x
 #: sizeof(Arrival))``, then the whole table is allocated and zero-filled
@@ -63,7 +76,9 @@ def _ports_arrivals_memory_bytes(n_sources: int, n_receivers: int) -> int:
     Room for the per-receiver capacity the Fortran engine gives the same
     grid, ``max(ArrivalsStorage / receivers, 10)`` (``bellhop.f90:222``),
     held to at most ``_BHC_ARRIVALS_PER_RECEIVER`` on small grids, plus the
-    ports' other allocations; clamped to [64 MiB, 1 GiB].
+    ports' other allocations; clamped to [64 MiB, 1 GiB]. The 10000 per
+    receiver, the overhead and the clamp are uacpy guidance (host memory, no
+    engine value); the ports' own default budget is 4 GiB.
     """
     n_sources = max(int(n_sources), 1)
     n_receivers = max(int(n_receivers), 1)
@@ -102,30 +117,27 @@ def arrivals_memory_bytes(source, deck_receiver, *, grid_type) -> int:
         n_rr if grid_is_paired(grid_type) else n_rz * n_rr)
 
 
-def find_bellhop_executable(backend, *, find) -> Path:
+def find_bellhop_executable(backend, *, model_name: str) -> Path:
     """Locate the Bellhop binary, keyed on ``backend``.
 
     ``None`` auto-selects in preference order CUDA > C++ > Fortran among
     whatever ``install.sh`` built. An explicitly requested variant is
     the only candidate: when it is not installed the search raises
     :class:`ExecutableNotFoundError` naming the ``install.sh`` flag that
-    builds it, rather than running another engine. ``find`` is the
-    model's path search
-    (:meth:`~uacpy.models.base.PropagationModel._find_executable_in_paths`).
+    builds it, rather than running another engine. The path search is
+    :func:`~uacpy.models._launch.find_executable_in_paths`, its refusal
+    naming ``model_name``.
     """
-    backend_names = {
-        'fortran': ['bellhop'],
-        'cxx': ['bellhopcxx'],
-        'cuda': ['bellhopcuda'],
-    }
-    auto_names = (['bellhopcxx', 'bellhop'] if _cuda_found_no_device
-                  else ['bellhopcuda', 'bellhopcxx', 'bellhop'])
-    names = backend_names.get(backend, auto_names)
+    searches = ([BELLHOP_BINARIES[backend]] if backend in BELLHOP_BINARIES
+                else [search for key, search in BELLHOP_BINARIES.items()
+                      if not (key == 'cuda' and _cuda_found_no_device)])
+    names = [name for search in searches for name in search.names]
     try:
-        path = find(
+        path = find_executable_in_paths(
             names,
-            bin_subdirs=['bellhopcuda', 'oalib', 'bellhop'],
-            dev_subdir='Acoustics-Toolbox/Bellhop',
+            bin_subdirs=list(searches[0].bin_subdirs),
+            dev_subdir=searches[0].dev_subdir,
+            model_name=model_name,
         )
     except ExecutableNotFoundError as exc:
         if backend in ('cxx', 'cuda'):

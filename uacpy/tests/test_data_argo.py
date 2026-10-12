@@ -201,6 +201,11 @@ def test_an_invalid_tolerance_is_a_configuration_error(monkeypatch, kw):
         argo.fetch_argo_profile((30.0, -40.0), date='2024-06-04', **kw)
 
 
+@pytest.mark.parametrize('max_days', [15, 15.0, np.float64(0.0)])
+def test_a_whole_valued_max_days_is_accepted_as_whole_days(max_days):
+    assert argo._checked_tolerances(None, max_days) == (None, int(max_days))
+
+
 def test_argo_mackenzie_reads_the_depths_at_the_floats_latitude(monkeypatch):
     from uacpy.core.acoustics import sound_speed_mackenzie
     from uacpy.core.acoustics.seawater import pressure_dbar_to_depth

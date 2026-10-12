@@ -13,15 +13,20 @@ block, which ``read_modes(component=)`` exposes.
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from uacpy.core.acoustics import pekeris_root
+from uacpy.core.deck_limits import AT_DB_PER_NEPER
 from uacpy.core.results import MediaTable, Modes
 from uacpy.core.exceptions import (
     ConfigurationError, FileFormatError,
 )
+from uacpy.core.acoustics import (
+    absorption_francois_garrison, absorption_thorp,
+)
+from uacpy.io.env_reader import _volume_absorption_of
 from uacpy.io._fortran_helpers import (
     DirectAccessFile, list_directed_int, read_list_directed_values,
     require_model_output, typed_format_error,
@@ -366,6 +371,26 @@ def _read_modes_asc_payload(
     }
 
 
+def _mod_header_counts(daf: DirectAccessFile) -> Tuple[int, ...]:
+    """The counts that confirm the byte order :class:`DirectAccessFile`
+    reads a ``.mod`` file's record length in: the four after the title of
+    record 1 (``Nfreq``, the acoustic medium count and ``NzTab`` twice,
+    ``Kraken/kraken.f90:593``) and the first medium's mesh count, which
+    opens record 2 (``kraken.f90:594``).
+
+    The four sit at the same bytes under either order, so on a large file a
+    small count byte-swapped can still lie inside it. The mesh count's
+    position is set by the record length, so under the wrong (shorter)
+    reading it falls in record 1's padding and reads 0."""
+    daf.seek(0, offset=84)
+    counts = daf.values(daf.i4, 4)
+    if counts.size != 4:
+        return ()           # a record too short to hold them confirms nothing
+    daf.seek(1)
+    mesh = daf.values(daf.i4, 1)
+    return tuple(int(c) for c in counts) + tuple(int(c) for c in mesh)
+
+
 class _ModFile(DirectAccessFile):
     """A KRAKEN ``.mod`` file open for reading.
 
@@ -383,7 +408,8 @@ class _ModFile(DirectAccessFile):
             raise FileFormatError(
                 f"Invalid mode file (truncated header): {filename}.")
         super().__init__(
-            fid, source=f'_read_modes_payload:{os.path.basename(filename)}')
+            fid, source=f'_read_modes_payload:{os.path.basename(filename)}',
+            header_counts=_mod_header_counts)
         self.filename = filename
         # LRecordLength is a count of 4-byte `longwords' and each eigenvalue
         # record holds LRecordLength/2 complex values (kraken.f90:587,110), so
@@ -517,6 +543,51 @@ class _ModFile(DirectAccessFile):
         side["rho"] = self.values(self.f4, 1)[0]
         side["depth"] = self.values(self.f4, 1)[0]
         return side
+
+
+def _seabed_attenuation(cp, frequency, volume_law):
+    """The seabed's own compressional attenuation (dB/wavelength) in a fluid
+    half-space whose record holds the complex speed ``cp`` at ``frequency``
+    Hz, or ``None`` when ``volume_law`` (the deck's TopOpt(4) and its row,
+    :func:`~uacpy.io.env_reader._volume_absorption_of`) is unknown.
+
+    ``CRCI`` (``misc/AttenMod.f90:57-114``) wrote ``cp = c + i·alphaT·c²/ω``
+    with ``alphaT`` in Np/m, whatever the deck's unit, and ``alphaT`` holds
+    the volume law of TopOpt(4) as well (``misc/sspMod.f90:437`` converts
+    the half-space with the deck's unit): Thorp ``'T'`` at the frequency
+    (``AttenMod.f90:86-94``, :func:`~uacpy.acoustics.absorption_thorp`) and
+    Francois-Garrison ``'F'`` with the row's T, S, pH and z_bar
+    (``AttenMod.f90:127-171``,
+    :func:`~uacpy.acoustics.absorption_francois_garrison`), both in dB/km
+    over 8685.8896. A biological ``'B'`` layer adds only between its depths,
+    which the half-space's ``z = HUGE`` is not. So
+    ``alpha_b = Im(cp)·ω/c² − alpha_vol`` (Np/m), times
+    ``AT_DB_PER_NEPER·c/f`` in dB/wavelength. A lossless seabed under a
+    volume law comes out a hair below zero at the record's single
+    precision, and is 0; a deficit past that precision says the deck is not
+    the run's, so the share is unknown."""
+    if volume_law is None:
+        return None
+    code, row = volume_law
+    if code not in (' ', 'T', 'F', 'B'):
+        return None
+    c = float(np.real(cp))
+    omega = 2.0 * np.pi * frequency
+    recorded = float(np.imag(cp)) * omega / c ** 2
+    db_per_km_to_np = 1.0 / (AT_DB_PER_NEPER * 1000.0)
+    volume = 0.0
+    if code == 'T':
+        volume = float(absorption_thorp(frequency)) * db_per_km_to_np
+    elif code == 'F':
+        temperature, salinity, ph, z_bar = row
+        volume = float(absorption_francois_garrison(
+            frequency, temperature, salinity, ph,
+            depth=z_bar)) * db_per_km_to_np
+    own = recorded - volume
+    if own < 0.0:
+        # float32's precision is 6e-8 of the recorded value.
+        return 0.0 if -own <= 1e-6 * recorded else None
+    return own * AT_DB_PER_NEPER * c / frequency
 
 
 @typed_format_error
@@ -945,13 +1016,16 @@ def read_modes(
         Hz; the closest entry of a multi-frequency ``.mod`` is read. ``None``
         (default) reads a single-frequency file and raises
         :class:`~uacpy.core.exceptions.ConfigurationError` naming the
-        frequencies of a multi-frequency one.
+        frequencies of a multi-frequency one. A ``.mod`` or ``.moa`` holding
+        one frequency returns it whatever is asked (it is the closest); the
+        result's ``frequencies`` says which.
     modes : int, list or ndarray, optional
         Mode numbers to keep, **1-based** as in the file and in
         ``read_modes_bin.m``; out-of-range numbers are dropped. ``None``
         keeps all.
     profile : int, optional
         Profile of a multi-profile ``.mod``, 1-based (``Kraken/kraken.f90:42``).
+        A ``.moa`` holds one profile and refuses any other.
     component : {'H', 'V', 'T', 'N'}, optional
         The stress-displacement component to keep inside an **elastic**
         medium (horizontal / vertical displacement, tangential / normal
@@ -972,8 +1046,13 @@ def read_modes(
         (m), ``frequencies`` = the entry read. ``media`` is the
         :class:`~uacpy.core.results.MediaTable` of a ``.mod``: the top
         depth (m) and density (g/cm³) of every medium, the base of the last
-        medium, the density below it and the water density (``None`` for a
-        ``.moa`` read with no ``water_density``). ``metadata`` carries the
+        medium, the density below it, the water density and, for a fluid
+        bottom half-space (boundary ``'A'`` with no shear speed), its
+        compressional speed (m/s) and its own attenuation (dB/wavelength:
+        the imaginary part of its complex speed less the volume law the
+        ``.env`` beside the file names, :func:`_seabed_attenuation`;
+        ``None`` without that deck); ``media`` is ``None`` for a ``.moa`` read with
+        no ``water_density``. ``metadata`` carries the
         file's ``title``, the ``.mod``'s ``top_halfspace`` /
         ``bottom_halfspace`` records (boundary code, ``cp``/``cs``/``rho``,
         and the ``k2``, ``gamma``, ``phi`` interface terms) and
@@ -983,6 +1062,12 @@ def read_modes(
     metadata: Dict[str, Any] = {}
     media = None
     if ext == '.moa':
+        if profile != 1:
+            raise ConfigurationError(
+                f"read_modes: {filepath} is a .moa, which holds one profile; "
+                f"profile={profile} names another.",
+                remediation="Read the .mod of the run for a multi-profile "
+                            "file, or leave profile at 1.")
         payload = _read_modes_asc_payload(filepath, modes=modes)
     else:
         payload = _read_modes_with_halfspace(filepath, frequency, modes,
@@ -990,6 +1075,15 @@ def read_modes(
         metadata['top_halfspace'] = payload['Top']
         metadata['bottom_halfspace'] = payload['Bot']
         metadata['media_types'] = list(payload.get('Mater', []))
+        # A fluid bottom half-space (boundary 'A' with no shear speed) has
+        # one compressional speed, the cp of its record (kraken.f90:603),
+        # and its own attenuation once the deck's volume law is taken out of
+        # the record (_seabed_attenuation). The .mod does not record that
+        # law, so the deck beside it says which it was; without one the
+        # seabed's share is not known.
+        bottom = payload['Bot']
+        fluid_halfspace = bottom['BC'] == 'A' and bottom['cs'] == 0.0
+        volume_law = _volume_absorption_of(root + '.env')
         # The medium table the modes were normalised in (kraken.f90:595-596:
         # the density at the top of every medium the file tabulates, the
         # water column first), from which Modes.modal_pressure_field takes
@@ -1001,8 +1095,14 @@ def read_modes(
                            else float(water_density)),
             tops=[float(d) for d in payload['depth']],
             densities=[float(r) for r in payload['rho']],
-            bottom_depth=float(payload['Bot']['depth']),
-            halfspace_density=float(payload['Bot']['rho']))
+            bottom_depth=float(bottom['depth']),
+            halfspace_density=float(bottom['rho']),
+            halfspace_sound_speed=(bottom['cp'].real if fluid_halfspace
+                                   else None),
+            halfspace_attenuation=(
+                _seabed_attenuation(bottom['cp'], float(payload['freq']),
+                                    volume_law)
+                if fluid_halfspace else None))
     metadata['title'] = str(payload.get('title', payload.get('pltitl', '')))
     if media is None and water_density is not None:
         media = MediaTable(water_density=float(water_density))

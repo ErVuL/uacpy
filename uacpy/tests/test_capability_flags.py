@@ -1,14 +1,23 @@
-"""Capability-flag harmonization tests.
+"""Every engine's capability surface, held to its saved record.
 
-Locks in the per-model `_supports_*` matrix. If a model gains or loses
-support for an Environment feature, the change must come with an update
-to this test so the public capability surface stays explicit.
+What each registered engine declares (``spec``: run modes, capability flags,
+source geometries, collapse defaults, ``EngineTraits``) and what a default
+instance resolves from it (its run modes, every ``_supports_*`` flag, its
+source geometries, its collapse policy, its default run mode, what a
+multi-depth ``Source`` meets in that mode) is saved in
+``tests/data/engine_specs.json``. ``python -m uacpy.tests._save_engine_specs``
+writes it; the tests below compare the live values with it field by field,
+so a capability that changes fails naming the engine and the field, and an
+intended change is recorded by rewriting the engine's record.
 
 Declaring a flag is a promise: ``_project_environment`` then leaves that
 feature in the env and warns about nothing, so the model's deck writer has to
-carry it — nothing downstream re-checks. A flag asserted here without a
+carry it — nothing downstream re-checks. A flag held here without a
 companion test that drives the writer is therefore only half the contract.
 """
+
+import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -20,140 +29,118 @@ from uacpy.models.scooter import Scooter
 from uacpy.models.sparc import SPARC
 from uacpy.models.bounce import Bounce
 from uacpy.models.ram import RAM
+from uacpy.models._registry import ENGINES
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, UnsupportedFeatureError,
 )
 from uacpy.core.source import VALID_SOURCE_TYPES
-from uacpy.tests.conftest import (build_engine, engine_entry, engine_names,
-                                  engine_params)
-
-
-_FEATURES = (
-    'altimetry',
-    'range_dependent_bathymetry',
-    'range_dependent_ssp',
-    'range_dependent_bottom',
-    'layered_bottom',
-    'elastic_media',
+from uacpy.tests._save_engine_specs import (
+    default_engine, instance_record, spec_record,
 )
+from uacpy.tests.conftest import build_engine, engine_entry, engine_params
 
 
-# Expected flags by feature, per engine. Each test builds its engine with
-# ``build_engine`` behind the markers ``engine_params`` attaches, because
-# every constructor resolves its binary.
-_EXPECTED = {
-    'Bellhop':
-        {'altimetry': True, 'range_dependent_bathymetry': True,
-         'range_dependent_ssp': True,
-         'range_dependent_bottom': True, 'layered_bottom': False,
-         'elastic_media': True},
-    'Kraken':
-        {'altimetry': False, 'range_dependent_bathymetry': True,
-         'range_dependent_ssp': True,
-         'range_dependent_bottom': True, 'layered_bottom': True,
-         'elastic_media': True},
-    'Scooter':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': True},
-    'SPARC':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': False},
-    'Bounce':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': True},
-    'OAST':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': True},
-    'OASN':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': True},
-    'OASR':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': True},
-    'OASP':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': True},
-    # OASSP and OASS read the layered stack OASP solves the mean field on
-    # (INENVI is shared verbatim between the binaries), so their axes are
-    # OASP's.
-    'OASSP':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': True},
-    'OASS':
-        {'altimetry': False, 'range_dependent_bathymetry': False,
-         'range_dependent_ssp': False,
-         'range_dependent_bottom': False, 'layered_bottom': True,
-         'elastic_media': True},
-    'RAM':
-        {'altimetry': True, 'range_dependent_bathymetry': True,
-         'range_dependent_ssp': True,
-         'range_dependent_bottom': True, 'layered_bottom': True,
-         'elastic_media': True},
-}
+#: Every registered engine's saved record (module docstring).
+_SAVED_SPECS = Path(__file__).parent / 'data' / 'engine_specs.json'
+
+
+def _saved_records() -> dict:
+    """The saved records, by registry key."""
+    return json.loads(_SAVED_SPECS.read_text(encoding='utf-8'))
+
+
+def _field_differences(saved, live, path=''):
+    """``(field, saved value, live value)`` for every value where the two
+    records differ, the field a dotted path (``traits.consumes_run_t_start``);
+    a field on one side only reads ``'<absent>'`` on the other."""
+    if isinstance(saved, dict) and isinstance(live, dict):
+        out = []
+        for key in sorted(set(saved) | set(live)):
+            field = f'{path}.{key}' if path else key
+            if key not in saved:
+                out.append((field, '<absent>', live[key]))
+            elif key not in live:
+                out.append((field, saved[key], '<absent>'))
+            else:
+                out.extend(_field_differences(saved[key], live[key], field))
+        return out
+    return [] if saved == live else [(path, saved, live)]
+
+
+def _assert_matches_saved(key, part, live):
+    """Fail naming the engine and every field of ``part`` (``'spec'`` or
+    ``'instance'``) where ``live`` differs from engine ``key``'s saved
+    record, with the command that rewrites it."""
+    saved_by_key = _saved_records()
+    if key not in saved_by_key:
+        pytest.fail(f"no saved record for {key!r} in "
+                    f"tests/data/engine_specs.json: run python -m "
+                    f"uacpy.tests._save_engine_specs {key} "
+                    f"(docs/DEV.md section 3, step 5)")
+    saved = saved_by_key[key]
+    live = json.loads(json.dumps(live, sort_keys=True))
+    differences = _field_differences(saved[part], live)
+    assert not differences, (
+        f"{saved['class']} differs from its saved record "
+        f"(tests/data/engine_specs.json):\n"
+        + "\n".join(f"  {saved['class']}: {part}.{field}: saved {old!r}, "
+                    f"live {new!r}" for field, old, new in differences)
+        + f"\nIf the change is meant, rewrite the record: python -m "
+          f"uacpy.tests._save_engine_specs {key}")
+
+
+#: One parameter per registered engine, by registry key, its class name as
+#: the id; the instance tests carry the markers of the installs the entry
+#: declares, since every constructor resolves its binary.
+_SPEC_KEYS = [pytest.param(key, id=entry.class_name)
+              for key, entry in ENGINES.items()]
+_INSTANCE_KEYS = [
+    pytest.param(key, id=entry.class_name,
+                 marks=[getattr(pytest.mark, f'requires_{install}')
+                        for install in entry.requires])
+    for key, entry in ENGINES.items()]
+
+
+def test_the_saved_records_cover_the_registered_engines():
+    """A registered engine with no saved record would be compared with
+    nothing, and a record of an engine the registry no longer holds is a
+    stale one."""
+    saved = set(_saved_records())
+    missing = sorted(set(ENGINES) - saved)
+    stale = sorted(saved - set(ENGINES))
+    assert not missing and not stale, (
+        f"tests/data/engine_specs.json has no record for {missing} and stale "
+        f"records for {stale}: run python -m uacpy.tests._save_engine_specs "
+        f"(docs/DEV.md section 3, step 5)")
+
+
+@pytest.mark.parametrize('key', _SPEC_KEYS)
+def test_an_engine_declares_its_saved_spec(key):
+    """``spec`` — run modes in order, capability flags, source geometries,
+    collapse defaults and every ``EngineTraits`` field — equals the saved
+    one. Read off the class: nothing is constructed."""
+    cls = ENGINES[key].load()
+    assert _saved_records()[key]['class'] == cls.__name__
+    _assert_matches_saved(key, 'spec', spec_record(cls))
+
+
+@pytest.mark.parametrize('key', _INSTANCE_KEYS)
+def test_a_default_engine_resolves_its_saved_capabilities(key):
+    """What a default instance resolves — run modes, every capability flag
+    through ``supports_feature``, source geometries, collapse policy, default
+    run mode, and what a two-depth ``Source`` meets in that mode, asked of
+    ``validate_inputs`` — equals the saved record. Read off the instance,
+    because an engine may resolve a flag from its constructor arguments
+    (Bellhop carries ``range_dependent_ssp`` for the default ``interp_ssp``
+    without declaring it)."""
+    try:
+        model = default_engine(key)
+    except ExecutableNotFoundError:
+        pytest.skip(f"{ENGINES[key].class_name} binary not available")
+    _assert_matches_saved(key, 'instance', instance_record(key, model))
 
 
 _MODEL_PARAMS = engine_params(value='name')
-
-
-@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-@pytest.mark.parametrize('feature', _FEATURES)
-def test_capability_flag(model_name, feature):
-    expected = _EXPECTED[model_name]
-    try:
-        m = build_engine(model_name)
-    except ExecutableNotFoundError:
-        pytest.skip(f"{model_name} binary not available")
-    flag = getattr(m, f'_supports_{feature}')
-    assert flag is expected[feature], (
-        f"{model_name}._supports_{feature} = {flag}, "
-        f"expected {expected[feature]}"
-    )
-
-
-# (source geometries the model honours, whether it reads a .sbp beam pattern).
-# Every entry is read off a default-constructed model. SPARC's is the only
-# instance-dependent one: ``SPARC(output_mode='S')`` widens it to all three
-# (``SPARC.__init__``), so the ``{'point'}`` below pins the default
-# ``output_mode='R'`` and nothing here covers the snapshot mode.
-_EXPECTED_SOURCE_TYPES = {
-    'Bellhop': ({'point', 'line'}, True),
-    'Kraken':  ({'point', 'line', 'scaled'}, True),
-    'Scooter': ({'point', 'line', 'scaled'}, False),
-    'SPARC':   ({'point'}, False),
-    'Bounce':  ({'point', 'line', 'scaled'}, False),
-    # OAST runs a line source in its plane geometry, option 'P' (OASES-11).
-    'OAST':    ({'point', 'line'}, False),
-    # OASN has no line-source geometry: its 'P' selects noise-intensity plots
-    # (unoasn22.f:655).
-    'OASN':    ({'point'}, False),
-    # A plane-wave reflection coefficient does not depend on source geometry,
-    # and OASR's deck writer reads only source.frequencies — same reasoning
-    # as Bounce, same run mode.
-    'OASR':    ({'point', 'line', 'scaled'}, False),
-    # OASP runs a line source in its plane geometry, option 'P' (decision A4).
-    'OASP':    ({'point', 'line'}, False),
-    # OASSP and OASS run both of their decks in plane geometry for a line
-    # Source, option 'P' (unoassp30.f:959-961, unoass21.f:654-656).
-    'OASSP':   ({'point', 'line'}, False),
-    'OASS':    ({'point', 'line'}, False),
-    'RAM':     ({'point'}, False),
-}
 
 
 def _reference_environment(model_name=None):
@@ -176,18 +163,6 @@ def _reference_receiver():
     return uacpy.Receiver(depths=100.0, ranges=np.linspace(100, 2000, 20))
 
 
-@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_source_capability_matrix(model_name):
-    """Locks the per-model source-geometry / beam-pattern surface."""
-    try:
-        m = build_engine(model_name)
-    except ExecutableNotFoundError:
-        pytest.skip(f"{model_name} binary not available")
-    types, pattern = _EXPECTED_SOURCE_TYPES[model_name]
-    assert set(m._supported_source_types) == types
-    assert m._supports_source_beam_pattern is pattern
-
-
 def test_the_two_reflection_models_accept_the_same_source_types():
     """``RunMode.REFLECTION`` is answered by Bounce and OASR, and neither
     reads source geometry — Bounce says so in its spec comment and OASR's
@@ -195,8 +170,6 @@ def test_the_two_reflection_models_accept_the_same_source_types():
     one must work on the other, or reusing it across models breaks for a
     reason no engine has."""
     from uacpy.models.oases import OASR as _OASR
-    assert (set(_EXPECTED_SOURCE_TYPES['OASR'][0])
-            == set(_EXPECTED_SOURCE_TYPES['Bounce'][0]))
     assert set(_OASR.spec.source_types) == set(Bounce.spec.source_types)
 
 
@@ -227,28 +200,12 @@ def test_oasr_returns_the_same_coefficient_for_every_source_type(source_type):
     assert np.array_equal(np.asarray(result.magnitude), np.asarray(reference.magnitude))
 
 
-def test_every_table_covers_the_registered_engines():
-    """A table missing an engine would skip that engine's row, and a row
-    for an engine the registry does not hold is a stale one."""
-    for name, table in (
-            ('_EXPECTED', _EXPECTED),
-            ('_EXPECTED_SOURCE_TYPES', _EXPECTED_SOURCE_TYPES),
-            ('_EXPECTED_ROUGH_SURFACE', _EXPECTED_ROUGH_SURFACE),
-            ('_EXPECTED_MULTI_SOURCE_DEPTH', _EXPECTED_MULTI_SOURCE_DEPTH),
-            ('_EXPECTED_ROUGH_BOTTOM', _EXPECTED_ROUGH_BOTTOM),
-            ('_VOLUME_ATTENUATION', _VOLUME_ATTENUATION),
-            ('_MULTI_DEPTH_IN_DEFAULT_MODE', _MULTI_DEPTH_IN_DEFAULT_MODE)):
-        missing = sorted(engine_names() - set(table))
-        stale = sorted(set(table) - engine_names())
-        assert not missing and not stale, (
-            f"{name} in test_capability_flags.py has no row for {missing} "
-            f"and stale rows for {stale}: every registered engine needs one "
-            f"(docs/DEV.md section 3, step 5)")
-
-
-def test_every_declared_source_type_is_valid():
-    for types, _ in _EXPECTED_SOURCE_TYPES.values():
-        assert types <= VALID_SOURCE_TYPES
+def test_every_saved_source_type_is_valid():
+    """The geometries each record names — declared and resolved — are ones a
+    ``Source`` accepts."""
+    for record in _saved_records().values():
+        assert set(record['spec']['source_types']) <= VALID_SOURCE_TYPES
+        assert set(record['instance']['source_types']) <= VALID_SOURCE_TYPES
 
 
 @pytest.mark.requires_binary
@@ -348,39 +305,6 @@ class TestPublicEnvShapeAccessors:
         assert linear.supports_feature('range_dependent_ssp') is False
 
 
-_EXPECTED_ROUGH_SURFACE = {
-    'Bellhop': False, 'Kraken': True, 'Scooter': True, 'SPARC': False,
-    'Bounce': False, 'OAST': True, 'OASN': True,
-    # OASR's deck has no sea surface: its layer 1 is the water half-space
-    # the plane wave arrives through, whose RG INENVI discards
-    # (oaseun31.f:377), so surface roughness is collapsed with a warning.
-    'OASR': False,
-    'OASP': True, 'OASSP': True, 'OASS': True, 'RAM': False,
-}
-
-
-@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_rough_surface_capability_matrix(model_name):
-    """Only solvers that accept a non-zero SSP%sigma may declare it.
-
-    ``Scooter/sparc.f90:177`` ERROUTs on any non-zero ``SSP%sigma(1:NMedia)``
-    and ``Kraken/bounce.f90:104`` on a rough elastic interface, so those must
-    not receive ``env.surface.roughness``; Kraken and Scooter consume it
-    (Kraken via the Kuperman-Ingenito perturbation, on any top boundary whose
-    ``Kraken/kraken.f90:850-867`` branch leaves ``rho1`` non-zero — 'A', 'V'
-    and 'R'; Scooter at ``Scooter/scooter.f90:309``, where ``SSP%sigma(1)``
-    enters the vacuum-boundary impedance). The OASES family reads it as column 7 (RG) of
-    each layer record (``oases/src/oaseun31.f:54``,
-    ``oases/doc/oast.tex:48``) — except OASR, whose deck has no sea surface
-    at all (see the matrix entry).
-    """
-    try:
-        m = build_engine(model_name)
-    except ExecutableNotFoundError:
-        pytest.skip(f"{model_name} binary not available")
-    assert m._supports_rough_surface is _EXPECTED_ROUGH_SURFACE[model_name]
-
-
 @pytest.mark.requires_binary
 def test_rough_surface_is_dropped_for_solvers_that_reject_it():
     """A rough surface must be collapsed with a warning, not passed through.
@@ -404,34 +328,23 @@ def test_rough_surface_is_dropped_for_solvers_that_reject_it():
     assert env.surface.roughness == 2.0
 
 
-_EXPECTED_MULTI_SOURCE_DEPTH = {
-    'Bellhop': True, 'Kraken': True, 'Scooter': True, 'SPARC': False,
-    'Bounce': False, 'OAST': False, 'OASN': False, 'OASR': False,
-    'OASP': False, 'OASSP': False, 'OASS': False, 'RAM': False,
-}
-
-
 @pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_multi_source_depth_capability_matrix(model_name):
-    """``_supports_multi_source_depth`` is True for the models that run a
-    source-depth *grid* in one binary call: Bellhop (in
-    every mode it stacks), Kraken (in its two TL modes) and Scooter (in
-    ``COHERENT_TL``). Which modes
-    those are is ``spec.traits.native_multi_depth_modes``; this flag is the whole-model
-    statement the capability matrix in docs/models/README.md prints. Every
-    other model reads ``False``: in a field mode ``PropagationModel.run``
-    loops over the depths and stacks the slabs, and in any other mode
-    ``_validate_geometry`` refuses a multi-depth Source with 'single source
-    depth' (pinned in test_input_validation.py). Bounce also reads
-    ``False``, but its geometry validation is a no-op so nothing enforces
-    it.
+def test_the_multi_source_depth_flag_is_read_off_the_native_modes(model_name):
+    """``_supports_multi_source_depth`` is True exactly for the models that
+    run a source-depth *grid* in one binary call, the modes being
+    ``spec.traits.native_multi_depth_modes``; the flag is the whole-model
+    statement the capability matrix in docs/models/README.md prints, and it
+    is never declared in ``spec.supports``. Every other model reads
+    ``False``: in a field mode ``PropagationModel.run`` loops over the depths
+    and stacks the slabs, and in any other mode ``_validate_geometry``
+    refuses a multi-depth Source with 'single source depth' (pinned in
+    test_input_validation.py). Bounce also reads ``False``, but its geometry
+    validation is a no-op so nothing enforces it.
     """
     try:
         m = build_engine(model_name)
     except ExecutableNotFoundError:
         pytest.skip(f"{model_name} binary not available")
-    assert (m._supports_multi_source_depth
-            is _EXPECTED_MULTI_SOURCE_DEPTH[model_name])
     assert m._supports_multi_source_depth is bool(
         type(m).spec.traits.native_multi_depth_modes)
     assert 'multi_source_depth' not in type(m).spec.supports
@@ -440,7 +353,7 @@ def test_multi_source_depth_capability_matrix(model_name):
 def test_multi_source_depth_declared_in_the_spec_is_refused():
     """The flag is read off ``spec.traits.native_multi_depth_modes``; declaring it in
     ``spec.supports`` as well would give one question two answers, so the
-    declaration is refused at construction (ARCH-11)."""
+    declaration is refused at construction."""
     from uacpy.core.run_settings import RunMode
     from uacpy.models.base import PropagationModel
     from uacpy.models._spec import ModelSpec
@@ -456,109 +369,6 @@ def test_multi_source_depth_declared_in_the_spec_is_refused():
 
     with pytest.raises(ConfigurationError, match='multi_source_depth'):
         _Declares()
-
-
-#: What a two-depth Source meets in each engine's default run mode:
-#: ``'field'`` — the default mode is a field mode, which stacks the depths;
-#: ``'ignored'`` — the engine reads no source geometry, so the depths reach
-#: no deck; ``'refused'`` — the default mode has no per-source sum.
-_MULTI_DEPTH_IN_DEFAULT_MODE = {
-    'Bellhop': 'field', 'Kraken': 'field', 'Scooter': 'field',
-    'SPARC': 'field', 'Bounce': 'ignored', 'OAST': 'field',
-    'OASN': 'refused', 'OASR': 'refused', 'OASP': 'field',
-    'OASSP': 'field', 'OASS': 'refused', 'RAM': 'field',
-}
-
-
-@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_a_multi_depth_source_stacks_in_a_field_mode_and_is_refused_elsewhere(
-        model_name):
-    """What the flag costs a caller, per model.
-
-    Bellhop runs the grid. Bounce reads no source geometry and overrides
-    ``_validate_geometry`` to a no-op, so it accepts the extra depths and
-    they reach no deck. Every other model accepts a multi-depth Source in
-    a field mode — ``run()`` loops over the depths — and refuses it in a
-    mode with no per-source sum (OASN's array products, OASR's reflection
-    table), naming the field modes that do stack.
-    """
-    try:
-        m = build_engine(model_name)
-    except ExecutableNotFoundError:
-        pytest.skip(f"{model_name} binary not available")
-    source = uacpy.Source(depths=[30.0, 60.0], frequencies=100.0)
-    args = (_reference_environment(model_name), source,
-            _reference_receiver())
-    expected = _MULTI_DEPTH_IN_DEFAULT_MODE[model_name]
-    default_is_field = m._default_run_mode() in m._FIELD_MODES
-    assert default_is_field == (expected == 'field')
-    if expected in ('field', 'ignored'):
-        m.validate_inputs(*args)
-    else:
-        with pytest.raises(ConfigurationError,
-                           match='single source depth per .* run'):
-            m.validate_inputs(*args)
-
-
-_EXPECTED_ROUGH_BOTTOM = {
-    'Bellhop': False, 'Kraken': True, 'Scooter': False, 'SPARC': False,
-    'Bounce': False, 'OAST': True, 'OASN': True, 'OASR': True,
-    'OASP': True, 'OASSP': True, 'OASS': True, 'RAM': False,
-}
-
-
-# Whether the engine honours ``env.absorption``. One flag, mirroring
-# ``spec.traits.consumes_volume_absorption``: a second one would differ only on Bounce,
-# and False is the honest answer there -- it tabulates R(theta) AT an
-# interface, so there is no range over which volume loss accumulates.
-_VOLUME_ATTENUATION = {
-    'Bellhop': True,    # alpha_dB_per_m, carried in the imaginary travel time
-    'Kraken': True,     # TopOpt position 4
-    'Scooter': True,    # TopOpt position 4
-    'SPARC': False,     # the march is lossless: sparc.f90:221 keeps Re(c) only
-    'Bounce': False,    # a reflection table has no path length
-    'RAM': True,        # water block on ksqw / lamw in every patched backend
-    'OAST': True,       # water-layer AC in dB/wavelength (oases_writer._water_ac)
-    'OASN': True,
-    'OASP': True,       # one AC per layer, at the deck's centre frequency
-    'OASR': False,      # a lossless water half-space, no path length
-    'OASSP': True,      # OASP's deck writer (_write_oasp_family_deck)
-    'OASS': True,       # water-layer AC, as OAST (write_oass_input)
-}
-
-
-@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_volume_attenuation_capability_matrix(model_name):
-    """Whether ``env.absorption`` reaches the engine, asked of the public API.
-
-    RAM is the case this exists for: no backend puts loss in the water --
-    ``matrc`` assigns ``ksq(i)=ksqw(i)`` above the bathymetry with no branch
-    and ``ksqw`` carries no attenuation term -- so a caller has to be able to
-    find that out without reading Fortran.
-    """
-    model = build_engine(model_name)
-    assert model.supports_feature('volume_attenuation') is \
-        _VOLUME_ATTENUATION[model_name], model_name
-
-
-@pytest.mark.parametrize('model_name', _MODEL_PARAMS)
-def test_rough_bottom_capability_matrix(model_name):
-    """Only solvers whose deck reaches a slot the binary reads may declare it.
-
-    Kraken does: ``Kraken/kraken.f90:902`` feeds ``SSP%sigma(Medium+1)`` to
-    ``KupIng``, which at ``Medium == LastAcoustic`` is the seabed interface.
-    Scooter does not — the writer puts the half-space sigma on the BotOpt line
-    (``write_bottom_section`` → ``SSP%sigma(NMedia+1)``) and no line in
-    ``Scooter/`` reads that slot, while a *layer* sigma lands in the
-    ``sigma(2:NMedia)`` range that ``Scooter/scooter.f90:63`` ERROUTs on. The
-    OASES family reads it as column 7 (RG) of each layer record
-    (``oases/src/oaseun31.f:54``).
-    """
-    try:
-        m = build_engine(model_name)
-    except ExecutableNotFoundError:
-        pytest.skip(f"{model_name} binary not available")
-    assert m._supports_rough_bottom is _EXPECTED_ROUGH_BOTTOM[model_name]
 
 
 @pytest.mark.requires_binary

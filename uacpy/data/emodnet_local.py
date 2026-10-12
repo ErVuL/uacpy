@@ -76,6 +76,14 @@ def download_emodnet_db(cache_dir=None, *, base_url: str = EMODNET_WFS_URL,
 
     ``cache_dir`` defaults to the offline cache's ``emodnet`` directory.
 
+    Paging follows the server's own count: pages continue until the
+    ``numberMatched`` (or GeoServer ``totalFeatures``) the first page reports
+    is reached, so a server that caps a page below the requested size still
+    yields every polygon; without a reported count, pages continue until an
+    empty one. Paging that ends short of the reported count raises
+    ``DataFetchError`` and writes nothing, since a partial index would be read
+    as the whole of Europe from then on.
+
     ``base_url`` is the WFS endpoint every page is requested from (default
     :data:`uacpy.data.seabed.EMODNET_WFS_URL`), the same keyword the live
     fetchers in :mod:`uacpy.data.seabed` take, so a mirror of the service
@@ -100,14 +108,16 @@ def download_emodnet_db(cache_dir=None, *, base_url: str = EMODNET_WFS_URL,
         cache_dir=cache_dir, verbose=verbose, log_tag='seabed')
 
     codes, wkb = [], []
-    start = 0
-    while True:
+    start, matched = 0, None
+    while matched is None or start < matched:
         url = (f"{base_url}?service=WFS&version=2.0.0&request=GetFeature"
                f"&typeNames={EMODNET_LAYER}&outputFormat=application/json"
                f"&srsName=EPSG:4326&sortBy={_SORT_BY}&count={_PAGE}"
                f"&startIndex={start}")
         fc = json.loads(http_get(url, timeout=timeout, verbose=verbose,
                                  source='seabed'))
+        if matched is None:
+            matched = _number_matched(fc)
         feats = fc.get('features') or []
         if not feats:
             break
@@ -121,9 +131,14 @@ def download_emodnet_db(cache_dir=None, *, base_url: str = EMODNET_WFS_URL,
         start += len(feats)
         log_message('seabed', f"EMODnet seabed: {start} polygons fetched",
                     verbose=verbose)
-        if len(feats) < _PAGE:
-            break
 
+    if matched is not None and start != matched:
+        raise DataFetchError(
+            f"EMODnet WFS paging ended at {start} of the {matched} polygons "
+            f"the server reports; a partial index is not written.",
+            remediation="Retry; if it repeats, the WFS paging or the layer "
+                        "has changed.",
+        )
     if not codes:
         raise DataFetchError(
             "EMODnet WFS returned no seabed polygons.",
@@ -144,6 +159,17 @@ def download_emodnet_db(cache_dir=None, *, base_url: str = EMODNET_WFS_URL,
     log_message('seabed', f"EMODnet seabed substrate: {len(codes)} polygons → {out}",
                 verbose=verbose)
     return out
+
+
+def _number_matched(fc):
+    """The feature count a WFS GeoJSON page reports for the whole query
+    (``numberMatched``, else GeoServer's ``totalFeatures``), or ``None`` when
+    it reports none or ``'unknown'``."""
+    for key in ('numberMatched', 'totalFeatures'):
+        value = fc.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None
 
 
 def _build_index():

@@ -36,8 +36,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from uacpy.core.results import Result, ResultStack
+from uacpy.core.results import Field, Result, ResultStack
+from uacpy.core.results._superposition import _stack_fields
 from uacpy.core._export import _resolve_class, saved_class_path
+from uacpy.core._validate import real_scalar_or_none
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, IOWarning, ModelExecutionError,
 )
@@ -245,6 +247,21 @@ def _job_worker(job: Job):
     return result, [(w.category, str(w.message)) for w in caught]
 
 
+def _collect_finished_job(result_and_warnings, jobs, index: int, results,
+                          warned) -> None:
+    """Record a finished job: its warnings in ``warned``, then each one
+    re-emitted (:func:`_reemit_job_warnings`), then its result in
+    ``results``. A warning the caller's filters turn into an error raises
+    from the re-emission before the result is stored, so the job counts as
+    failed and is never also stacked; ``warned`` keeps every warning it
+    recorded."""
+    result, job_warnings = result_and_warnings
+    if job_warnings:
+        warned[index] = job_warnings
+    _reemit_job_warnings(job_warnings, jobs[index], index)
+    results[index] = result
+
+
 def _reemit_job_warnings(job_warnings, job: Job, index: int) -> None:
     """Raise each warning a worker recorded again in this process, under
     its own category, prefixed with the job's label, so the caller's
@@ -257,12 +274,10 @@ def _reemit_job_warnings(job_warnings, job: Job, index: int) -> None:
 
 def _saved_result(saved) -> Any:
     """The result a :meth:`ParallelResult.to_dict` entry holds, rebuilt
-    by the ``from_dict`` of the class it names (a :class:`Result` or a
-    :class:`ResultStack`)."""
+    by the ``from_dict`` of the :class:`Result` class it names (a
+    :class:`ResultStack` included)."""
     saved = dict(saved)
-    path = saved.pop('__class__')
-    klass: Any = (ResultStack if path == saved_class_path(ResultStack)
-                  else _resolve_class(path, Result))
+    klass: Any = _resolve_class(saved.pop('__class__'), Result)
     return klass.from_dict(saved)
 
 
@@ -284,7 +299,9 @@ class ParallelResult:
         ``{job_index: [(category, message), ...]}`` for the jobs that
         finished and warned. :func:`run_parallel` also re-emits each one in
         the calling process, under its own category, with the message
-        prefixed by the job's label.
+        prefixed by the job's label; a re-emitted warning the caller's
+        filters make an error fails that job (its result is not kept), and
+        its entry here still lists every warning the job recorded.
 
     Saves and loads through :meth:`to_dict` / :meth:`from_dict`, each
     result nested as its own ``to_dict``.
@@ -315,7 +332,9 @@ class ParallelResult:
         ``coordinate_name`` and ``warnings``, the exceptions and warning
         categories as the objects they are (they pickle).
         ``np.savez(f, **d)`` stores it; read it back with
-        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`."""
+        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict` — for a
+        file you wrote only: unpickling runs the code a file carries
+        (:mod:`uacpy.core._export`)."""
         return {
             'results': [None if r is None else
                         {'__class__': saved_class_path(type(r)),
@@ -347,19 +366,44 @@ class ParallelResult:
                    warnings={i: list(w)
                              for i, w in dict(d['warnings']).items()})
 
-    def stack(self, coordinate_name: Optional[str] = None) -> ResultStack:
-        """Bundle the successful results into a :class:`ResultStack`.
+    def stack(self, coordinate_name: Optional[str] = None) -> Result:
+        """Bundle the successful results along one new axis.
 
-        Skips failed jobs (and their labels). Uses the job labels as the
-        coordinate when they are numeric, else the job index. ``ResultStack``
-        requires the slabs to share a concrete type *and* the same ``model`` /
+        :class:`Field` results become one Field with a leading
+        ``coordinate_name`` axis (they must lie on one grid and hold one
+        quantity); any other results become a :class:`ResultStack`. Skips
+        failed jobs (and their labels). Uses the job labels as the
+        coordinate when every one is a real number (a bool, a complex value
+        or text is not one: read as a coordinate it would be 1 or 0, its
+        real part, or what it spells), else the job index, with a
+        ``FallbackWarning``. Either way the
+        results must share a concrete type *and* the same ``model`` /
         ``backend`` — so this is for single-model sweeps. For a cross-model
         batch, iterate ``results`` instead of stacking.
+
+        A stacked Field carries one run record when the jobs share it: the
+        jobs' own when it is the same, and the multi-depth record
+        (``source_depths`` the axis, ``depth_loop='per_depth'``) when the
+        jobs are one-depth runs that differ only in their source depth,
+        stacked over ``'source_depth'``. Jobs whose records differ (a knob
+        sweep) have no one record, so the stacked Field's ``run_settings`` is
+        ``None``; each job's record stays on ``results[i].run_settings``.
+        A sweep that leaves the jobs' records equal keeps the record: an
+        attenuation sweep on Kraken, Scooter, Bellhop or OAST, whose records
+        hold no environment. RAM's record holds the grid it resolves from
+        the environment, so a sweep that changes that grid drops it — an
+        attenuation sweep, the absorbing layer setting its depth extent —
+        and one that does not (bottom density) keeps it. Jobs on different
+        waveguide sound speeds are refused (iterate ``results``).
 
         Parameters
         ----------
         coordinate_name : str, optional
-            The stacking axis's name.
+            The new axis's name; default :attr:`coordinate_name`.
+
+        Returns
+        -------
+        Field or ResultStack
         """
         kept = [(i, r) for i, r in enumerate(self.results) if r is not None]
         keep = [i for i, _ in kept]
@@ -371,27 +415,29 @@ class ParallelResult:
         if nested:
             raise ConfigurationError(
                 f"ParallelResult.stack: job(s) {nested} returned a "
-                f"ResultStack (a multi-depth Source), and a stack of stacks "
-                f"is neither superposable nor plottable.",
+                f"ResultStack (the rays or arrivals of a multi-depth "
+                f"Source), and a stack of stacks is not one result.",
                 remediation=("Stack the jobs' results yourself along the "
                              "axis you need, e.g. one ResultStack per source "
                              "depth from result.slabs[k], or run single-depth "
                              "Sources."))
-        try:
-            coord = np.array([float(self.labels[i]) for i in keep], dtype=float)
-        except (TypeError, ValueError):
+        numbers = [real_scalar_or_none(self.labels[i]) for i in keep]
+        if any(number is None for number in numbers):
             warnings.warn(
-                "ParallelResult.stack: job labels are non-numeric; using "
-                "the successful-job indices as the stack coordinate "
+                "ParallelResult.stack: job labels are not all real numbers; "
+                "using the successful-job indices as the stack coordinate "
                 "instead of the labels.",
                 FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
             coord = np.array(keep, dtype=float)
-        return ResultStack(
-            [r for _, r in kept],
-            coord,
-            coordinate_name=coordinate_name or self.coordinate_name,
-        )
+        else:
+            coord = np.array(numbers, dtype=float)
+        results = [r for _, r in kept]
+        name = coordinate_name or self.coordinate_name
+        if all(isinstance(r, Field) for r in results):
+            return _stack_fields(results, coord, coordinate_name=name,
+                                 who='ParallelResult.stack')
+        return ResultStack(results, coord, coordinate_name=name)
 
     def summary(self):
         """One row per job as a ``pandas.DataFrame`` (optional extra
@@ -553,10 +599,8 @@ def _salvage_after_crash(future_to_idx, jobs, results, errors, warned,
         if results[i] is not None or i in errors:
             continue
         try:
-            results[i], job_warnings = future.result(timeout=0)
-            _reemit_job_warnings(job_warnings, jobs[i], i)
-            if job_warnings:
-                warned[i] = job_warnings
+            _collect_finished_job(future.result(timeout=0), jobs, i, results,
+                                  warned)
         except (BrokenProcessPool, CancelledError, FuturesTimeoutError):
             errors[i] = crash
         except Exception as job_exc:  # noqa: BLE001 — that job's own failure
@@ -612,7 +656,17 @@ def run_parallel(
     Returns
     -------
     ParallelResult
-        Per-job results and errors; call ``.stack()`` for a ``ResultStack``.
+        Per-job results and errors; ``.stack()`` bundles them along one
+        axis (one Field for Field results, else a ``ResultStack``).
+
+    Notes
+    -----
+    Workers do not inherit the caller's warning filters: each job runs to
+    the end and its warnings are re-emitted here as it finishes. A filter
+    such as ``warnings.simplefilter('error', uacpy.NumericsWarning)`` then
+    acts after the run: that job fails with the warning as its error
+    (raised, or kept in ``errors`` under ``raise_on_error=False``), and its
+    result is dropped rather than stacked.
     """
     jobs = _check_jobs(jobs)
 
@@ -642,10 +696,8 @@ def run_parallel(
             for future in as_completed(future_to_idx):
                 i = future_to_idx[future]
                 try:
-                    results[i], job_warnings = future.result()
-                    _reemit_job_warnings(job_warnings, jobs[i], i)
-                    if job_warnings:
-                        warned[i] = job_warnings
+                    _collect_finished_job(future.result(), jobs, i, results,
+                                          warned)
                 except BrokenProcessPool:
                     # A worker died hard (native segfault / OOM-kill) — the pool
                     # is now broken and every outstanding job is unrecoverable.

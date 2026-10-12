@@ -145,20 +145,17 @@ class TestVolumeAttenuation:
         seg = ram_collins.collins_range_segments(shallow_env_thorp, 'ramgeo',
                                                  200.0,
                                         10000.0, dz=0.05,
-                                        knobs=m._knob_record(),
-                                        speed_bounds=m._speed_bounds)[0]
+                                        knobs=m._knob_record())[0]
         block = seg['water_attn']
         expected = float(absorption_thorp(10000.0)) / 1000.0 * 1500.0 / 10000.0
         assert block[0][0] == 0.0 and block[-1][0] == 200.0
         assert all(abs(v - expected) < 1e-12 * expected for _, v in block)
         assert 'water_attn' not in ram_collins.collins_range_segments(
-            shallow_env, 'ramgeo', 200.0, 10000.0, knobs=m._knob_record(),
-            speed_bounds=m._speed_bounds)[0]
+            shallow_env, 'ramgeo', 200.0, 10000.0, knobs=m._knob_record())[0]
         zero = Environment(name='zero', bathymetry=100.0, ssp=1500.0,
                            absorption=ConstantAbsorption(0.0))
         assert 'water_attn' not in ram_collins.collins_range_segments(
-            zero, 'ramgeo', 200.0, 10000.0, knobs=m._knob_record(),
-            speed_bounds=m._speed_bounds)[0]
+            zero, 'ramgeo', 200.0, 10000.0, knobs=m._knob_record())[0]
 
     @pytest.mark.requires_binary
     @pytest.mark.parametrize('law', ['thorp', 'fg'])

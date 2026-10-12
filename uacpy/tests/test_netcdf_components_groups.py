@@ -88,7 +88,10 @@ class TestComponentsTravelAsGroups:
     def test_a_root_of_another_class_is_refused(self, tmp_path):
         from uacpy.core.exceptions import ConfigurationError
         _broadband().to_netcdf(tmp_path / 'f.nc')
-        with pytest.raises(ConfigurationError, match='is not a Covariance'):
+        with pytest.raises(ConfigurationError,
+                           match=r'(?s)Covariance\.from_netcdf: .* holds a '
+                                 r'Field, not a Covariance\..*'
+                                 r'Field\.from_netcdf\(path\)'):
             Covariance.from_netcdf(tmp_path / 'f.nc')
 
     def test_a_plain_xarray_file_reads_through_from_xarray(self, tmp_path):

@@ -188,13 +188,16 @@ def download_coastline(cache_dir=None, *, url=None,
     url : str, optional
         Address with a ``{resolution}`` field; ``None`` is
         :data:`NATURAL_EARTH_URL`.
-    resolutions : sequence of str, optional
-        Natural Earth scales to fetch. Default all three.
+    resolutions : str or sequence of str, optional
+        Natural Earth scales to fetch, one (``'50m'``) or several. Default
+        all three.
     timeout : float, optional
         Network timeout in seconds. Default 120.
     verbose : bool or str, optional
         Logging gate passed through to ``log_message``.
     """
+    if isinstance(resolutions, str):
+        resolutions = (resolutions,)
     for res in resolutions:
         _check_resolution('download_coastline', res)
     dest = Path(cache_dir) if cache_dir else _cache.dataset_root('coastline')

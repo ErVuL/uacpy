@@ -17,11 +17,12 @@ import numpy as np
 
 from uacpy.data import _cache
 from uacpy.data._netcdf import netcdf_lock, open_netcdf
+from uacpy.data.sound_speed import _GRIDS
 
 __all__ = ['column', 'close']
 
-# Resolution → WOA file-resolution code (mirror of sound_speed._GRIDS).
-_CODE = {'1.00': '01', '0.25': '04'}
+# Resolution → WOA file-resolution code, read off sound_speed._GRIDS.
+_CODE = {resolution: grid[2] for resolution, grid in _GRIDS.items()}
 
 _DATASETS = {}   # path -> netCDF Dataset (open once, read many)
 
@@ -51,8 +52,9 @@ def close():
     A monthly SSP touches up to 24 files per resolution and they stay open for
     the process lifetime, so dropping the memo is not enough — the handles have
     to be closed. Registered with :func:`uacpy.data._cache.register_cache`, and
-    also public because WOA23 is installed out of band
-    (``install.sh --data woa23``) rather than by a ``download_*`` function.
+    also callable directly as ``uacpy.data.woa23_local.close()``, since WOA23
+    is installed out of band (``install.sh --data woa23``) rather than by a
+    ``download_*`` function.
     """
     # Under the memo lock and the netCDF lock: closing a handle another
     # thread is mid-read on is what the two locks exist to prevent.

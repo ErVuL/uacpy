@@ -10,30 +10,39 @@ from typing import Dict, NamedTuple, Optional, Tuple, Union
 import numpy as np
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.models._extract import _restore_requested_axis
+from uacpy.models._extract import (
+    _restore_requested_axis, attach_output_paths, finish_broadband,
+    mask_source_axis, result_kwargs,
+)
 from uacpy.models._band import FREQUENCY_ARRAY_FIELDS, BandResolution
 from uacpy.models._spec import ModelSpec
+from uacpy.models._knobs import is_real_number, positive_finite
+from uacpy.models._window import check_pinned_window, refuse_inverted_window
 from uacpy.core.run_settings import EngineSettings, OutputSpec, RunMode
 from uacpy.core.results import Field, PhaseReference
-from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core.exceptions import (
+    ConfigurationError, FallbackWarning, NumericsWarning,
+)
 from uacpy.io.oases_writer import (
-    OASP_FREQ_MAX_PER_CENTER, write_oasp_input,
+    OASP_FREQ_MAX_PER_CENTER, oasp_centre_frequency, write_oasp_input,
     oases_wavenumber_bounds, water_ac_anchor_frequency,
 )
 from uacpy.io._parsers import parse_oasp_trf
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
 from uacpy.models.oases._common import (
     _OASES_TRAITS, _SCTOUT_BARE_FORT46, _geometry_options,
-    _oases_find_executable, _reject_plane_geometry_letter_on_a_point_source,
+    _oases_binary, _reject_plane_geometry_letter_on_a_point_source,
     _reject_wavenumber_overrun, _warn_if_water_ac_extrapolates,
     _check_n_wavenumbers_knob, _warn_offset_ignored_under_auto_sampling,
 )
 from uacpy.models.oases._sampling import (
     _oases_frequency_sweep, _oasp_marched_frequencies,
+    check_power_of_two_time_samples,
 )
 from uacpy.models.oases._base import OASES
 from uacpy.models._notices import message_notice
 from uacpy.core.engine_defaults import OASP_FREQ_MIN, OASP_INTEGRATION_OFFSET, OASP_N_TIME_SAMPLES
+from uacpy.models._launch import require_output
 
 
 def _warn_if_trf_grid_replaced_request(requested, produced) -> None:
@@ -119,8 +128,8 @@ class _OaspSweep(NamedTuple):
     freq_min: float
     freq_max: float
     freq_max_origin: str
-    center_frequency: float
-    center_frequency_origin: str
+    fc: float
+    fc_origin: str
     ladder: np.ndarray
     notices: Tuple[str, ...]
 
@@ -151,9 +160,9 @@ class OASPSettings(EngineSettings):
         Where ``FR2`` came from.
     time_step : float
         Block VIII's ``DT`` (s), the Nyquist step of ``FR2``.
-    center_frequency : float
+    fc : float
         Block III's ``FREQS`` (Hz), the pulse carrier.
-    center_frequency_origin : str
+    fc_origin : str
         Where ``FREQS`` came from.
     marched_frequencies : ndarray
         The bins (Hz) the ``.trf`` carries (:func:`_oasp_marched_frequencies`).
@@ -172,8 +181,8 @@ class OASPSettings(EngineSettings):
     dip_angle : float or None
         The dip-slip source's dip (degrees), read only under ``'4'``.
     notices : tuple of Notice
-        What the run says about the sweep it resolved (a non-equispaced
-        request resampled, a constructor edge overridden).
+        What the run says about the sweep it resolved (a constructor edge
+        overridden, a pinned ``NX`` coarser than the requested spacing).
     """
 
     options: str
@@ -184,8 +193,8 @@ class OASPSettings(EngineSettings):
     freq_max: float
     freq_max_origin: str
     time_step: float
-    center_frequency: float
-    center_frequency_origin: str
+    fc: float
+    fc_origin: str
     marched_frequencies: np.ndarray
     c_low: float
     c_low_origin: str
@@ -199,15 +208,41 @@ class OASPSettings(EngineSettings):
     _ARRAY_FIELDS = FREQUENCY_ARRAY_FIELDS
 
 
-def _check_oasp_knobs(freq_min, freq_max) -> None:
-    """Refuse an OASP ``freq_min`` not below ``freq_max``.
+def _band_named(mode, source, request) -> bool:
+    """Whether the call names the band OASP sweeps — ``run(frequencies=)``,
+    or a multi-frequency Source on BROADBAND — rather than the run deriving
+    it (:meth:`OASP._requested_frequencies`)."""
+    if request is not None and request.kwargs.get('frequencies') is not None:
+        return True
+    return (mode == RunMode.BROADBAND
+            and np.atleast_1d(np.asarray(source.frequencies)).size > 1)
+
+
+def _check_oasp_knobs(freq_min, freq_max, n_time_samples) -> None:
+    """Refuse an OASP ``freq_min`` that is negative or not below
+    ``freq_max``, a non-positive ``freq_max``, and an ``n_time_samples``
+    that is not a power of two of at least 2
+    (:func:`~uacpy.models.oases._sampling.check_power_of_two_time_samples`).
 
     An inverted pair reaches the deck unvalidated (the writer formats
     whatever it is given) and OASP then computes LX > MX, so the
     frequency loop never executes and the .trf comes back empty rather
     than wrong. The band check of a run compares freq_max against the
     band top only, never against freq_min, so this is the one place the
-    ordering is tested."""
+    ordering is tested. ``n_time_samples`` is the FFT length NX, which a
+    fraction would reach truncated."""
+    if freq_min is not None and not (
+            is_real_number(freq_min) and np.isfinite(freq_min)
+            and freq_min >= 0.0):
+        raise ConfigurationError(
+            f"OASP: freq_min={freq_min!r} must be a finite frequency of at "
+            f"least 0 Hz (FR1 of Block VIII).")
+    positive_finite('OASP: freq_max (Hz)', freq_max, optional=True)
+    if n_time_samples is not None:
+        check_power_of_two_time_samples('OASP: n_time_samples',
+                                        n_time_samples)
+    if freq_min is None:
+        freq_min = OASP_FREQ_MIN
     if freq_max is not None and freq_min >= freq_max:
         raise ConfigurationError(
             f"OASP: freq_min={freq_min:g} Hz is not below "
@@ -229,17 +264,18 @@ def _nearest_bin(ladder, frequency: float) -> int:
     return int(np.argmin(np.abs(np.asarray(ladder) - frequency)))
 
 
-def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
+def _oasp_sweep(mode, source, requested, *, knob_fc,
                 knob_freq_min, knob_freq_max,
-                knob_n_time_samples) -> _OaspSweep:
+                knob_n_time_samples, band_named=False) -> _OaspSweep:
     """Block III/VIII of the deck — the carrier, ``NX``, ``FR1``, ``FR2``
     — and the ladder of bins they give, resolved once for a call.
 
     A requested band (:meth:`OASP._requested_frequencies`) sets the
     sweep:
     ``FR1``/``FR2`` its edges and ``NX`` the smallest power of two whose
-    bins ``DLFREQ = 2·FR2/NX`` are as fine as the requested spacing
-    (floored at a pinned ``n_time_samples``), with the Nyquist lifted by
+    bins ``DLFREQ = 2·FR2/NX`` are as fine as the requested spacing (a
+    pinned ``n_time_samples`` as given, with a notice when its bins are
+    coarser), with the Nyquist lifted by
     ``NX/(NX - 2)`` so the top bin lands on the band's upper edge. With
     no request (the default sweep of a one-carrier BROADBAND run) the
     sweep is ``freq_min .. freq_max`` (``2.5·fc`` when unpinned) on
@@ -265,34 +301,49 @@ def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
                 "frequency."
             )
         # The (freq_min, freq_max, N) triple is OASP's internal language; a
-        # non-equispaced request is named as such.
-        fmin_user, freq_max, n_user, sweep_notice = \
-            _oases_frequency_sweep(requested, 'OASP')
-        if sweep_notice is not None:
-            notices.append(message_notice(sweep_notice, FallbackWarning))
+        # non-equispaced request is refused.
+        fmin_user, freq_max, n_user = _oases_frequency_sweep(requested,
+                                                             'OASP')
         # Deck fc: the centre of the requested band — the same centre
         # convention the sibling broadband models use (RAM's (fc, Q, T)
         # sweep is parameterised around the band midpoint). A pinned
-        # ``center_frequency`` wins.
-        if knob_center_frequency is not None:
-            fc_run = knob_center_frequency
-            fc_origin = 'OASP(center_frequency=…)'
+        # ``fc`` wins.
+        if knob_fc is not None:
+            fc_run = knob_fc
+            fc_origin = 'OASP(fc=…)'
         else:
-            fc_run = float(0.5 * (requested.min() + requested.max()))
+            fc_run = oasp_centre_frequency(requested)
             fc_origin = 'centre of the requested band'
-        if knob_freq_min and abs(knob_freq_min - fmin_user) > 1e-9:
-            notices.append(
-                message_notice(f"OASP.run(frequencies=…) sets the sweep's lower edge to "
-                            f"{fmin_user:.3f} Hz, overriding the constructor's "
-                            f"freq_min={knob_freq_min:.3f} Hz.",
-                            FallbackWarning))
-        if (knob_freq_max is not None
-                and abs(knob_freq_max - freq_max) > 1e-9):
-            notices.append(
-                message_notice(f"OASP.run(frequencies=…) sets the sweep's upper edge to "
-                            f"{freq_max:.3f} Hz, overriding the constructor's "
-                            f"freq_max={knob_freq_max:.3f} Hz.",
-                            FallbackWarning))
+        # A pinned edge the call's band does not share: the deck carries
+        # one sweep (FR1 FR2, unoasp22.f:176). Beside a band the caller
+        # named (``band_named``: run(frequencies=), a multi-frequency
+        # Source) the two pins contradict each other; beside a band the run
+        # derives (a TIME_SERIES pulse, COHERENT_TL's source frequency) the
+        # pinned edge is not used.
+        unused = [f"{name}={value:g}" for name, value, edge in
+                  (('freq_min', knob_freq_min, fmin_user),
+                   ('freq_max', knob_freq_max, freq_max))
+                  if value is not None and abs(value - edge) > 1e-9]
+        if unused and band_named:
+            raise ConfigurationError(
+                f"OASP({', '.join(unused)}) pins the sweep and the call "
+                f"names the band too ({fmin_user:g}-{freq_max:g} Hz, from "
+                f"run(frequencies=) or the Source's frequencies); the deck "
+                f"carries one sweep (FR1 FR2, unoasp22.f:176), so the two "
+                f"contradict each other.",
+                remediation=(
+                    "Leave OASP(freq_min=, freq_max=) unset to sweep the "
+                    "call's band, or drop the band from the call (a "
+                    "one-frequency Source, no frequencies=) to sweep the "
+                    "pinned edges."))
+        if unused:
+            notices.append(message_notice(
+                f"OASP({', '.join(unused)}) is not used: this "
+                f"{getattr(mode, 'name', mode)} run sweeps "
+                f"{fmin_user:g}-{freq_max:g} Hz, the band the run derives "
+                f"(the source waveform's, or the bin at the source "
+                f"frequency).",
+                FallbackWarning))
         freq_min = fmin_user
         freq_max_origin = 'top of the requested band'
         n_time_samples = knob_n_time_samples
@@ -310,21 +361,17 @@ def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
             # and the deck sets DT at Nyquist, 1/(2*freq_max), so
             # NX = 2*freq_max/DLFREQ samples are needed to land bins as
             # fine as the requested df. OASP requires NT = 2^M
-            # (oasp.tex:129), so round that up to a power of two — never
-            # down past a pinned n_time_samples.
-            # Two samples more than that, so the Nyquist lift below keeps
-            # DLFREQ = 2*freq_max/(NX - 2) no coarser than df.
-            target = max(int(n_time_samples or 0),
-                         int(np.ceil(2.0 * freq_max / df_user)) + 2)
-            if target > 1:
-                n_time_samples = 1 << (target - 1).bit_length()
-            else:
-                n_time_samples = 2
-            n_time_origin = (
-                f"the power of two reaching the requested spacing "
-                f"{df_user:g} Hz"
-                + (" (floored at OASP(n_time_samples=…))"
-                   if knob_n_time_samples is not None else ""))
+            # (oasp.tex:129), so an unpinned NX is that count rounded up to
+            # a power of two, two samples more than it so the Nyquist lift
+            # below keeps DLFREQ = 2*freq_max/(NX - 2) no coarser than df.
+            # A pinned NX is written as given.
+            target = int(np.ceil(2.0 * freq_max / df_user)) + 2
+            spacing_nx = 1 << (target - 1).bit_length()
+            if knob_n_time_samples is None:
+                n_time_samples = spacing_nx
+                n_time_origin = (
+                    f"the power of two reaching the requested spacing "
+                    f"{df_user:g} Hz")
             # OASP's top bin is DLFREQ*(NX/2 - 1): MX = FR2/DLFREQ + 2 is
             # clamped to NX/2 (unoasp22.f:237-246), and with the Nyquist
             # at the band's top the last bin fell one DLFREQ short of it
@@ -345,6 +392,17 @@ def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
                             / (n_time_samples - 2) * guard)
                 freq_max_origin = ('top of the requested band, the '
                                    'Nyquist lifted by NX/(NX - 2)')
+            dlfreq = 2.0 * freq_max / n_time_samples
+            if (knob_n_time_samples is not None
+                    and dlfreq > df_user * (1.0 + 1e-6)):
+                notices.append(message_notice(
+                    f"OASP(n_time_samples={n_time_samples}) gives bins "
+                    f"DLFREQ = 1/(DT*NX) = {dlfreq:.6g} Hz apart "
+                    f"(unoasp22.f:237), coarser than the requested spacing "
+                    f"{df_user:.6g} Hz; the result carries that ladder. "
+                    f"n_time_samples={spacing_nx} or more reaches the "
+                    f"requested spacing.",
+                    NumericsWarning))
         elif n_time_samples is None:
             n_time_samples = OASP_N_TIME_SAMPLES
     else:
@@ -352,11 +410,11 @@ def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
         # (RAM's (fc, Q, T) sweep centres on the band midpoint).
         src_freqs = np.atleast_1d(
             np.asarray(source.frequencies, dtype=float))
-        if knob_center_frequency is not None:
-            fc_run = knob_center_frequency
-            fc_origin = 'OASP(center_frequency=…)'
+        if knob_fc is not None:
+            fc_run = knob_fc
+            fc_origin = 'OASP(fc=…)'
         else:
-            fc_run = float(0.5 * (src_freqs.min() + src_freqs.max()))
+            fc_run = oasp_centre_frequency(src_freqs)
             fc_origin = 'source.frequencies'
         f_top = max(fc_run, float(src_freqs.max()))
         freq_max = knob_freq_max
@@ -370,8 +428,8 @@ def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
             freq_max_origin = 'OASP(freq_max=…)'
         # The derived edge needs the same test as a pinned one. It is
         # 2.5x the band centre, so it clears the band by construction —
-        # unless ``center_frequency`` pins fc below it, and then a
-        # 1000 Hz source with center_frequency=10 writes FR2=25 Hz and
+        # unless a pinned ``fc`` sits below it, and then a
+        # 1000 Hz source with fc=10 writes FR2=25 Hz and
         # comes back labelled with a 25 Hz bin.
         if f_top > freq_max:
             origin = (f"the derived sweep edge freq_max="
@@ -379,7 +437,7 @@ def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
                       f"{freq_max:.1f} Hz" if derived_freq_max
                       else f"the pinned sweep edge "
                            f"freq_max={freq_max:.1f} Hz")
-            fix = ("Raise center_frequency to the band's own centre (or "
+            fix = ("Raise fc to the band's own centre (or "
                    "leave it None), pin freq_max above the band, or pass "
                    "frequencies= explicitly."
                    if derived_freq_max else
@@ -391,7 +449,8 @@ def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
                 f"(centre {fc_run:.1f} Hz), above {origin} — the sweep "
                 f"would never compute the top of the band. {fix}"
             )
-        freq_min = knob_freq_min
+        freq_min = (OASP_FREQ_MIN if knob_freq_min is None
+                    else knob_freq_min)
         if knob_n_time_samples is not None:
             n_time_samples = knob_n_time_samples
             n_time_origin = 'OASP(n_time_samples=…)'
@@ -405,36 +464,39 @@ def _oasp_sweep(mode, source, requested, *, knob_center_frequency,
         requested=requested, n_time_samples=int(n_time_samples),
         n_time_samples_origin=n_time_origin, freq_min=float(freq_min),
         freq_max=float(freq_max), freq_max_origin=freq_max_origin,
-        center_frequency=float(fc_run),
-        center_frequency_origin=fc_origin, ladder=ladder,
+        fc=float(fc_run),
+        fc_origin=fc_origin, ladder=ladder,
         notices=tuple(notices))
 
 
 def _oasp_settings(mode, requested, *, options, c_low_pinned,
                    c_high_pinned, n_wavenumbers, integration_offset,
                    integrand_plot_step, dip_angle,
-                   knob_center_frequency, knob_freq_min,
+                   knob_fc, knob_freq_min,
                    knob_freq_max, knob_n_time_samples, env,
-                   source) -> OASPSettings:
+                   source, band_named=False) -> OASPSettings:
     """Every value the OASP deck is written from, resolved once on the
     projected ``env`` for a call in ``mode`` asking for ``requested``:
     the option line (with ``'P'`` for a line Source), the sweep
     (:func:`_oasp_sweep`), Block VII's phase-speed window and
     wavenumber count."""
     sweep = _oasp_sweep(mode, source, requested,
-                        knob_center_frequency=knob_center_frequency,
+                        knob_fc=knob_fc,
                         knob_freq_min=knob_freq_min,
                         knob_freq_max=knob_freq_max,
-                        knob_n_time_samples=knob_n_time_samples)
+                        knob_n_time_samples=knob_n_time_samples,
+                        band_named=band_named)
     options = _geometry_options(
         options if options is not None else 'N J', source)
     ssp_data = env.ssp.extend_to(env.depth).to_pairs()
-    c_low, c_high = oases_wavenumber_bounds(ssp_data, cmax=1e9)
+    c_low, c_high = oases_wavenumber_bounds(ssp_data)
     derived = "oases_wavenumber_bounds(water column)"
     if c_low_pinned is not None:
         c_low = c_low_pinned
     if c_high_pinned is not None:
         c_high = c_high_pinned
+    refuse_inverted_window('OASP', c_low, c_high, c_low=c_low_pinned,
+                           c_high=c_high_pinned)
     c_low_origin = 'OASP(c_low=…)' if c_low_pinned is not None else derived
     c_high_origin = ('OASP(c_high=…)' if c_high_pinned is not None
                      else derived)
@@ -447,8 +509,8 @@ def _oasp_settings(mode, requested, *, options, c_low_pinned,
         freq_max=sweep.freq_max,
         freq_max_origin=sweep.freq_max_origin,
         time_step=1.0 / (2.0 * sweep.freq_max),
-        center_frequency=sweep.center_frequency,
-        center_frequency_origin=sweep.center_frequency_origin,
+        fc=sweep.fc,
+        fc_origin=sweep.fc_origin,
         marched_frequencies=sweep.ladder,
         c_low=float(c_low),
         c_low_origin=c_low_origin,
@@ -472,7 +534,7 @@ def _write_oasp_deck(deck: Path, inputs, name: str) -> None:
         'integration_offset': engine.integration_offset,
         'n_wavenumbers': engine.n_wavenumbers,
         'freq_min': engine.freq_min,
-        'center_frequency': engine.center_frequency,
+        'fc': engine.fc,
         'time_step': engine.time_step,
         'c_low': engine.c_low,
         'c_high': engine.c_high,
@@ -607,8 +669,7 @@ class OASP(OASES):
     recommended.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the
-    layer stack is kept).
+    Per-model: ``'ssp': 'mean'`` (the layer stack is kept).
 
     Examples
     --------
@@ -628,20 +689,24 @@ class OASP(OASES):
     # unoasp22.f:946-948), which _resolve_engine_settings writes for it.
     spec = ModelSpec(
         modes=(RunMode.COHERENT_TL, RunMode.BROADBAND, RunMode.TIME_SERIES),
+        # A rough interface is column 7 (RG) of the layer record
+        # (oaseun31.f:54).
         supports={'layered_bottom', 'elastic_media',
                   'rough_surface', 'rough_bottom'},
+        # A line Source runs in the plane geometry, option 'P'.
         source_types=frozenset({'point', 'line'}),
-        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+        collapse={'ssp': 'mean'},
         traits=dataclasses.replace(
             _OASES_TRAITS,
             consumes_run_t_start=True,
             consumes_single_mode_frequencies=True,
-            # BROADBAND runs OASP's own FFT ladder, not the
-            # ``fc·(1 ± 0.25)`` band whose 1 Hz floor the base announces.
+            # BROADBAND runs OASP's own FFT ladder, not the base's
+            # ``fc·(1 ± 0.25)`` band.
             announced_band_modes=frozenset({RunMode.TIME_SERIES}),
         ),
     )
     provenance_id = 'oases'
+    _BINARIES = MappingProxyType({'oasp': _oases_binary('oasp')})
     outputs = MappingProxyType({
         RunMode.COHERENT_TL: OutputSpec(
             'Field', kind='pressure', unit='Pa',
@@ -661,9 +726,9 @@ class OASP(OASES):
         *,
         executable: Optional[Path] = None,
         n_time_samples: Optional[int] = None,
-        freq_min: float = OASP_FREQ_MIN,
+        freq_min: Optional[float] = None,
         freq_max: Optional[float] = None,
-        center_frequency: Optional[float] = None,
+        fc: Optional[float] = None,
         integrand_plot_step: Optional[int] = None,
         options: Optional[str] = None,
         integration_offset: float = OASP_INTEGRATION_OFFSET,
@@ -684,29 +749,42 @@ class OASP(OASES):
         executable : Path, optional
             Path to OASP binary. Auto-detected if ``None``.
         n_time_samples : int, optional
-            FFT length NX (samples per receiver trace; OASP rounds it up to
-            a power of two). ``None`` (default) takes 4096 for the default
-            sweep of a one-carrier BROADBAND run, and for a requested band —
+            FFT length NX (samples per receiver trace, a power of two).
+            ``None`` (default) takes 4096 for the default
+            sweep of a one-carrier BROADBAND run (uacpy guidance: OASES
+            requires only ``NT = 2^M``, oasp.tex:129; its worked decks use
+            2048, oasp.tex:583, and 1024, oasp.tex:773), and for a requested
+            band —
             ``run(frequencies=)``, a TIME_SERIES pulse, a multi-element
             ``source.frequencies``, the source frequency of a COHERENT_TL
             run — the smallest power of two whose bins are as fine as the
             requested spacing, so the TIME_SERIES record is the
             ``output_duration`` asked for, rounded up to that power of two.
-            A value given is a floor on NX in every case.
+            A value given is written as given in every case, and must be a
+            power of two (oasp.tex:129 ``NT = 2^M``); a notice says when
+            its bins are coarser than a requested spacing.
         freq_min : float, optional
-            Lower edge of the OASP broadband sweep (Hz). Default 0.0.
-            Must be below ``freq_max`` when that is pinned.
-            Default ``0.0``.
+            Lower edge of the OASP broadband sweep (Hz), at least 0 and
+            below ``freq_max`` when that is pinned. ``None`` (default) is
+            0, the manual's worked deck (oasp.tex:583). A pinned edge beside
+            a band the call names (``run(frequencies=)``, a
+            multi-frequency Source) is refused, naming both; beside a band
+            the run derives (a TIME_SERIES pulse, COHERENT_TL's source
+            frequency) the run says it is not used. ``freq_max`` follows the
+            same rule.
         freq_max : float, optional
             Upper edge of the OASP broadband sweep (Hz). ``None``
             (default) derives ``2.5 ×`` the centre frequency at
             ``run()`` time; a pinned value below the centre frequency
             or the top of the requested band raises at ``run()``.
-        center_frequency : float, optional
+        fc : float, optional
             Carrier frequency for the pulse (Hz). ``None`` defaults to
             the centre (midpoint) of the run's frequency band at
             ``run()`` time — a single ``source.frequencies`` entry is
-            its own centre.
+            its own centre: the manual's FRC, "Center frequency of
+            source" (oasp.tex:84). OASP itself only records it
+            (oasp.tex:278-280); uacpy derives the default ``freq_max``
+            from it.
         integrand_plot_step : int, optional
             OASP's ``INTF`` (Block VII, ``unoasp22.f:160``). It gates how
             often the wavenumber *integrand* is plotted
@@ -746,18 +824,11 @@ class OASP(OASES):
         The receiver ranges are ``receiver.ranges``: Block VIII's
         ``R0 RSPACE NPLOTS`` are read from them.
         """
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse,
-        )
-        self.n_time_samples = (
-            int(n_time_samples) if n_time_samples is not None else None
-        )
-        self.freq_min = float(freq_min)
-        self.freq_max = float(freq_max) if freq_max is not None else None
-        self.center_frequency = (
-            float(center_frequency) if center_frequency is not None else None
-        )
+        super().__init__(**_host_options(locals()))
+        self.n_time_samples = n_time_samples
+        self.freq_min = freq_min
+        self.freq_max = freq_max
+        self.fc = float(fc) if fc is not None else None
         self.integrand_plot_step = (
             int(integrand_plot_step)
             if integrand_plot_step is not None else None
@@ -779,20 +850,29 @@ class OASP(OASES):
         # DA, the dip angle INSRC reads only under the '4' (dip-slip) option.
         self.dip_angle = float(dip_angle) if dip_angle is not None else None
         self._check_knobs()
+        if n_time_samples is not None:
+            self.n_time_samples = int(n_time_samples)
+        if freq_min is not None:
+            self.freq_min = float(freq_min)
+        if freq_max is not None:
+            self.freq_max = float(freq_max)
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
         self._exe = self._resolve_executable(
-            executable, lambda: _oases_find_executable(self, 'oasp'),
+            executable, lambda: self._find_binary('oasp'),
         )
 
     def _check_knobs(self) -> None:
-        """Refuse a ``freq_min`` not below ``freq_max``
-        (:func:`_check_oasp_knobs`). Run at construction and again by every
+        """Refuse a band or FFT length no run could use
+        (:func:`_check_oasp_knobs`), and a pinned phase-speed window that is
+        not positive or not ordered
+        (:func:`~uacpy.models._window.check_pinned_window`). Run at construction and again by every
         run (:meth:`_validate_engine`), since the attributes can be
         reassigned in between."""
         _check_n_wavenumbers_knob(self.n_wavenumbers)
-        _check_oasp_knobs(self.freq_min, self.freq_max)
+        check_pinned_window('OASP', c_low=self.c_low, c_high=self.c_high)
+        _check_oasp_knobs(self.freq_min, self.freq_max, self.n_time_samples)
 
     def _validate_engine(self, env, source, receiver, run_mode, *,
                          request=None) -> None:
@@ -829,8 +909,8 @@ class OASP(OASES):
         """The bins OASP propagates: the ladder of its sweep
         (``settings.engine.marched_frequencies``), for COHERENT_TL the one bin
         nearest the source frequency, which the Field carries. A one-carrier
-        BROADBAND call gets no 1 Hz floor notice of the ``fc·(1 ± 0.25)``
-        band, which OASP does not run (``spec.traits.announced_band_modes``).
+        BROADBAND call runs that ladder, not the base's ``fc·(1 ± 0.25)``
+        band (``spec.traits.announced_band_modes``).
         """
         ladder = settings.engine.marched_frequencies
         if settings.mode == RunMode.COHERENT_TL:
@@ -848,10 +928,11 @@ class OASP(OASES):
             integration_offset=self.integration_offset,
             integrand_plot_step=self.integrand_plot_step,
             dip_angle=self.dip_angle,
-            knob_center_frequency=self.center_frequency,
+            knob_fc=self.fc,
             knob_freq_min=self.freq_min, knob_freq_max=self.freq_max,
             knob_n_time_samples=self.n_time_samples,
-            env=env, source=source)
+            env=env, source=source,
+            band_named=_band_named(settings.mode, source, request))
 
     def _write_input(self, inputs) -> Path:
         """Stage 4: the OASP deck (:func:`_write_oasp_deck`)."""
@@ -872,7 +953,8 @@ class OASP(OASES):
         the binary's streams (OASES writes no print file)."""
         proc = self._execute(deck.stem, inputs.work_dir)
         _reject_wavenumber_overrun(self.model_name, proc, 1)
-        self._require_output(
+        require_output(
+            self.model_name,
             [inputs.work_dir / f'{deck.stem}{suffix}'
              for suffix in self._TRF_SUFFIXES],
             what='a transfer-function file', process=proc,
@@ -881,7 +963,8 @@ class OASP(OASES):
     def _read_output(self, inputs, deck: Path) -> dict:
         """Stage 4: the transfer function on the requested axes
         (:func:`_read_trf_on_requested_ranges`)."""
-        output_file = self._require_output(
+        output_file = require_output(
+            self.model_name,
             [inputs.work_dir / f'{deck.stem}{suffix}'
              for suffix in self._TRF_SUFFIXES],
             what='a transfer-function file',
@@ -928,18 +1011,18 @@ class OASP(OASES):
                 },
                 # OASP's FFT length NX: the synthesis floors its own at it.
                 synthesis_floor=engine.n_time_samples,
-                **self._result_kwargs(
-                    source,
+                **result_kwargs(
+                    self.model_name, self.provenance, source,
                     phase_reference=PhaseReference.TRAVELLING_WAVE.value,
                     backend='oasp',
                     frequencies=raw['freq'],
                     source_depth=raw['source_depth'],
-                    center_frequency=raw['center_frequency'],
+                    fc=raw['fc'],
                 ),
             )
-            result = self._mask_source_axis(result, source)
+            result = mask_source_axis(self.model_name, result, source)
             if settings.time is not None:
-                result = self._finish_broadband(result, settings)
+                result = finish_broadband(self.model_name, result, settings)
         else:
             # COHERENT_TL: the bin at the source frequency, as complex
             # narrowband pressure on (n_depth, n_range). Users get TL via
@@ -958,21 +1041,22 @@ class OASP(OASES):
                     'range': raw['ranges'],
                 },
                 synthesis_floor=engine.n_time_samples,
-                **self._result_kwargs(
-                    source,
+                **result_kwargs(
+                    self.model_name, self.provenance, source,
                     phase_reference=settings.output.phase_reference,
                     backend='oasp',
                     frequencies=float(raw['freq'][freq_idx]),
                     frequencies_available=raw['freq'],
                     source_depth=raw['source_depth'],
-                    center_frequency=raw['center_frequency'],
+                    fc=raw['fc'],
                 ),
             )
-            result = self._mask_source_axis(result, source)
+            result = mask_source_axis(self.model_name, result, source)
 
-        self._attach_output_paths(
+        attach_output_paths(
             result, inputs.work_dir, deck.stem,
             primary_files=(('trf_file', '.trf'),),
+            cleanup=self.cleanup,
         )
 
         self._log("OASP simulation complete")

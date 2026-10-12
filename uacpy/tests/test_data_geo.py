@@ -4,6 +4,38 @@ import numpy as np
 import pytest
 
 from uacpy.core.exceptions import ConfigurationError
+
+
+@pytest.mark.parametrize('valid, kept', [
+    ([True, True, False, True], [0.0, 10.0]),     # cut at the first gap
+    ([True, True, True, True], [0.0, 10.0, 20.0, 30.0]),
+    ([False, True, True, True], [])])             # a land cell
+def test_a_column_is_cut_at_its_first_invalid_level(valid, kept):
+    from uacpy.data._geo import cut_at_first_invalid
+    z = np.array([0.0, 10.0, 20.0, 30.0])
+    (cut,) = cut_at_first_invalid(valid, z)
+    assert cut.tolist() == kept
+
+
+def test_a_value_is_read_at_the_level_nearest_the_mid_depth():
+    from uacpy.data._geo import mid_depth, value_at_depth
+    depths, values = [0.0, 500.0, 2000.0], [8.1, 8.0, 7.9]
+    assert mid_depth(depths) == 1000.0
+    assert value_at_depth(depths, values) == 8.0          # 500 m is nearest
+    assert value_at_depth(depths, values, 1800.0) == 7.9
+
+
+@pytest.mark.parametrize('bad', [2.7, '5', None, 1])
+def test_a_max_points_that_is_no_whole_count_of_two_or_more_is_refused(bad):
+    from uacpy.data._geo import checked_max_points
+    with pytest.raises(ConfigurationError, match='max_points'):
+        checked_max_points(bad, 'fetch_x')
+
+
+@pytest.mark.parametrize('good', [2, 2.0, np.int64(1000)])
+def test_a_whole_max_points_of_two_or_more_is_accepted(good):
+    from uacpy.data._geo import checked_max_points
+    assert checked_max_points(good, 'fetch_x') == int(good)
 from uacpy.core.geo import as_coordinate, normalize_lon
 
 

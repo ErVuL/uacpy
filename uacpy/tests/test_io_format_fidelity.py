@@ -148,7 +148,8 @@ class TestBoundaryFilesAreListDirected:
                      "0.0 0.0\n"
                      "45.0\n\n-10.0\n")
         pat = read_source_beam_pattern(p)
-        assert pat.tolist() == [[-45.0, -10.0], [0.0, 0.0], [45.0, -10.0]]
+        assert pat.angles.tolist() == [-45.0, 0.0, 45.0]
+        assert pat.levels_dB.tolist() == [-10.0, 0.0, -10.0]
 
     def test_truncated_sbp_is_a_typed_error(self, tmp_path):
         from uacpy.io.refl_io import read_source_beam_pattern
@@ -333,7 +334,7 @@ class TestSbpAngleResolution:
         p = tmp_path / 'fine.sbp'
         write_source_beam_pattern(p, angles, np.zeros(5))
         back = read_source_beam_pattern(p)
-        assert np.array_equal(back[:, 0], angles), \
+        assert np.array_equal(back.angles, angles), \
             "distinct angles collided on the file's angle grid"
 
     def test_sub_resolution_step_is_refused(self, tmp_path):
@@ -439,20 +440,18 @@ class TestOastTlMultiFrequency:
         assert 'plotted_frequencies' not in out['metadata']
 
 
-class TestOastTlIsAlwaysAFrequencyStack:
-    """``read_oast_tl`` returns a ResultStack over frequency whatever the
-    file holds — length 1 for one frequency — with each slab on its own
+class TestOastTlIsAlwaysAListOfFieldsPerFrequency:
+    """``read_oast_tl`` returns a list of TL Fields, one per frequency,
+    whatever the file holds — length 1 for one frequency — each on its own
     native range grid."""
 
-    def test_one_frequency_is_a_stack_of_one(self, tmp_path):
-        from uacpy.core.results import Field, ResultStack
+    def test_one_frequency_is_a_list_of_one(self, tmp_path):
+        from uacpy.core.results import Field
         from uacpy.io import read_oast_tl
         plp = _plp_tl_pair(tmp_path, [(400.0, 10.0, 1.0, 0.5),
                                       (400.0, 20.0, 1.0, 0.5)])
         stack = read_oast_tl(plp, [10.0, 20.0])
-        assert type(stack) is ResultStack and len(stack) == 1
-        assert stack.coordinate_name == 'frequency'
-        assert stack.coordinate.tolist() == [400.0]
+        assert type(stack) is list and len(stack) == 1
         slab = stack[0]
         assert type(slab) is Field
         assert slab.data.shape == (2, 4)
@@ -467,10 +466,9 @@ class TestOastTlIsAlwaysAFrequencyStack:
         plp = _plp_tl_pair(tmp_path, curves, n_ranges=512)
         stack = read_oast_tl(plp, [10.0])
         assert len(stack) == 2
-        assert stack.coordinate.tolist() == [400.0, 800.0]
+        assert [float(f.frequencies[0]) for f in stack] == [400.0, 800.0]
         assert stack[0].coords['range'][-1] == pytest.approx(1724.6464)
         assert stack[1].coords['range'][-1] == pytest.approx(862.32576)
-        assert stack.at(frequency=800.0) is stack[1]
 
     def test_a_label_less_file_needs_its_frequencies(self, tmp_path):
         from uacpy.core.exceptions import FileFormatError
@@ -485,7 +483,7 @@ class TestOastTlIsAlwaysAFrequencyStack:
         plp = _plp_tl_pair(tmp_path, [(None, None, 1.0, 0.5)] * 2)
         with pytest.warns(UserWarning, match='by position'):
             stack = read_oast_tl(plp, [10.0, 20.0], frequencies=[250.0])
-        assert stack.coordinate.tolist() == [250.0]
+        assert len(stack) == 1
         assert float(stack[0].frequencies[0]) == 250.0
 
     def test_frequencies_one_per_block(self, tmp_path):
@@ -496,15 +494,19 @@ class TestOastTlIsAlwaysAFrequencyStack:
                 pytest.raises(ConfigurationError, match='1 plotted'):
             read_oast_tl(plp, [10.0, 20.0], frequencies=[250.0, 500.0])
 
-    def test_the_labels_win_and_a_disagreeing_frequency_is_refused(
+    def test_an_agreeing_frequency_keeps_its_precision_and_a_far_one_is_refused(
             self, tmp_path):
+        """The ``F7.1`` label is a print rounding: a frequency within its
+        half step is kept at the caller's precision (as receiver depths
+        are), one further away is refused, and none takes the label."""
         from uacpy.core.exceptions import ConfigurationError
         from uacpy.io import read_oast_tl
         plp = _plp_tl_pair(tmp_path, [(400.0, 10.0, 1.0, 0.5),
                                       (400.0, 20.0, 1.0, 0.5)])
-        # within the F7.1 label's half step: accepted, the label kept
         stack = read_oast_tl(plp, [10.0, 20.0], frequencies=[400.04])
-        assert stack.coordinate.tolist() == [400.0]
+        assert float(stack[0].frequencies[0]) == 400.04
+        assert float(read_oast_tl(plp, [10.0, 20.0])[0].frequencies[0]) \
+            == 400.0
         with pytest.raises(ConfigurationError, match="'Freq:' labels"):
             read_oast_tl(plp, [10.0, 20.0], frequencies=[400.06])
 
@@ -1196,7 +1198,7 @@ class TestTheTransferFunctionReaderReturnsPressure:
                 'ranges': np.array([500.0, 1000.0, 1500.0]),
                 'depths': np.array([10.0, 20.0, 30.0, 40.0]),
                 'transfer_function': tf, 'source_depth': 25.0,
-                'center_frequency': 105.0, 'omegim': 0.0}
+                'fc': 105.0, 'omegim': 0.0}
 
     def test_normal_stress_becomes_the_pressure(self, monkeypatch):
         import uacpy.io._parsers as parsers

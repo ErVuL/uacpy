@@ -387,6 +387,17 @@ class TestXsmLayoutFollowsTheManual:
             path, receiver_depths=[10, 20]).receiver_positions is None
         assert cov.metadata['white_noise_level'] == 50.0
 
+    def test_the_unit_is_the_one_the_caller_states(self, tmp_path):
+        """The ``.xsm`` names no unit and OASN and OASS write it in
+        different ones, so the reader stamps what its caller states and
+        leaves ``''`` (not stated) by default; the matrix is unchanged."""
+        path = self._write(tmp_path)
+        assert read_oasn_covariance(path).unit == ''
+        stated = read_oasn_covariance(path, unit='µPa²/Hz')
+        assert stated.unit == 'µPa²/Hz'
+        np.testing.assert_array_equal(
+            stated.covariance, _read_oasn_covariance_payload(path)['covariance'])
+
     @pytest.mark.requires_oases
     def test_oasn_returns_the_file_in_pascal_squared_per_hertz(
             self, tmp_path, monkeypatch):

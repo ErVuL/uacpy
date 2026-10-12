@@ -24,6 +24,11 @@ from uacpy.plot import shared_colorbar
 from uacpy.visualization.plots._common import _cell_edge_extent, _flip_y
 
 
+
+#: Phase speeds (m/s) labelled on the top axis of the wavenumber plots.
+PHASE_SPEED_TICKS = (1400.0, 1500.0, 1650.0, 2000.0, 3000.0, 6000.0)
+
+
 def run_with_greens_function(env, source, receiver, **knobs):
     """Run Scooter keeping its scratch dir, and read the ``.grn`` back.
 
@@ -84,6 +89,10 @@ def greens_function():
     top = axes[0].secondary_xaxis(
         'top', functions=(lambda x: 2.0 * np.pi * freq / np.maximum(x, 1e-9),
                           lambda c: 2.0 * np.pi * freq / np.maximum(c, 1e-9)))
+    # The window runs to k = 0 (c_high unbounded), where c = ω/k diverges:
+    # name the phase speeds worth reading rather than let the locator
+    # crowd ticks into the k -> 0 end.
+    top.set_xticks(PHASE_SPEED_TICKS)
     top.set_xlabel('Phase speed $c = \\omega/k$ (m/s)')
 
     zi = int(np.argmin(np.abs(grn.receiver_depths
@@ -124,7 +133,7 @@ def phase_speed_window():
     """
     env, source, _ = shallow_water()
     line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-    cases = [('default — 1416 to 1732 m/s', {}, 'C0'),
+    cases = [('default — 1341 m/s to unbounded', {}, 'C0'),
              ('c_high=1600', {'c_high': 1600.0}, 'C1'),
              ('c_low=1520', {'c_low': 1520.0}, 'C2')]
     freq = float(source.frequencies[0])
@@ -159,6 +168,10 @@ def phase_speed_window():
     top = axes[0].secondary_xaxis(
         'top', functions=(lambda x: 2.0 * np.pi * freq / np.maximum(x, 1e-9),
                           lambda c: 2.0 * np.pi * freq / np.maximum(c, 1e-9)))
+    # The window runs to k = 0 (c_high unbounded), where c = ω/k diverges:
+    # name the phase speeds worth reading rather than let the locator
+    # crowd ticks into the k -> 0 end.
+    top.set_xticks(PHASE_SPEED_TICKS)
     top.set_xlabel('Phase speed $c = \\omega/k$ (m/s)')
 
     axes[1].set_xlabel('Range (km)')

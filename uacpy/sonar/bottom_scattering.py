@@ -46,6 +46,7 @@ __all__ = [
     'apl_uw_bottom_loss',
     'apl_uw_bottom_backscatter',
     'APL_UW_SEDIMENTS',
+    'TABLE_WATER_SOUND_SPEED',
 ]
 
 #: Water sound speed the report's Table 3 and Figure 2 were computed with

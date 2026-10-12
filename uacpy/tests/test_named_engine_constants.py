@@ -4,8 +4,6 @@ import numpy as np
 import pytest
 
 import uacpy
-from uacpy.core.run_settings import RunMode
-from uacpy.models._window import C_HIGH_FACTOR
 from uacpy.models.bellhop._plan import resolve_ray_box
 from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK_M
 from uacpy.io.bellhop_writer import BELLHOP_RAY_BOX_FACTOR, bellhop_ray_box
@@ -17,40 +15,28 @@ from uacpy.models.sparc import _plan as sparc_plan
 
 
 def test_the_factors_hold_their_values():
-    assert scooter_plan.SCOOTER_RMAX_FACTOR_BROADBAND == 3.0
-    assert scooter_plan.SCOOTER_RMAX_FACTOR_NARROWBAND == 2.0
-    assert sparc_plan.SPARC_RMAX_FACTOR == 4.0
+    assert scooter_plan.SCOOTER_RMAX_FACTOR == 2.0
+    assert sparc_plan.SPARC_RMAX_TIME_MARGIN == 1.2
     assert sparc_plan.SPARC_WINDOW_TRAVEL_TIMES == 2.5
-    # the margin must exceed 1 + the window (sparc/_plan.py's derivation)
-    assert sparc_plan.SPARC_RMAX_FACTOR > \
-        1.0 + sparc_plan.SPARC_WINDOW_TRAVEL_TIMES
-    assert kraken_grid.KRAKEN_RMAX_MULTIPLIER == 1.05
-    assert kraken_grid.KRAKEN_RMAX_MULTIPLIER_BAND == 3.0
-    assert kraken_grid.KRAKEN_RMAX_FALLBACK_M == 100_000.0
+    assert sparc_plan.SPARC_C_HIGH_UNBOUNDED == 1.0e7
+    # on the auto window the default RMax is 4 x the farthest range
+    assert 1.0 + sparc_plan.SPARC_RMAX_TIME_MARGIN * \
+        sparc_plan.SPARC_WINDOW_TRAVEL_TIMES == pytest.approx(4.0)
+    assert kraken_grid.KRAKEN_RMAX_NO_RANGE_M == 100_000.0
     assert BELLHOP_RAY_BOX_FACTOR == 1.2
     assert NO_RECEIVER_RANGE_FALLBACK_M == 10_000.0
     assert oasr.OASR_DEFAULT_ANGLES_DEG == (0.0, 90.0, 181)
 
 
-def test_the_kraken_rmax_margin_is_not_the_phase_speed_window():
-    """Two quantities that share the value 1.05 keep two names: the RMax
-    margin is Kraken's own, not the phase-speed window's."""
-    assert C_HIGH_FACTOR == kraken_grid.KRAKEN_RMAX_MULTIPLIER
-    assert 'C_HIGH_FACTOR' not in vars(kraken_grid)
-
-
-@pytest.mark.parametrize('mode, expected', [
-    (RunMode.COHERENT_TL, 'SCOOTER_RMAX_FACTOR_NARROWBAND'),
-    (RunMode.BROADBAND, 'SCOOTER_RMAX_FACTOR_BROADBAND'),
-    (RunMode.TIME_SERIES, 'SCOOTER_RMAX_FACTOR_BROADBAND')])
-def test_scooter_resolves_its_named_multiplier(mode, expected):
-    value, _ = scooter_plan.resolve_rmax_factor(mode, rmax_factor=None)
-    assert value == getattr(scooter_plan, expected)
+def test_scooter_resolves_its_named_multiplier():
+    value, _ = scooter_plan.resolve_rmax_factor(rmax_factor=None)
+    assert value == scooter_plan.SCOOTER_RMAX_FACTOR
 
 
 def test_sparc_resolves_its_named_margin():
-    assert sparc_plan.resolve_rmax_factor(rmax_factor=None) == \
-        sparc_plan.SPARC_RMAX_FACTOR
+    rmax, _, _ = sparc_plan.resolve_rmax_m(1000.0, 1500.0, 2.0,
+                                           rmax_factor=None)
+    assert rmax == 1000.0 + sparc_plan.SPARC_RMAX_TIME_MARGIN * 1500.0 * 2.0
 
 
 class _Rx:
@@ -59,20 +45,17 @@ class _Rx:
         self.range_max = float(np.max(self.ranges))
 
 
-@pytest.mark.parametrize('band, name', [
-    (False, 'KRAKEN_RMAX_MULTIPLIER'), (True, 'KRAKEN_RMAX_MULTIPLIER_BAND')])
-def test_kraken_resolves_its_named_multiplier(band, name):
-    rmax, _ = kraken_grid.resolve_rmax_m(_Rx([1000.0, 4000.0]), band=band,
+def test_kraken_resolves_the_farthest_receiver_range():
+    rmax, _ = kraken_grid.resolve_rmax_m(_Rx([1000.0, 4000.0]),
                                          pinned_rmax_m=None)
-    assert rmax == 4000.0 * getattr(kraken_grid, name)
+    assert rmax == 4000.0
 
 
 def test_kraken_falls_back_to_the_named_range():
-    rmax, _ = kraken_grid.resolve_rmax_m(_Rx([0.0]), band=False,
-                                         pinned_rmax_m=None)
-    assert rmax == kraken_grid.KRAKEN_RMAX_FALLBACK_M
+    rmax, _ = kraken_grid.resolve_rmax_m(_Rx([0.0]), pinned_rmax_m=None)
+    assert rmax == kraken_grid.KRAKEN_RMAX_NO_RANGE_M
     assert kraken_grid.compute_rmax_m(None) == \
-        kraken_grid.KRAKEN_RMAX_FALLBACK_M
+        kraken_grid.KRAKEN_RMAX_NO_RANGE_M
 
 
 def _env():

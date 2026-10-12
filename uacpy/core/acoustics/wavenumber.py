@@ -151,17 +151,19 @@ def snapshot_frequency_component(
     nt = len(times)
     if nt < 2:
         raise ConfigurationError(
-            "SPARC snapshot has nt<2 — cannot extract a frequency component "
-            "via time-FFT. Use a larger n_time_samples."
-        )
+            f"{who}: times holds {nt} output time(s); a frequency component "
+            f"needs at least two to transform.",
+            remediation="Pass snapshots sampled at two or more times (for a "
+                        "SPARC run: a larger n_time_samples).")
     dt = float(times[1] - times[0])
     nyquist = 0.5 / dt
     if frequency > nyquist:
         raise ConfigurationError(
-            f"Source frequency {frequency:.3f} Hz exceeds the snapshot's "
-            f"Nyquist {nyquist:.3f} Hz; reduce dt by raising n_time_samples or "
-            "shortening time_max."
-        )
+            f"{who}: frequency {frequency:.3f} Hz exceeds the Nyquist "
+            f"{nyquist:.3f} Hz of times' {dt:.6g} s step.",
+            remediation="Sample the snapshots more finely in time (for a "
+                        "SPARC run: raise n_time_samples or shorten "
+                        "time_max).")
     # The bin position of ``frequency`` itself: fftfreq[k] = k / (nt·dt),
     # so a fractional k evaluates the transform at the frequency, off-bin.
     bin_at_f0 = frequency * nt * dt
@@ -285,6 +287,14 @@ def _warn_zero_ranges(ranges: np.ndarray, source_type: str,
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
+#: Relative to the largest ``|k|``: how far a wavenumber grid may sit off
+#: the line ``k[0] + i*dk`` and still be transformed as uniform. SPARC builds
+#: its grid in single precision (``Scooter/sparc.f90:123-124``), so its
+#: values carry ~1e-7·|k| of rounding; a grid uniform in phase speed instead
+#: departs from a line by orders of magnitude more.
+_K_GRID_RTOL = 1e-6
+
+
 def hankel_transform(
     G_src: np.ndarray,
     k: np.ndarray,
@@ -346,7 +356,22 @@ def hankel_transform(
             f"{who}: spectrum must be 'positive', 'negative', or 'both', "
             f"got {spectrum!r}.")
 
-    dk = float(k[1] - k[0]) if len(k) > 1 else 1.0
+    k = np.asarray(k, dtype=float)
+    # The mean step, as fieldsco.m:107 takes it ((k(end) - k(1))/(Nk - 1));
+    # the trapezoidal weight dk is one number, so a grid off the line
+    # k(1) + i*dk is refused rather than weighted by its first step.
+    dk = float((k[-1] - k[0]) / (len(k) - 1)) if len(k) > 1 else 1.0
+    off_line = (np.max(np.abs(k - (k[0] + dk * np.arange(len(k)))))
+                if len(k) > 2 else 0.0)
+    if off_line > _K_GRID_RTOL * float(np.max(np.abs(k))):
+        raise ConfigurationError(
+            f"{who}: k is not uniformly spaced: it departs from the line "
+            f"k[0] + i*dk (dk = {dk:.6g} 1/m, the mean step) by up to "
+            f"{off_line:.3g} 1/m, and the transform weights every sample by "
+            f"one step dk.",
+            remediation="Resample the spectrum onto a uniform wavenumber "
+                        "grid (np.interp onto np.linspace(k[0], k[-1], n)) "
+                        "before transforming it.")
     # fieldsco.m:109-111's own guard: the uniform-dk DFT is periodic in range
     # with period 2*pi/dk, and beyond ~10/dk the wrapped tail is amplified
     # exponentially by the exp(+attenuation*r) stabilisation compensation (+70 dB

@@ -119,7 +119,10 @@ there, at 10–20° grazing for real sediments, instead of saturating. Pass
 
 `bottom_loss_curve` is fluid–fluid: it ignores shear entirely. That costs under
 0.25 dB for clay through gravel, whose shear speeds are far below the water's,
-but 11–16 dB near 20–30° grazing for chalk and limestone, whose are not. For the
+but 11–16 dB near 20–30° grazing for chalk and limestone, whose are not. A
+preset name is its fluid curve; a carrier or dict that carries a positive
+`shear_speed` (an elastic environment's half-space) is evaluated as that fluid
+with a `FallbackWarning`. For the
 real `R(θ)` of an elastic or layered seabed use [Bounce](../models/bounce.md);
 [environment](environment.md) has the full breakdown.
 
@@ -157,7 +160,7 @@ from uacpy.metrics import tl_rmse, tl_max_error, tl_bias
 | `tl_rmse(field, reference, range_window=None, depth_window=None)` | Root-mean-square TL difference, dB |
 | `tl_max_error(field, reference, …)` | Largest absolute TL difference, dB |
 | `tl_bias(field, reference, …)` | Mean **signed** difference `field - reference`; positive means `field` reports more loss |
-| `tl_rmse_on_shared_ranges(field, reference, *, depth)` | RMS dB difference at one depth over the ranges both reach, **resampling** onto the coarser axis |
+| `tl_rmse_on_shared_ranges(field, reference, *, depth=None)` | RMS dB difference at one depth over the ranges both reach, **resampling** onto the coarser axis; two Fields with `depth=`, or two `(ranges, tl_dB)` curves |
 
 The first three take two [`Field`](results.md) instances on the same `depth`
 and/or `range` axes (a 2-D grid, or a 1-D cut such as `field.at(depth=50.0)`),
@@ -191,7 +194,9 @@ answer there — it is the number the pairwise table of
 `uacpy.plot.plot_field_statistics` prints in every cell, and
 `tl_rmse_on_shared_ranges` is where it comes from. Two functions rather
 than a flag on one: the refusal and the resampling answer different
-questions, and picking the wrong one should mean picking a name.
+questions, and picking the wrong one should mean picking a name. A measured
+curve needs no Field: `tl_rmse_on_shared_ranges((r_meas, tl_meas), (r_model,
+tl_model))` takes two `(ranges_m, tl_dB)` pairs and runs the same computation.
 
 `ConfigurationError` also fires when the window selects no finite cells at all
 — an empty comparison is a bug, not a zero.
@@ -292,11 +297,15 @@ Standalone functions, all pure NumPy, no solver involved. They are
 what the rest of the package calls when it needs a number rather than a field,
 and each names the standard or paper it implements. Formulas compute numbers; objects are what models take, plot, save and cite; the object calls the formula.
 
-They are grouped by subject in six sub-modules — `seawater` (sound speed,
-density, Doppler), `boundaries` (reflection, bottom loss, the Pekeris branch),
-`bubbles`, `levels` (volts → Pa → dB), `wavenumber` (the Hankel transform and
-its alias period) and `modal` (a normal-mode sum on arrays) — but every one of
-them is re-exported from the package, so you reach them all as
+They are grouped by subject in ten sub-modules of `uacpy.core.acoustics` —
+`seawater` (sound speed, density, Doppler), `attenuation` (the volume
+absorption formulas, pH scales, attenuation units), `boundaries` (reflection,
+bottom loss, the Pekeris branch), `bubbles`, `levels` (volts → Pa → dB, SEL,
+track exposure), `weighting` (auditory and SEL frequency weighting, the
+exposure thresholds), `wavenumber` (the Hankel transform and its alias
+period), `modal` (a normal-mode sum on arrays), `arrays` (free-field line-array
+steering and directivity) and `ray_geometry` (a ray's miss distance) — but
+every one of them is re-exported from the package, so you reach them all as
 `uacpy.acoustics.<name>` (or `from uacpy.acoustics import <name>`) and never
 name a sub-module.
 
@@ -304,7 +313,7 @@ name a sub-module.
 
 | Function | Implements | Inputs |
 |---|---|---|
-| `sound_speed_mackenzie(temperature, salinity, depth)` | Mackenzie (1981), nine-term | °C, PSU, **metres** |
+| `sound_speed_mackenzie(temperature, salinity, *, depth=)` | Mackenzie (1981), nine-term | °C, PSU, **metres** |
 | `sound_speed_unesco(temperature, salinity, *, depth= \| pressure_dbar=, latitude_deg=)` | UNESCO (1983) / Chen & Millero (1977) | °C (ITS-90), PSU (PSS-78), **decibars** |
 | `sound_speed_delgrosso(temperature, salinity, *, depth= \| pressure_dbar=, latitude_deg=)` | Del Grosso (1974), "NRL II" | °C (ITS-90), PSU, **decibars** |
 | `sound_speed_teos10(temperature, salinity, *, depth= \| pressure_dbar=, latitude_deg=)` | TEOS-10 (IOC/SCOR/IAPSO 2010), Eqn. (2.17.1) on the IAPWS-08/09 Gibbs function | °C (ITS-90), PSU (PSS-78), **decibars** |
@@ -312,15 +321,36 @@ name a sub-module.
 **Water properties, one rule everywhere.** Every water-property input —
 `temperature`, `salinity` and `pH` of these formulas, of
 `absorption_francois_garrison`, of the `FrancoisGarrison` law and of
-`SoundSpeedProfile.from_temperature_salinity` — is a single value, an array
-on the depths it is evaluated at (broadcast as usual), or `(depth, value)`
-pairs interpolated linearly onto those depths, end values held. Pairs need
-the evaluation coordinate, `depth=` (pairs are always on depth, in metres,
-for the pressure equations too), and a call without it is
-refused. One helper, `uacpy.core._validate.water_property`, applies the rule
-for all of them. `absorption_thorp(f, depth=)` takes the same depth argument,
-so its call has the shape of `absorption_francois_garrison`'s; Thorp has no
-water inputs and no depth term, so its value is the same at every depth.
+`SoundSpeedProfile.from_temperature_salinity` — is exactly one of:
+
+- a single value — constant water;
+- an array of **exactly** the shape of `depth` — one value per point,
+  read point by point;
+- otherwise `(depth, value)` pairs, an `(M, 2)` array such as
+  `[(0, 22), (60, 12), (200, 10)]` — a profile measured on depths of its
+  own (metres, finite, non-negative, strictly increasing), interpolated
+  linearly onto the depths evaluated, end values held. Pairs need `depth=`
+  (metres, for the pressure equations too); a call without it, or at
+  `pressure_dbar=`, is refused.
+
+Any other array is refused with a `ConfigurationError` that names the
+property, both shapes and the three forms: a water array is never broadcast
+against `depth`. So an omitted or scalar `depth` takes single values and
+pairs only (a temperature sweep at one depth passes
+`depth=np.zeros_like(T)`), and two casts side by side, `T` of shape
+`(N, 2)`, take a depth grid of that shape, `np.column_stack([z, z])`. Values
+come first, which is the one corner of the rule: `M` pairs evaluated on a
+depth grid of exactly shape `(M, 2)` are read as `2M` values, not as a
+profile. At `pressure_dbar=` the arrays have the pressure's shape.
+`frequency` is not a water property and broadcasts with `depth` as usual.
+The `FrancoisGarrison` law has no evaluation depth of its own, so it takes
+a single value or pairs; its `from_temperature_salinity(depths, T, S)` also
+takes arrays of `depths`' shape. A profile the law holds comes back as a
+record (`law.temperature`) that every water-property input takes again. One
+helper, `uacpy.core._validate.water_property`, applies the rule for all of
+them. `absorption_thorp(f, depth=)` takes the same depth argument, so its
+call has the shape of `absorption_francois_garrison`'s; Thorp has no water
+inputs and no depth term, so its value is the same at every depth.
 
 ```python
 z = np.array([0.0, 30.0, 100.0, 500.0])
@@ -392,16 +422,18 @@ Mackenzie is the cheap nine-term fit. It is validated for
 `T ∈ [-2, 30] °C`, `S ∈ [25, 40] PSU`, `depth ∈ [0, 8000] m`, and emits a
 `ValidityWarning` outside those ranges rather than quietly extrapolating.
 
-All four vectorise over any argument.
+All four evaluate point by point: a temperature array takes a coordinate
+of its own shape.
 
 ```python
 temperatures = np.linspace(0.0, 30.0, 121)
 pressures = np.linspace(0.0, 6000.0, 121)          # dbar ≈ metres
+surface = np.zeros_like(temperatures)              # one point per temperature
 
-unesco = acoustics.sound_speed_unesco(temperatures, 35.0, depth=0.0)
-delgrosso = acoustics.sound_speed_delgrosso(temperatures, 35.0, depth=0.0)
-teos10 = acoustics.sound_speed_teos10(temperatures, 35.0, depth=0.0)
-mackenzie = acoustics.sound_speed_mackenzie(temperatures, 35.0, depth=0.0)
+unesco = acoustics.sound_speed_unesco(temperatures, 35.0, depth=surface)
+delgrosso = acoustics.sound_speed_delgrosso(temperatures, 35.0, depth=surface)
+teos10 = acoustics.sound_speed_teos10(temperatures, 35.0, depth=surface)
+mackenzie = acoustics.sound_speed_mackenzie(temperatures, 35.0, depth=surface)
 
 T, P = np.meshgrid(temperatures, pressures)
 delta = (acoustics.sound_speed_delgrosso(T, 35.0, pressure_dbar=P)
@@ -421,7 +453,8 @@ Mackenzie within 0.25 m/s, across the whole temperature range. At that level the
 the uncertainty in your `T` and `S`.
 
 Right: the same difference over the full temperature–pressure plane. Del Grosso
-is slower than UNESCO everywhere here, and the gap grows with both temperature
+is slower than UNESCO everywhere here but on the surface row between 14.5 and
+20.5 °C, where it is faster by at most 0.011 m/s, and the gap grows with both temperature
 and pressure to −3.7 m/s in the 30 °C / 5600 dbar corner — 0.22 %, or 0.14 s of
 travel time over a 100 km path. That corner is a numerical extreme rather than
 an ocean: Del Grosso built his tables from *realistic* `(S, T, P)` triads and
@@ -462,29 +495,34 @@ number consistent with `bottom_loss_curve`, negate the log:
 
 | Function | For |
 |---|---|
-| `pressure(x, sensitivity, gain, volt_params=None)` | Recorded volts (or ADC bits) → **pascals**, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
+| `pressure_from_recording(x, sensitivity, gain, volt_params=None)` | Recorded volts (or ADC bits) → **pascals**, given hydrophone sensitivity in dB re 1 V/µPa and preamp gain in dB |
 | `spl(x, ref=REFERENCE_PRESSURE_WATER, *, axis=None, floor=PRESSURE_FLOOR, complex_record=None)` | A pressure time series in Pa → mean SPL in dB re `ref` (default 1 µPa, written in Pa as `1e-6`). `axis=-1` gives one level per record of a block |
 | `peak_level(x, ref=…, *, axis=None, floor=…, complex_record=None)` | The same record → **peak** SPL, `20·log10(max\|x\|/ref)` |
-| `sound_exposure_level(p, sample_rate, ref=…, *, axis=-1)` | A record → **SEL**, `10·log10(Σp²/fs/ref²)` in dB re 1 µPa²·s; the rate, as on `Field.sound_exposure_level` (a value below 1 Hz is refused as a sample interval) |
-| `power_to_dB(power, ref=1e-6, floor=1e-30)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
+| `sound_exposure_level(pressure, sample_rate, ref=…, *, axis=-1, floor=…, complex_record=None, weighting=None)` | A record → **SEL**, `10·log10(Σp²/fs/ref²)` in dB re 1 µPa²·s; the rate, as on `Field.sound_exposure_level` (a value below 1 Hz is refused as a sample interval). `weighting=` gives the frequency-weighted SEL — a hearing group, your own `W(f)` function or a `(f, W_dB)` table ([results §6b](results.md#6b-weighted-accumulated-and-moving-source-exposure)) |
+| `cumulative_sound_exposure_level(pressure, sample_rate, ref=…, *, step=1.0, reset=None, weighting=None, axis=-1, floor=…, complex_record=None)` | `(times, levels)`: the SEL accumulated at the end of every `step` seconds, restarting every `reset` seconds; its last value is `sound_exposure_level`'s. Reads a `np.memmap` one block at a time |
+| `track_exposure(sel_dB, ranges, positions, *, closest_approach, along=None, axis=-1, event_duration=None)` | The cumulative SEL of events along a straight line: the energy sum of one event's SEL at each event's distance `√(d² + (x_i − a)²)`; `along=` gives the plan view. For a continuous source, `sel_dB` is a received level and `event_duration=` the seconds each event lasts (each event's SEL is that level plus `10·log10(event_duration / 1 s)`). `Field.track_exposure` wraps it |
+| `weighted_pressure(pressure, sample_rate, weighting, *, axis=-1, complex_record=None)` | The frequency-weighted pressure `p_w(t)`, time-aligned (a zero-phase spectral filter) |
+| `frequency_weighting(frequency, weighting)` | `W(f)` in dB of any accepted weighting on your grid; `-inf` where it carries no weight |
+| `auditory_weighting(frequency, group)` | The Southall et al. (2019) weighting of one hearing group, the curve a group name stands for; also exported by `uacpy.noise` with the [noise guide](noise.md)'s spectrum helpers |
+| `power_to_dB(power, ref=1e-6, *, floor=1e-30)` | A **squared** quantity (PSD, mean-square pressure, an f-k spectrum) → dB re `ref` |
 | `sum_levels_dB(*levels_dB, axis=None)` | The **incoherent** (power) sum of dB levels — the separate arguments, or one array's levels along `axis` (`sum_levels_dB([L1, L2, L3])` without `axis` is the three levels unchanged), `10·log10(Σ10^(L/10))`, through `logaddexp` so a very loud term cannot overflow and a `-inf` term adds nothing; two equal levels give +3.01 dB. The sum of no-energy markers stays the marker, and a NaN level sums to NaN |
 | `integrate_psd(psd, frequencies, freq_min=None, freq_max=None)` | The power a one-sided PSD carries in a band, `∫ psd df` (Pa²/Hz → Pa²), with the band edges spliced into the grid; a band reaching past the spectrum is refused |
-| `band_level(level_density_dB, frequencies, freq_min=None, freq_max=None)` | The band level of a level density, `10·log10 ∫ 10^(L/10) df`; an empty band is `-inf`. `WenzNoise.band_level`, `weighted_level`, `wind_noise_level(band_integrate=True)` and `decidecade_band_levels` all integrate through it |
+| `band_level(level_density_dB, frequencies, freq_min=None, freq_max=None)` | The band level of a level density, `10·log10 ∫ 10^(L/10) df`; an empty band is `-inf`. `WenzNoise.band_level`, `WenzNoise.decidecade_levels`, `weighted_level` and `decidecade_band_levels` all integrate through it |
 | `received_level_dB(source_level_dB, tl_dB)` | The sonar-equation propagation term `SL - TL` (dB re 1 µPa); a no-energy cell (`\|TL\| >= 600`) stays the marker, at -600, instead of becoming a finite `SL - 600`. `Field.at_source_level` is this on a field |
 | `no_energy_mask(levels_dB)` | `True` where a dB value is the **no-energy marker** (±600 dB, `NO_ENERGY_DB`: a cell a model reached with no energy), not a level — the one test every metric and plotter excludes such cells with. A genuine deep null is kept |
 
 #### Volts → Pa → spectrum → dB
 
-`pressure` is the one place a recording's own units enter the package. It takes
+`pressure_from_recording` is the one place a recording's own units enter the package. It takes
 the hydrophone's data-sheet sensitivity in dB re 1 V/µPa (a negative number)
 and the preamp gain in dB, and returns **pascals**, so every estimator and
 every default reference downstream reads the same unit:
 
 ```python
-from uacpy.acoustics import pressure, spl
+from uacpy.acoustics import pressure_from_recording, spl
 from uacpy.acoustic_signal import welch
 
-p = pressure(volts, sensitivity=-165.0, gain=20.0)   # Pa
+p = pressure_from_recording(volts, sensitivity=-165.0, gain=20.0)   # Pa
 spl(p)                                               # dB re 1 µPa
 est = welch(p, sample_rate)         # Pa²/Hz
 est.plot()                                           # dB re 1 µPa²/Hz
@@ -492,7 +530,7 @@ est.plot()                                           # dB re 1 µPa²/Hz
 
 Pass `volt_params=(bits, v_ref)` when `x` is raw ADC counts rather than volts;
 the conversion to volts then happens first. The µPa in the sensitivity unit and
-the Pa that comes back out are 120 dB apart, and `pressure` carries that factor
+the Pa that comes back out are 120 dB apart, and `pressure_from_recording` carries that factor
 — a hand-rolled `10**(SH/20)` division leaves the level 120 dB high.
 
 `power_to_dB` is the conversion every spectral estimator in the package uses:
@@ -506,7 +544,8 @@ weighting, see [noise](noise.md) and [signal processing](signal.md).
 is set by the **rms**, `peak_level` by the **peak**, `sound_exposure_level` by
 the **energy**. A short transient can reach a damaging peak while carrying
 little energy, and a long one can do the reverse — which is why Southall et al.
-(2019) state injury criteria as a peak *and* an exposure, never one alone. SEL
+(2019) state their **impulsive** criteria as a peak *and* an exposure, either
+one sufficient. Their non-impulsive criteria are weighted SEL alone: "For impulsive exposures, both criteria are defined for all marine mammal groups. However, for non-impulsive exposures, only frequency-weighted SEL criteria are given here" (their Tables 6 and 7). SEL
 also accumulates where the other two do not: doubling the duration of a steady
 signal adds 3 dB to SEL and nothing to `spl`.
 
@@ -574,10 +613,25 @@ stack = uacpy.run_parallel(jobs, coordinate_name='dr').stack()
 
 `ParallelResult` holds `results` (aligned to the jobs, `None` where one
 raised), `errors` (`{job_index: exception}`), `labels` and `coordinate_name`.
-It iterates and indexes like a list, and `.stack()` bundles the successes into
-a [`ResultStack`](results.md). Stacking requires the slabs to share a concrete
+It iterates and indexes like a list, and `.stack()` bundles the successes
+along one new leading axis named by `coordinate_name` — at the job labels
+when every one is a real number, else at the job index, with a warning:
+`Field` results into
+one `Field` (they must share a grid), other results into a
+[`ResultStack`](results.md). Either requires the results to share a concrete
 type *and* the same `model` / `backend`, so it is for single-model sweeps —
-iterate `results` for a cross-model batch.
+iterate `results` for a cross-model batch. The joined `Field` carries one run
+record only when the jobs share it (one-depth jobs that differ only in their
+source depth, stacked over `'source_depth'`, get the multi-depth record);
+jobs whose run records differ (a knob sweep) leave `run_settings=None`, and
+each job's record stays on `results[i].run_settings`. A sweep that leaves the
+jobs' records equal keeps the record — attenuation on Kraken, Scooter,
+Bellhop or OAST, whose records hold no environment; RAM's record holds the
+grid it resolves from the environment, so a sweep that changes that grid
+drops it (attenuation: the absorbing layer sets its depth extent) and one
+that does not (bottom density) keeps it — and jobs on
+different waveguide sound speeds do not join at all: iterate `results` for
+them.
 
 ### The four things worth knowing
 
@@ -701,7 +755,7 @@ into something that stops the run.
 
 - **[Environment](environment.md)** — where the material presets end up, and
   the collapse policy the warnings announce.
-- **[Results](results.md)** — the `Field` the metrics score, `ResultStack`, and
+- **[Results](results.md)** — the `Field` the metrics score, the field of several sources, and
   `result.metadata`.
 - **[File I/O](io.md)** — `work_dir` / `cleanup`, and the readers behind every
   path `run_parallel` can hand back.

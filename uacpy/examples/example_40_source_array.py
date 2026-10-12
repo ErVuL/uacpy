@@ -1,4 +1,4 @@
-"""A vertical source array: the stack, the two totals, the level, the response.
+"""A vertical source array: the fields, the two totals, the level, the response.
 
 Several sources driven together raise questions one source never does. How do
 their fields combine — coherently, as the elements of one array, or in
@@ -18,7 +18,8 @@ agree while the pattern is symmetric in +/-theta, and part company once
 steering breaks that symmetry.
 
 Uses: Source(depths=[...], weights=, source_level_dB=, beam_pattern=) ·
-ResultStack.plot / .superpose(coherent=True|False) · Field.at_source_level ·
+Field over source_depth: .plot / .superpose(coherent=True|False) ·
+Field.at_source_level ·
 Source.array_factor / .array_beam_pattern · Modes.excitation ·
 plot_mode_excitation · Kraken (one launch for every depth) vs RAM (one march
 per depth, same contract)
@@ -71,43 +72,44 @@ fleet = uacpy.Source(depths=depths, frequencies=FREQ,
                      source_level_dB=180.0)
 kraken = uacpy.Kraken(verbose=False)
 
-# ── 1. one slab per source ──────────────────────────────────────────────
+# ── 1. one field per source ─────────────────────────────────────────────
 # Kraken writes every depth into ONE deck and the .shd reader splits it, so
 # this is a single binary launch; RAM marches once per depth. Either way the
-# contract is the same: a ResultStack over source_depth whose slabs are the
-# unit-amplitude field of one source.
-stack = kraken.run(env, array, receiver)
-fleet_stack = kraken.run(env, fleet, receiver)
-print(f"Kraken: {stack.n_slabs} slabs over source_depth "
-      f"{np.round(stack.coordinate, 1).tolist()}")
+# contract is the same: one Field whose source_depth axis holds the
+# unit-amplitude field of each source.
+sources = kraken.run(env, array, receiver)
+fleet_sources = kraken.run(env, fleet, receiver)
+print(f"Kraken: {sources.coords['source_depth'].size} fields over "
+      f"source_depth {np.round(sources.coords['source_depth'], 1).tolist()}")
 
 # env= puts each panel in the waveguide it was computed in, and the grid
-# marks each panel's OWN source — the stacking coordinate is source_depth, so
-# 'one source at a time' is exactly what a panel shows.
-fig, _ = fleet_stack.plot(
-    env=env, title='One source at a time — the slabs a total is built from')
-fig.savefig(OUT / 'example_40_slabs.png', dpi=140, bbox_inches='tight')
+# marks each panel's OWN source — one panel per source depth, so 'one source
+# at a time' is exactly what a panel shows.
+fig, _ = fleet_sources.plot(
+    env=env, title='One source at a time — the fields a total is built from')
+fig.savefig(OUT / 'example_40_sources.png', dpi=140, bbox_inches='tight')
 plt.close(fig)
 
 # The same Source on a PE gives the same shape of answer through the looped
 # path, which is what makes the two engines comparable cell by cell.
-ram_stack = uacpy.RAM(verbose=False).run(env, array, receiver)
-print(f"RAM   : {ram_stack.n_slabs} slabs, looped one march per depth")
+ram_sources = uacpy.RAM(verbose=False).run(env, array, receiver)
+print(f"RAM   : {ram_sources.coords['source_depth'].size} fields, looped one "
+      f"march per depth")
 
 # ── 2. the two totals ───────────────────────────────────────────────────
 # coherent: the elements are one array, driven with a fixed relative phase.
 # incoherent: the same five sources, mutually incoherent - unrelated tones,
-# separate platforms. Same slabs, different physics, different answer.
-coherent = stack.superpose()
-incoherent = fleet_stack.superpose(coherent=False)
+# separate platforms. Same fields, different physics, different answer.
+coherent = sources.superpose()
+incoherent = fleet_sources.superpose(coherent=False)
 
 one = kraken.run(env, uacpy.Source(depths=float(depths[2]), frequencies=FREQ,
                                    source_level_dB=180.0), receiver)
 med = lambda f: float(np.nanmedian(np.asarray(f.dB)))
-print(f"median level, one source        : {med(one):6.2f} dB")
-print(f"median level, coherent total    : {med(coherent):6.2f} dB "
+print(f"median loss, one source         : {med(one):6.2f} dB")
+print(f"median loss, coherent total     : {med(coherent):6.2f} dB "
       f"({med(one) - med(coherent):+.2f} dB of array gain)")
-print(f"median level, incoherent total  : {med(incoherent):6.2f} dB "
+print(f"median loss, incoherent total   : {med(incoherent):6.2f} dB "
       f"({med(one) - med(incoherent):+.2f} dB)")
 
 # ── 3. the level, not the loss ──────────────────────────────────────────

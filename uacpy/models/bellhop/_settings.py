@@ -36,7 +36,7 @@ class BellhopSettings(EngineSettings):
         The deck's ``RunType(1:1)``: ``'C'``, ``'I'``, ``'S'`` (TL),
         ``'R'`` (rays), ``'E'`` (eigenrays) or ``'A'`` (arrivals, which the
         BROADBAND and TIME_SERIES syntheses are built from).
-    center_frequency : float
+    fc : float
         The one frequency (Hz) the rays are traced at: the source frequency,
         or on BROADBAND / TIME_SERIES the centre of a multi-frequency
         Source's band.
@@ -86,7 +86,7 @@ class BellhopSettings(EngineSettings):
     backend: str
     executable: str
     run_type: str
-    center_frequency: float
+    fc: float
     beam_type: str
     n_beams: int
     launch_angles: Tuple[float, float]
@@ -123,4 +123,4 @@ class BellhopSettings(EngineSettings):
         d = dict(d)
         if d.get('bounce') is not None:
             d['bounce'] = RunSettings.from_dict(d['bounce'])
-        return cls(**d)
+        return super().from_dict(d)

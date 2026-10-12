@@ -167,7 +167,7 @@ class TestElasticBoundaryAutoDetection:
     def test_kraken_detects_elastic_bottom(self, elastic_env, source, receiver_10x10):
         """Test that Kraken detects an elastic bottom and dispatches to krakenc."""
         kraken = Kraken(verbose=False)
-        result = kraken.compute_tl(elastic_env, source, receiver_10x10)
+        result = kraken.compute_field(elastic_env, source, receiver_10x10)
 
         assert result is not None
         assert result.data.shape == (len(receiver_10x10.depths), len(receiver_10x10.ranges))
@@ -184,7 +184,7 @@ class TestElasticBoundaryAutoDetection:
         """Test that Kraken works with a fluid bottom (dispatches to kraken.exe)."""
         kraken = Kraken(verbose=False)
 
-        result = kraken.compute_tl(fluid_env, source, receiver_10x10)
+        result = kraken.compute_field(fluid_env, source, receiver_10x10)
 
         assert result is not None
         assert result.data.shape == (len(receiver_10x10.depths), len(receiver_10x10.ranges))
@@ -216,8 +216,8 @@ class TestElasticBoundaryAutoDetection:
         """
         kraken = Kraken(verbose=False)
 
-        result_elastic = kraken.compute_tl(elastic_env, source, receiver_10x10)
-        result_fluid = kraken.compute_tl(fluid_env, source, receiver_10x10)
+        result_elastic = kraken.compute_field(elastic_env, source, receiver_10x10)
+        result_fluid = kraken.compute_field(fluid_env, source, receiver_10x10)
 
         # .dB is the dB view regardless of how the Field stores its data.
         diff = np.abs(result_elastic.dB - result_fluid.dB)
@@ -345,10 +345,10 @@ class TestBounceToScooterWorkflow:
         )
 
         scooter = Scooter(verbose=False, c_low=1400.0, c_high=10000.0)
-        result_with_file = scooter.compute_tl(env_with_rc, source, receiver_10x10)
+        result_with_file = scooter.compute_field(env_with_rc, source, receiver_10x10)
 
         # Workflow 2: Direct elastic
-        result_direct = scooter.compute_tl(elastic_env, source, receiver_10x10)
+        result_direct = scooter.compute_field(elastic_env, source, receiver_10x10)
 
         diff = np.abs(result_with_file.dB - result_direct.dB)
         mean_diff = np.nanmean(diff)
@@ -374,7 +374,7 @@ class TestWorkflowComparison:
         """
         # Approach 1: Kraken auto-detection
         kraken = Kraken(verbose=False)
-        result_kraken = kraken.compute_tl(elastic_env, source, receiver_10x10)
+        result_kraken = kraken.compute_field(elastic_env, source, receiver_10x10)
 
         # Approach 2: BOUNCE → SCOOTER
         bounce = Bounce(verbose=False, c_low=1400.0, c_high=10000.0, rmax_m=10000.0, work_dir=tmp_path)
@@ -402,7 +402,7 @@ class TestWorkflowComparison:
         )
 
         scooter = Scooter(verbose=False, c_low=1400.0, c_high=10000.0)
-        result_scooter = scooter.compute_tl(env_with_rc, source, receiver_10x10)
+        result_scooter = scooter.compute_field(env_with_rc, source, receiver_10x10)
 
         # Both should produce valid results
         assert result_kraken is not None

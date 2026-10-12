@@ -36,30 +36,60 @@ __all__ = ['DataSource', 'DataProvenance', 'SOURCES', 'citations',
            'provenance_table']
 
 
-def _resolve(obj) -> List[DataProvenance]:
+def _resolve(obj, who='citations') -> List[DataProvenance]:
     """Normalise any accepted input to a uniform list of :class:`DataProvenance`.
 
     A bare :class:`DataSource` or a catalogue id is wrapped in a
     ``DataProvenance`` with no fetch specifics, so every consumer reads the
-    same type (``.source`` for the dataset, the rest for the fetch)."""
+    same type (``.source`` for the dataset, the rest for the fetch). A
+    carrier gives its ``.data_sources``; a record a fetcher returns
+    (``TSProfile``, ``BathyGrid``, ``SeabedSample``, ...) gives its
+    ``.provenance``, none when that is ``None`` (user-supplied data).
+    Anything else is refused in ``who``'s name, including an object whose
+    ``.provenance`` is not a data record (a model's engine provenance)."""
     def wrap(x):
         if isinstance(x, DataProvenance):
             return x
         if isinstance(x, DataSource):
             return DataProvenance(source=x)
-        if x in SOURCES:
+        if isinstance(x, str) and x in SOURCES:
             return DataProvenance(source=SOURCES[x])
         raise ConfigurationError(
-            f"citations: unknown source id {x!r}; valid ids: {sorted(SOURCES)}."
+            f"{who}: unknown source id {x!r}; valid ids: {sorted(SOURCES)}."
         )
 
     if obj is None:
         return [DataProvenance(source=s) for s in SOURCES.values()]
     if hasattr(obj, 'data_sources'):       # an Environment / carrier
         return list(obj.data_sources)
+    if hasattr(obj, 'provenance'):         # a record a fetcher returned
+        prov = obj.provenance
+        if prov is None:
+            return []
+        if not isinstance(prov, (DataProvenance, DataSource, str)):
+            raise ConfigurationError(
+                f"{who}: a {type(obj).__name__} carries no data sources; its "
+                f".provenance is a {type(prov).__name__}.",
+                remediation=(
+                    "A model's own reference is its .citation. Pass an "
+                    "Environment or carrier (its .data_sources), a record a "
+                    "fetcher returned, a DataProvenance or DataSource, a "
+                    "source id, or an iterable of those."))
+        return [wrap(prov)]
     if isinstance(obj, (str, DataSource, DataProvenance)):  # a single id/source
         obj = [obj]
-    return [wrap(s) for s in obj]
+    try:
+        items = list(obj)
+    except TypeError:
+        raise ConfigurationError(
+            f"{who}: a {type(obj).__name__} carries no data sources.",
+            remediation=(
+                "Pass an Environment or carrier (its .data_sources), a "
+                "record a fetcher returned (its .provenance), a "
+                "DataProvenance or DataSource, a source id, or an iterable "
+                "of those."),
+        ) from None
+    return [wrap(s) for s in items]
 
 
 def citations(obj=None) -> str:
@@ -69,8 +99,10 @@ def citations(obj=None) -> str:
     ----------
     obj : optional
         ``None`` → the whole catalogue; an ``Environment`` / carrier → the
-        provenance it carries (``.data_sources``); or an iterable of source
-        ids / :class:`DataSource` / :class:`DataProvenance`.
+        provenance it carries (``.data_sources``); a record a fetcher
+        returned (``TSProfile``, ``BathyGrid``, ``SeabedSample``, ...) → its
+        ``.provenance``; or a source id, :class:`DataSource`,
+        :class:`DataProvenance`, or an iterable of those.
 
     Returns
     -------
@@ -107,7 +139,8 @@ def provenance_table(*objs):
     ----------
     *objs
         Anything :func:`citations` takes — an ``Environment`` or carrier
-        (its ``.data_sources``), source ids, :class:`DataSource` or
+        (its ``.data_sources``), a record a fetcher returned (its
+        ``.provenance``), source ids, :class:`DataSource` or
         :class:`DataProvenance` records — and results: a result adds a row
         for the engine that produced it (its ``model_source``). Pass the
         environment and the result together for data and engine in one
@@ -138,7 +171,7 @@ def provenance_table(*objs):
                 'offset_km': None, 'point_kind': None, 'cell_size_deg': None,
                 'from_neighbour_cell': None, 'range_m': None})
             continue
-        for prov in _resolve(obj):
+        for prov in _resolve(obj, who='provenance_table'):
             src = prov.source
             rows.append({
                 'kind': 'data', 'id': src.id, 'name': src.name,

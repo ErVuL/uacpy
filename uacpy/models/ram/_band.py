@@ -10,7 +10,7 @@ from uacpy.core.environment import (
 )
 from uacpy.core.source import Source
 from uacpy.models._defaults import (
-    DEFAULT_BROADBAND_BANDWIDTH_FACTOR, DEFAULT_BROADBAND_N_FREQS,
+    DEFAULT_BROADBAND_BANDWIDTH_FACTOR, DEFAULT_BROADBAND_N_FREQUENCIES,
 )
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, NumericsWarning,
@@ -36,18 +36,22 @@ def resolve_broadband_grid(source: Source, *,
 
     A multi-element ``frequencies`` array defines the band itself:
     ``fc`` is an array bin near its centre and ``Q`` / ``T`` are derived
-    from its half-width and spacing, so the marched sweep contains every
-    requested bin and the result is trimmed back to exactly them (the
-    derivation is logged, not warned). A lone pinned ``Q`` or ``T`` is
-    ignored in that case, with a warning — the array already fixes both,
-    and honouring one pin would march a band that misses the request.
-    Only a pinned *pair* replaces the array's band (the array then
-    contributes only fc), with a warning naming both grids.
+    from its half-width and spacing (:func:`array_sweep`), so the marched
+    sweep contains every requested bin and the result is trimmed back to
+    exactly them (the derivation is logged, not warned). A pinned ``Q``
+    and/or ``T`` beside the array is a second description of the same
+    band: when the sweep it gives around the array's ``fc`` marches the
+    array's own bins the pinned values are used, otherwise the two
+    contradict each other and ``ConfigurationError`` names both. (A
+    TIME_SERIES grid derived from the pulse is a default, not a request:
+    :meth:`RAM._requested_frequencies` hands it over already rebuilt on
+    the pins, :func:`sweep_on_the_pins`.)
 
     ``require_uniform=False`` (the Collins backends on ``BROADBAND``,
     which march the requested bins one subprocess each) lets a
     non-uniform array through; ``Q`` / ``T`` then come back ``None``,
-    since no ``(fc, Q, T)`` sweep describes the grid.
+    since no ``(fc, Q, T)`` sweep describes the grid — and a pinned ``Q``
+    or ``T`` beside it is refused for the same reason.
 
     Single-element arrays use ``frequencies[0]`` as fc: one bin when
     neither ``Q`` nor ``T`` is pinned (``run()`` has already expanded a
@@ -83,7 +87,7 @@ def resolve_broadband_grid(source: Source, *,
                 f"), i.e. {np.size(frq)} bins over "
                 f"{float(np.min(frq)):.4g}-{float(np.max(frq)):.4g} Hz "
                 f"(df = 1/T = {1.0 / T:.4g} Hz). The default band is "
-                f"{DEFAULT_BROADBAND_N_FREQS} bins over "
+                f"{DEFAULT_BROADBAND_N_FREQUENCIES} bins over "
                 f"fc·(1 ± {DEFAULT_BROADBAND_BANDWIDTH_FACTOR / 2:g}).",
                 FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
@@ -100,40 +104,27 @@ def resolve_broadband_grid(source: Source, *,
             remediation="Pass the bins sorted in increasing order, each "
                         "once (np.unique sorts and de-duplicates).",
         )
-    if knobs.q_factor is not None and knobs.record_duration is not None:
-        # Both pinned: the constructor pair IS the sweep spec; the array
-        # only contributes the centre bin. Say exactly what replaces
-        # what: substituting the band silently would leave the caller
-        # reading a sweep it never asked for.
-        fc = float(freqs[len(freqs) // 2])
-        Q, T = float(knobs.q_factor), float(knobs.record_duration)
-        marched = broadband_frequencies(fc, Q, T)
-        give_notice(notices,
-            f"RAM BROADBAND: q_factor={Q:g} and record_duration={T:g} are pinned, so the "
-            f"{len(freqs)}-bin frequency array ({freq_min:.2f}-"
-            f"{freq_max:.2f} Hz) contributes only its centre bin "
-            f"fc={fc:.2f} Hz; the sweep marches {np.size(marched)} bins "
-            f"over {float(np.min(marched)):.2f}-"
-            f"{float(np.max(marched)):.2f} Hz. Pass the array with q_factor / record_duration "
-            f"unset to march the array itself.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        return fc, Q, T
-    if knobs.q_factor is not None or knobs.record_duration is not None:
-        knob, value = (('q_factor', knobs.q_factor) if knobs.q_factor is not None
-                       else ('record_duration', knobs.record_duration))
-        give_notice(notices,
-            f"RAM BROADBAND: {knob}={value:g} is pinned alone, and the "
-            f"{len(freqs)}-bin frequency array ({freq_min:.2f}-"
-            f"{freq_max:.2f} Hz) already fixes the band, so {knob} is "
-            f"ignored and the array's bins are marched. Unset {knob} to "
-            f"silence this, or pin both q_factor and record_duration to march an (fc, Q, T) "
-            f"sweep around the array's centre instead.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-    spacings = np.diff(freqs)
-    if not np.allclose(spacings, spacings[0], rtol=1e-4):
-        if not require_uniform and np.all(spacings > 0.0):
+    pinned = [f"{name}={getattr(knobs, name):g}"
+              for name in ('q_factor', 'record_duration')
+              if getattr(knobs, name) is not None]
+    pins = ' and '.join(pinned)
+    sweep = array_sweep(freqs)
+    if sweep is None:
+        spacings = np.diff(freqs)
+        if pinned:
+            raise ConfigurationError(
+                f"RAM BROADBAND: {pins} describe{'s' if len(pinned) == 1 else ''} "
+                f"a uniform (fc, Q, T) sweep, and the {len(freqs)}-bin "
+                f"frequency array ({freq_min:.4g}-{freq_max:.4g} Hz) is "
+                f"non-uniform (Δf from {spacings.min():.4g} to "
+                f"{spacings.max():.4g} Hz), which no sweep describes: the "
+                f"two settings contradict each other.",
+                remediation=("Leave q_factor and record_duration unset to march the "
+                             "frequency array, or pass a single-frequency "
+                             "Source without frequencies= to march the (fc, "
+                             "q_factor, record_duration) sweep around it."),
+            )
+        if not require_uniform:
             return float(freqs[len(freqs) // 2]), None, None
         raise ConfigurationError(
             f"RAM BROADBAND: non-uniform frequency spacing "
@@ -143,39 +134,106 @@ def resolve_broadband_grid(source: Source, *,
             f"Collins backends (backend='ramgeo' / 'rams' / 'ramsurf') "
             f"march any increasing list on BROADBAND."
         )
-    df = float(spacings[0])
-    # (fc, Q, T) can only march bins at fc + m·Δf, so anchor fc on an
-    # actual array bin (the upper-middle one) rather than the band
-    # midpoint — an even-length array's midpoint sits half a bin
-    # off-grid, which would drop one bin and shift every other by
-    # Δf/2. The half-band (n//2 + 1/2)·Δf puts peramx.f90:361's
-    # nf1 = int((bw-df)/df)+1 mid-interval (robust to float noise):
-    # an odd count round-trips exactly, an even count marches one
-    # extra bin at freq_max + Δf — a superset of the request that
-    # ``requested_broadband_bins`` trims back off the result.
-    fc = float(freqs[len(freqs) // 2])
-    bw_half = (len(freqs) // 2 + 0.5) * df
-    Q = fc / bw_half
-    T = 1.0 / df
+    fc, Q, T = sweep
     marched = broadband_frequencies(fc, Q, T)
+    if pinned:
+        Q_pin = Q if knobs.q_factor is None else float(knobs.q_factor)
+        T_pin = (T if knobs.record_duration is None
+                 else float(knobs.record_duration))
+        on_pins = broadband_frequencies(fc, Q_pin, T_pin)
+        if not (on_pins.size == marched.size
+                and np.allclose(on_pins, marched, rtol=0.0, atol=1e-3 / T)):
+            raise ConfigurationError(
+                f"RAM BROADBAND: {pins} around the frequency array's centre "
+                f"bin fc={fc:.4g} Hz march{'es' if len(pinned) == 1 else ''} "
+                f"{on_pins.size} bins over {float(on_pins[0]):.4g}-"
+                f"{float(on_pins[-1]):.4g} Hz at Δf = {1.0 / T_pin:.4g} Hz, "
+                f"and the {len(freqs)}-bin frequency array asks for "
+                f"{freq_min:.4g}-{freq_max:.4g} Hz at Δf = {1.0 / T:.4g} Hz: "
+                f"the two settings contradict each other.",
+                remediation=("Leave q_factor and record_duration unset to march the "
+                             "frequency array, or pass a single-frequency "
+                             "Source without frequencies= to march the (fc, "
+                             "q_factor, record_duration) sweep around it."),
+            )
+        Q, T = Q_pin, T_pin
     log(
         f"RAM BROADBAND: the {len(freqs)}-bin frequency array "
-        f"({freq_min:.2f}-{freq_max:.2f} Hz, Δf={df:.4g} Hz) resolves to "
-        f"fc={fc:.2f} Hz, Q={Q:.4f}, T={T:.4f} s; the sweep spans "
-        f"{np.size(marched)} bins and the result carries exactly the "
-        f"{len(freqs)} requested bins."
+        f"({freq_min:.2f}-{freq_max:.2f} Hz, Δf={1.0 / T:.4g} Hz) resolves to "
+        f"fc={fc:.2f} Hz, Q={Q:.4f}, T={T:.4f} s"
+        + (f" ({pins} pinned)" if pinned else "") +
+        f"; the sweep spans {np.size(marched)} bins and the result carries "
+        f"exactly the {len(freqs)} requested bins."
     )
     return fc, Q, T
 
 
+def array_sweep(freqs):
+    """``(fc, Q, T)`` of the ``(fc, Q, T)`` sweep that marches every bin of
+    the increasing array ``freqs`` (uniform to ``rtol=1e-4``), or ``None``
+    for a non-uniform array, which no sweep describes.
+
+    ``(fc, Q, T)`` can only march bins at ``fc + m·Δf``, so ``fc`` is an
+    actual array bin (the upper-middle one) rather than the band midpoint —
+    an even-length array's midpoint sits half a bin off-grid, which would
+    drop one bin and shift every other by ``Δf/2``. The half-band
+    ``(n//2 + 1/2)·Δf`` puts ``peramx.f90:361``'s
+    ``nf1 = int((bw-df)/df)+1`` mid-interval (robust to float noise): an
+    odd count round-trips exactly, an even count marches one extra bin at
+    ``freq_max + Δf`` — a superset of the request that
+    :func:`requested_broadband_bins` trims back off the result."""
+    freqs = np.asarray(freqs, dtype=float)
+    spacings = np.diff(freqs)
+    if not np.allclose(spacings, spacings[0], rtol=1e-4):
+        return None
+    df = float(spacings[0])
+    fc = float(freqs[len(freqs) // 2])
+    return fc, fc / ((len(freqs) // 2 + 0.5) * df), 1.0 / df
+
+
+def sweep_on_the_pins(freqs, *, knobs) -> np.ndarray:
+    """The bins of the sweep a derived (uniform) grid ``freqs`` becomes
+    under a pinned ``q_factor`` / ``record_duration``: its
+    :func:`array_sweep` with each pinned knob in place of the derived one.
+    A TIME_SERIES grid derived from the pulse is uacpy's default, so a pin
+    replaces what it names and the grid supplies the rest."""
+    fc, Q, T = array_sweep(freqs)
+    if knobs.q_factor is not None:
+        Q = float(knobs.q_factor)
+    if knobs.record_duration is not None:
+        T = float(knobs.record_duration)
+    return broadband_frequencies(fc, Q, T)
+
+
+def warn_if_band_pins_unused_on_tl(*, notices=None, knobs) -> None:
+    """One notice naming a pinned ``q_factor`` / ``record_duration`` on a
+    COHERENT_TL run, which marches the source frequency alone: mpiramS's
+    deck carries the one-bin sweep ``(fc, 1e6, 1)`` (``peramx.f90:362-370``
+    marches ``fc`` alone for a band narrower than one bin) and a Collins deck
+    carries one ``freq`` (``ramgeo1.5.f:105``), so the pins describe a
+    sweep the run does not march."""
+    pinned = [f"{name}={value:g}" for name, value in (
+        ('q_factor', knobs.q_factor),
+        ('record_duration', knobs.record_duration)) if value is not None]
+    if not pinned:
+        return
+    give_notice(notices,
+        f"RAM: {' and '.join(pinned)} set the (fc, Q, T) sweep of a "
+        f"BROADBAND / TIME_SERIES run; a COHERENT_TL run marches the source "
+        f"frequency alone, so {'they are' if len(pinned) > 1 else 'it is'} "
+        f"not used here.",
+        FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    )
+
+
 def default_band_knobs(fc: float) -> Tuple[float, float]:
     """``(Q, T)`` of the default band every engine expands a lone ``fc``
-    to — ``DEFAULT_BROADBAND_N_FREQS`` bins over
+    to — ``DEFAULT_BROADBAND_N_FREQUENCIES`` bins over
     ``fc·(1 ± DEFAULT_BROADBAND_BANDWIDTH_FACTOR/2)``: the half-width
     ``fc/Q`` is ``fc·bandwidth_factor/2`` and the spacing ``1/T`` that of
-    the default grid, ``fc·bandwidth_factor/(n_freqs - 1)``."""
+    the default grid, ``fc·bandwidth_factor/(n_frequencies - 1)``."""
     Q = 2.0 / DEFAULT_BROADBAND_BANDWIDTH_FACTOR
-    T = ((DEFAULT_BROADBAND_N_FREQS - 1)
+    T = ((DEFAULT_BROADBAND_N_FREQUENCIES - 1)
          / (float(fc) * DEFAULT_BROADBAND_BANDWIDTH_FACTOR))
     return Q, T
 
@@ -230,14 +288,12 @@ def requested_broadband_bins(source: Source, *, knobs):
     caller-supplied frequency array whenever the two differ (one extra
     bin past ``freq_max`` for an even count). The broadband runners trim
     their output onto this
-    grid so ``H(f)`` round-trips the request bin for bin. ``None`` —
-    keep the full sweep — when the caller pinned both ``Q`` and ``T``
-    (the sweep *is* the spec, and :func:`resolve_broadband_grid` warns
-    that the array contributes only fc), or supplied a single frequency
-    together with a pinned ``Q`` or ``T`` (a band around fc).
+    grid so ``H(f)`` round-trips the request bin for bin — a pinned ``Q``
+    / ``T`` beside an array describes the array's own sweep
+    (:func:`resolve_broadband_grid` refuses one that does not). ``None``
+    — keep the full sweep — for a single frequency together with a
+    pinned ``Q`` or ``T`` (a band around fc).
     """
-    if knobs.q_factor is not None and knobs.record_duration is not None:
-        return None
     freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
     if len(freqs) == 1 and (knobs.q_factor is not None or knobs.record_duration is not None):
         return None
@@ -252,8 +308,8 @@ ABSORBER_COST_NOTICE_POINTS = 10000
 
 def report_band_grid_cost(env: Environment, kind: str,
                            grid: RamGrid, freq_min: float,
-                           freq_max: float, *, notices=None, knobs, log,
-                           speed_bounds) -> None:
+                           freq_max: float, *, notices=None, knobs,
+                          log) -> None:
     """Say what one band grid costs: its depth points and the share the
     absorbing layer takes. A band marches one grid, ``dz`` sized at its
     highest frequency and the absorber (``absorber_width_wavelengths``
@@ -261,8 +317,7 @@ def report_band_grid_cost(env: Environment, kind: str,
     is ~40:1 — meshes metres of sponge at the finest ``dz``. Logged; a
     warning past :data:`ABSORBER_COST_NOTICE_POINTS` points when the
     absorber holds most of them, naming what narrows it."""
-    absorber = absorbing_layer_thickness(env, freq_min, knobs=knobs,
-                                         speed_bounds=speed_bounds)
+    absorber = absorbing_layer_thickness(env, freq_min, knobs=knobs)
     share = min(1.0, absorber / float(grid.zmax))
     text = (
         f"RAM:{kind}: the band {freq_min:.4g}-{freq_max:.4g} Hz marches "

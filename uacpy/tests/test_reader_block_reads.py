@@ -378,6 +378,23 @@ _SHD_SHAPES = {
 }
 
 
+def test_shd_whose_record_length_reads_both_ways_is_read_in_its_own_order(
+        tmp_path):
+    """LRecl = 65536 words little-endian reads 256 big-endian; the header's
+    counts settle the order, so the file reads whole, with no big-endian
+    notice (a 3 MB file: 12 records of 256 KiB)."""
+    rng = np.random.default_rng(7)
+    samples = _nonzero_complex64(rng, (1, 1, 1, 2, 3))
+    path = tmp_path / 'lrecl65536.shd'
+    assert _write_shd(path, samples, 1, 1, 1, 1, 1, 2, 3,
+                      recl_floor=65536) == 65536
+    with recorded_warnings() as caught:
+        got = read_shd_bin(str(path))
+    assert not [w for w in caught if 'big-endian' in str(w.message)]
+    assert np.array_equal(got.pressure, samples[0])
+    np.testing.assert_array_equal(got.receiver_ranges, [100.0, 200.0, 300.0])
+
+
 @pytest.mark.parametrize('shape', sorted(_SHD_SHAPES))
 def test_shd_pressure_block_equals_seek_per_record_read(tmp_path, shape):
     kw = dict(_SHD_SHAPES[shape])

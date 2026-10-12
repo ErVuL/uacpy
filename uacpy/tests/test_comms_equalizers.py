@@ -329,7 +329,7 @@ class TestTheEqualiserDenominatorIsOneImplementation:
         from uacpy.comms import equalize, ofdm, transceiver
         # The OFDM receiver reaches the denominator through the one
         # per-subcarrier equaliser it shares with ofdm_demodulate.
-        assert ofdm.regularizer is equalize.regularizer
+        assert ofdm._regularizer is equalize._regularizer
         assert transceiver.equalize_subcarriers is ofdm.equalize_subcarriers
 
     def test_the_zero_forcing_floor_has_one_definition(self):
@@ -349,16 +349,16 @@ class TestTheEqualiserDenominatorIsOneImplementation:
 
     @pytest.mark.parametrize('snr', [None, 10.0, 1000.0])
     def test_the_formula_matches_its_closed_form(self, snr):
-        from uacpy.comms.equalize import _ZF_REL_FLOOR, regularizer
+        from uacpy.comms.equalize import _ZF_REL_FLOOR, _regularizer
         h2 = np.array([4.0, 1.0, 0.25])
         expected = (_ZF_REL_FLOOR * h2.max() if snr is None
                     else h2.mean() / snr)
-        assert regularizer(h2, snr) == pytest.approx(expected, rel=1e-15)
+        assert _regularizer(h2, snr) == pytest.approx(expected, rel=1e-15)
 
     def test_a_powerless_channel_returns_zero(self):
-        from uacpy.comms.equalize import regularizer
-        assert regularizer(np.zeros(4), 10.0) == 0.0
-        assert regularizer(np.array([]), None) == 0.0
+        from uacpy.comms.equalize import _regularizer
+        assert _regularizer(np.zeros(4), 10.0) == 0.0
+        assert _regularizer(np.array([]), None) == 0.0
 
 
 class TestAdaptiveOutputLagsByHalfTheFeedforwardSpan:

@@ -104,6 +104,40 @@ class TestOaspTrfFrequencyAxis:
         np.testing.assert_allclose(np.diff(axis), 1.0 / (dt * nx), rtol=1e-12)
 
 
+class TestOaspRangeStepTilesTheReceiverSpan:
+    """``range_step`` spaces OASP's ``R0 + i*RSPACE`` axis across the
+    receiver's span: NPLOTS comes from the span, a step that does not
+    divide it is refused (both sides pinned), and without it the receiver's
+    own uniform ranges are the axis."""
+
+    RX = uacpy.Receiver(depths=[50.0], ranges=[1000.0, 2000.0, 3000.0])
+
+    @pytest.mark.parametrize('step, n', [(500.0, 5), (400.0, 6),
+                                         (2000.0, 2)])
+    def test_a_step_that_divides_the_span_reaches_its_far_end(self, step, n):
+        from uacpy.io.oases_writer import _oasp_range_axis
+        r0_km, dr_km, nplots = _oasp_range_axis('w', self.RX, step)
+        assert (r0_km, nplots) == (1.0, n)
+        assert dr_km == pytest.approx(step / 1000.0)
+        assert r0_km + (nplots - 1) * dr_km == pytest.approx(3.0)
+
+    @pytest.mark.parametrize('step', [600.0, 700.0, 2000.5])
+    def test_a_step_that_does_not_divide_the_span_is_refused(self, step):
+        from uacpy.io.oases_writer import _oasp_range_axis
+        with pytest.raises(ConfigurationError, match='does not tile'):
+            _oasp_range_axis('write_oasp_input', self.RX, step)
+
+    @pytest.mark.parametrize('step', [0.0, -500.0, float('nan')])
+    def test_a_step_that_is_not_positive_is_refused(self, step):
+        from uacpy.io.oases_writer import _oasp_range_axis
+        with pytest.raises(ConfigurationError, match='positive finite'):
+            _oasp_range_axis('write_oasp_input', self.RX, step)
+
+    def test_without_a_step_the_receivers_own_axis_is_written(self):
+        from uacpy.io.oases_writer import _oasp_range_axis
+        assert _oasp_range_axis('w', self.RX, None) == (1.0, 1.0, 3)
+
+
 class TestOASNWavenumberSampling:
     """``n_wavenumbers`` reaches every OASN integration block. The replica and
     discrete-source wavenumber lines (``NWSIN``/``NWDIN``, unoasn22.f:227 and
@@ -231,7 +265,85 @@ class TestOASNNoiseWavenumberCounts:
     ])
     def test_pinned_count_reaches_the_block(self, tmp_path, block):
         line = self._last_line(tmp_path, n_wavenumbers=800, **block)
-        assert line.split()[:2] == ['800', '800']
+        assert line.split() == ['800', '800', '200']
+
+    @pytest.mark.parametrize('nw', [-1, 0, None])
+    def test_an_unpinned_surface_block_takes_the_measured_counts(
+            self, tmp_path, nw):
+        line = self._last_line(tmp_path, n_wavenumbers=nw,
+                               noise=OasnNoise(surface_level=70.0))
+        assert line.split() == ['1600', '63836', '100']
+
+    @pytest.mark.parametrize('nw', [-1, 0, None])
+    def test_an_unpinned_deep_block_takes_the_manuals_counts(
+            self, tmp_path, nw):
+        line = self._last_line(tmp_path, n_wavenumbers=nw,
+                               noise=OasnNoise(deep_level=70.0))
+        assert line.split() == ['400', '400', '100']
+
+    def test_each_block_takes_its_own_counts_when_both_are_written(
+            self, tmp_path):
+        import warnings
+        from uacpy.io.oases_writer import write_oasn_input
+        env = uacpy.Environment(name='oasn', bathymetry=100, ssp=1500)
+        path = tmp_path / 'oasn.dat'
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            write_oasn_input(path, env, uacpy.Source(frequencies=100, depths=50),
+                             uacpy.Receiver(depths=np.array([30.0, 70.0]),
+                                            ranges=np.array([0.0])),
+                             options='N J', noise=OasnNoise(surface_level=70.0,
+                                                            deep_level=70.0))
+        lines = path.read_text().splitlines()
+        counts = [line for line in lines
+                  if line in ('1600 63836 100', '400 400 100')]
+        assert counts == ['1600 63836 100', '400 400 100']
+
+    def test_the_surface_counts_fill_oases_array_exactly(self):
+        """NOIPAR stops on a total above NP (oasnun22.f:319), not at it."""
+        from uacpy.io.oases_writer import (
+            _OASES_MAX_WAVENUMBERS, _OASN_SURFACE_NOISE_SAMPLES)
+        assert sum(_OASN_SURFACE_NOISE_SAMPLES) == _OASES_MAX_WAVENUMBERS
+
+
+@pytest.mark.requires_oases
+class TestTheDefaultSurfaceNoiseDeckConverges:
+    """The surface block's default counts give a covariance within 0.5 dB of
+    the integral taken on the real axis (measured 0.16 dB on this 100 m
+    column at 100 Hz); the manual's worked-deck 400 / 400 / 100 reads 3.8 dB
+    low, held down by OASES's artificial attenuation on the discrete band
+    (unoasn22.f:288-289), which falls as 1/NWSD."""
+
+    @staticmethod
+    def _diag_db(tmp_path, **kwargs):
+        import warnings
+        from uacpy.models import OASN
+        env = uacpy.Environment(bathymetry=100.0, ssp=1500.0,
+                                bottom=uacpy.BoundaryProperties(
+                                    acoustic_type='half-space',
+                                    sound_speed=1700.0, density=1.8,
+                                    attenuation=0.5))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            cov = OASN(verbose=False, work_dir=tmp_path,
+                       surface_noise_level=50.0, **kwargs).compute_covariance(
+                env, uacpy.Source(depths=10.0, frequencies=100.0),
+                uacpy.Receiver(depths=[20.0, 50.0, 80.0], ranges=[1000.0]))
+        return 10.0 * np.log10(np.abs(np.diag(np.asarray(cov.covariance)[0])))
+
+    def _real_axis(self, tmp_path):
+        return self._diag_db(tmp_path / 'ref', n_wavenumbers=16384,
+                             integration_offset=1e-9)
+
+    def test_the_default_reads_within_half_a_dB_of_the_real_axis_integral(
+            self, tmp_path):
+        default = self._diag_db(tmp_path / 'default')
+        assert np.max(np.abs(default - self._real_axis(tmp_path))) < 0.5
+
+    def test_the_manuals_worked_deck_counts_read_several_dB_low(
+            self, tmp_path):
+        manual = self._diag_db(tmp_path / 'manual', n_wavenumbers=400)
+        assert np.min(self._real_axis(tmp_path) - manual) > 2.0
 
 
 class TestOasesInterfaceRoughness:

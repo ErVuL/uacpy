@@ -24,9 +24,16 @@ from uacpy.models._projection import (
 # this env *shape* — or this source feature — work with this model?".
 # Declaring one is a promise: ``_project_environment`` then leaves that
 # feature in the env and emits no warning, so the model's deck writer has to
-# carry it — nothing downstream re-checks.
-# Keep in lockstep with the ``self._supports_*`` block in
-# ``PropagationModel.__init__``.
+# carry it — nothing downstream re-checks. A flag left False whose feature
+# is present in the env on ``run()`` is collapsed by ``_project_environment``
+# with one ``FallbackWarning`` per dropped feature.
+#
+# The list is intentionally bounded. Add a flag ONLY for a question of the
+# form "does this env shape work with this model?". Niche numerical-method
+# requirements (3-D, broadband, specific SSP interp scheme,
+# volume-attenuation formula) belong in run()-time asserts, not here.
+# ``PropagationModel.__init__`` sets every flag False before
+# :meth:`PropagationModel._apply_spec` reads them off the spec.
 _CAPABILITY_FLAGS: frozenset = frozenset({
     'altimetry',
     'range_dependent_bathymetry',
@@ -35,12 +42,29 @@ _CAPABILITY_FLAGS: frozenset = frozenset({
     'layered_bottom',
     'elastic_media',
     # Derived, like 'volume_attenuation' below: read off
-    # ``_NATIVE_MULTI_DEPTH_MODES`` (non-empty -> True), never declared in
+    # ``spec.traits.native_multi_depth_modes`` (non-empty -> True), never declared in
     # ``spec.supports``, so the whole-model flag and the per-mode table
-    # cannot disagree.
+    # cannot disagree. An engine writes one source-depth grid into a single
+    # deck in the modes that table lists. Every other engine and mode reads
+    # one source depth per deck: in a field mode ``run()`` loops over the
+    # depths in Python and joins the fields on a source_depth axis
+    # (:func:`~uacpy.models._stacking.run_per_source_depth`); in any other
+    # mode the models that read source geometry raise from
+    # ``_validate_geometry``. Bounce accepts a multi-depth ``Source`` without
+    # raising because it reads no source geometry at all and overrides
+    # ``_validate_geometry`` to a no-op (``bounce/_model.py``); the extra
+    # depths reach no deck.
     'multi_source_depth',
     'source_beam_pattern',
+    # Surface sigma(1). SPARC's GetPar (Scooter/sparc.f90:177) and Bounce's
+    # elastic branch (Kraken/bounce.f90:104) ERROUT on a non-zero
+    # SSP%sigma; Kraken consumes it (Kraken/kraken.f90:902) and Scooter in
+    # its vacuum-boundary impedance (Scooter/scooter.f90:309).
     'rough_surface',
+    # Seabed sigma(NMedia+1). Kraken/KrakenC feed it to the
+    # Kuperman-Ingenito interfacial-roughness perturbation
+    # (Kraken/Scattering.f90:8, Kraken/kraken.f90:902); Bellhop's solver
+    # ignores the value and RAM's PE format has nowhere to put it.
     'rough_bottom',
     # Declarative ONLY: unlike every other flag this one drives no branch in
     # ``_project_environment`` -- ``env.absorption`` passes through untouched
@@ -85,7 +109,8 @@ class EngineTraits:
     consumes_run_t_start : bool
         A TIME_SERIES run places its output record where
         ``run(t_start=...)`` asks: the engines that synthesise through
-        ``_finish_broadband`` or Bellhop's delay-and-sum.
+        :func:`~uacpy.models._extract.finish_broadband` or Bellhop's
+        delay-and-sum.
     consumes_single_mode_frequencies : bool
         ``run(frequencies=...)`` means something on a single-frequency run
         mode: OASP, whose solver always runs a frequency sweep that the
@@ -111,8 +136,9 @@ class EngineTraits:
         PE marches deeper (``RAM._max_receiver_depth``).
     native_multi_depth_modes : frozenset of RunMode
         Modes in which the engine writes every source depth into one deck
-        and its reader splits the output into a ``ResultStack``; the base's
-        per-depth loop stands aside for these.
+        and its reader splits the output by source depth (a Field's
+        ``source_depth`` axis, a ``ResultStack`` of rays or arrivals); the
+        base's per-depth loop stands aside for these.
     python_stacked_modes : frozenset of RunMode
         Modes outside the field modes in which the engine returns a
         ``ResultStack`` over the source depths anyway, by looping in Python
@@ -120,11 +146,10 @@ class EngineTraits:
         carries no per-source boundary). Legal input, just not one launch.
     announced_band_modes : frozenset of RunMode
         The modes whose band, derived by the base rules, the engine
-        propagates, so stage 3 announces it: the TIME_SERIES grid derived
-        from the pulse, the 1 Hz floor of a one-carrier BROADBAND band. An
-        engine that derives or runs its band otherwise (a time-marching
-        record, a delay-and-sum labelled by the grid, an FFT ladder of its
-        own) leaves the mode out; the refusal of a pulse with no usable band
+        propagates, so stage 3 announces the notice that band carries (the
+        TIME_SERIES grid derived from the pulse). An engine that derives or
+        runs its band otherwise (a time-marching record, a delay-and-sum
+        labelled by the grid, an FFT ladder of its own) leaves the mode out; the refusal of a pulse with no usable band
         applies whatever this says.
     single_frequency_modes : frozenset of RunMode
         Modes that consume exactly one source frequency
@@ -213,14 +238,17 @@ class ModelSpec(FieldsRepr):
     (who wrote the engine, under what licence) from the run-behaviour fields
     above, and the codebase already keeps dataset provenance in a separate
     catalogue (:mod:`uacpy.data.sources`) rather than folding it into the
-    carriers. Models declare it the same way — a ``source`` class attribute
-    referencing :data:`uacpy.models.provenance.MODEL_PROVENANCE`.
+    carriers. Models declare it the same way — a ``provenance_id`` class
+    attribute naming an entry of
+    :data:`uacpy.models.provenance.MODEL_PROVENANCE`.
 
-    Binary resolution is intentionally *not* here either: nothing generic reads it,
-    its shape differs per model (single name vs. list of search dirs vs. the
-    OASES helper vs. Bellhop's backend dispatch), and multi-binary models
-    (Kraken's krakenc, RAM's Collins backends) pick the real executable at
-    ``run()`` time. Each model resolves ``self._exe`` in its own ``__init__``.
+    Binary resolution is *not* here either: it is the class's
+    :attr:`~uacpy.models.base.PropagationModel._BINARIES`, one search per
+    backend, which the model's own lookup and
+    :func:`uacpy.models.engine_status` both read. Each model resolves
+    ``self._exe`` in its own ``__init__``; multi-binary models (Kraken's
+    krakenc, RAM's Collins backends) look the binary of the backend a run
+    dispatches to up at ``run()`` time.
     """
 
     modes: tuple = ()

@@ -21,9 +21,10 @@ is first named, so matplotlib/scipy are paid for only by code that uses them.
 The top level lists nothing of its own. Its core names are
 ``uacpy.core.__all__``; its model names are the engines of
 ``uacpy.models._registry`` plus the OASES family base and the protocol types
-(:class:`~uacpy.models.base.PropagationModel`,
-:class:`~uacpy.models._spec.ModelSpec`, :class:`RunMode`); the rest are the
-subpackages, the parallel runner and the plotting entry points.
+(:class:`~uacpy.models.base.PropagationModel`, :class:`RunMode`); the rest are
+the subpackages, the parallel runner and the plotting entry points. The
+engine declaration a model author writes, ``ModelSpec``, is in
+:mod:`uacpy.models` (docs/DEV.md §2.5).
 """
 
 import importlib as _importlib
@@ -65,9 +66,9 @@ _LAZY_SUBMODULES = {
 }
 
 #: The model classes the top level offers: every registered engine, the base
-#: and factory of the OASES family, and the protocol types.
+#: and factory of the OASES family, and the protocol types a user calls.
 _MODEL_NAMES = (tuple(entry.class_name for entry in _ENGINES.values())
-                + ('OASES', 'PropagationModel', 'ModelSpec', 'RunMode'))
+                + ('OASES', 'PropagationModel', 'RunMode'))
 
 _LAZY_ATTRS = {
     # Every core name that is not a submodule, read through uacpy.core, so
@@ -109,10 +110,10 @@ if _TYPE_CHECKING:
         Surface, Thorp, UACPYError, UACPYWarning, NumericsWarning,
         ValidityWarning, FallbackWarning, ProvenanceWarning, IOWarning,
         UnsupportedFeatureError, generate_sea_surface, get_material,
-        list_materials, materials_table,
+        list_materials, materials_table, stack_fields,
     )
     from uacpy.models import (  # noqa: F401
-        Bellhop, Bounce, Kraken, ModelSpec, OASES, OASN, OASP, OASR, OASS,
+        Bellhop, Bounce, Kraken, OASES, OASN, OASP, OASR, OASS,
         OASSP, OAST, PropagationModel, RAM, RunMode, SPARC, Scooter,
     )
     from uacpy.parallel import Job, ParallelResult, run_parallel  # noqa: F401
@@ -134,7 +135,8 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(__all__) | set(globals()))
+    return sorted(set(__all__) | {name for name in globals()
+                                  if not name.startswith('_')})
 
 
 __all__ = [*_LAZY_ATTRS, *_LAZY_SUBMODULES, '__version__']

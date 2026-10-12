@@ -11,9 +11,12 @@ import warnings
 import numpy as np
 
 from uacpy.acoustic_signal._results import ResultTuple
-from uacpy.acoustic_signal.channel import impulse_response
+from uacpy.acoustic_signal.channel import (
+    apply_impulse_response, impulse_response,
+)
 from uacpy.comms.phy import rc_pulse, rrc_pulse
-from uacpy.core._validate import require_positive_finite_scalar
+from uacpy.core._validate import (
+    require_generator, require_positive_finite_scalar)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._plotting import plotter
 from uacpy.core.exceptions import (
@@ -118,7 +121,7 @@ def awgn(signal, snr_dB, *, rng=None):
         ``signal`` plus the noise realisation, same shape and dtype class.
     """
     x = np.asarray(signal)
-    rng = np.random.default_rng() if rng is None else rng
+    rng = require_generator(rng, "awgn")
     p = np.mean(np.abs(x) ** 2)
     if p == 0:
         warnings.warn(
@@ -252,9 +255,11 @@ def pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
     amplitudes : array_like
         Complex path amplitudes, carrying per-path phase.
     delays_s : array_like
-        Path delays (s), measured from whatever origin the caller wants
-        the tap grid to start at. They are used as given: subtract the
-        first arrival yourself if the taps should start there.
+        Path delays (s), finite and non-negative, measured from the origin
+        the tap grid is built around. They are used as given: subtract the
+        first arrival yourself if the taps should start there. A negative
+        delay is refused, since the grid opens only ``span/2`` symbols
+        before 0 and would cut that path's pulse; so is an empty list.
     symbol_rate : float
         Symbol rate (Bd). ``T = 1/symbol_rate``.
     pulse : {'rc', 'rrc'}
@@ -312,6 +317,21 @@ def _pulse_shaped_taps(amplitudes, delays_s, symbol_rate, *, pulse='rc',
     if sps < 1:
         raise ConfigurationError(
             f"{who}: sps must be >= 1 sample per symbol; got {sps!r}.")
+    if rel.size == 0:
+        raise ConfigurationError(
+            f"{who}: no arrivals; a channel no path reaches has no taps.")
+    if not np.all(np.isfinite(rel)):
+        raise ConfigurationError(
+            f"{who}: delays_s must be finite; an arrival with a non-finite "
+            f"delay has no place on the tap grid.")
+    if np.any(rel < 0.0):
+        # The grid opens span/2 symbols before 0, so an earlier path would
+        # lose the leading part of its pulse, or all of it.
+        raise ConfigurationError(
+            f"{who}: delays_s reaches {rel.min():g} s, before 0; the tap "
+            f"grid starts {span / (2.0 * symbol_rate):g} s (span/2 symbols) "
+            f"before 0 and would cut that path's pulse. Pass delays from the "
+            f"earliest arrival: delays_s - min(delays_s).")
     fs = symbol_rate * sps
     half = span * sps / 2.0
     # The 1e-9 keeps an arrival a rounding error past a sample instant
@@ -378,6 +398,12 @@ def apply_channel(signal, h):
     first arrival reaches the output ``-delays_s[0]*symbol_rate*sps``
     samples in.
 
+    The convolution is :func:`uacpy.acoustic_signal.apply_impulse_response`'s:
+    FFT overlap-add, the direct sum below 19 taps, so a long recording
+    through a long channel costs ``O(N log M)`` rather than ``N·M``. For a
+    signal too long to hold, pass it in blocks to
+    :func:`uacpy.acoustic_signal.apply_impulse_response_blocks`.
+
     Parameters
     ----------
     signal : array_like
@@ -390,7 +416,16 @@ def apply_channel(signal, h):
         raise ConfigurationError(
             "apply_channel: empty channel h (0 taps); pass at least one tap "
             "— h=[1.0] is the identity channel.")
-    return np.convolve(np.asarray(signal), taps)
+    samples = np.asarray(signal)
+    if (samples.ndim != 1 or samples.size == 0
+            or samples.dtype.kind not in 'biufc'
+            or not np.all(np.isfinite(samples))):
+        raise ConfigurationError(
+            f"apply_channel: signal must be a non-empty 1-D array of finite "
+            f"numbers; got shape {samples.shape}, dtype {samples.dtype}.")
+    _, received = apply_impulse_response(taps, source_waveform=samples,
+                                         sample_rate=1.0)
+    return received
 
 
 def fading_taps(n_taps, n_samples, doppler_hz, *, sample_rate, rician_k=0.0,
@@ -436,7 +471,7 @@ def fading_taps(n_taps, n_samples, doppler_hz, *, sample_rate, rician_k=0.0,
     ndarray
         Complex tap gains of shape ``(n_taps, n_samples)``.
     """
-    rng = np.random.default_rng() if rng is None else rng
+    rng = require_generator(rng, "fading_taps")
     fs = float(sample_rate)
     n = int(n_samples)
     # Written as the negation of the admissible condition so NaN is refused

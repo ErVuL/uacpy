@@ -18,12 +18,13 @@ run (:func:`replica_bank_from_field`), a cross-spectral density matrix from
 array snapshots (:func:`csdm`), and the Bartlett / MVDR ambiguity-surface
 processors (:func:`bartlett`, :func:`mvdr`), which return the surface as an
 ambiguity :class:`~uacpy.core.results.Field`. Self-contained — KRAKEN modes
-or a ``Field``/``ResultStack`` plus numpy, no OASES dependency.
+or a ``Field`` plus numpy, no OASES dependency.
 """
 
 from .bottom_scattering import (
     BottomParameters,
     APL_UW_SEDIMENTS,
+    TABLE_WATER_SOUND_SPEED,
     apl_uw_bottom_backscatter,
     apl_uw_bottom_loss,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "perturbative_grazing_limit",
     "BottomParameters",
     "APL_UW_SEDIMENTS",
+    "TABLE_WATER_SOUND_SPEED",
     "apl_uw_bottom_backscatter",
     "apl_uw_bottom_loss",
     "apl_uw_surface_backscatter",

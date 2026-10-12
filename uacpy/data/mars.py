@@ -29,7 +29,8 @@ from typing import Dict, Optional, Union
 from uacpy.core.environment import BoundaryProperties
 from uacpy.core.exceptions import DataFetchError, IOWarning, ValidityWarning
 from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
-                                 GRAIN_SIZE_MODEL_RANGES)
+                                 GRAIN_SIZE_MODEL_RANGES,
+                                 GRAIN_SIZE_SOURCE_RANGES)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.geo import (
     Coordinate, as_coordinate, great_circle_km, normalize_lon,
@@ -283,16 +284,23 @@ def _warn_outside_the_fit(sample: SeabedSample, model: str) -> None:
     phi = float(sample.grain_size_phi)
     if lo <= phi <= hi:
         return
+    per_quantity = ', '.join(
+        f"{quantity.replace('_', ' ')} [{a:g}, {b:g}]"
+        for quantity, (a, b) in GRAIN_SIZE_SOURCE_RANGES[model].items())
+    coarsest = min(a for a, _ in GRAIN_SIZE_MODEL_RANGES.values())
+    coarse_note = (
+        f" No grain-size relation in uacpy is fitted coarser than "
+        f"{coarsest:g} ϕ; a class from uacpy.core.materials describes a "
+        f"seabed this coarse and a grain-size relation does not."
+        if phi < coarsest else "")
     warnings.warn(
         f"AusSeabed MARS sample at {sample.sample_point[0]:.3f}, "
         f"{sample.sample_point[1]:.3f} has ϕ={phi:.2f} (via "
         f"{sample.details['via']}), "
         f"outside the [{lo:g}, {hi:g}] ϕ the {model!r} grain-size relations "
-        f"are fitted over: the geoacoustics returned are that fit at "
-        f"ϕ={min(max(phi, lo), hi):g}, not at the sampled grain size. The "
-        f"'apl-uw' relations reach -1 ϕ (2 mm) against 'hamilton''s 0 ϕ; for "
-        f"seabed coarser than that, a class from uacpy.core.materials "
-        f"describes it and a grain-size relation does not.",
+        f"are fitted over ({per_quantity} ϕ): the geoacoustics returned are "
+        f"that fit at ϕ={min(max(phi, lo), hi):g}, not at the sampled grain "
+        f"size.{coarse_note}",
         ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 

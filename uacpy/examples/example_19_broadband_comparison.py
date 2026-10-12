@@ -27,7 +27,7 @@ Two things in the figures are worth reading carefully. Bellhop's |H|, with its
 default hat beams, sits 0.3 dB from Scooter's on average although this 100 m
 guide is only D/λ = 3-10 wavelengths deep over 50-150 Hz; with
 beam_type='B' it sits 3.3 dB under, because a Gaussian beam's width is
-floored at πλ, a sizeable part of so shallow a duct (measured at the 12
+floored at πλ, a sizeable part of so shallow a duct (measured at the 13
 receiver depths, 5 km). The phase panel removes the bulk travel time with
 Field.remove_delay before plotting, because the raw phase of a 3.3 s delay is
 aliased on any grid this coarse — see the comment at that panel.
@@ -67,7 +67,9 @@ seabed = uacpy.BoundaryProperties(acoustic_type='half-space',
 env = uacpy.Environment(name='Pekeris waveguide', bathymetry=100, ssp=1500,
                         bottom=seabed)
 source = uacpy.Source(depths=36, frequencies=100)
-receiver = uacpy.Receiver(depths=np.linspace(5, 95, 12),
+# Depths in 7.5 m steps, so the 50 m target below is one of them (Field.at
+# picks the nearest sample; a depth halfway between two is a tie).
+receiver = uacpy.Receiver(depths=np.linspace(5, 95, 13),
                           ranges=np.array([5000.0]))
 frequencies = np.arange(50.0, 150.0 + 0.5, 1.0)
 TARGET_DEPTH, TARGET_RANGE = 50.0, 5000.0
@@ -170,7 +172,7 @@ uacpy.plot.compare(spectra, labels=list(fields), value='magnitude', ax=ax_mag,
 # aliased, each model by its own sampling. (OASP rebuilds a finer grid of its
 # own, so it aliases differently and merely LOOKS like different physics.)
 # remove_delay takes r/c from each field's own range and leaves the multipath
-# residual, which the grid does resolve: all seven then agree, at about 7 ms.
+# residual, which the grid does resolve: all seven then agree.
 compensated = [spectrum.remove_delay(sound_speed=1500.0)
                for spectrum in spectra]
 uacpy.plot.compare(compensated, labels=list(fields), value='phase',
@@ -237,7 +239,7 @@ axes[-1, 0].set_xlabel('Time (ms)')
 fig.suptitle(f'Time series — depth {TARGET_DEPTH:.0f} m, range '
              f'{TARGET_RANGE / 1000:.0f} km, fc '
              f'{source.frequencies[0]:.0f} Hz', fontsize='large')
-fig.tight_layout()
+fig.tight_layout(rect=(0, 0, 1, 0.985))      # room for the suptitle
 fig.savefig(OUT / 'example_19_time_series_comparison.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)

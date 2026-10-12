@@ -24,9 +24,7 @@ import numpy as np
 import pytest
 
 from uacpy.core.absorption import FrancoisGarrison, Thorp
-from uacpy.core.boundary import (
-    BoundaryProperties, SedimentLayer, _DENSITY_UNITS_SUSPECT_G_CM3,
-)
+from uacpy.core.boundary import BoundaryProperties, SedimentLayer
 from uacpy.core.bottom import SeabedColumn
 from uacpy.core.exceptions import ValidityWarning
 from uacpy.core._validate import SPEED_UNITS_SUSPECT_M_S
@@ -68,36 +66,6 @@ def _halfspace(**kw):
     base = dict(sound_speed=1600.0, density=1.8)
     base.update(kw)
     return BoundaryProperties(**base)
-
-
-@pytest.mark.parametrize('build', [_layer, _halfspace],
-                         ids=['SedimentLayer', 'BoundaryProperties'])
-class TestDensityTypedInKgPerCubicMetre:
-
-    def test_a_kg_per_m3_value_warns_and_names_the_g_per_cm3_it_means(
-            self, build):
-        warning = _only(_recorded(lambda: build(density=1500.0)))
-        message = str(warning.message)
-        assert 'density=1500 looks like kg/m³' in message
-        assert 'uacpy takes g/cm³ (1.5)' in message
-
-    def test_the_first_value_over_the_bound_warns(self, build):
-        assert _DENSITY_UNITS_SUSPECT_G_CM3 == 20.0
-        _only(_recorded(lambda: build(density=20.001)))
-
-    def test_the_bound_itself_and_everything_under_it_stay_silent(
-            self, build):
-        _silent(_recorded(lambda: build(density=20.0)))
-        _silent(_recorded(lambda: build(density=19.99)))
-
-    def test_the_remedy_typed_back_is_silent(self, build):
-        # The message quotes 1.5 for 1500: the value re-entered as g/cm³.
-        _silent(_recorded(lambda: build(density=1.5)))
-
-    def test_the_value_is_stored_as_given_not_corrected(self, build):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            assert build(density=1500.0).density == 1500.0
 
 
 @pytest.mark.parametrize('build', [_layer, _halfspace],
@@ -199,7 +167,8 @@ class TestSeabedWarningsNameTheCallersLine:
 
     def test_a_direct_constructor_call_lands_here(self):
         for build in (_layer, _halfspace):
-            warning = _only(_recorded(lambda: build(density=1500.0)))
+            warning = _only(_recorded(
+                lambda: build(sound_speed=1600.0, shear_speed=1700.0)))
             assert warning.filename != '<string>'
             assert Path(warning.filename).resolve() == _THIS_FILE
 
@@ -209,7 +178,8 @@ class TestSeabedWarningsNameTheCallersLine:
         over — and which a generated ``__init__``'s ``<string>`` frame would
         have stopped on."""
         warning = _only(_recorded(
-            lambda: BoundaryProperties.from_preset('sand', density=1900.0)))
+            lambda: BoundaryProperties.from_preset('sand',
+                                                   shear_speed=1900.0)))
         assert Path(warning.filename).resolve() == _THIS_FILE
 
     def test_a_layer_collapsed_onto_a_half_space_lands_here(self):
@@ -220,7 +190,7 @@ class TestSeabedWarningsNameTheCallersLine:
             warnings.simplefilter('ignore')
             column = SeabedColumn(
                 layers=[SedimentLayer(thickness=2.0, sound_speed=1600.0,
-                                      density=1800.0)],
+                                      density=1.8, shear_speed=1700.0)],
                 halfspace=BoundaryProperties(sound_speed=1700.0, density=1.9))
         warning = _only(_recorded(lambda: column.collapse_layers('top_layer')))
         assert Path(warning.filename).resolve() == _THIS_FILE
@@ -230,8 +200,10 @@ class TestSeabedWarningsNameTheCallersLine:
         the caller's line, so two lines get two warnings."""
         with warnings.catch_warnings(record=True) as record:
             warnings.simplefilter('default')
-            SedimentLayer(thickness=5.0, sound_speed=1600.0, density=1500.0)
-            SedimentLayer(thickness=5.0, sound_speed=1600.0, density=1500.0)
+            SedimentLayer(thickness=5.0, sound_speed=1600.0, density=1.8,
+                          shear_speed=1700.0)
+            SedimentLayer(thickness=5.0, sound_speed=1600.0, density=1.8,
+                          shear_speed=1700.0)
         assert len(record) == 2
 
 

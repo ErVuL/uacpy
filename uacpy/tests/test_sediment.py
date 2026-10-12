@@ -18,6 +18,7 @@ caller cannot tell a substituted answer from an evaluated one.
 import importlib
 import inspect
 import pkgutil
+import re
 import warnings
 
 import numpy as np
@@ -644,6 +645,105 @@ class TestALithologySampleCitesDeck41:
         assert bottom.data_sources[0].source.id == expected
 
 
+class TestAnArrayOfGrainSizes:
+    """An array of ϕ converts each element as one ϕ converts, returns arrays
+    of its shape, and reports every substitution in one warning that names
+    the ϕ values affected."""
+
+    @pytest.mark.parametrize('model', ['hamilton', 'apl-uw'])
+    @pytest.mark.parametrize('phi', [
+        np.array([1.0, 2.0]), [3.0], np.array([[-0.5, 4.0, 9.2],
+                                                [2.0, 2.0, 12.0]])])
+    def test_each_element_is_the_one_value_conversion(self, model, phi):
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            out = grain_size_to_geoacoustics(phi, model=model)
+            one = [grain_size_to_geoacoustics(float(p), model=model)
+                   for p in np.ravel(phi)]
+        for name in ('sound_speed', 'density', 'attenuation'):
+            assert out[name].shape == np.shape(phi)
+            assert out[name].ravel().tolist() == [o[name] for o in one]
+
+    def test_one_value_returns_floats(self):
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        for phi in (2.0, np.float64(2.0), np.array(2.0)):
+            out = grain_size_to_geoacoustics(phi)
+            assert all(type(v) is float for v in out.values())
+        assert grain_size_to_geoacoustics(np.array(2.0)) == \
+            grain_size_to_geoacoustics(2.0)
+
+    def test_one_warning_names_the_values_each_substitution_hit(self):
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        with pytest.warns(UserWarning) as record:
+            grain_size_to_geoacoustics([2.0, 9.2, 9.4, 9.2, -0.5])
+        assert len(record) == 1
+        text = str(record[0].message)
+        assert text.startswith('grain_size_to_geoacoustics: at ϕ=-0.5 '
+                               '(1 of 5 values), attenuation')
+        assert ('at ϕ=9.2 and 9.4 (3 of 5 values), sound_speed and density '
+                'come from data covering -1 to 9 ϕ, so they are its ϕ=9 '
+                'values.') in text
+        assert 'ϕ=2 ' not in text
+
+    def test_an_array_inside_every_source_is_silent(self):
+        """Both sides of the edge: the endpoints themselves are silent, the
+        first value past one warns and names it."""
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            grain_size_to_geoacoustics([-1.0, 4.0, 9.0], model='apl-uw')
+        with pytest.warns(UserWarning, match=r'at ϕ=9\.001 \(1 of 3 values'):
+            grain_size_to_geoacoustics([-1.0, 4.0, 9.001], model='apl-uw')
+
+    def test_a_long_list_of_values_is_cut_short_with_a_count(self):
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        phis = 9.0 + np.arange(1, 13) / 100.0          # 12 distinct, all > 9
+        with pytest.warns(UserWarning) as record:
+            grain_size_to_geoacoustics(phis, model='hamilton')
+        assert ('at ϕ=9.01, 9.02, 9.03, 9.04, 9.05, 9.06, 9.07, 9.08 and '
+                '4 more (12 of 12 values)') in str(record[0].message)
+
+    def test_a_clamped_apl_uw_map_reports_one_clause_whatever_its_size(self):
+        """Under 'apl-uw' a ϕ past 9 also names the unclamped fit, whose
+        numbers differ at every ϕ; a map of fine mud gives one group whose
+        clause spans those numbers, not one clause per value."""
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        lengths = []
+        for n in (10, 1000):
+            with pytest.warns(UserWarning) as record:
+                grain_size_to_geoacoustics(np.linspace(9.01, 11.0, n),
+                                           model='apl-uw')
+            assert len(record) == 1
+            text = str(record[0].message)
+            assert text.count('unclamped fit') == 1, text
+            assert f'({n} of {n} values)' in text
+            lengths.append(len(text))
+        # 10 and 1000 values print the same clauses: only the listed ϕ
+        # digits and the counts differ.
+        assert max(lengths) < 600 and abs(lengths[1] - lengths[0]) < 20, \
+            lengths
+
+        def unclamped_speed(phi):
+            with pytest.warns(UserWarning) as rec:
+                grain_size_to_geoacoustics(phi, model='apl-uw')
+            return re.search(r'sound_speed=([0-9.]+) m/s',
+                             str(rec[0].message)).group(1)
+        lo, hi = sorted((unclamped_speed(9.01), unclamped_speed(11.0)),
+                        key=float)
+        with pytest.warns(UserWarning) as record:
+            grain_size_to_geoacoustics(np.array([9.01, 11.0]), model='apl-uw')
+        assert f'sound_speed={lo} to {hi} m/s' in str(record[0].message)
+
+    def test_a_nan_element_propagates_without_a_report(self):
+        from uacpy.core.sediment import grain_size_to_geoacoustics
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            out = grain_size_to_geoacoustics([2.0, np.nan, np.nan])
+        assert np.isfinite(out['sound_speed'][0])
+        assert np.isnan(out['sound_speed'][1:]).all()
+
+
 class TestEachQuantityIsReportedAgainstItsOwnSource:
     """A validity range belongs to the source a quantity comes from, not to
     the model. ``'hamilton'`` is two sources: ``sound_speed`` and ``density``
@@ -1026,9 +1126,9 @@ class TestTheScatteringModelReadsTheSedimentRelations:
     def test_the_branch_joins_belong_to_the_branch_above(self):
         """Hamilton's Fig. 3 caption gives the branch ranges as "0 to 2.6
         phi", "2.6 to 4.5 phi" and so on, sharing each endpoint between two
-        branches and settling nothing, so a tie-break is an implementation
-        choice. The join belongs to the branch **above** it, which is how
-        ``ReadEnvironmentBell.f90:509-518`` reads it (``ELSE IF( Mz >= 2.6
+        branches; TR 9407 Eq. 5 (p. IV-9) prints half-open intervals
+        (2.6 <= Mz < 4.5). The join belongs to the branch **above** it, as
+        there and as ``ReadEnvironmentBell.f90:509-518`` reads it (``ELSE IF( Mz >= 2.6
         .AND. Mz < 4.5 )``) and therefore what the Acoustics-Toolbox ``'G'``
         bottom does."""
         for join in _BRANCH_JOINS:
@@ -1422,3 +1522,148 @@ def test_a_unit_string_stays_exact():
     from uacpy.acoustics import convert_attenuation_units
     with pytest.raises(ConfigurationError, match='unknown unit'):
         convert_attenuation_units(1.0, 1000.0, 'DB/KM', 'dB/m')
+
+
+class TestBottomFromSamples:
+    """Your own seabed samples → a range-dependent bottom: each waypoint of
+    the transect takes its nearest sample's grain size."""
+
+    #: A 78.6 km track along 45 N; five waypoints sit 19.66 km apart.
+    START, END = (45.0, -6.0), (45.0, -5.0)
+
+    def _three_grabs(self, **kwargs):
+        from uacpy.data import bottom_from_samples
+        return bottom_from_samples(
+            [45.00, 45.01, 45.00], [-6.00, -5.60, -5.10], [1.5, 3.0, 7.5],
+            self.START, self.END, **kwargs)
+
+    def test_each_waypoint_takes_its_nearest_sample(self):
+        """The waypoint at 19.7 km is 19.7 km from the first grab and
+        11.8 km from the second, so it takes the second."""
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            bottom = self._three_grabs(n_points=5, max_distance_km=25.0)
+        assert [c.halfspace.grain_size_phi for c in bottom.columns] == \
+            [1.5, 3.0, 3.0, 7.5, 7.5]
+        assert all(c.halfspace.data_sources == () for c in bottom.columns)
+
+    def test_a_column_is_its_samples_conversion(self):
+        from uacpy.data import bottom_from_grain_size
+        bottom = self._three_grabs(n_points=5, max_distance_km=25.0,
+                                   model='apl-uw', water_sound_speed=1490.0,
+                                   roughness=0.2)
+        want = bottom_from_grain_size(7.5, model='apl-uw',
+                                      water_sound_speed=1490.0, roughness=0.2)
+        got = bottom.columns[-1].halfspace
+        assert (got.sound_speed, got.density, got.attenuation,
+                got.roughness) == (want.sound_speed, want.density,
+                                   want.attenuation, want.roughness)
+
+    def test_auto_places_the_change_of_sample_within_one_probe_step(self):
+        """Two samples at the ends: the nearest one changes at the track's
+        midpoint, and 'auto' keeps the two probe columns either side."""
+        from uacpy.data import bottom_from_samples, transect_length
+        bottom = bottom_from_samples([45.0, 45.0], [-6.0, -5.0], [1.0, 7.0],
+                                     self.START, self.END, max_points=200)
+        length = transect_length(self.START, self.END)
+        ranges = np.asarray(bottom.ranges)
+        assert [c.halfspace.grain_size_phi for c in bottom.columns] == \
+            [1.0, 1.0, 7.0, 7.0]
+        assert ranges[1] < length / 2 < ranges[2]
+        assert ranges[2] - ranges[1] == pytest.approx(length / 199)
+
+    def test_each_distinct_sample_is_converted_once(self, monkeypatch):
+        from uacpy.data import bottom_from_samples, sediment_db
+        calls = []
+        convert = sediment_db.bottom_from_grain_size
+
+        def counted(phi, **kwargs):
+            calls.append(phi)
+            return convert(phi, **kwargs)
+        monkeypatch.setattr(sediment_db, 'bottom_from_grain_size', counted)
+        bottom_from_samples([45.0, 45.0], [-6.0, -5.0], [1.0, 7.0],
+                            self.START, self.END)
+        assert sorted(calls) == [1.0, 7.0]
+
+    def test_a_water_speed_callable_is_read_at_each_waypoint(self):
+        from uacpy.data import bottom_from_samples
+        bottom = bottom_from_samples(
+            [45.0], [-5.5], [3.0], self.START, self.END, n_points=3,
+            max_distance_km=50.0,
+            water_sound_speed=lambda lat, lon: 1480.0 + 20.0 * (lon + 6.0))
+        speeds = [c.halfspace.sound_speed for c in bottom.columns]
+        assert speeds[0] / 1480.0 == pytest.approx(speeds[-1] / 1500.0)
+        assert speeds[0] < speeds[1] < speeds[2]
+
+    @pytest.mark.parametrize('limit, gaps', [(78.7, 0), (40.0, 2)])
+    def test_a_waypoint_past_max_distance_is_a_filled_gap(self, limit, gaps):
+        """One grab at the start: a limit past the far end covers all five
+        waypoints; 40 km leaves the last two as gaps, filled and announced."""
+        from uacpy.data import bottom_from_samples
+        with recorded_warnings() as caught:
+            bottom = bottom_from_samples([45.0], [-6.0], [2.0], self.START,
+                                         self.END, n_points=5,
+                                         max_distance_km=limit)
+        filled = [w for w in caught
+                  if f'{gaps} of 5 transect waypoints' in str(w.message)]
+        assert len(filled) == (1 if gaps else 0)
+        assert len(caught) == len(filled)
+        assert len(bottom.columns) == 5
+
+    def test_no_sample_within_reach_of_any_waypoint_names_the_limit(self):
+        from uacpy.data import bottom_from_samples
+        with pytest.raises(DataFetchError,
+                           match='^bottom_from_samples: no transect waypoint '
+                                 'has a sample within max_distance_km=10;'
+                           ) as caught:
+            bottom_from_samples([50.0], [-6.0], [2.0], self.START, self.END,
+                                n_points=5, max_distance_km=10.0)
+        assert 'Pass max_distance_km=' in str(caught.value)
+
+    def test_samples_past_the_relations_warn_once_under_its_own_name(self):
+        """Every sample's conversion is reported in one warning that
+        counts samples, not one warning per sample under the converter's
+        name."""
+        from uacpy.data import bottom_from_samples
+        phis = [9.2, 9.4, 9.6, 9.8, 10.0, 10.2]
+        with recorded_warnings() as record:
+            bottom_from_samples(np.full(6, 45.0), np.linspace(-6.0, -5.0, 6),
+                                phis, (45.0, -6.0), (45.0, -5.0),
+                                model='apl-uw')
+        texts = [str(w.message) for w in record]
+        assert len(texts) == 1, texts
+        assert texts[0].startswith('bottom_from_samples: of the samples, '
+                                   'at ϕ=9.2, 9.4, 9.6, 9.8, 10 and 10.2 '
+                                   '(6 of 6 values)'), texts
+
+    @pytest.mark.parametrize('lat_offset_deg, warns', [
+        (0.081, False),     # 9.0 km north of the track: within 10 km
+        (0.099, True),      # 11.0 km north: past the offset rule
+    ])
+    def test_a_sample_off_the_track_is_announced_past_ten_km(
+            self, lat_offset_deg, warns):
+        from uacpy.core.exceptions import ProvenanceWarning
+        from uacpy.data import bottom_from_samples
+        lons = np.arange(-6.0, -4.99, 0.02)
+        with recorded_warnings() as caught:
+            bottom_from_samples(np.full(lons.size, 45.0 + lat_offset_deg),
+                                lons, np.full(lons.size, 2.0), self.START,
+                                self.END, n_points=20)
+        notices = [w for w in caught
+                   if issubclass(w.category, ProvenanceWarning)
+                   and 'farther than 10 km' in str(w.message)]
+        assert len(notices) == int(warns)
+
+    @pytest.mark.parametrize('args, match', [
+        (([45.0, 45.1], [-6.0], [2.0]), 'one length'),
+        (([], [], []), 'one length'),
+        (([45.0, 45.1], [-6.0, -5.9], [2.0, np.nan]),
+         r'phis\[1\] is nan; 1 of the 2'),
+        (([95.0], [-6.0], [2.0]), r'lats\[0\] = 95 is outside'),
+    ])
+    def test_samples_that_are_not_one_position_and_one_phi_are_refused(
+            self, args, match):
+        from uacpy.data import bottom_from_samples
+        with pytest.raises(ConfigurationError,
+                           match=f'^bottom_from_samples: .*{match}'):
+            bottom_from_samples(*args, self.START, self.END)

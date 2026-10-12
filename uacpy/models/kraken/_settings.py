@@ -5,7 +5,7 @@ the result)."""
 
 from dataclasses import dataclass
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from uacpy.core._records import FrozenRecord
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.run_settings import EngineSettings
@@ -48,16 +48,15 @@ class KrakenLaunch(FrozenRecord):
         The deck's ``cHigh`` (m/s), one per profile.
     rmax_m : float
         The deck's ``RMax`` (m), the mesh-convergence scale of the solve.
-    n_mesh : int
+    n_mesh : int or tuple of int
         The ``NG`` mesh count written on every medium line (0: the binary
-        sizes each medium).
+        sizes each medium at ``deck_frequency``), or one count per medium,
+        water first, on a band deck where a medium's own count would leave
+        fewer than AT's 10 points at the band's lowest frequency
+        (:func:`~uacpy.models.kraken._grid.band_n_mesh`).
     field_option : str or None
         ``field.exe``'s four-letter option (source geometry, coupling, beam
         pattern, coherence); ``None`` when no field is summed.
-    check_n_mesh : int or None
-        The mesh of the second, coarser solve the launch's mode count is
-        compared with (a krakenc solve of an elastic problem); ``None``: no
-        second solve.
     """
 
     _REPR_UNITS = {'deck_frequency': 'Hz', 'marched_frequencies': 'Hz',
@@ -71,9 +70,8 @@ class KrakenLaunch(FrozenRecord):
     c_low: float
     c_high: Tuple[float, ...]
     rmax_m: float
-    n_mesh: int
+    n_mesh: Union[int, Tuple[int, ...]]
     field_option: Optional[str] = None
-    check_n_mesh: Optional[int] = None
 
     _ARRAY_FIELDS = ('marched_frequencies', 'tabulation_depths', 'profile_ranges_m')
 
@@ -82,6 +80,9 @@ class KrakenLaunch(FrozenRecord):
         # holds.
         object.__setattr__(self, 'c_high',
                            tuple(float(c) for c in self.c_high))
+        if isinstance(self.n_mesh, (list, tuple, np.ndarray)):
+            object.__setattr__(self, 'n_mesh',
+                               tuple(int(n) for n in self.n_mesh))
         self._freeze_arrays()
 
     @classmethod
@@ -106,8 +107,6 @@ class KrakenLaunch(FrozenRecord):
             text += f", {self.n_profiles} profiles"
         if self.field_option is not None:
             text += f", field option {self.field_option!r}"
-        if self.check_n_mesh is not None:
-            text += f", mode count checked at n_mesh {self.check_n_mesh}"
         return text
 
 

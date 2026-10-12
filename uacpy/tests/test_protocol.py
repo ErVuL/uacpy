@@ -17,6 +17,8 @@ import pytest
 import types
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Optional, Union
 from uacpy.core import Environment
 from uacpy.core import Source
 from uacpy.core.bottom import Bottom
@@ -45,16 +47,24 @@ from uacpy.core.run_settings import EngineSettings
 from uacpy.core.run_settings import OutputSpec
 from uacpy.core.run_settings import RunSettings
 from uacpy.models._band import broadband_band, resolve_band
-from uacpy.models._checks import check_carrier_types
+from uacpy.models._checks import (
+    check_carrier_types, check_per_range_receiver_depth, speed_bounds,
+)
 from uacpy.models._projection import (
     _smooth_surface, collapse_elastic_boundary, has_shear,
 )
 from uacpy.models._spec import EngineTraits, ModelSpec
-from uacpy.models.base import PropagationModel
+from uacpy.models.base import (
+    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _RunCall, _host_options,
+)
 from uacpy.core.run_settings import RunMode
+from uacpy.models import _launch as launch_module
 from uacpy.models.kraken import _launch
 from uacpy.tests.conftest import make_halfspace
 from uacpy.tests.conftest import recorded_warnings
+from uacpy.models._extract import (
+    finish_broadband, mask_source_axis, result_kwargs,
+)
 
 
 ALL_WRAPPERS = [Bellhop, Bounce, Kraken, RAM, Scooter, SPARC,
@@ -87,7 +97,7 @@ def _wrapper_params(classes):
 
 @pytest.mark.requires_binary
 class TestTheSourceAxisIsMaskedByOneMethod:
-    """``_mask_source_axis`` NaNs the ``r = 0`` column of a point-source field
+    """``_extract.mask_source_axis`` NaNs the ``r = 0`` column of a point-source field
     and warns once with one text for every engine; a line or scaled source
     carries no ``1/sqrt(r)`` and keeps its column; a grid clear of the axis is
     returned untouched and silent."""
@@ -111,8 +121,8 @@ class TestTheSourceAxisIsMaskedByOneMethod:
         wrapper = make()
         source = Source(depths=10.0, frequencies=100.0)
         with pytest.warns(UserWarning) as record:
-            out = wrapper._mask_source_axis(self._field([0.0, 100.0, 500.0]),
-                                            source)
+            out = mask_source_axis(wrapper.model_name,
+                                   self._field([0.0, 100.0, 500.0]), source)
         texts = [str(w.message) for w in record if 'r = 0' in str(w.message)]
         assert len(texts) == 1 and texts[0].startswith(
             f"{wrapper.model_name}: 1 receiver range(s) at r = 0, where the "
@@ -126,7 +136,7 @@ class TestTheSourceAxisIsMaskedByOneMethod:
         source = Source(depths=10.0, frequencies=100.0, source_type=source_type)
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            out = Kraken(verbose=False)._mask_source_axis(field, source)
+            out = mask_source_axis('Kraken', field, source)
         assert out is field and np.isfinite(out.data).all()
 
     def test_a_grid_clear_of_the_axis_is_untouched_and_silent(self):
@@ -134,14 +144,13 @@ class TestTheSourceAxisIsMaskedByOneMethod:
         data_before = field.data
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            out = Kraken(verbose=False)._mask_source_axis(
-                field, Source(depths=10.0, frequencies=100.0))
+            out = mask_source_axis(
+                'Kraken', field, Source(depths=10.0, frequencies=100.0))
         assert out is field and out.data is data_before
 
 
-@pytest.mark.requires_binary
 class TestTheBroadbandTailIsShared:
-    """``_finish_broadband`` returns the BROADBAND transfer function as is and
+    """``_extract.finish_broadband`` returns the BROADBAND transfer function as is and
     synthesises TIME_SERIES with the prepared pulse — the one tail every
     IFFT-based wrapper ends its broadband route with — the transfer function
     carrying the run's settings, so the synthesis reads the waveguide the
@@ -155,27 +164,34 @@ class TestTheBroadbandTailIsShared:
 
     def test_broadband_returns_the_transfer_function_itself(self):
         tf = object()
-        assert Kraken(verbose=False)._finish_broadband(
-            tf, self._settings(RunMode.BROADBAND)) is tf
+        assert finish_broadband(
+            'Kraken', tf, self._settings(RunMode.BROADBAND)) is tf
 
     def test_time_series_synthesises_with_the_prepared_pulse(self):
         from uacpy.core.run_settings import TimeSettings
         calls = []
+        series = Field(data=np.zeros((1, 1, 16)),
+                       coords={'depth': np.array([30.0]),
+                               'range': np.array([500.0]),
+                               'time': np.arange(16) / 8000.0})
 
         class _Tf:
             _run_settings = None
 
-            def synthesize_time_series(self, **kw):
+            def _synthesized(self, source_waveform, sample_rate, **kw):
+                kw.update(source_waveform=source_waveform,
+                          sample_rate=sample_rate)
                 calls.append((self._run_settings, kw))
-                return 'series'
+                return series
         settings = self._settings(
             RunMode.TIME_SERIES,
             TimeSettings(source_waveform=np.ones(4), sample_rate=8000.0))
-        out = Kraken(verbose=False)._finish_broadband(_Tf(), settings)
-        assert out == 'series'
+        out = finish_broadband('Kraken', _Tf(), settings)
+        assert out is series
         (seen, kw), = calls
         assert seen is settings
         assert kw['sample_rate'] == 8000.0 and kw['t_start'] is None
+        assert kw['who'] == 'Kraken.run'
         np.testing.assert_array_equal(kw['source_waveform'], np.ones(4))
 
 
@@ -341,7 +357,7 @@ class TestModelConsistency:
                 )
             else:
                 model = model_cls(verbose=False)
-            result = model.compute_tl(
+            result = model.compute_field(
                 env=env_with_rc, source=source, receiver=receiver_small,
             )
             assert isinstance(result, Field)
@@ -401,14 +417,14 @@ class TestSmoothSurfaceWritesNodesSilently:
 
 
 class TestSpeedBoundsFindThePhysicalExtremes:
-    """``PropagationModel._speed_bounds`` spans the water column plus every
+    """``_checks.speed_bounds`` spans the water column plus every
     geoacoustic seabed speed — the physical bracket the ``c_max`` stamp is
     taken from."""
 
     def test_the_halfspace_sets_the_maximum_when_fastest(self):
         env = Environment(name='hs', bathymetry=100.0, ssp=1500.0,
                           bottom=make_halfspace(3000.0))
-        assert PropagationModel._speed_bounds(env) == (1500.0, 3000.0)
+        assert speed_bounds(env) == (1500.0, 3000.0)
 
     def test_a_sediment_layer_faster_than_the_halfspace_sets_the_maximum(self):
         bottom = Bottom([SeabedColumn(
@@ -417,14 +433,14 @@ class TestSpeedBoundsFindThePhysicalExtremes:
             halfspace=make_halfspace(1600.0))])
         env = Environment(name='layered', bathymetry=100.0, ssp=1500.0,
                           bottom=bottom)
-        assert PropagationModel._speed_bounds(env)[1] == 1700.0
+        assert speed_bounds(env)[1] == 1700.0
 
     def test_a_rigid_halfspace_contributes_no_speed(self):
         env = Environment(
             name='rigid', bathymetry=100.0,
             ssp=[(0.0, 1500.0), (100.0, 1520.0)],
             bottom=BoundaryProperties(acoustic_type='rigid'))
-        assert PropagationModel._speed_bounds(env) == (1500.0, 1520.0)
+        assert speed_bounds(env) == (1500.0, 1520.0)
 
     def test_it_always_returns_a_two_tuple_of_speeds(self):
         """The premise ``run_settings.waveguide`` is written against.
@@ -443,7 +459,7 @@ class TestSpeedBoundsFindThePhysicalExtremes:
             Environment(name='vacuum', bathymetry=100.0, ssp=1500.0,
                         bottom=BoundaryProperties(acoustic_type='vacuum')),
         ):
-            bounds = PropagationModel._speed_bounds(env)
+            bounds = speed_bounds(env)
             assert isinstance(bounds, tuple) and len(bounds) == 2, (
                 env.name, bounds)
             assert all(np.isfinite(b) and b > 0 for b in bounds), (
@@ -455,7 +471,7 @@ class TestSpeedBoundsFindThePhysicalExtremes:
         that could hand back ``None`` or a bare value — reopens an arm the
         waveguide record does not check for."""
         import inspect
-        body = inspect.getsource(PropagationModel._speed_bounds)
+        body = inspect.getsource(speed_bounds)
         assert body.count('return') == 1, body
 
 
@@ -492,30 +508,30 @@ class TestBroadbandNFreqsGuard:
 
     _SRC = Source(depths=50.0, frequencies=100.0)
 
-    def test_n_freqs_one_is_a_configuration_error(self):
+    def test_n_frequencies_one_is_a_configuration_error(self):
         model = Bellhop(verbose=False)
-        with pytest.raises(ConfigurationError, match=r'n_freqs = 1'):
+        with pytest.raises(ConfigurationError, match=r'n_frequencies = 1'):
             broadband_band(self._SRC, 1, model.bandwidth_factor,
                            model_name='Bellhop')
 
-    def test_n_freqs_zero_is_a_configuration_error(self):
+    def test_n_frequencies_zero_is_a_configuration_error(self):
         model = Bellhop(verbose=False)
-        with pytest.raises(ConfigurationError, match=r'n_freqs = 0'):
+        with pytest.raises(ConfigurationError, match=r'n_frequencies = 0'):
             broadband_band(self._SRC, 0, model.bandwidth_factor,
                            model_name='Bellhop')
 
     def test_an_explicit_grid_bypasses_the_guard(self):
         got = resolve_band(RunMode.BROADBAND, self._SRC, [90.0, 100.0],
-                           None, model_name='Bellhop', n_freqs=0)
+                           None, model_name='Bellhop', n_frequencies=0)
         np.testing.assert_allclose(got.frequencies, [90.0, 100.0])
 
 
 @pytest.mark.requires_binary
 class TestBroadbandBandwidthFactorGuard:
-    """``_band.broadband_band`` names the cause of an empty band:
-    a non-positive ``bandwidth_factor`` (the band ``fc·(1 ± bf/2)`` inverts
-    or collapses at any fc) is reported as such, and only a centre frequency
-    the 1 Hz floor overtakes is blamed on being sub-1 Hz."""
+    """``_band.broadband_band`` builds the band ``fc·(1 ± bf/2)`` as given
+    and names the cause of one it cannot build: a non-positive
+    ``bandwidth_factor`` inverts or collapses it at any fc, and from 2 up
+    its lower edge reaches 0 Hz."""
 
     _SRC = Source(depths=50.0, frequencies=1000.0)
 
@@ -530,15 +546,28 @@ class TestBroadbandBandwidthFactorGuard:
             self._resolve(self._SRC, bandwidth_factor)
         text = str(exc.value)
         assert 'bandwidth_factor must be positive' in text, text
-        assert 'Sub-1 Hz' not in text, text
+        assert 'below 2' not in text, text
 
     def test_the_smallest_positive_factor_expands_the_band(self):
         got = self._resolve(self._SRC, 1e-3)
         assert got.size == 8 and got[0] < got[-1]
 
-    def test_a_sub_1_hz_centre_frequency_is_blamed_on_the_floor(self):
-        with pytest.raises(ConfigurationError, match=r'Sub-1 Hz centre'):
-            self._resolve(Source(depths=50.0, frequencies=0.5), 0.5)
+    @pytest.mark.parametrize('bandwidth_factor', [2.0, 2.5])
+    def test_a_factor_that_reaches_0_hz_is_refused(self, bandwidth_factor):
+        with pytest.raises(ConfigurationError,
+                           match='bandwidth_factor must be below 2'):
+            self._resolve(self._SRC, bandwidth_factor)
+
+    def test_a_factor_just_below_2_keeps_its_lower_edge(self):
+        """1.999 puts the lower edge at 0.5 Hz; the band is built as
+        given, with no floor."""
+        got = broadband_band(self._SRC, 8, 1.999, model_name='Bellhop')
+        assert got.frequencies[0] == pytest.approx(0.5)
+        assert got.notice is None
+
+    def test_a_sub_1_hz_band_is_built_as_given(self):
+        got = self._resolve(Source(depths=50.0, frequencies=0.5), 0.5)
+        np.testing.assert_allclose(got[[0, -1]], [0.375, 0.625])
 
 
 @pytest.mark.requires_binary
@@ -559,7 +588,8 @@ class TestSelectBackendIsPureIntrospection:
 
     def test_the_name_decision_reads_no_disk(self, monkeypatch):
         model = Kraken(verbose=False)
-        monkeypatch.setattr(model, '_find_executable_in_paths', self._no_disk)
+        monkeypatch.setattr(launch_module, 'find_executable_in_paths',
+                            self._no_disk)
         elastic = self._env(make_halfspace(1800.0, shear_speed=400.0,
                                        shear_attenuation=0.5))
         fluid = self._env(make_halfspace(1800.0))
@@ -569,7 +599,8 @@ class TestSelectBackendIsPureIntrospection:
     def test_forcing_kraken_on_elastic_media_raises_without_disk(
             self, monkeypatch):
         model = Kraken(verbose=False, backend='kraken')
-        monkeypatch.setattr(model, '_find_executable_in_paths', self._no_disk)
+        monkeypatch.setattr(launch_module, 'find_executable_in_paths',
+                            self._no_disk)
         elastic = self._env(make_halfspace(1800.0, shear_speed=400.0,
                                        shear_attenuation=0.5))
         with pytest.raises(ConfigurationError, match='elastic media'):
@@ -592,7 +623,7 @@ class TestSelectBackendIsPureIntrospection:
 class TestFieldPrtAttach:
     """``kraken._launch.attach_field_prt_path`` records field.exe's
     hard-coded ``field.prt`` under its own metadata key, existence-checked,
-    iff the scratch survives — ``_attach_output_paths`` only ever sees the
+    iff the scratch survives — ``attach_output_paths`` only ever sees the
     modes binary's ``kfield.prt``."""
 
     def test_field_prt_is_attached_when_the_scratch_survives(self, tmp_path):
@@ -678,7 +709,8 @@ def _waveform(n=256, rate=1000.0, freq=100.0):
 
 @pytest.mark.requires_binary
 class TestTimeSeriesRequiresAPositiveFiniteSampleRate:
-    """``_require_timeseries_signal`` is the one gate every IFFT-based
+    """``_checks.require_timeseries_signal``, reached through the stage-2
+    hook ``_check_time_series_request``, is the one gate every IFFT-based
     TIME_SERIES wrapper passes its ``sample_rate`` through, so the check
     belongs there rather than in six wrappers.
 
@@ -690,21 +722,28 @@ class TestTimeSeriesRequiresAPositiveFiniteSampleRate:
     silently wrong answer at exit 0.
     """
 
+    @staticmethod
+    def _check(model, waveform, rate):
+        """The stage-2 hook a TIME_SERIES call of ``model`` runs on its
+        pulse pair."""
+        return model._check_time_series_request(_RunCall(
+            mode=RunMode.TIME_SERIES,
+            kwargs=dict(frequencies=None, source_waveform=waveform,
+                        sample_rate=rate, output_duration=None,
+                        t_start=None)))
+
     @pytest.mark.parametrize('cls', _wrapper_params(TIMESERIES_WRAPPERS))
     @pytest.mark.parametrize('rate', BAD_SAMPLE_RATES)
     def test_every_timeseries_wrapper_names_the_bad_rate(self, cls, rate):
         with pytest.raises(ConfigurationError, match='sample_rate'):
-            _model(cls)._require_timeseries_signal(
-                RunMode.TIME_SERIES, _waveform(), rate)
+            self._check(_model(cls), _waveform(), rate)
 
     def test_a_positive_finite_rate_is_accepted(self):
-        _model(Bellhop)._require_timeseries_signal(
-            RunMode.TIME_SERIES, _waveform(), 1000.0)
+        self._check(_model(Bellhop), _waveform(), 1000.0)
 
     def test_a_non_numeric_rate_raises_the_typed_error(self):
         with pytest.raises(ConfigurationError, match='sample_rate'):
-            _model(Bellhop)._require_timeseries_signal(
-                RunMode.TIME_SERIES, _waveform(), 'fast')
+            self._check(_model(Bellhop), _waveform(), 'fast')
 
     @pytest.mark.parametrize('rate', BAD_SAMPLE_RATES)
     def test_bellhop_run_refuses_the_rate_before_it_traces_rays(self, rate):
@@ -740,46 +779,36 @@ class TestSynthesizeTimeSeriesRequiresAPositiveFiniteSampleRate:
     @pytest.mark.parametrize('rate', BAD_SAMPLE_RATES)
     def test_the_typed_error_names_the_rate(self, rate):
         with pytest.raises(ConfigurationError, match='sample_rate'):
-            self._broadband_field().synthesize_time_series(_waveform(), rate)
+            self._broadband_field().synthesize_time_series(source_waveform=_waveform(),
+                                                           sample_rate=rate)
 
     def test_a_positive_finite_rate_yields_an_ascending_time_axis(self):
-        out = self._broadband_field().synthesize_time_series(
-            _waveform(), 1000.0)
+        out = self._broadband_field().synthesize_time_series(source_waveform=_waveform(),
+                                                             sample_rate=1000.0)
         t = np.asarray(out.coords['time'])
         assert t.size > 1
         assert np.all(np.diff(t) > 0)
 
 
 @pytest.mark.requires_binary
-class TestComputeModesRequiresAWholeModeCount:
-    """``compute_modes`` applies the cap as ``int(n_modes)`` — the copy
-    ``Kraken._compute_modes_impl`` runs — which truncates toward zero, so a
-    fractional request would run a different cap than the caller asked for.
-    ``True`` is refused for the same reason ``Bellhop(n_beams=True)`` is: bool
-    is an int subclass and would silently mean 1.
-    """
-
-    @staticmethod
-    def _compute(n_modes):
-        Kraken(verbose=False).compute_modes(
-            Environment(name='flat', bathymetry=100.0, ssp=1500.0),
-            Source(depths=25.0, frequencies=200.0),
-            n_modes=n_modes)
+class TestTheModeCapIsAWholeCountOnTheModel:
+    """The mode cap is ``Kraken(n_modes=)``, the one home of the setting
+    (``compute_modes`` takes none). A fractional cap would run a different
+    cap than the caller asked for, and ``True`` is refused for the same
+    reason ``Bellhop(n_beams=True)`` is: bool is an int subclass and would
+    silently mean 1."""
 
     @pytest.mark.parametrize('n_modes', [50.5, -0.5, float('nan'),
-                                         float('inf'), np.float64(3.25)])
-    def test_a_fractional_or_non_finite_cap_is_refused(self, n_modes):
-        with pytest.raises(ConfigurationError, match='whole number'):
-            self._compute(n_modes)
+                                         float('inf'), np.float64(3.25),
+                                         True])
+    def test_a_fractional_non_finite_or_bool_cap_is_refused(self, n_modes):
+        with pytest.raises(ConfigurationError,
+                           match='must be (an integer|a number, not a bool)'):
+            Kraken(verbose=False, n_modes=n_modes)
 
-    def test_a_bool_cap_is_refused(self):
-        with pytest.raises(ConfigurationError, match='must be an int'):
-            self._compute(True)
-
-    def test_a_receiver_in_the_third_slot_is_named(self):
-        with pytest.raises(ConfigurationError, match='takes no receiver'):
-            self._compute(Receiver(depths=np.array([50.0]),
-                                   ranges=np.array([1000.0])))
+    @pytest.mark.parametrize('n_modes', [1, np.int64(4)])
+    def test_a_whole_cap_is_kept(self, n_modes):
+        assert Kraken(verbose=False, n_modes=n_modes).n_modes == n_modes
 
 
 @pytest.mark.requires_binary
@@ -803,12 +832,21 @@ class TestIrregularReceiverGridIsCheckedPairwise:
         return Receiver(depths=np.array([20.0, 100.0]),
                         ranges=np.array([1000.0, 5000.0]))
 
+    @staticmethod
+    def _check(model, env, receiver):
+        """The per-range seafloor check on the (depth, range) pairs
+        ``model``'s deck carries."""
+        check_per_range_receiver_depth(
+            model.model_name, env, receiver,
+            paired=model._receiver_grid_is_paired(receiver),
+            verbose=model.verbose)
+
     def test_a_paired_grid_clear_of_its_own_seafloor_is_silent(self):
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            Bellhop(grid_type='I', verbose=False)._check_per_range_receiver_depth(
-                self._env(), self._receiver())
+            self._check(Bellhop(grid_type='I', verbose=False), self._env(),
+                        self._receiver())
 
     def test_a_rectilinear_grid_logs_the_cross_term(self, capsys):
         # 100 m at 1 km is under the 50 m seafloor, but 20 m keeps that range
@@ -816,16 +854,16 @@ class TestIrregularReceiverGridIsCheckedPairwise:
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            Bellhop(grid_type='R', verbose='info')._check_per_range_receiver_depth(
-                self._env(), self._receiver())
+            self._check(Bellhop(grid_type='R', verbose='info'), self._env(),
+                        self._receiver())
         assert 'below the local seafloor' in capsys.readouterr().out
 
     def test_a_paired_grid_reports_a_receiver_below_its_own_seafloor(self):
         deep = Receiver(depths=np.array([80.0, 100.0]),
                         ranges=np.array([1000.0, 5000.0]))
         with pytest.warns(UserWarning, match=r'range=1000\.0 m, depth=80\.0 m'):
-            Bellhop(grid_type='I', verbose=False)._check_per_range_receiver_depth(
-                self._env(), deep)
+            self._check(Bellhop(grid_type='I', verbose=False), self._env(),
+                        deep)
 
     def test_a_non_bellhop_wrapper_spans_the_product(self):
         # Both depths under the 50 m seafloor at 1 km: a buried range.
@@ -833,13 +871,13 @@ class TestIrregularReceiverGridIsCheckedPairwise:
                         ranges=np.array([1000.0, 5000.0]))
         with pytest.warns(UserWarning, match='lie entirely below the local '
                                              'seafloor'):
-            Kraken(verbose=False)._check_per_range_receiver_depth(
-                self._env(), deep)
+            self._check(Kraken(verbose=False), self._env(), deep)
 
 
 # The six wrappers that synthesise p(t) from a broadband transfer function and
 # so route their TIME_SERIES arguments through
-# ``PropagationModel._require_timeseries_signal``. SPARC also declares
+# ``_checks.require_timeseries_signal`` (the base's stage-2 hook
+# ``_check_time_series_request``). SPARC also declares
 # TIME_SERIES but computes p(t) from its own ``pulse_type`` and never calls
 # the helper.
 
@@ -853,7 +891,7 @@ class TestIrregularReceiverGridIsCheckedPairwise:
 
 def _builds_a_result_stack(func):
     """Whether a call to ``func`` builds a ``ResultStack``: the constructor,
-    or ``ResultStack.from_slabs``, which stacks two or more slabs."""
+    or ``ResultStack.from_slabs``, which stacks two or more results."""
     import ast
 
     if isinstance(func, ast.Name):
@@ -862,12 +900,22 @@ def _builds_a_result_stack(func):
             and getattr(func.value, 'id', '') == 'ResultStack')
 
 
-def _result_stack_producers():
-    """``{module path: [line numbers]}`` for every ``return ResultStack(…)``
-    and ``return ResultStack.from_slabs(…)`` in shipped code — the producer
-    half of the union the wrappers declare,
-    read by AST so the annotations cannot drift away from the code that fills
-    them."""
+def _joins_fields_over_source_depth(func):
+    """Whether a call to ``func`` joins per-depth Fields into one Field over
+    a ``source_depth`` axis: ``stack_fields``, its labelled form
+    ``_stack_fields`` or ``restack_source_depths``."""
+    import ast
+
+    return isinstance(func, ast.Name) and func.id in (
+        'stack_fields', '_stack_fields', 'restack_source_depths')
+
+
+def _functions_calling(builds):
+    """``{module path: sorted function names}``: every function in shipped
+    code holding a call whose callee ``builds`` accepts, credited to the
+    innermost function around the call (``'<module>'`` at module level).
+    Read by AST, so the gates below cannot drift away from the code that
+    builds the results."""
     import ast
     import pathlib
 
@@ -881,31 +929,59 @@ def _result_stack_producers():
                                                    '__pycache__'}:
             continue
         tree = ast.parse(path.read_text(encoding='utf-8'))
-        lines = [node.lineno for node in ast.walk(tree)
-                 if isinstance(node, ast.Return)
-                 and isinstance(node.value, ast.Call)
-                 and _builds_a_result_stack(node.value.func)]
-        if lines:
-            found[str(path.relative_to(package.parent))] = lines
+        owners = set()
+
+        def visit(node, owner):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                owner = node.name
+            if isinstance(node, ast.Call) and builds(node.func):
+                owners.add(owner)
+            for child in ast.iter_child_nodes(node):
+                visit(child, owner)
+
+        visit(tree, '<module>')
+        if owners:
+            found[str(path.relative_to(package.parent))] = sorted(owners)
     return found
 
 
-#: Entry points measured to hand back a ``ResultStack``. Driven, not read: a
-#: 200 m guide, a 2-depth ``Source`` and the real binaries, over all 12
-#: concrete wrappers × all 10 ``compute_*`` × {1, 2} source depths. Bellhop's
-#: TL / RAYS / ARRIVALS / EIGENRAYS returned ``ResultStack`` at 2 depths and a
-#: plain ``Result`` at 1. The field modes (TL, BROADBAND, TIME_SERIES) stack on
-#: every engine since ``PropagationModel.run`` loops the depths
-#: (test_multi_source.py drives the five field models).
-_STACKING_ENTRY_POINTS = [
+#: Every function in shipped code that builds a ``ResultStack``, which holds
+#: results that are not Fields: the ``.arr`` and ``.ray`` readers on a file
+#: with several source depths (Bellhop's ARRIVALS and RAYS), the depth loop
+#: joining sparse per-depth results (Bellhop's EIGENRAYS, one of its
+#: ``spec.traits.python_stacked_modes``), ``ParallelResult.stack`` over
+#: results that are not all Fields, and the join of the components the
+#: source depths of one Field hold differently (the per-depth arrivals
+#: behind a Bellhop BROADBAND field).
+_RESULT_STACK_BUILDERS = {
+    'uacpy/core/results/_superposition.py': [
+        '_merged_components', 'components_at_source_depths'],
+    'uacpy/io/oalib_reader.py': ['_read_arrivals_body', 'read_ray_file'],
+    'uacpy/models/_stacking.py': ['run_per_source_depth'],
+    'uacpy/parallel.py': ['stack'],
+}
+
+
+#: Entry points that return a Field in every case: over a ``Source`` with
+#: several depths, one Field whose leading ``source_depth`` axis holds the
+#: field of each depth (test_engine_conformance.py drives every engine's
+#: default field mode over a two-depth Source).
+_SOURCE_AXIS_ENTRY_POINTS = [
+    ('PropagationModel', 'compute_field'),
+    ('PropagationModel', 'compute_time_series'),
+    ('PropagationModel', 'compute_transfer_function'),
+]
+
+
+#: Entry points that can hand back a ``ResultStack``: Bellhop's RAYS,
+#: ARRIVALS and EIGENRAYS over a Source with several depths (test_bellhop.py
+#: drives each), and every route that reaches those modes.
+_RESULT_STACK_ENTRY_POINTS = [
     ('PropagationModel', 'run'), ('Bellhop', 'run'),
     ('Bellhop', 'run_with_bounce'),
-    ('PropagationModel', 'compute_tl'),
     ('PropagationModel', 'compute_rays'),
     ('PropagationModel', 'compute_arrivals'),
     ('PropagationModel', 'compute_eigenrays'),
-    ('PropagationModel', 'compute_time_series'),
-    ('PropagationModel', 'compute_transfer_function'),
 ]
 
 
@@ -925,56 +1001,89 @@ _SINGLE_RESULT_ENTRY_POINTS = [
 _OWNERS = {'PropagationModel': PropagationModel, 'Bellhop': Bellhop}
 
 
-def test_the_result_stack_producers_are_where_the_annotations_say():
-    """The sweep behind the two gates below, so neither can pass against an
-    empty set. Stacking happens in **three** places, and two of them are the
-    ones a reader misses: ``_stacking.run_per_source_depth`` loops a
-    field mode over the depths for every engine, and Bellhop's eigenrays
-    (its ``spec.traits.python_stacked_modes``), and
-    the OALIB readers build one whenever a ``.shd`` / ``.arr`` / ``.ray``
-    carries more than one source depth — which is why Bellhop's TL, RAYS and
-    ARRIVALS stack without the wrapper looking as though it does (Scooter's
-    ``assemble_field_from_grn`` stacks its own per-depth Hankel
-    transforms)."""
-    producers = _result_stack_producers()
-    assert 'uacpy/models/_stacking.py' in producers, producers
-    assert 'uacpy/io/oalib_reader.py' in producers, (
-        "no OALIB reader builds a ResultStack any more; if the readers stopped "
-        "stacking, re-measure which compute_* can return one and narrow the "
-        "annotations with it — do not assume\n" + repr(producers))
-    assert len(producers['uacpy/io/oalib_reader.py']) >= 3, (
-        "the OALIB readers build fewer ResultStacks than the three "
-        "(TL, ARRIVALS, RAYS) the wrapper annotations are sized for: "
-        + repr(producers))
+def test_only_results_that_are_not_fields_are_built_into_a_result_stack():
+    """A ``ResultStack`` holds rays, arrivals, eigenrays and other results
+    that are not Fields, so it is built only where those are joined; the
+    ``.shd`` reader and the field modes build one Field over
+    ``source_depth`` instead and are not among the builders. Pinned as the
+    whole set, so a new builder needs the shape it returns checked rather
+    than assumed."""
+    builders = _functions_calling(_builds_a_result_stack)
+    assert builders == _RESULT_STACK_BUILDERS, builders
 
 
-@pytest.mark.parametrize('owner_name,method_name', _STACKING_ENTRY_POINTS,
-                         ids=[f'{o}.{m}' for o, m in _STACKING_ENTRY_POINTS])
-def test_an_entry_point_that_can_stack_declares_both_shapes(owner_name,
-                                                            method_name):
-    """``ResultStack`` is not a ``Result`` subclass — its MRO is
-    ``(ResultStack, object)`` — so ``-> Result`` told a caller that
-    ``res: Result = model.compute_tl(...)`` was correct while handing them an
-    object with a different attribute surface.
+def test_the_field_modes_join_their_source_depths_into_one_field():
+    """The other half of the sweep: the depth loop every engine's field
+    modes run through joins its per-depth Fields with ``stack_fields``, and
+    every return of the ``.shd`` reader builds one ``Field`` — with a
+    leading ``source_depth`` axis when the file carries several source
+    depths — so a multi-depth TL read from a ``.shd`` is one Field."""
+    import ast
+    import pathlib
 
-    Each of these was driven with a 2-depth ``Source`` and the real binaries
-    and returned a ``ResultStack``. The stacking is not visible at the call
-    site: for TL, RAYS and ARRIVALS it happens inside the OALIB readers, which
-    split a multi-source-depth file into one slab per depth."""
+    import uacpy
+
+    joiners = _functions_calling(_joins_fields_over_source_depth)
+    assert 'run_per_source_depth' in joiners.get(
+        'uacpy/models/_stacking.py', []), joiners
+    reader = pathlib.Path(uacpy.__file__).resolve().parent / 'io' / \
+        'oalib_reader.py'
+    (shd,) = [node for node in ast.parse(reader.read_text(encoding='utf-8'))
+              .body if isinstance(node, ast.FunctionDef)
+              and node.name == 'read_shd_file']
+    returns = [node.value for node in ast.walk(shd)
+               if isinstance(node, ast.Return)]
+    assert returns, "read_shd_file returns nothing"
+    assert all(isinstance(value, ast.Call)
+               and getattr(value.func, 'id', '') == 'Field'
+               for value in returns), [ast.unparse(v)[:60] for v in returns]
+    assert "'source_depth'" in ast.unparse(shd), (
+        "read_shd_file no longer names a 'source_depth' axis")
+
+
+@pytest.mark.parametrize('owner_name,method_name', _SOURCE_AXIS_ENTRY_POINTS,
+                         ids=[f'{o}.{m}' for o, m in _SOURCE_AXIS_ENTRY_POINTS])
+def test_a_field_entry_point_declares_a_field_and_names_the_source_axis(
+        owner_name, method_name):
+    """A Field over ``source_depth`` is a Field, so the annotation covers
+    every return when it is ``Field`` or a base of it. Nothing in the type
+    says a multi-depth Source adds a leading axis, so the docstring's
+    Returns section names ``source_depth``."""
+    import typing
+
+    method = getattr(_OWNERS[owner_name], method_name)
+    annotation = typing.get_type_hints(method)['return']
+    assert isinstance(annotation, type) and issubclass(Field, annotation), (
+        f"{owner_name}.{method_name} declares {annotation!r}, which does not "
+        f"cover the Field it returns")
+    assert 'source_depth' in (method.__doc__ or ''), (
+        f"{owner_name}.{method_name}'s docstring does not name the "
+        f"source_depth axis a multi-depth Source adds to its Field")
+
+
+@pytest.mark.parametrize('owner_name,method_name', _RESULT_STACK_ENTRY_POINTS,
+                         ids=[f'{o}.{m}' for o, m in
+                              _RESULT_STACK_ENTRY_POINTS])
+def test_an_entry_point_that_can_return_a_result_stack_declares_result(
+        owner_name, method_name):
+    """``ResultStack`` is a ``Result`` subclass, so ``-> Result`` covers
+    both shapes these return: one result, or a ResultStack of rays,
+    arrivals or eigenrays over a Source with several depths. The stacking
+    is not visible at the call site — for RAYS and ARRIVALS it happens
+    inside the ``.ray`` / ``.arr`` readers — so the docstring names
+    ResultStack."""
     import typing
 
     from uacpy.core.results import Result
     from uacpy.core.results.stack import ResultStack
 
-    assert not issubclass(ResultStack, Result), (
-        "ResultStack is a Result subclass now, so `-> Result` covers it: "
-        "narrow the unions and this gate together")
+    assert issubclass(ResultStack, Result), ResultStack.__mro__
     method = getattr(_OWNERS[owner_name], method_name)
     annotation = typing.get_type_hints(method)['return']
-    assert set(typing.get_args(annotation)) == {Result, ResultStack}, (
-        f"{owner_name}.{method_name} declares {annotation!r}; driven over a "
-        f"multi-depth Source it hands back a ResultStack, which is not a "
-        f"Result")
+    assert annotation is Result, (
+        f"{owner_name}.{method_name} declares {annotation!r}; over a "
+        f"multi-depth Source it can hand back a ResultStack, which only "
+        f"Result covers")
     assert 'ResultStack' in (method.__doc__ or ''), (
         f"{owner_name}.{method_name}'s docstring Returns section does not "
         f"name ResultStack, so a reader who trusts the prose over the "
@@ -990,8 +1099,9 @@ def test_an_entry_point_that_refuses_multiple_depths_declares_one_shape(
     """The other side, pinned so it cannot be widened on a hunch either.
 
     Every model declaring these modes raises ``ConfigurationError`` on a
-    ``Source`` with more than one depth, so the stack shape is unreachable
-    through them and ``-> Result`` is total. Widening one of these means the
+    ``Source`` with more than one depth, so neither multi-depth shape (a
+    Field over ``source_depth``, a ResultStack) is reachable through them
+    and ``-> Result`` is total. Widening one of these means the
     sweep has to be re-run, not re-argued."""
     import typing
 
@@ -1001,8 +1111,8 @@ def test_an_entry_point_that_refuses_multiple_depths_declares_one_shape(
     annotation = typing.get_type_hints(method)['return']
     assert annotation is Result, (
         f"{owner_name}.{method_name} declares {annotation!r}; every model "
-        f"that supports this mode refuses a multi-depth Source, so the "
-        f"stack shape is unreachable here")
+        f"that supports this mode refuses a multi-depth Source, so no "
+        f"multi-depth shape is reachable here")
 
 
 class TestMissingVolumeAbsorptionIsAnnounced:
@@ -1165,7 +1275,7 @@ class TestOneRunnerLaunchesEveryBinary:
 
     def test_the_stale_files_go_and_the_checks_run_in_order(self, tmp_path):
         import subprocess
-        from uacpy.models._launch import run_launch
+        from uacpy.models._launch import LaunchContext, run_launch
         (tmp_path / 'deck.out').write_text('old')
         (tmp_path / 'deck.prt').write_text('old')
         seen = []
@@ -1173,43 +1283,45 @@ class TestOneRunnerLaunchesEveryBinary:
         def run(argv, *, cwd, timeout, env):
             seen.append(sorted(p.name for p in tmp_path.iterdir()))
             return subprocess.CompletedProcess(argv, 0, 'out', '')
-        result = run_launch(self._launch(tmp_path, checks=(
-            lambda r: seen.append(('first', r.stdout)),
-            lambda r: seen.append(('second', r.returncode)))), run=run)
+        result = run_launch(LaunchContext('Engine', run), self._launch(
+            tmp_path, checks=(
+                lambda r: seen.append(('first', r.stdout)),
+                lambda r: seen.append(('second', r.returncode)))))
         assert seen == [[], ('first', 'out'), ('second', 0)]
         assert result.args == ['engine', 'deck']
 
     def test_a_failure_carries_the_prt_tail_and_skips_the_checks(
             self, tmp_path):
         from uacpy.core.exceptions import ModelExecutionError
-        from uacpy.models._launch import run_launch
+        from uacpy.models._launch import LaunchContext, run_launch
         checked = []
 
         def run(argv, *, cwd, timeout, env):
             (tmp_path / 'deck.prt').write_text('*** FATAL ERROR *** why')
             raise self._failure()
         with pytest.raises(ModelExecutionError, match='why'):
-            run_launch(self._launch(tmp_path, checks=(checked.append,)),
-                       run=run)
+            run_launch(LaunchContext('Engine', run),
+                       self._launch(tmp_path, checks=(checked.append,)))
         assert checked == []
 
     @pytest.mark.parametrize('tolerated', [True, False])
     def test_a_tolerated_failure_runs_the_checks_on_none(self, tmp_path,
                                                          tolerated):
         from uacpy.core.exceptions import ModelExecutionError
-        from uacpy.models._launch import run_launch
+        from uacpy.models._launch import LaunchContext, run_launch
         checked = []
 
         def run(argv, *, cwd, timeout, env):
             raise self._failure()
         launch = self._launch(tmp_path, checks=(checked.append,),
                               tolerate_exit=lambda exc: tolerated)
+        context = LaunchContext('Engine', run)
         if tolerated:
-            assert run_launch(launch, run=run) is None
+            assert run_launch(context, launch) is None
             assert checked == [None]
         else:
             with pytest.raises(ModelExecutionError, match='boom'):
-                run_launch(launch, run=run)
+                run_launch(context, launch)
             assert checked == []
 
 
@@ -1347,8 +1459,9 @@ class _AbsorbingStub(PropagationModel):
         return Field(data=np.ones((1, 1), complex),
                      coords={'depth': [float(receiver.depths[0])],
                              'range': [float(receiver.ranges[0])]},
-                     **self._result_kwargs(source, frequencies=source.frequencies,
-                                           phase_reference='travelling_wave'))
+                     **result_kwargs(self.model_name, self.provenance, source,
+                                     frequencies=source.frequencies,
+                                     phase_reference='travelling_wave'))
 
 
 # ── the run protocol: one resolution, one validation, one stamp ──────────
@@ -1374,8 +1487,13 @@ class _FieldStub(PropagationModel):
                      traits=EngineTraits(consumes_run_t_start=True))
     provenance_id = 'acoustics_toolbox'
 
-    def __init__(self, **kw):
-        super().__init__(**kw)
+    def __init__(self, *, use_tmpfs: bool = False,
+                 verbose: Union[bool, str] = False,
+                 work_dir: Optional[Path] = None,
+                 cleanup: Optional[bool] = None,
+                 timeout: float = DEFAULT_RUN_TIMEOUT_S,
+                 collapse: Optional[Dict[str, str]] = None):
+        super().__init__(**_host_options(locals()))
         self.calls = []
 
     def _default_run_mode_for(self, frequencies):
@@ -1402,8 +1520,9 @@ class _FieldStub(PropagationModel):
         return Field(data=data,
                      coords={'depth': receiver.depths,
                              'range': receiver.ranges},
-                     **self._result_kwargs(source, frequencies=f,
-                                           phase_reference='travelling_wave'))
+                     **result_kwargs(self.model_name, self.provenance, source,
+                                     frequencies=f,
+                                     phase_reference='travelling_wave'))
 
 
 class TestRunSettings:
@@ -1530,6 +1649,21 @@ class TestARequestedAxisIsRestoredWithinItsPrecision:
         np.testing.assert_array_equal(
             self._restore(shifted, band, _SHD_FREQUENCY_RTOL), shifted)
 
+    def test_a_depth_axis_read_back_in_real4_is_restored(self):
+        """Kraken reads the receiver depths back from the ``.shd`` as
+        REAL*4 (``field.f90`` ``Pos%Rz``): float32 rounding is restored to
+        the requested depths, and an axis off by more than that is a
+        different grid and kept as read."""
+        from uacpy.models.kraken._extract import _SHD_DEPTH_RTOL
+        depths = np.array([0.1, 17.3, 55.55, 99.9, 4321.7])
+        read = depths.astype(np.float32).astype(float)
+        assert not np.array_equal(read, depths)
+        np.testing.assert_array_equal(
+            self._restore(read, depths, _SHD_DEPTH_RTOL), depths)
+        shifted = depths * (1.0 + 4.0 * 2.0 ** -23)
+        np.testing.assert_array_equal(
+            self._restore(shifted, depths, _SHD_DEPTH_RTOL), shifted)
+
     def test_a_range_axis_read_back_in_real4_is_restored(self):
         """OASP and OASSP read ``R0``/``RSPACE`` (km) back from the ``.trf``
         as REAL*4 (``TRFHEAD``, ``oasiun23.f:814``)."""
@@ -1553,17 +1687,19 @@ class TestOneRunProtocol:
         """ARCH-1 / RA-CONTRACT-1: the mode that decides the depth loop is
         the mode that runs. ``run_mode=None`` + a frequency vector is
         BROADBAND, which this model does not batch, so a 2-depth Source is
-        one run per depth and comes back as a 2-slab stack, each slab its
-        own depth's field."""
-        from uacpy.core.results import ResultStack
+        one run per depth and comes back as one Field whose leading
+        ``source_depth`` axis holds each depth's own field."""
         env, src, rcv = _stub_triple(2)
         model = _FieldStub()
         out = model.run(env, src, rcv, frequencies=[90.0, 100.0, 110.0])
-        assert isinstance(out, ResultStack) and out.n_slabs == 2
+        assert isinstance(out, Field)
+        assert list(out.coords)[0] == 'source_depth'
+        assert out.coords['source_depth'].tolist() == [30.0, 60.0]
         assert [c[0] for c in model.calls] == [RunMode.BROADBAND] * 2
         assert [c[1] for c in model.calls] == [[30.0], [60.0]]
-        assert [float(sl.data.real.flat[0]) for sl in out.slabs] == [30.0, 60.0]
-        assert all(sl.run_mode is RunMode.BROADBAND for sl in out.slabs)
+        assert [float(out.data[i].real.flat[0]) for i in range(2)] == [30.0,
+                                                                       60.0]
+        assert out.run_mode is RunMode.BROADBAND
 
     def test_run_mode_none_with_frequencies_applies_the_weight(self):
         """The other half of RA-CONTRACT-1: a weighted one-depth Source on
@@ -1590,12 +1726,14 @@ class TestOneRunProtocol:
         assert all(isinstance(c[0], RunMode) for c in model.calls)
 
     def test_every_result_carries_the_settings_it_ran_with(self):
+        from uacpy.core.results._superposition import split_source_depths
         env, src, rcv = _stub_triple(2)
         model = _FieldStub()
         want = model.run_settings(env, src, rcv, RunMode.COHERENT_TL)
         out = model.run(env, src, rcv, RunMode.COHERENT_TL)
-        for slab in out.slabs:
-            assert slab._run_settings == want
+        assert out._run_settings == want
+        for plane in split_source_depths(out):
+            assert plane._run_settings == want
         assert want.depth_loop == 'per_depth'
         assert want.frequencies.tolist() == [100.0]
 
@@ -1630,6 +1768,20 @@ class TestOneRunProtocol:
          'ConfigurationError', 'frequencies='),
         (dict(t_start=float('nan')), 'ConfigurationError', 't_start'),
         (dict(output_duration=-1.0), 'ConfigurationError', 'output_duration'),
+        (dict(run_mode=RunMode.BROADBAND, frequencies=[-50.0, 50.0]),
+         'ConfigurationError', 'frequencies= must be positive'),
+        (dict(run_mode=RunMode.BROADBAND, frequencies=[0.0, 50.0]),
+         'ConfigurationError', 'frequencies= must be positive'),
+        (dict(run_mode=RunMode.BROADBAND, frequencies=[float('nan'), 50.0]),
+         'ConfigurationError', 'frequencies= must be finite'),
+        (dict(run_mode=RunMode.BROADBAND, frequencies=[50.0, float('inf')]),
+         'ConfigurationError', 'frequencies= must be finite'),
+        (dict(run_mode=RunMode.BROADBAND, frequencies=[100.0, 100.0, 200.0]),
+         'ConfigurationError', 'more than once'),
+        (dict(run_mode=RunMode.BROADBAND, frequencies=[]),
+         'ConfigurationError', 'non-empty'),
+        (dict(run_mode=RunMode.BROADBAND, frequencies=[50j, 100.0]),
+         'ConfigurationError', 'real numbers'),
     ])
     def test_the_three_entry_points_refuse_the_same_calls(self, call, kw,
                                                           exc, match):
@@ -1644,6 +1796,18 @@ class TestOneRunProtocol:
         with pytest.raises(getattr(uacpy, exc), match=match):
             getattr(model, call)(env, src, rcv, run_mode, **kw)
         assert model.calls == []
+
+    @pytest.mark.parametrize('frequencies', [[200.0, 150.0, 100.0], 0.5,
+                                             np.array([1e-3, 5e3])])
+    def test_a_run_frequency_grid_a_source_would_take_is_accepted(
+            self, frequencies):
+        """``frequencies=`` follows the Source's rule, which takes any
+        order and any positive value: the grid is kept as given."""
+        env, src, rcv = _stub_triple(1)
+        s = _FieldStub().run_settings(env, src, rcv, RunMode.BROADBAND,
+                                      frequencies=frequencies)
+        assert s.frequencies.tolist() == np.atleast_1d(
+            np.asarray(frequencies, dtype=float)).tolist()
 
     def test_validate_inputs_refuses_what_run_refuses_for_a_missing_env(self):
         """RA-CONTRACT-18: the carrier types are part of the one checking
@@ -1678,8 +1842,13 @@ class _StagedFieldStub(PropagationModel):
     provenance_id = 'acoustics_toolbox'
     outputs = {RunMode.COHERENT_TL: _PRESSURE, RunMode.BROADBAND: _PRESSURE}
 
-    def __init__(self, **kw):
-        super().__init__(**kw)
+    def __init__(self, *, use_tmpfs: bool = False,
+                 verbose: Union[bool, str] = False,
+                 work_dir: Optional[Path] = None,
+                 cleanup: Optional[bool] = None,
+                 timeout: float = DEFAULT_RUN_TIMEOUT_S,
+                 collapse: Optional[Dict[str, str]] = None):
+        super().__init__(**_host_options(locals()))
         self.calls = []
 
     def _resolve_engine_settings(self, env, source, receiver, settings, *,
@@ -1709,8 +1878,9 @@ class _StagedFieldStub(PropagationModel):
             data=np.full((rcv.depths.size, rcv.ranges.size), raw,
                          dtype=complex),
             coords={'depth': rcv.depths, 'range': rcv.ranges},
-            **self._result_kwargs(
-                inputs.source, frequencies=inputs.settings.frequencies,
+            **result_kwargs(
+                self.model_name, self.provenance, inputs.source,
+                frequencies=inputs.settings.frequencies,
                 phase_reference=inputs.settings.output.phase_reference))
 
 
@@ -1816,13 +1986,13 @@ class TestTheStagedPath:
         assert [c[0] for c in model.calls].count('settings') == 1
 
     def test_a_multi_depth_source_is_one_launch_per_depth(self):
-        from uacpy.core.results import ResultStack
         env, src, rcv = _stub_triple(2)
         model = _StagedFieldStub()
         out = model.run(env, src, rcv)
-        assert isinstance(out, ResultStack) and out.n_slabs == 2
-        assert [float(sl.data.real.flat[0]) for sl in out.slabs] == [30.0,
-                                                                      60.0]
+        assert isinstance(out, Field)
+        assert out.coords['source_depth'].tolist() == [30.0, 60.0]
+        assert [float(out.data[i].real.flat[0]) for i in range(2)] == [30.0,
+                                                                       60.0]
         assert [c[0] for c in model.calls].count('launch') == 2
 
     def test_a_weighted_one_depth_source_is_scaled_once(self):
@@ -1864,15 +2034,83 @@ class TestTheStagedPath:
                                                               coherent):
         """ARCH-4: an engine's Field carries the coherence its mode
         declares (``outputs[mode].coherent``), assigned once by stage 6 —
-        on every slab of a stack — not derived from the payload."""
+        on the Field over ``source_depth``, whose depth planes inherit a
+        declared True or False — not derived from the payload."""
+        from uacpy.core.results._superposition import split_source_depths
+
         class _Declared(_StagedFieldStub):
             outputs = {RunMode.COHERENT_TL: OutputSpec(
                 'Field', kind='pressure', unit='Pa',
                 phase_reference='travelling_wave', coherent=coherent)}
         result = _Declared().run(*_stub_triple(2))
-        for slab in result.slabs:
-            assert 'coherent' not in slab.metadata
-            assert slab.coherent is coherent
+        assert 'source_depth' in result.coords
+        assert 'coherent' not in result.metadata
+        assert result.coherent is coherent
+        if coherent is not None:
+            # A plane inherits a declared answer; ``Field.replace`` decides
+            # a None anew from the plane's own storage.
+            for plane in split_source_depths(result):
+                assert plane.coherent is coherent
+
+    @pytest.mark.parametrize('init, refusal', [
+        ('def __init__(self, *, use_tmpfs: bool = False, '
+         'verbose: Union[bool, str] = False, work_dir: Optional[Path] = None, '
+         'cleanup: Optional[bool] = None, timeout: float = 5.0, '
+         'collapse: Optional[Dict[str, str]] = None): pass',
+         "parameter 'timeout' differs"),
+        ('def __init__(self, *, use_tmpfs: bool = False, '
+         'verbose: Union[bool, str] = False, work_dir: Optional[Path] = None, '
+         'cleanup: Optional[bool] = None, '
+         'timeout: float = DEFAULT_RUN_TIMEOUT_S): pass',
+         "lacks the host option 'collapse'"),
+        ('def __init__(self, use_tmpfs: bool = False, *, '
+         'verbose: Union[bool, str] = False, work_dir: Optional[Path] = None, '
+         'cleanup: Optional[bool] = None, '
+         'timeout: float = DEFAULT_RUN_TIMEOUT_S, '
+         'collapse: Optional[Dict[str, str]] = None): pass',
+         "parameter 'use_tmpfs' must be keyword-only"),
+        ('def __init__(self, *, use_tmpfs: int = 0, '
+         'verbose: Union[bool, str] = False, work_dir: Optional[Path] = None, '
+         'cleanup: Optional[bool] = None, '
+         'timeout: float = DEFAULT_RUN_TIMEOUT_S, '
+         'collapse: Optional[Dict[str, str]] = None): pass',
+         "parameter 'use_tmpfs' differs"),
+        ('def __init__(self, **kw): pass', 'must not use \\*\\*kwargs'),
+    ])
+    def test_a_constructor_whose_host_options_differ_is_refused(
+            self, init, refusal):
+        """Every model constructor repeats ``PropagationModel.__init__``'s
+        host options as keyword-only parameters with the same default and
+        annotation (``_host.check_host_parameters``): a copy that differs,
+        lacks one, takes one by position or hides them in ``**kwargs`` is a
+        ``TypeError`` naming the class and the parameter when the class is
+        defined."""
+        namespace = dict(Union=Union, Optional=Optional, Path=Path,
+                         Dict=Dict, DEFAULT_RUN_TIMEOUT_S=DEFAULT_RUN_TIMEOUT_S)
+        exec(init, namespace)
+        with pytest.raises(TypeError, match=refusal) as err:
+            type('_Planted', (PropagationModel,),
+                 {'__init__': namespace['__init__']})
+        assert '_Planted.__init__()' in str(err.value)
+
+    def test_the_base_declares_one_attribute_per_capability_flag(self):
+        """``PropagationModel`` annotates ``_supports_<flag>`` for exactly
+        the flags of ``_spec._CAPABILITY_FLAGS``, and ``__init__`` sets every
+        one of them."""
+        from uacpy.models._spec import _CAPABILITY_FLAGS
+        declared = {name[len('_supports_'):]
+                    for name in PropagationModel.__annotations__
+                    if name.startswith('_supports_')}
+        assert declared == set(_CAPABILITY_FLAGS)
+        model = _StagedFieldStub()
+        assert all(isinstance(getattr(model, f'_supports_{flag}'), bool)
+                   for flag in _CAPABILITY_FLAGS)
+
+    def test_a_constructor_repeating_the_host_options_is_accepted(self):
+        """The stand-ins of this file repeat the host options as every
+        engine does, and forward them as given."""
+        model = _StagedFieldStub(verbose='info', timeout=7.5)
+        assert (model.verbose, model.timeout) == ('info', 7.5)
 
     def test_an_engine_without_spec_is_refused_at_definition(self):
         """The stage hooks make a class concrete, so it must declare the
@@ -1918,7 +2156,7 @@ class TestTheStagedTimeSeriesStage:
     """On a :class:`PropagationModel` that declares ``TIME_SERIES``, the base owns
     the time-series keywords once per call: the pulse refusal and the
     dropped-keyword warning in stage 2 (before the projection), the
-    auto-derived grid and the 1 Hz floor notices in stage 3 (``run`` and
+    auto-derived grid notice in stage 3 (``run`` and
     ``run_settings``, not ``validate_inputs``), and the engine's own notices
     through ``_announce_engine_settings`` on the same terms."""
 
@@ -1969,13 +2207,13 @@ class TestTheStagedTimeSeriesStage:
                                         **_pulse())
         assert len(_said(caught, 'auto-derived')) == 1
 
-    def test_the_floored_band_is_announced_by_run_settings_only(self):
+    def test_a_sub_1_hz_band_is_run_without_a_notice(self):
         env, src, rcv = _stub_triple(1, frequencies=1.0)
-        model = _StagedTimeSeriesStub()
-        for call, expected in (('run_settings', 1), ('validate_inputs', 0)):
-            with recorded_warnings() as caught:
-                getattr(model, call)(env, src, rcv, RunMode.BROADBAND)
-            assert len(_said(caught, 'floored at 1 Hz')) == expected, call
+        with recorded_warnings() as caught:
+            settings = _StagedTimeSeriesStub().run_settings(
+                env, src, rcv, RunMode.BROADBAND)
+        assert settings.frequencies[0] == pytest.approx(0.75)
+        assert not _said(caught, 'bandwidth_factor')
 
     def test_the_engine_announces_through_run_settings_only(self):
         env, src, rcv = _stub_triple(1)

@@ -20,6 +20,7 @@ from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, NumericsWarning,
 )
 from uacpy.models.ram._settings import RamGrid
+from uacpy.models._checks import speed_bounds
 
 
 # ── Per-backend facts, each stated once ──────────────────────────────────────
@@ -103,7 +104,11 @@ COLLINS_SAMPLES_PER_BEAT = 6.0
 # march then follows the linear gradient. Measured on a two-profile front
 # 10 km long, marching only the declared profiles was 3.3 dB (median) and up
 # to 29 dB off the same front densified to 41 columns. Each profile change
-# re-factorises the depth operator, so the count is capped.
+# re-factorises the depth operator, so the count is capped. The densification
+# is the RAM guide's own remedy ("If gradual range dependence is desired, it
+# is necessary to either use an appropriate sequence of profile blocks or
+# modify ram.f to interpolate profiles", ram.pdf p.8); the 0.5 m/s step and
+# the 128-profile cap are uacpy guidance.
 _SSP_STEP_MAX_MPS = 0.5
 _MAX_SSP_PROFILES = 128
 # mpiramS/src/param.f90:10 — the radius its flat-earth transform uses.
@@ -115,7 +120,9 @@ _EARTH_RADIUS_M = 6378137.0
 #: Calibrated, not derived — see :func:`adequate_zmax` for the sweep:
 #: 1 wavelength leaves +0.54 dB of spurious loss at 25 Hz over a lossless
 #: seabed, 2 reaches +0.12 dB against a +0.07 dB converged deep grid, and 4
-#: is indistinguishable from converged.
+#: is indistinguishable from converged. uacpy guidance (measured); Jensen et
+#: al. (*Computational Ocean Acoustics*, Sect. 6.5.3) ask for "a real
+#: physical bottom of several wavelengths thickness".
 _SEABED_WAVELENGTHS_BEFORE_ABSORBER = 2.0
 
 
@@ -140,7 +147,8 @@ _LEAKED_ENERGY_FLOOR_DB = float(
 #: room to work. ``ram.pdf`` p.7 asks for the grid bottom "well below the ocean
 #: bottom interface" with the attenuation raised "over the lower few
 #: wavelengths of the grid"; three is that "few", calibrated against the
-#: measured error curve rather than assumed.
+#: measured error curve rather than assumed — and the width of Collins' own
+#: sample absorber (100 m at 50 Hz with c0 = 1600 m/s, ram.pdf p.8, p.12).
 _MIN_SUBBOTTOM_WAVELENGTHS = 3.0
 
 
@@ -177,7 +185,7 @@ def seabed_sound_speed(env: Environment, c0: float) -> float:
     return max(speeds) if speeds else float(c0)
 
 
-def resolve_c0(env: Environment, *, knobs, speed_bounds) -> float:
+def resolve_c0(env: Environment, *, knobs) -> float:
     """Resolve the PE reference speed ``c₀``.
 
     ``c₀`` is the algorithmic expansion point of the parabolic
@@ -208,46 +216,73 @@ def resolve_c0(env: Environment, *, knobs, speed_bounds) -> float:
 
 def water_speed_bounds(env: Environment):
     """Slowest / fastest sound speeds (m/s) of the water column alone,
-    over every profile; :meth:`_speed_bounds` adds the seabed."""
+    over every profile; :func:`~uacpy.models._checks.speed_bounds` adds the
+    seabed."""
     c = np.asarray(env.ssp.sound_speed, dtype=float).ravel()
     c = c[np.isfinite(c)]
     return float(c.min()), float(c.max())
 
 
-def resolve_angle_max(env: Environment, *, knobs) -> float:
-    """Maximum propagation angle (degrees) bracketing the Padé spectrum.
+#: Source aperture (degrees) the default ``angle_max`` takes before the
+#: seabed term: the aperture of the worked example in Lytaev (2023) §5.1
+#: ("We will proceed from the maximum propagation angle θmax = 30°"). Jensen
+#: et al. (*Computational Ocean Acoustics*, Sect. 6.2.4) treat the aperture
+#: as application-dependent ("a 20° equation for one application and a 30°
+#: equation for another").
+DEFAULT_ANGLE_MAX_DEG = 30.0
 
-    Lytaev (2023, https://doi.org/10.3390/jmse11030496) §5.5 estimates it
-    as ``θ_max = max(θ_max^src, θ_max^bottom)``, where ``θ_max^bottom`` is
-    the steepest slope between bottom and water, taken from the bathymetry
-    relief. ``angle_max`` on the constructor supplies the source aperture;
-    the seabed term is measured here, so a slope steeper than it widens
-    ``[ξ_min, ξ_max]`` instead of leaving the auto grid coarser than the
-    ``accuracy`` budget implies. Capped just under 90° — the bracket is
-    undefined at grazing.
-    """
-    theta = float(knobs.angle_max)
+
+def source_aperture(knobs) -> float:
+    """The source's maximum propagation angle (degrees): the pinned
+    ``angle_max``, else :data:`DEFAULT_ANGLE_MAX_DEG`."""
+    return (DEFAULT_ANGLE_MAX_DEG if knobs.angle_max is None
+            else float(knobs.angle_max))
+
+
+def steepest_slope_deg(env: Environment) -> float:
+    """The steepest bottom/water slope (degrees) between consecutive
+    ``env.bathymetry`` nodes; 0 for a flat or one-node bathymetry."""
     bathy = env.bathymetry
     if bathy is None or bathy.n_ranges < 2:
-        return theta
+        return 0.0
     r = np.asarray(bathy.ranges, dtype=float)
     z = np.asarray(bathy.depths, dtype=float)
     dr = np.diff(r)
     valid = dr > 0.0
     if not np.any(valid):
-        return theta
-    slope = np.degrees(np.arctan(np.abs(np.diff(z))[valid] / dr[valid]))
-    return float(min(max(theta, float(np.max(slope))), 89.0))
+        return 0.0
+    return float(np.max(np.degrees(
+        np.arctan(np.abs(np.diff(z))[valid] / dr[valid]))))
+
+
+def resolve_angle_max(env: Environment, *, knobs) -> float:
+    """Maximum propagation angle (degrees) bracketing the Padé spectrum.
+
+    A pinned ``angle_max`` is used as given. Left unset, it is Lytaev
+    (2023, https://doi.org/10.3390/jmse11030496) §5.5's estimate
+    ``θ_max = max(θ_max^src, θ_max^bottom)``: the source aperture
+    :data:`DEFAULT_ANGLE_MAX_DEG` and the steepest slope between bottom and
+    water, taken from the bathymetry relief (:func:`steepest_slope_deg`),
+    so a slope steeper than the aperture widens ``[ξ_min, ξ_max]`` instead
+    of leaving the automatic grid coarser than the ``accuracy`` budget
+    implies — capped just under 90°, where the bracket is undefined.
+    """
+    if knobs.angle_max is not None:
+        return float(knobs.angle_max)
+    return float(min(max(DEFAULT_ANGLE_MAX_DEG, steepest_slope_deg(env)),
+                     89.0))
 
 
 def compute_zmax(env: Environment, freq: float,
                   c0: Optional[float] = None, *, max_range: float,
-                  notices=None, knobs, speed_bounds) -> float:
+                  source_depth: float = 0.0,
+                  notices=None, knobs) -> float:
     """
     Compute PE domain depth (zmax) that extends below the seafloor.
 
     If self.zmax is set, uses that value directly. Otherwise adds:
-    - The modelled sediment stack below the max seafloor depth
+    - The modelled sediment stack below the max seafloor depth, or the
+      deepest source (``source_depth``, m) when that lies deeper
     - A real-seabed pad below that (:func:`adequate_zmax`)
     - An absorbing layer (``absorber_width_wavelengths`` wavelengths of
       ``c₀``, :func:`absorbing_layer_thickness`) to prevent spurious
@@ -276,11 +311,10 @@ def compute_zmax(env: Environment, freq: float,
         # ``collins.resolve_collins_grid`` already calls it with its own kind
         # and dz — passing one here would either raise early or warn twice.
         warn_if_seafloor_outside_grid(knobs.zmax, env, freq=freq,
-                                      notices=notices, knobs=knobs,
-                                      speed_bounds=speed_bounds)
+                                      notices=notices, knobs=knobs)
         return knobs.zmax
-    return adequate_zmax(env, freq, c0, max_range=max_range, knobs=knobs,
-                         speed_bounds=speed_bounds)
+    return adequate_zmax(env, freq, c0, max_range=max_range,
+                         source_depth=source_depth, knobs=knobs)
 
 
 def _seabed_top_media(env: Environment) -> List[tuple]:
@@ -310,7 +344,7 @@ def leaky_field_depth(env: Environment, freq: float, max_range: float, *,
     hold above its absorber.
 
     A water-borne component at grazing angle ``θ_w`` (up to the source
-    aperture ``angle_max``) that the seabed transmits leaves
+    aperture, :func:`source_aperture`) that the seabed transmits leaves
     into it at ``θ_b`` (Snell, ``cos θ_b = c_b cos θ_w / c_w``) and keeps
     leaking along the whole track, so at range ``r`` its bottom field
     reaches ``r·tan θ_b``; a grid that cuts it there changes the component
@@ -344,7 +378,7 @@ def leaky_field_depth(env: Environment, freq: float, max_range: float, *,
         return 0.0
     depth = float(env.depth)
     c_w = float(np.max(np.asarray(env.ssp.sound_speed, dtype=float)[-1]))
-    theta_w = np.radians(np.linspace(0.1, float(knobs.angle_max), 400))
+    theta_w = np.radians(np.linspace(0.1, source_aperture(knobs), 400))
     deepest = 0.0
     for c_b, rho_b, alpha_b in media:
         cos_b = c_b * np.cos(theta_w) / c_w
@@ -374,22 +408,28 @@ def leaky_field_depth(env: Environment, freq: float, max_range: float, *,
 
 
 def adequate_zmax(env: Environment, freq: float,
-                   c0: Optional[float] = None, *, max_range: float, knobs,
-                   speed_bounds) -> float:
+                   c0: Optional[float] = None, *, max_range: float,
+                   source_depth: float = 0.0, knobs) -> float:
     """The grid bottom ``ram.pdf`` p.7 asks for: the seafloor, the
     modelled sediment stack, a real-seabed pad and the absorbing layer.
+    The sum is uacpy guidance; the sources' fixed rules are not used —
+    ``zmax = 1.5 * SSP.depth( 2 )`` in the toolbox's RAM deck writers
+    (``Matlab/Slicer/write_ram_in.m:74``), "about 3 or 4 times the depth of
+    the ocean bottom" (``ramsurf/readme.orig``), ``4H/3`` (Jensen et al.,
+    *Computational Ocean Acoustics*, ch. 6 App. 1).
     The pad is the deeper of two seabed wavelengths and the depth the
     continuous spectrum's bottom field reaches within ``max_range``
-    (:func:`leaky_field_depth`).
+    (:func:`leaky_field_depth`). A source deeper than the stack's base
+    (``source_depth``, m) takes the stack's place, so the pad lies below
+    it and it radiates from real seabed, not from the absorber.
 
     Split out from :func:`compute_zmax` so the seafloor guard can compare
     a pinned ``zmax`` against it without recursing back through the pinned
     branch.
     """
     if c0 is None:
-        c0 = resolve_c0(env, knobs=knobs, speed_bounds=speed_bounds)
-    absorbing_width = absorbing_layer_thickness(env, freq, knobs=knobs,
-                                                speed_bounds=speed_bounds)
+        c0 = resolve_c0(env, knobs=knobs)
+    absorbing_width = absorbing_layer_thickness(env, freq, knobs=knobs)
     dz_for_pad = float(knobs.dz) if knobs.dz is not None else 0.0
     # Leave REAL seabed between the seafloor and the absorber, not one
     # cell. ``absorber_span`` puts the ramp over the deepest
@@ -401,7 +441,7 @@ def adequate_zmax(env: Environment, freq: float,
     # ``absorber_span`` docstring warns against, an artificial gradient
     # standing in for the seabed, and it costs energy the seabed should
     # have returned to modes whose evanescent tails reach past one cell.
-    # Collins states the requirement directly (``RAM.md`` p.2): "To
+    # Collins states the requirement directly (``ram.pdf`` p.7): "To
     # prevent artificial reflections, the bottom of the computational grid
     # (the depth zmax) is placed WELL BELOW the ocean bottom interface and
     # the attenuation is increased over the LOWER FEW WAVELENGTHS of the
@@ -455,7 +495,8 @@ def adequate_zmax(env: Environment, freq: float,
     # ``ram.f90:334-342``) and :func:`mpirams.prepare_bottom_properties` sets
     # ``sedlayer`` from this same domain (:func:`absorber_span`), so the
     # two decks ramp from one depth.
-    return env.depth + stack + max(dz_for_pad, seabed_pad) + absorbing_width
+    below = max(stack, float(source_depth) - float(env.depth))
+    return env.depth + below + max(dz_for_pad, seabed_pad) + absorbing_width
 
 
 def flat_earth_depth(z):
@@ -484,7 +525,7 @@ def flat_earth_depth_inverse(z_transformed):
 
 
 def absorber_span(env: Environment, freq: float,
-                   zmax: float, *, knobs, speed_bounds) -> float:
+                   zmax: float, *, knobs) -> float:
     """Depth below the deepest seafloor at which the absorbing layer starts.
 
     ``profl`` interpolates the sediment arrays linearly between control
@@ -513,11 +554,11 @@ def absorber_span(env: Environment, freq: float,
     seabed.
     """
     return (float(zmax) - float(env.depth)) - absorbing_layer_thickness(
-        env, freq, knobs=knobs, speed_bounds=speed_bounds)
+        env, freq, knobs=knobs)
 
 
-def absorbing_layer_thickness(env: Environment, freq: float, *, knobs,
-                              speed_bounds) -> float:
+def absorbing_layer_thickness(env: Environment, freq: float, *,
+                              knobs) -> float:
     """Thickness (m) of the artificial absorbing layer:
     ``absorber_width_wavelengths`` wavelengths of the PE reference speed
     ``c₀``. One formula for the domain depth (:func:`adequate_zmax`),
@@ -544,7 +585,7 @@ def absorbing_layer_thickness(env: Environment, freq: float, *, knobs,
     2.27 → 2.20). Raise ``absorber_width_wavelengths`` on a lossless seabed.
     """
     return (knobs.absorber_width_wavelengths * resolve_c0(
-        env, knobs=knobs, speed_bounds=speed_bounds)
+        env, knobs=knobs)
             / max(float(freq), 1.0))
 
 
@@ -552,7 +593,7 @@ def warn_if_seafloor_outside_grid(zmax: float, env, *,
                                    dz: Optional[float] = None,
                                    kind: Optional[str] = None,
                                    freq: Optional[float] = None,
-                                   notices=None, knobs, speed_bounds) -> None:
+                                   notices=None, knobs) -> None:
     """Warn when a **pinned** ``zmax`` puts the seafloor outside the PE
     domain.
 
@@ -643,8 +684,7 @@ def warn_if_seafloor_outside_grid(zmax: float, env, *,
             # 0.32 dB — noise. Three wavelengths tracks the measured error
             # curve instead: silent at 700 m (0.32 dB) and 1500 m, warning
             # at 300 m (3.1 dB) and 222 m (16.0 dB).
-            lam = resolve_c0(env, knobs=knobs,
-                             speed_bounds=speed_bounds) / max(float(freq), 1.0)
+            lam = resolve_c0(env, knobs=knobs) / max(float(freq), 1.0)
             adequate = depth + _MIN_SUBBOTTOM_WAVELENGTHS * lam
             if float(zmax) < adequate:
                 give_notice(notices,
@@ -999,14 +1039,41 @@ def check_source_row_is_solved(zs: float, dz: float) -> None:
         f"(si=1.0+zs/dz, ifix). No solver writes row 1 — every sweep "
         f"starts at 2 — so the amplitude is frozen there for the whole "
         f"march and acts as a permanent source on the pressure-release "
-        f"surface. Measured ~46 dB too loud against Kraken.",
+        f"surface.",
         remediation=(f"Set dz <= {float(zs):.4g} m so the source lands at "
                      f"index 2 or deeper, or move the source below "
                      f"{float(dz):.4g} m."),
     )
 
 
-def band_speeds(env, *, knobs, speed_bounds):
+def check_source_inside_the_domain(zs: float, dz: float,
+                                   zmax: float) -> None:
+    """Reject a source the binary cannot plant inside its depth grid.
+
+    Every self-starter puts the delta on rows ``is = int(1 + zs/dz)`` and
+    ``is + 1`` (:func:`check_source_row_is_solved`), and every grid holds
+    ``nz = floor(zmax/dz - 0.5)`` rows, the solvers sweeping rows 2 to
+    ``nz + 1`` (``ramgeo1.5.f:130``, ``ram.f90:56``,
+    ``mpiramS/src/solvetri.f90:50``). A source past row ``nz`` is outside
+    the arrays the march solves. ``zs`` and ``zmax`` are in the deck's
+    frame. Anywhere above it — the sediment included, which the depth
+    operator spans like the water — the PE computes the source's field.
+    """
+    row = int(1.0 + float(zs) / float(dz))
+    nz = int(float(zmax) / float(dz) - 0.5)
+    if row <= nz:
+        return
+    raise ConfigurationError(
+        f"RAM: the source at {float(zs):.4g} m lands on depth row {row} "
+        f"(1 + zs/dz, dz={float(dz):.4g} m), past the last row the binary "
+        f"marches, nz = floor(zmax/dz - 0.5) = {nz} for zmax="
+        f"{float(zmax):.4g} m (ramgeo1.5.f:130, ram.f90:56).",
+        remediation=(f"Pin zmax well below {float(zs):.4g} m, or leave it "
+                     f"unset to have the domain sized around the source."),
+    )
+
+
+def band_speeds(env, *, knobs):
     """``(c0, c_min, c_max, c_min_all, c_max_all)`` the grid chooser scores
     with: the accuracy band is the water column widened to contain ``c0``
     (a one-sided interval would score fine, but the widening buys a finer
@@ -1015,7 +1082,7 @@ def band_speeds(env, *, knobs, speed_bounds):
     25 m step against 1.27 at the water band's 57 m, the far field
     unchanged); the whole medium's hull is the stability band, held
     non-amplifying only (``pe_grid``)."""
-    c0 = resolve_c0(env, knobs=knobs, speed_bounds=speed_bounds)
+    c0 = resolve_c0(env, knobs=knobs)
     c_min, c_max = water_speed_bounds(env)
     c_min_all, c_max_all = speed_bounds(env)
     return c0, min(c_min, c0), max(c_max, c0), c_min_all, c_max_all
@@ -1056,8 +1123,7 @@ def nonzero_shear_speeds(env: Environment) -> List[float]:
     return [float(cs) for cs in candidates if float(cs) > 0.0]
 
 
-def modal_beat_wavenumber(env: Environment, freq: float, *,
-                          speed_bounds) -> float:
+def modal_beat_wavenumber(env: Environment, freq: float) -> float:
     """Widest horizontal-wavenumber spread of the trapped modes, rad/m:
     ``2πf (1/c_min − 1/c_max)`` over the environment's slowest and
     fastest compressional speeds. The modulus of the field beats at up to

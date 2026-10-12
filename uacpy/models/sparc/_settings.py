@@ -1,8 +1,8 @@
 """The settings record one :class:`~uacpy.models.sparc.SPARC` run
 resolves before it launches."""
 
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
 
 from uacpy.core.run_settings import EngineSettings
 
@@ -24,8 +24,8 @@ class SparcSettings(EngineSettings):
     deck_frequency : float
         The deck's header frequency (Hz), ``source.frequencies[0]``: the
         frequency the seabed and volume attenuation are converted at
-        (``sparc.f90:96-97``) and the centre of a canned pulse
-        (``sparc.f90:525``).
+        (``sparc.f90:96-97``) and the frequency ``F`` a canned pulse is
+        built on (``sparc.f90:525``, ``tslib/cans.f90``).
     freq_min, freq_max : float
         The pulse band (Hz) the deck carries: ``sparc.f90:111-116`` spans
         the wavenumbers ``[2π freq_min / c_high, 2π freq_max / c_low]`` from it.
@@ -33,24 +33,32 @@ class SparcSettings(EngineSettings):
         Where each band edge came from: the constructor, ``run(frequencies=)``,
         the base rule's band of the marched waveform padded to the ``time_max``
         record (its -40 dB support, its lowest bin above DC, or the cost
-        limit of a hard-edged pulse), or one octave around a canned pulse's
-        frequency.
+        limit of a hard-edged pulse), or a canned pulse's spectral support
+        ``[0, m·F]`` as ``tslib/cans.f90`` states it for its shape.
     time_max : float
         The end (s) of the ``[0, time_max]`` output window.
     time_max_origin : str
         Where ``time_max`` came from: the constructor, ``run(output_duration=)``,
         or 2.5 direct travel times to the farthest receiver.
     n_time_samples : int
-        The output time samples over ``[0, time_max]``.
+        The output time samples over ``[0, time_max]``: the constructor's,
+        or the least count with more than eight per period at ``freq_max``
+        (Jensen et al., Sect. 8.2.1.3).
     rmax_m : float
-        The deck's ``RMax`` (m): the farthest receiver range times
-        ``rmax_factor``; it sets the wavenumber step.
+        The deck's ``RMax`` (m); it sets the wavenumber step: the farthest
+        receiver range times a pinned ``rmax_factor``, else that range plus
+        ``1.2 × c_fast × time_max``, which keeps the range replica out of
+        the record.
     rmax_factor : float
-        The margin ``rmax_m`` was built with.
+        ``rmax_m`` over the farthest receiver range.
     rmax_factor_origin : str
-        Where the margin came from: the constructor or the default.
+        Where ``rmax_m`` came from: the constructor or the default rule.
     c_low, c_high : float
         The phase-speed bounds (m/s) the deck carries.
+    c_low_origin, c_high_origin : str or None
+        Where each bound came from: the constructor, or the rule that
+        derived it from the environment. ``None`` on a record that does not
+        state it (one saved without these fields). Keyword-only.
     n_wavenumbers : int
         The wavenumbers ``sparc.f90:116`` marches.
     n_mesh : tuple of int
@@ -91,6 +99,8 @@ class SparcSettings(EngineSettings):
     rmax_factor_origin: str
     c_low: float
     c_high: float
+    c_low_origin: Optional[str] = field(default=None, kw_only=True)
+    c_high_origin: Optional[str] = field(default=None, kw_only=True)
     n_wavenumbers: int
     n_mesh: Tuple[int, ...]
     output_mode: str

@@ -675,15 +675,16 @@ def test_examples_index_lists_exactly_the_scripts_on_disk() -> None:
 MODELS_README = DOCS_DIR / "models" / "README.md"
 
 
-def _readme_run_mode_matrix():
-    """(header, rows) of the ``## Run modes`` table in models/README.md,
-    which the page itself says is generated from ``model.supported_modes``."""
+def _readme_table(heading: str):
+    """(header, rows) of the table under the ``## <heading>`` section of
+    models/README.md: the ``Run modes`` matrix, which the page says is
+    generated from ``model.supported_modes``, or the ``Capability matrix``."""
     if not MODELS_README.is_file():
         pytest.skip("docs/models/README.md is not present")
     text = MODELS_README.read_text(encoding="utf-8")
-    match = re.search(r"^## Run modes\s*$", text, re.M)
+    match = re.search(rf"^## {re.escape(heading)}\s*$", text, re.M)
     if not match:
-        pytest.fail("models/README.md has no '## Run modes' section")
+        pytest.fail(f"models/README.md has no '## {heading}' section")
     section = text[match.end():]
     nxt = re.search(r"^## ", section, re.M)
     if nxt:
@@ -691,7 +692,7 @@ def _readme_run_mode_matrix():
     table = [line for line in section.splitlines()
              if line.lstrip().startswith("|")]
     if len(table) < 3:
-        pytest.fail("the '## Run modes' section has no parsable table")
+        pytest.fail(f"the '## {heading}' section has no parsable table")
     return _split_row(table[0]), [_split_row(r) for r in table[2:]]
 
 
@@ -725,7 +726,7 @@ def test_readme_run_mode_matrix_matches_model_specs() -> None:
     undocumented."""
     from uacpy.models import RunMode
 
-    header, rows = _readme_run_mode_matrix()
+    header, rows = _readme_table("Run modes")
     supported = _readme_matrix_supported_modes()
     columns = [(_matrix_model_name(cell), i)
                for i, cell in enumerate(header) if _matrix_model_name(cell)]
@@ -773,6 +774,122 @@ def test_readme_run_mode_matrix_matches_model_specs() -> None:
         problems.append(f"RunMode member(s) absent from the matrix: "
                         f"{sorted(undocumented)}")
     assert not problems, ("README run-mode matrix drift:\n"
+                          + "\n".join(problems))
+
+
+# ── models/README.md capability matrix ────────────────────────────────────
+
+#: Each row of the ``## Capability matrix`` table in models/README.md, by its
+#: label, and the capability flags it reports: a ✅ cell says the model carries
+#: one of them, a ✗ cell that it carries none.
+_README_FEATURE_FLAGS = {
+    "Range-dep. bathymetry": ("range_dependent_bathymetry",),
+    "Range-dep. SSP": ("range_dependent_ssp",),
+    "Range-dep. bottom": ("range_dependent_bottom",),
+    "Sea-surface altimetry": ("altimetry",),
+    "Layered bottom": ("layered_bottom",),
+    "Rough surface/bottom (`sigma`)": ("rough_surface", "rough_bottom"),
+    "Elastic media (shear)": ("elastic_media",),
+    "Multiple source depths": ("multi_source_depth",),
+    "Water-column absorption (`env.absorption`)": ("volume_attenuation",),
+}
+
+
+def _readme_matrix_features() -> dict:
+    """The capability flags each README column carries, as the saved engine
+    records state them for a default instance (``tests/data/engine_specs.json``,
+    held to the live engines by ``test_capability_flags.py``, so this gate
+    needs no binary). The OASES column is the union across its instantiable
+    sub-models, as the page states."""
+    import json
+    from uacpy.models._registry import ENGINES
+    from uacpy.models.oases import OASES
+    records = json.loads((Path(__file__).parent / "data" / "engine_specs.json")
+                         .read_text(encoding="utf-8"))
+    out = {"OASES": set()}
+    for key, entry in ENGINES.items():
+        carried = {name for name, on in
+                   records[key]["instance"]["features"].items() if on}
+        if issubclass(entry.load(), OASES):
+            out["OASES"] |= carried
+        else:
+            out[entry.class_name] = carried
+    return out
+
+
+def _bellhop_keeps_a_layered_bottom_through_bounce() -> bool:
+    """Whether a default Bellhop takes the BOUNCE route the README's
+    footnote 1 states, which keeps a layered bottom as given while the
+    ``layered_bottom`` flag reads False: ``auto_bounce`` defaults to True
+    (``Bellhop._project_environment``; the route's tests are Bellhop's)."""
+    from uacpy.models.bellhop import Bellhop
+    return inspect.signature(Bellhop).parameters["auto_bounce"].default is True
+
+
+#: The cells marked ✅ whose flag reads False because the model carries the
+#: feature by another route, which the page's footnote states, each with the
+#: check that the route still holds.
+_README_FEATURE_ROUTES = {
+    ("Layered bottom", "Bellhop"):
+        _bellhop_keeps_a_layered_bottom_through_bounce,
+}
+
+
+@requires_docs
+def test_readme_capability_matrix_matches_the_engine_records() -> None:
+    """Every ✅/✗ cell of the README capability matrix agrees with the
+    capability flags of a default instance of that model (the OASES column
+    with any of its sub-models): ✅ where the model carries one of the row's
+    flags or reaches the feature by a route ``_README_FEATURE_ROUTES`` names
+    and checks, ✗ where it carries none. Every row is one of
+    ``_README_FEATURE_FLAGS`` and every model has a column, so a new row, a
+    renamed one or a new engine fails here."""
+    header, rows = _readme_table("Capability matrix")
+    carried = _readme_matrix_features()
+    columns = [(_matrix_model_name(cell), i)
+               for i, cell in enumerate(header) if _matrix_model_name(cell)]
+    problems = [f"unknown model column {name!r}" for name, _ in columns
+                if name not in carried]
+    uncolumned = sorted(set(carried) - {name for name, _ in columns})
+    if uncolumned:
+        problems.append(f"model(s) {uncolumned} have no column "
+                        f"(docs/DEV.md section 3, step 7)")
+    labels = [row[0] for row in rows]
+    problems += [f"row {label!r} names no capability flag "
+                 f"(_README_FEATURE_FLAGS)" for label in labels
+                 if label not in _README_FEATURE_FLAGS]
+    problems += [f"row {label!r} is missing from the matrix"
+                 for label in _README_FEATURE_FLAGS if label not in labels]
+    for row in rows:
+        flags = _README_FEATURE_FLAGS.get(row[0])
+        if flags is None:
+            continue
+        for name, ci in columns:
+            if name not in carried:
+                continue
+            cell = row[ci].strip()
+            has = bool(carried[name] & set(flags))
+            route = _README_FEATURE_ROUTES.get((row[0], name))
+            if cell.startswith("✅"):
+                if has:
+                    if route is not None:
+                        problems.append(
+                            f"{row[0]!r} × {name}: the flag now reads True; "
+                            f"drop its _README_FEATURE_ROUTES entry")
+                elif route is None:
+                    problems.append(f"{row[0]!r} × {name}: ✅ but the engine "
+                                    f"carries none of {list(flags)}")
+                elif not route():
+                    problems.append(f"{row[0]!r} × {name}: ✅ by a route "
+                                    f"that no longer holds ({route.__name__})")
+            elif cell.startswith("✗"):
+                if has:
+                    problems.append(f"{row[0]!r} × {name}: ✗ but the engine "
+                                    f"carries {sorted(carried[name] & set(flags))}")
+            else:
+                problems.append(f"{row[0]!r} × {name}: unreadable cell "
+                                f"{cell!r}")
+    assert not problems, ("README capability matrix drift:\n"
                           + "\n".join(problems))
 
 
@@ -1898,17 +2015,18 @@ def test_every_documented_default_equals_the_signature_default() -> None:
 
 
 
-def test_c_high_factor_records_which_models_require_the_pad():
-    """The pad cannot be tuned for Kraken alone: Scooter/SPARC use c_high as
-    the lower limit of a wavenumber integral, where it keeps the branch point
-    k = omega/c_bottom inside the window. Without this note a later round
-    'simplifies' the constant and breaks the model users are told to fall back
-    to."""
+def test_c_high_factor_records_which_models_use_the_pad():
+    """The 1.05 pad is Kraken's mode-search bound; the wavenumber integrals
+    (Scooter, SPARC) leave an unpinned c_high unbounded, k_min = 0, as JKPS
+    ch. 4 App. 1 recommends. The note says so and points at the rule they
+    use, and that rule does not read the factor."""
+    import inspect
+    from uacpy.models import _window
     src = (Path(uacpy.__file__).parent / 'models' / '_window.py').read_text()
-    block = src.split('C_LOW_FACTOR = 0.95')[0].split('C_HIGH_FACTOR')[-1]
-    assert 'branch point' in block
-    assert 'scooter.f90:67,123' in block
-    assert "SPARC._resolve_engine_settings" in block
+    block = src.split('\nC_HIGH_FACTOR = ')[0].split('``C_HIGH_FACTOR``')[-1]
+    assert 'Kraken' in block and 'k_min = 0' in block
+    assert ':func:`resolve_window`' in block
+    assert 'C_HIGH_FACTOR' not in inspect.getsource(_window.resolve_window)
 
 
 def test_thorp_docstring_points_at_its_frequency_band():
@@ -2504,6 +2622,78 @@ def test_every_io_writer_docstring_example_runs(module_name, qualname,
         f"directory: {[p.name for p in tmp_path.iterdir()]}")
 
 
+# ── acoustic_signal / comms docstring examples ───────────────────────────
+
+#: The signal and comms toolkits build their own inputs in every ``>>>``
+#: block (a tone, a chirp, a bit stream), so each example runs as written.
+_SIGNAL_PACKAGES = ('acoustic_signal', 'comms')
+
+
+def _signal_docstring_examples():
+    """``(module, qualname)`` for every docstring with a ``>>>`` block in the
+    two toolkits; ``qualname`` is ``''`` for a module docstring and
+    ``Class.method`` for a method."""
+    root = Path(uacpy.__file__).resolve().parent
+    found = []
+    for package in _SIGNAL_PACKAGES:
+        for path in sorted((root / package).glob('*.py')):
+            module = (f"uacpy.{package}" if path.stem == '__init__'
+                      else f"uacpy.{package}.{path.stem}")
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            if '>>>' in (ast.get_docstring(tree) or ''):
+                found.append((module, ''))
+            for node in tree.body:
+                if not isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    continue
+                if '>>>' in (ast.get_docstring(node) or ''):
+                    found.append((module, node.name))
+                if isinstance(node, ast.ClassDef):
+                    found += [(module, f"{node.name}.{item.name}")
+                              for item in node.body
+                              if isinstance(item, ast.FunctionDef)
+                              and '>>>' in (ast.get_docstring(item) or '')]
+    return found
+
+
+_SIGNAL_EXAMPLES = _signal_docstring_examples()
+
+
+def test_the_signal_example_sweep_finds_the_known_examples():
+    """The sweep itself, so an empty collection cannot pass as a green gate."""
+    assert ('uacpy.acoustic_signal.generate', 'bpsk_modulate') in \
+        _SIGNAL_EXAMPLES
+    assert len(_SIGNAL_EXAMPLES) >= 15
+
+
+@pytest.mark.parametrize('module_name,qualname', _SIGNAL_EXAMPLES,
+                         ids=[f'{m.rsplit(".", 1)[-1]}.{q or "module"}'
+                              for m, q in _SIGNAL_EXAMPLES])
+def test_every_signal_and_comms_docstring_example_runs(module_name, qualname,
+                                                       tmp_path, monkeypatch):
+    """Run each ``>>>`` block of the two toolkits, with its module's names in
+    scope, in an empty directory: an example that does not parse or that the
+    function's own guards refuse fails here rather than in a reader's
+    session."""
+    import functools
+    import numpy as np
+
+    module = importlib.import_module(module_name)
+    target = (functools.reduce(getattr, qualname.split('.'), module)
+              if qualname else module)
+    globs = dict(vars(module))
+    globs.setdefault('np', np)
+    monkeypatch.chdir(tmp_path)
+    runner = doctest.DocTestRunner(
+        optionflags=doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE)
+    output = []
+    tests = doctest.DocTestFinder(recurse=False).find(
+        target, name=f"{module_name}.{qualname}", globs=globs)
+    assert tests, f"no doctest collected for {module_name}.{qualname}"
+    for test in tests:
+        result = runner.run(test, out=output.append)
+        assert result.failed == 0, ''.join(output)
+
+
 # ── README.md's documentation-page count ──────────────────────────────────
 
 
@@ -2536,28 +2726,36 @@ def _docs_bullet() -> str:
 
 
 def _content_pages():
-    """``(guide stems, model stems, index READMEs)``.
+    """``(guide stems, model stems, theory stems, index READMEs)``.
 
     ``docs/DEV.md`` is deliberately outside the count: README.md bullets it
     separately, two bullets below the one this gate reads."""
     guide = sorted(p.stem for p in (DOCS_DIR / "guide").glob("*.md"))
     models = sorted(p.stem for p in (DOCS_DIR / "models").glob("*.md")
                     if p.name != "README.md")
+    theory = sorted(p.stem for p in (DOCS_DIR / "theory").glob("*.md"))
     indexes = [DOCS_DIR / "README.md", DOCS_DIR / "models" / "README.md"]
-    return guide, models, indexes
+    return guide, models, theory, indexes
 
 
 @requires_docs
 def test_the_readme_documentation_page_count_matches_the_docs_tree() -> None:
     """README.md publishes both a page count and the count including the two
-    index READMEs; a page added under ``docs/guide/`` moves both."""
-    guide, models, indexes = _content_pages()
+    index READMEs; a page added under ``docs/guide/``, ``docs/models/`` or
+    ``docs/theory/`` moves both, and each theory page is linked from the
+    bullet (the guide pages are named in prose, checked below)."""
+    guide, models, theory, indexes = _content_pages()
     assert all(p.is_file() for p in indexes), [str(p) for p in indexes]
+    bullet = _docs_bullet()
     match = re.search(r"(\d+) pages \((\d+)\s+counting the two index READMEs\)",
-                      _docs_bullet())
+                      bullet)
     assert match is not None, "README.md's page-count phrasing changed"
-    assert int(match.group(1)) == len(guide) + len(models)
-    assert int(match.group(2)) == len(guide) + len(models) + len(indexes)
+    pages = len(guide) + len(models) + len(theory)
+    assert int(match.group(1)) == pages
+    assert int(match.group(2)) == pages + len(indexes)
+    unlinked = [stem for stem in theory
+                if f"docs/theory/{stem}.md" not in bullet]
+    assert unlinked == [], f"README.md's docs/ bullet does not link {unlinked}"
 
 
 @requires_docs
@@ -2579,7 +2777,7 @@ def test_the_readme_figure_count_matches_the_figures_on_disk() -> None:
 def test_the_readme_names_every_guide_page() -> None:
     """The same bullet enumerates the guides in prose. A page present on disk
     but absent from the sentence is invisible to a reader of the front page."""
-    guide, _, _ = _content_pages()
+    guide, _, _, _ = _content_pages()
     unmapped = sorted(set(guide) - set(_GUIDE_PAGE_PHRASES))
     assert unmapped == [], f"add these to _GUIDE_PAGE_PHRASES: {unmapped}"
     bullet = _docs_bullet()
@@ -2619,9 +2817,10 @@ def _reproducibility_table():
 
 
 def _public_draw_sites():
-    """Every public, exported function whose own body calls ``default_rng`` or
-    constructs a ``Generator`` — an AST sweep, so a docstring example that
-    seeds a generator is not counted as a draw."""
+    """Every public, exported function whose own body calls ``default_rng``,
+    constructs a ``Generator`` or takes one through ``require_generator``
+    (which makes one when none is given) — an AST sweep, so a docstring
+    example that seeds a generator is not counted as a draw."""
     package = Path(uacpy.__file__).resolve().parent
     exported = set(getattr(uacpy, '__all__', ()))
     for module in pkgutil.iter_modules([str(package)]):
@@ -2644,7 +2843,7 @@ def _public_draw_sites():
                 func = call.func
                 attr = (func.attr if isinstance(func, ast.Attribute)
                         else getattr(func, 'id', None))
-                if attr in ('default_rng', 'Generator'):
+                if attr in ('default_rng', 'Generator', 'require_generator'):
                     names.add(node.name)
                     break
     return names
@@ -2661,19 +2860,31 @@ def test_the_reproducibility_page_enumerates_every_public_draw() -> None:
     assert swept == set(_reproducibility_table())
 
 
+#: One call per §2 row whose ``Default`` column says ``fixed sequence``: the
+#: call that leaves the generator unset, so its repeat can be measured.
+_FIXED_SEQUENCE_CALLS = {
+    'schmidl_cox_preamble': lambda: uacpy.comms.schmidl_cox_preamble(64, 16),
+}
+
+
 @requires_docs
 def test_each_default_column_matches_the_live_signature() -> None:
     """§2's ``Default`` column is the load-bearing half: it says which of the
-    listed functions a reproducible run has to pin. ``unseeded`` means the
-    seeding argument defaults to ``None``; ``fixed seed`` means it does not."""
+    listed functions a reproducible run has to pin. Every seeding argument
+    defaults to ``None``; ``unseeded`` means that draws afresh, ``fixed
+    sequence`` that it draws one fixed stream, which
+    :func:`test_a_fixed_default_seed_really_repeats_without_being_asked`
+    measures for each such row."""
+    fixed = set()
     for name, (knob, default_column) in _reproducibility_table().items():
         function = _resolve_public(name)
         default = inspect.signature(function).parameters[knob].default
-        if default_column == 'unseeded':
-            assert default is None, (name, default)
-        else:
-            assert default_column == 'fixed seed', (name, default_column)
-            assert default is not None, name
+        assert default is None, (name, default)
+        assert default_column in ('unseeded', 'fixed sequence'), (
+            name, default_column)
+        if default_column == 'fixed sequence':
+            fixed.add(name)
+    assert fixed == set(_FIXED_SEQUENCE_CALLS)
 
 
 @requires_docs
@@ -2693,12 +2904,12 @@ def test_the_page_counts_the_functions_a_run_has_to_pin() -> None:
 
 
 def test_a_fixed_default_seed_really_repeats_without_being_asked() -> None:
-    """The claim §2 makes about its one exception, measured rather than read
-    off the signature."""
+    """The claim §2 makes about its ``fixed sequence`` rows, measured rather
+    than read off the signature."""
     import numpy as np
 
-    first = uacpy.comms.schmidl_cox_preamble(64, 16)
-    assert np.array_equal(first, uacpy.comms.schmidl_cox_preamble(64, 16))
+    for name, call in _FIXED_SEQUENCE_CALLS.items():
+        assert np.array_equal(call(), call()), name
 
 
 def _resolve_public(name):
@@ -2988,8 +3199,10 @@ def test_the_plotter_count_the_guide_advertises_matches_the_package():
     drifted to 54 against 59 exported plotters: a reader checking whether a
     name exists would conclude the page listed them all when it did not, and
     the two plotters added alongside this gate widened the gap rather than
-    caused it. Both halves of the sentence are pinned, since the second is
-    what makes the first checkable.
+    caused it. Both halves of the sentence are pinned: the count, and that
+    ``__all__`` holds plotters only — a submodule name in it is bound by
+    ``from uacpy.plot import *`` and shadows the user's own ``signal`` or
+    ``noise``.
     """
     import types
     import uacpy
@@ -2998,15 +3211,15 @@ def test_the_plotter_count_the_guide_advertises_matches_the_package():
                   if isinstance(getattr(plot, n), types.ModuleType)]
     plotters = [n for n in plot.__all__ if n not in submodules]
     text = (DOCS_DIR / "guide" / "plotting.md").read_text(encoding="utf-8")
-    m = re.search(r"All (\d+) plotters in `uacpy\.plot\.__all__`[^0-9]+"
-                  r"(\d+) remaining names", text)
+    m = re.search(r"All (\d+) plotters in `uacpy\.plot\.__all__`[^.]+"
+                  r"holds plotters and nothing else", text)
     assert m, "the reference section's opening sentence has moved or changed"
     assert int(m.group(1)) == len(plotters), (
         f"docs/guide/plotting.md advertises {m.group(1)} plotters; "
         f"uacpy.plot exports {len(plotters)}")
-    assert int(m.group(2)) == len(submodules), (
-        f"docs/guide/plotting.md advertises {m.group(2)} submodule names; "
-        f"uacpy.plot exports {len(submodules)}")
+    assert submodules == [], (
+        f"uacpy.plot.__all__ names submodules, which a star import binds "
+        f"over the user's own names: {submodules}")
 
     # The page's subtitle counts them a second time, four screens above §7,
     # and had drifted to 54 while §7 read 59: pinning one sentence left the
@@ -3036,22 +3249,17 @@ def test_the_data_package_scopes_its_cache_first_claim_to_one_source():
     assert 'cache' in env_doc.lower()
 
 
-def test_the_reference_says_the_ifft_engines_choose_their_output_rate():
-    """The §18 ``sample_rate`` row describes the input waveform's rate and
-    sends the reader to ``result.sample_rate`` for the output's.
-
-    It read "Sample rate of ``source_waveform`` / the synthesised output",
-    which holds on Bellhop only: Kraken, Scooter and RAM inverse-FFT a
-    transfer function and return ``nfft·Δf`` of their grid (measured
-    2560 Hz for a 2000 Hz input), so a user who wrote a WAV or added noise at
-    the rate they passed mis-timed every sample.
-    """
+def test_the_reference_says_every_engine_returns_the_callers_rate():
+    """The §18 ``sample_rate`` row says the trace comes back at the rate the
+    waveform was passed at, on the delay-and-sum engine and the IFFT ones
+    alike, as the synthesis does (``t_start + n/sample_rate`` exactly); it
+    no longer describes an ``nfft·Δf`` rate of the package's choosing."""
     text = _documentation_text()
     row = next(line for line in text.splitlines()
                if line.startswith("| `sample_rate` | Hz |"))
-    assert "synthesised output" not in row
-    assert "result.sample_rate" in row
-    assert "2560 Hz" in row and "Bellhop" in row
+    assert "every engine" in row and "Bellhop" in row
+    assert "t_start + n/sample_rate" in row
+    assert "nfft" not in row
 
 
 def test_the_reference_calls_fc_over_q_the_half_bandwidth():
@@ -3534,3 +3742,81 @@ def test_entry_point_docstring_examples_run(module_name, name):
     for t in tests:
         runner.run(t)
     assert runner.failures == 0, f"{module_name}.{name}: doctest failed"
+
+
+# ── DEV §2.2: the engine hooks ───────────────────────────────────────────
+
+def _dev_hook_rows():
+    """``{hook: (stage, engines)}`` read off the hook table of docs/DEV.md
+    §2.2, in the table's order; ``engines`` is ``None`` for "every engine"
+    and an empty set for "—"."""
+    text = (DOCS_DIR / "DEV.md").read_text(encoding="utf-8")
+    section = text.split("### 2.2 ", 1)[1].split("\n### ", 1)[0]
+    table = section.split("| Hook | Stage | Base default | Overridden by |",
+                          1)[1]
+    rows = {}
+    for line in table.splitlines()[2:]:
+        if not line.startswith("|"):
+            break
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        hook = re.fullmatch(r"\**`([A-Za-z_]+)`\**", cells[0]).group(1)
+        owners = cells[3]
+        rows[hook] = (cells[1], None if owners == "every engine" else
+                      set() if owners == "—" else
+                      {name.strip() for name in owners.split(",")})
+    return rows
+
+
+def _engine_hook_census():
+    """``{member: engines}``: every method or property of
+    ``PropagationModel`` a registered engine class (or a base of its own,
+    such as ``OASES``) defines again, with the engines that do. The
+    declarations an engine makes (``spec``, ``outputs``, ...) are DEV §2.5's,
+    not hooks."""
+    import inspect
+    from uacpy.models._registry import ENGINES
+    from uacpy.models.base import PropagationModel
+    members = [name for name, value in vars(PropagationModel).items()
+               if not (name.startswith("__") and name.endswith("__"))
+               and (inspect.isfunction(value) or isinstance(
+                   value, (property, classmethod, staticmethod)))]
+    census = {}
+    for key in sorted(ENGINES):
+        cls = ENGINES[key].load()
+        own = cls.__mro__[:cls.__mro__.index(PropagationModel)]
+        for name in members:
+            if any(name in vars(klass) for klass in own):
+                census.setdefault(name, set()).add(cls.__name__)
+    return census
+
+
+def test_dev_lists_every_engine_hook():
+    """docs/DEV.md §2.2 lists every method of ``PropagationModel`` an engine
+    may override, in the order of ``base._ENGINE_HOOKS``, and names the
+    engines that override each: a hook the base declares, or one an engine
+    overrides without the declaration, missing from the table fails, and
+    so does an "Overridden by" cell that is not the census of the code."""
+    from uacpy.models._registry import ENGINES
+    from uacpy.models.base import _ENGINE_HOOKS, PropagationModel
+    rows = _dev_hook_rows()
+    assert list(rows) == list(_ENGINE_HOOKS), (
+        "docs/DEV.md §2.2 hook table and base._ENGINE_HOOKS differ: "
+        f"missing {sorted(set(_ENGINE_HOOKS) - set(rows))}, "
+        f"extra {sorted(set(rows) - set(_ENGINE_HOOKS))}, or another order")
+    for hook in _ENGINE_HOOKS:
+        assert hook in vars(PropagationModel), (
+            f"base._ENGINE_HOOKS names {hook!r}, which PropagationModel "
+            f"does not define")
+    census = _engine_hook_census()
+    undeclared = sorted(set(census) - set(_ENGINE_HOOKS))
+    assert not undeclared, (
+        f"engines override {undeclared} of PropagationModel, which "
+        f"base._ENGINE_HOOKS (and docs/DEV.md §2.2) do not list: "
+        f"{ {name: sorted(census[name]) for name in undeclared} }")
+    every = {ENGINES[key].load().__name__ for key in ENGINES}
+    for hook, (_stage, owners) in rows.items():
+        listed = every if owners is None else owners
+        assert listed == census.get(hook, set()), (
+            f"docs/DEV.md §2.2: {hook} is overridden by "
+            f"{sorted(census.get(hook, set()))}, the table says "
+            f"{sorted(listed)}")

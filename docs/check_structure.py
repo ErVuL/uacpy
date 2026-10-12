@@ -182,7 +182,8 @@ def main(argv=None) -> int:
         # Default scope: the docs/ tree plus the repo-root pages
         # (DOCUMENTATION.md, README.md), which live outside it.
         files = list(markdown_files(REPO_ROOT / "docs"))
-        files += sorted(REPO_ROOT.glob("*.md"))
+        files += [REPO_ROOT / name for name in ("DOCUMENTATION.md", "README.md")
+                  if (REPO_ROOT / name).is_file()]
 
     n_files = 0
     problems: list[tuple[Path, str, str]] = []

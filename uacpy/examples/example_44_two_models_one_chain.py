@@ -36,7 +36,7 @@ radiate that pulse. Each bin is steered at its own frequency, because a
 beam delay is a phase that scales with it: one steering vector at the band
 centre mis-steers both edges.
 
-Uses: Kraken(mode_coupling='coupled') · Bellhop · ResultStack.p ·
+Uses: Kraken(mode_coupling='coupled') · Bellhop · Field.p over source_depth ·
 RunMode.BROADBAND ·
 beamform_field (narrowband and broadband) · BeamformedField.to_time_trace ·
 compare_models · passive_signal_excess_field(array_gain_dB=<grid>)
@@ -112,7 +112,7 @@ i60 = int(np.argmin(np.abs(plane_depths - 60.0)))
 array_as_sources = uacpy.Source(depths=elements, frequencies=FREQ)
 kraken = uacpy.Kraken(verbose=False, mode_coupling='coupled')
 bellhop = uacpy.Bellhop(backend='fortran', verbose=False, n_beams=0, beam_type='G')
-# .p stacks every slab's complex pressure: (n_el, n_z, n_r)
+# .p is each source's complex pressure on the source_depth axis: (n_el, n_z, n_r)
 # Within about 0.6 km of the array the plane's deepest cells see paths
 # steeper than Kraken's modes carry, well inside the ranges this example
 # reads off; that notice is printed.
@@ -159,8 +159,20 @@ print(f"\nthe {angles.size}-point scan holds {n_looks:.0f} independent "
 
 se, pd_map, r_by_z = {}, {}, {}
 for label, pressure in (('Kraken', p_map), ('Bellhop', bh_map)):
-    scan = beamform_field(pressure, elements, angles, FREQ, sound_speed=C_REF,
-                          weights=taper)
+    # A grid point whose element samples hold no field gets NaN beams, which
+    # beamform_field notes; that notice is printed, any other is shown as usual.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        scan = beamform_field(pressure, elements, angles, FREQ,
+                              sound_speed=C_REF, weights=taper)
+    for warning in caught:
+        text = ' '.join(str(warning.message).split())
+        if 'non-finite element sample' in text:
+            print(f"  noted ({label}): {text.split(' (a blank')[0]}, "
+                  f"against {int((~in_water).sum())} below the seafloor")
+        else:
+            warnings.showwarning(warning.message, warning.category,
+                                 warning.filename, warning.lineno)
     with np.errstate(divide='ignore', invalid='ignore'):
         gain = np.where(in_water, scan.array_gain(), np.nan)
         loss = np.where(in_water, -10.0 * np.log10(

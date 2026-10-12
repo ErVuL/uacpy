@@ -319,7 +319,7 @@ def parse_oasp_trf(
         - 'transfer_function': ndarray, complex transfer functions
                               shape (n_freq, n_range, n_depth)
         - 'source_depth': float, source depth (m)
-        - 'center_frequency': float, center frequency (Hz)
+        - 'fc': float, center frequency (Hz)
 
     Notes
     -----
@@ -328,8 +328,11 @@ def parse_oasp_trf(
 
     Examples
     --------
-    >>> data = parse_oasp_trf('pulse.trf', receiver_depths=[20., 50., 80.])
-    >>> trf = data['transfer_function']  # shape: (n_freq, n_range, n_depth)
+    The files are a run's own output, so these lines show the calls and
+    do not run here::
+
+        data = parse_oasp_trf('pulse.trf', receiver_depths=[20., 50., 80.])
+        trf = data['transfer_function']  # shape: (n_freq, n_range, n_depth)
     """
     filepath = Path(filepath)
 

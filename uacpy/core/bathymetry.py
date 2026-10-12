@@ -11,7 +11,10 @@ from uacpy.core.collapse import DEPTH_COLLAPSE_METHODS, _method_list
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core._grid import _RangeProfile
-from uacpy.core._validate import require_positive, scalar_or_none
+from uacpy.core._validate import (
+    real_array_or_none, refuse_two_columns, require_positive,
+    scalar_or_none,
+)
 from uacpy.core._provenance import coerce_data_sources
 
 __all__ = [
@@ -103,7 +106,11 @@ class Bathymetry(_RangeProfile):
         pairs into a :class:`Bathymetry`.
 
         ``None`` is rejected (bathymetry is required; there is no default
-        seafloor).
+        seafloor). Two columns ``(ranges, depths)`` are refused with the
+        ``np.column_stack`` remedy, except for two 2-sample columns: a
+        ``2 x 2`` input is read as two ``(range, depth)`` pairs, the
+        documented form, and the two cannot be told apart, so write a
+        two-point seafloor as pairs or as ``Bathymetry(ranges=, depths=)``.
 
         Parameters
         ----------
@@ -123,13 +130,19 @@ class Bathymetry(_RangeProfile):
         # value here (None, a string, bytes, a 0-d string array) is not a
         # depth: ``arr`` stays None for it, as for a non-numeric sequence.
         try:
-            arr = np.asarray(value, dtype=float) if np.ndim(value) else None
-        except (TypeError, ValueError):
+            arr = real_array_or_none(value) if np.ndim(value) else None
+        except ValueError:
             arr = None
         if arr is None:
             raise ConfigurationError(
                 f"Bathymetry: must be a positive scalar depth or shape (N, 2) "
                 f"as [(range, depth), ...]; got non-numeric {value!r}.")
+        refuse_two_columns(
+            arr, who='Bathymetry', name='bathymetry',
+            columns='ranges, depths', pair='range, depth',
+            carrier='a Bathymetry',
+            remediation="Pass bathymetry=np.column_stack([ranges, depths]) "
+                        "or Bathymetry(ranges=ranges, depths=depths).")
         if arr.ndim != 2 or arr.shape[1] != 2:
             raise ConfigurationError(
                 f"Bathymetry: must be a positive scalar or shape (N, 2) as "

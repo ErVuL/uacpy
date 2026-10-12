@@ -15,10 +15,12 @@ from uacpy.core.environment import Environment, SoundSpeedProfile
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.io.oalib_writer import deck_depth
 
 # Ceiling (m) on the gap between consecutive automatic segment edges:
 # adiabatic/coupled mode summation interpolates each mode between profiles,
 # so a slowly-varying stretch still gets a profile at least every 2 km.
+# uacpy guidance (unmeasured).
 # The caller-facing knob is ``n_segments`` (an explicit uniform decomposition
 # overrides the automatic change-point edges entirely).
 _MAX_SEGMENT_LENGTH_M = 2000.0
@@ -44,8 +46,9 @@ _SEGMENT_DEPTH_STEP_PER_WAVELENGTH = 0.25
 # :func:`_ssp_change_ceiling` for the sweep it comes from.
 _SSP_CHANGE_PER_HZ = 0.5
 
-# Ceiling on the automatic profile count. AT's own coupled deck ships 51
-# profiles (``tests/wedge/wedge.env``) and every profile costs a mode solve,
+# Ceiling on the automatic profile count, uacpy guidance (unmeasured; the
+# toolbox's coupled wedge deck carries 51 profiles, ``tests/wedge/wedge.env``).
+# Every profile costs a mode solve,
 # so an unbounded wavelength criterion could ask for thousands on a steep
 # slope at high frequency. When this binds, the caller is told what depth step
 # per wavelength was actually achieved rather than left to assume convergence.
@@ -146,14 +149,16 @@ def _thin_to_budget(ranges, env: Environment,
         worst = max((abs(b - a) for a, b in zip(depths, depths[1:])),
                     default=0.0)
         warnings.warn(
-            f"segment_environment_by_range: the quarter-wavelength criterion "
-            f"asks for {len(ranges)} profiles, above the "
-            f"{_MAX_AUTO_SEGMENTS}-profile ceiling, so the automatic "
-            f"decomposition was thinned to {len(thinned)}. The worst segment "
-            f"now spans {worst:.3g} m of depth against the "
-            f"{depth_step:.3g} m target, so the modes are interpolated across "
-            f"more than a quarter wavelength of change and the field may not be "
-            f"converged.",
+            f"Kraken: the quarter-wavelength criterion asks for "
+            f"{len(ranges)} range profiles, above the {_MAX_AUTO_SEGMENTS}-"
+            f"profile ceiling of the automatic decomposition, so it was "
+            f"thinned to {len(thinned)}. The worst segment now spans "
+            f"{worst:.3g} m of depth against the {depth_step:.3g} m target, "
+            f"so the modes are interpolated across more than a quarter "
+            f"wavelength of change and the field may not be converged. "
+            f"Kraken(n_segments={len(ranges)}) runs that many evenly spaced "
+            f"profiles (the cost grows with the count); compare it with this "
+            f"run, or with RAM, before trusting either.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     return thinned
 
@@ -303,28 +308,25 @@ def segments_at_ranges(env: Environment, segment_ranges_m
         ssp_at_range = env.ssp.eval(range=r).to_pairs()
 
         # AT ends a medium only at the SSP sample matching the mesh-line depth
-        # (Acoustics-Toolbox/misc/sspMod.f90:352-362). Quantise the segment
-        # depth to the nearest 0.1 m — a deliberate stability quantum, not a
-        # writer requirement (``deck_depth`` round-trips 6 decimals): the
-        # segment's seafloor AND its profile's last sample both sit on it, so
-        # segment decks are identical under mm-scale bathymetry noise.
-        # Truncate the profile above it and append an interpolated sample
-        # exactly there; that appended sample is the one ``extend_to`` lands
-        # on, because the segment's bathymetry is the same quantised depth.
-        depth_rounded = float(f"{depth_at_range:.1f}")
-        if depth_rounded <= 0.0:
+        # (Acoustics-Toolbox/misc/sspMod.f90:352-362). The segment's seafloor
+        # is the bathymetry's depth there as the deck writes it
+        # (``deck_depth``, the 6 decimals every AT depth is written at); the
+        # profile is truncated above it and an interpolated sample appended
+        # exactly there, the sample ``extend_to`` lands on, because the
+        # segment's bathymetry is the same depth.
+        seafloor = deck_depth(depth_at_range)
+        if seafloor <= 0.0:
             raise ConfigurationError(
                 f"Kraken: the seafloor at r = {r:g} m is {depth_at_range:g} m "
-                f"deep, which rounds to 0.0 m at the 0.1 m quantum the "
-                f"segment decks are written at, so that segment has no water "
+                f"deep as the deck writes it, so that segment has no water "
                 f"column for a mode solver.",
-                remediation="Give the bathymetry at least 0.05 m of water "
-                            "there (no mode is trapped in a few centimetres, "
-                            "so the field does not change), or use RAM or "
-                            "Bellhop, which take the shallower apex.")
-        ssp_for_segment = ssp_at_range[ssp_at_range[:, 0] < depth_rounded].copy()
-        c_at_depth = float(np.interp(depth_rounded, ssp_at_range[:, 0], ssp_at_range[:, 1]))
-        ssp_for_segment = np.vstack([ssp_for_segment, [depth_rounded, c_at_depth]])
+                remediation="Give the bathymetry water at that range (at "
+                            "least 1e-06 m, the resolution the deck is "
+                            "written at), or use RAM or Bellhop, which take "
+                            "the shallower apex.")
+        ssp_for_segment = ssp_at_range[ssp_at_range[:, 0] < seafloor].copy()
+        c_at_depth = float(np.interp(seafloor, ssp_at_range[:, 0], ssp_at_range[:, 1]))
+        ssp_for_segment = np.vstack([ssp_for_segment, [seafloor, c_at_depth]])
         # Kraken needs ≥2 samples per medium; on shoaling segments where the
         # seafloor is shallower than every SSP sample, prepend the surface.
         if len(ssp_for_segment) < 2:
@@ -337,7 +339,7 @@ def segments_at_ranges(env: Environment, segment_ranges_m
         env_segment = Environment(
             name=f"{env.name} @ {r / 1000.0:.1f}km",
             ssp=seg_ssp,
-            bathymetry=depth_rounded,
+            bathymetry=seafloor,
             bottom=bottom_segment,
             surface=env.surface,
             absorption=env.absorption,

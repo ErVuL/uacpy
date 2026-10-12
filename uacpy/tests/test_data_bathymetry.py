@@ -168,6 +168,67 @@ def test_fetch_bathy_grid(stub_http):
     assert np.isnan(depth[1, 1])       # land cell → NaN (point fetchers would raise)
 
 
+@pytest.mark.parametrize('spelling', ['GEBCO', 'Gebco', ('GEBCO',)])
+def test_a_bathymetry_source_id_or_preset_matches_in_any_case(stub_http,
+                                                             spelling):
+    assert bathymetry.fetch_bathy((40.0, 7.0), source=spelling) == 2458.0
+
+
+def test_the_local_preset_matches_in_any_case(tmp_path, monkeypatch):
+    pytest.importorskip('netCDF4')
+    from uacpy.data import _cache
+    from uacpy.tests._cache_builders import _write_gebco
+    _write_gebco(tmp_path)
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    _cache.invalidate_grids()
+    assert bathymetry.fetch_bathy((40.0, 7.0), source='LOCAL') == 1500.0
+    grid = bathymetry.fetch_bathy_grid((40, 41), (7, 8), n_lat=2, n_lon=2,
+                                       source='Local')
+    assert grid.provenance.source.id == 'gebco'
+
+
+_MIRROR = 'https://topo.example.org/v1'
+
+
+@pytest.mark.parametrize('source', ['gmrt', 'emodnet_dtm', 'local',
+                                    ('gmrt', 'emodnet_dtm')])
+def test_a_base_url_that_no_attempt_reads_is_refused(source):
+    with pytest.raises(ConfigurationError, match="only 'gebco' reads"):
+        bathymetry.fetch_bathy((40.0, 7.0), source=source, base_url=_MIRROR)
+
+
+def test_the_default_base_url_is_not_refused_with_a_source_that_ignores_it():
+    # 'local' with no installed grid fails on the cache, not on base_url.
+    with pytest.raises(ConfigurationError, match='not found'):
+        bathymetry.fetch_bathy((40.0, 7.0), source='local')
+
+
+def test_a_base_url_reaches_gebcos_online_fallback(stub_http):
+    bathymetry.fetch_bathy((40.0, 7.0), source='gebco', base_url=_MIRROR)
+    assert stub_http['urls'] and stub_http['urls'][0].startswith(_MIRROR)
+
+
+def test_the_bathy_grid_records_the_online_gebco_vintage(stub_http):
+    stub_http['elevations'] = [-1000.0] * 4
+    grid = bathymetry.fetch_bathy_grid((40, 41), (7, 8), n_lat=2, n_lon=2)
+    assert grid.provenance.data_date == 'gebco2020 via OpenTopoData'
+
+
+def test_the_bathy_grid_records_the_installed_gebco_release(tmp_path,
+                                                            monkeypatch):
+    pytest.importorskip('netCDF4')
+    from uacpy.data import _cache
+    from uacpy.tests._cache_builders import _write_gebco
+    _write_gebco(tmp_path)
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    _cache.invalidate_grids()
+    for source in ('gebco', 'local'):
+        grid = bathymetry.fetch_bathy_grid((40, 41), (7, 8), n_lat=2,
+                                           n_lon=2, source=source)
+        assert grid.provenance.source.id == 'gebco'
+        assert grid.provenance.data_date == 'GEBCO_2025'
+
+
 def test_the_bathy_grid_is_labelled_on_its_lat_lon_axes(stub_http):
     pytest.importorskip('xarray')
     stub_http['elevations'] = [-1000, -1100, -1200,

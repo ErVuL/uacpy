@@ -104,20 +104,20 @@ band-limited transfer functions, SPARC to watch a pulse propagate.
 | Feature | Native? | Note |
 |---|---|---|
 | Layered bottom | ✅ | each layer is its own finite-element medium |
-| Elastic media (shear) | ✅ | `c_s`, shear attenuation carried through |
+| Elastic media (shear) | ✅ | `c_s`, shear attenuation carried through; a fluid sediment layer below an elastic one is refused (see [Layered and elastic seabeds](#layered-and-elastic-seabeds)) |
 | Rough surface / bottom (`sigma`) | ✅ | sea surface only, and only under a pressure-release (vacuum) surface — `SSP%sigma(1)` enters the solve through that branch alone. A rough rigid/elastic surface, and any seabed interfacial roughness, is dropped with a warning |
 | Source type (`point`/`line`/`scaled`) | ✅ | `Source(source_type=…)` |
 | Range-dependent bathymetry | ❌ | collapsed — default `'max'` |
 | Range-dependent SSP | ❌ | collapsed — default `'mean'` |
 | Range-dependent bottom | ❌ | collapsed — default `'median'` |
 | Sea-surface altimetry | ❌ | dropped |
-| Multiple source depths | ✅ (`COHERENT_TL`) | the deck takes the depth vector and one wavenumber sweep writes every depth into the `.grn` (its `NSz` axis), transformed one depth at a time into a `ResultStack`; `BROADBAND` / `TIME_SERIES` loop through `run()` (one deck per depth) |
+| Multiple source depths | ✅ (`COHERENT_TL`) | the deck takes the depth vector and one wavenumber sweep writes every depth into the `.grn` (its `NSz` axis), transformed one depth at a time onto the Field's `source_depth` axis; `BROADBAND` / `TIME_SERIES` loop through `run()` (one deck per depth) |
 | Source beam pattern | ❌ | |
 
-The collapse defaults differ from the package-wide ones: Scooter takes the
-**mean** SSP and the **median** bottom column rather than the profile at
-`r = 0`, because a single spectral solve should represent the whole track
-rather than its near field. Bathymetry keeps the package default, `'max'`.
+The SSP collapse differs from the package-wide one: Scooter takes the
+**mean** SSP rather than the profile at `r = 0`, because a single spectral
+solve should represent the whole track rather than its near field. The bottom
+takes the package default, the **median** column, and bathymetry its `'max'`.
 Override any of them per run:
 
 ```python
@@ -164,19 +164,19 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `c_low` | `None` | Lower phase-speed bound. `None` ⇒ `0.95 × min(SSP)`. Sets `k_max = ω/c_low`. |
-| `c_high` | `None` | Upper phase-speed bound. `None` ⇒ `1.05 × max(SSP, bottom)`. Sets `k_min = ω/c_high`. A vacuum or rigid bottom has no speed to cap on, so this resolves to the toolbox's unbounded value (`1e9`) instead. |
-| `rmax_factor` | `None` | Spectral `RMax = receiver.ranges.max() × this`. `None` ⇒ `2.0` for `COHERENT_TL`, `3.0` for `BROADBAND`/`TIME_SERIES`. |
-| `wavenumber_spectrum` | `'positive'` | Which wavenumber branch the transform integrates: `'positive'`, `'negative'`, `'both'`. |
-| `stabilizing_attenuation_off` | `False` | Zero Scooter's contour offset. Leave it alone unless you know why. |
-| `taper` | `0.0` | Hanning roll-off of the wavenumber kernel over this fraction of the spectral span at **each** edge, applied before the transform. `0` = off, matching `fieldsco.m`, which disables it and calls it *"user play (at your own risk)"*. A rectangular edge's sidelobes fall at 6 dB/octave, a Hann edge's at 18 (Abraham, *Underwater Acoustic Signal Processing*, Sect. 4.10). See the gotcha below before raising it. |
+| `c_low` | `None` | Lower phase-speed bound. `None` ⇒ `0.90 × min(SSP)`. Sets `k_max = ω/c_low`. The factor `scooter.f90:258` computes (it does not apply it): "phase speed must be some 10% below slowest acoustic speed"; Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1) call `k_max ≈ 1.1 ω/c_min` "in general, conservative". |
+| `c_high` | `None` | Upper phase-speed bound. Sets `k_min = ω/c_high`. `None` ⇒ the toolbox's unbounded value `1e9` (`doc/bounce.htm`: "CMax to 1.0E9") over every bottom, so the integral runs from `k_min ≈ 0`: Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1 step 1), "it is recommended to initially include these components by choosing k min = 0. If k min is chosen larger, as will often be done by experienced modelers to reduce computation time, one must be careful to avoid numerical artifacts". It costs wavenumbers: `Nk ∝ 1/c_low − 1/c_high`, 4.4× a window capped at `1.05 ×` the fastest speed in the channel of §6 ("The phase-speed window"), and the run time 5-6.6× (measured: 5× on a near-field Lloyd case, 6.6× — 0.24 to 1.58 s — on a 50 Hz Munk run to 50 km), with the Green's-function memory growing as `Nk` too. A set value is written as given; one that drops a direct or surface-reflected path the receivers see warns. |
+| `rmax_factor` | `None` | Spectral `RMax = receiver.ranges.max() × this`. `None` ⇒ `2.0` in every run mode, the ratio of the toolbox's own Scooter decks, narrowband and broadband (`tests/Munk/MunkS.env`, `tests/BroadBand/MunkS.env`: RMax 200 km for receivers to 100 km); `doc/scooter.htm` asks only that RMax reach the farthest receiver — "You can get increased accuracy by making Rmax larger than the largest receiver range; however, run time will increase in direct proportion". |
+| `wavenumber_spectrum` | `'positive'` | Which wavenumber branch the transform integrates: `'positive'`, `'negative'`, `'both'`. `'positive'` is the manual's recommendation (`doc/fields.htm`: "'P' Positive (recommended)"). |
+| `stabilizing_attenuation_off` | `False` | Zero Scooter's contour offset. Leave it alone unless you know why. `False` keeps SCOOTER's own default, `Atten = Deltak` unless TOPOPT(7:7) is `'0'` (`scooter.f90:129-130`; `doc/EnvironmentalFile.htm`). |
+| `taper` | `0.0` | Hanning roll-off of the wavenumber kernel over this fraction of the spectral span at **each** edge, applied before the transform. `0` = off, matching `fieldsco.m`, which disables it and calls it *"user play (at your own risk)"*. A rectangular edge's sidelobes fall at 6 dB/octave, a Hann edge's at 18 (Abraham, *Underwater Acoustic Signal Processing*, Sect. 4.10). A Green's function of fewer than four phase speeds has no room for a roll-off at each edge, and a run that returns one refuses a positive taper (`ConfigurationError`: `taper=0` or more wavenumbers). See the gotcha below before raising it. |
 
 **The depth mesh**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `n_mesh` | `0` | Finite-element points **per medium** (a total count, not a density). `0` ⇒ Scooter picks from frequency. |
-| `interp_ssp` | `None` | SSP connection scheme; `'isovelocity'` shape forces `'C'` regardless. |
+| `n_mesh` | `0` | Finite-element points **per medium** (a total count, not a density). `0` ⇒ Scooter picks from frequency: the manual's automatic mesh (`doc/EnvironmentalFile.htm`: "If you type 0 for the number of mesh points, the code will calculate NMESH automatically"), which `scooter.f90:106-110` scales with frequency and floors at 100 points. |
+| `interp_ssp` | `None` | SSP connection scheme; `'isovelocity'` shape forces `'C'` regardless. Unset → `'linear'` (AT `'C'`), the manual's choice when unsure (`doc/EnvironmentalFile.htm`: "If your not sure which option to take, I'd suggest you use 'C'."). |
 
 **Execution**
 
@@ -186,7 +186,7 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 | `work_dir` | `None` | Pin the scratch dir to keep `.env` / `.grn` / `.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
 | `use_tmpfs` | `False` | Run in RAM. |
-| `timeout` | `600.0` | Subprocess timeout (s). |
+| `timeout` | `600.0` | Subprocess timeout (s). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `collapse` | `None` | Per-feature collapse overrides. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`; `'info'` logs the resolved `c_low`/`c_high`. |
 
@@ -253,7 +253,7 @@ G = np.abs(grn.data[0, 0])                     # (n_rd, n_k)
 
 This is the figure only Scooter can give you, and it is worth reading slowly.
 
-The top panel is `|G(k, z)|` — 1034 wavenumbers × 100 depths for this run. Each
+The top panel is `|G(k, z)|` — 5965 wavenumbers × 100 depths for this run. Each
 bright vertical stripe **marks** a pole of the Green's function, and its
 structure down the depth axis is a mode shape: one lobe, two lobes, three. No
 pole actually sits on the contour Scooter samples — the seabed is lossy, and
@@ -282,7 +282,7 @@ where they are supposed to part company.
 
 ```python
 line = uacpy.Receiver(depths=50.0, ranges=np.linspace(50.0, 5000.0, 400))
-cases = [('default — 1416 to 1732 m/s', {}, 'C0'),
+cases = [('default — 1341 m/s to unbounded', {}, 'C0'),
          ('c_high=1600', {'c_high': 1600.0}, 'C1'),
          ('c_low=1520', {'c_low': 1520.0}, 'C2')]
 for label, knobs, colour in cases:
@@ -299,26 +299,28 @@ Cutting at `c_high = 1600 m/s` removes the near-cutoff poles and the leaky
 continuum — energy that is heavily attenuated anyway, so the TL barely moves
 past 1 km. Cutting at `c_low = 1520 m/s` removes the best-trapped, lowest-order
 poles, which are the ones that survive to long range: that curve is visibly
-wrong everywhere. The defaults (`0.95 × min SSP` to `1.05 × max speed`) bracket
-both ends with margin **at long range**, and cost accuracy close in: the
-default `c_high` starts the integration at `k_min = ω/c_high` rather than at
-`0`, dropping the steep-angle continuum, and COA Ch. 4 Appendix 1 (step 1)
-recommends including it (`k_min = 0`, i.e. an unbounded `c_high`) whenever you
-are unsure — raising `k_min` to save time is left to experienced modellers, who
-must then watch for the artifacts of COA §4.5.2. In this
-channel that costs 0.19 dB median beyond 2 km — and **29.8 dB at 100 m**, one
-water depth out. That is a second near-source limit, separate from the
+wrong everywhere. The default runs from `0.9 × min SSP` to an unbounded
+`c_high` — `k_min ≈ 0`, which COA Ch. 4 Appendix 1 (step 1) recommends: include
+the steep-angle continuum, and leave raising `k_min` to save time to
+experienced modellers, who must then watch for the artifacts of COA §4.5.2. A
+finite `c_high` costs accuracy close in. Pinned at `1.05 ×` the fastest speed
+(1732.5 m/s here), it starts the integration at `k_min = ω/c_high` and drops
+that continuum: on the 50 m line above, 0.19 dB median beyond 2 km — and
+**36.7 dB at 99.6 m**, one water depth out — for 4.4× fewer wavenumbers. That is a second near-source limit, separate from the
 fast-field one in [§1](#1-what-it-solves) and scaled by the water depth rather
 than the wavelength: 100 m here is already 13 λ, well clear of "a few
 wavelengths", and still wrong. The criterion is an ANGLE, not a range: a path
 at grazing `θ` in water of speed `c` is integrated only while
-`θ <= arccos(c / c_high)` (17.8° for the default `c_high` over a transparent
-1500 m/s bottom), and a run whose receivers see a steeper direct or
-surface-reflected path warns. `c_high=1e9` (5.5× the wavenumbers here) restores
-the missing paths. A second, smaller error survives even inside the cut: the
-hard `k_min` edge rings, 1.9 dB at 1.2 km (three water depths) in a Lloyd
-geometry whose paths all sit below the cut; a small `taper` (`taper=0.05`)
-removes it (61.19 dB against the exact 61.18). Narrow the window only to
+`θ <= arccos(c / c_high)` (30.0° for that pinned value here, 17.8° for
+`c_high = 1575` over a transparent 1500 m/s bottom), and a run with a pinned
+`c_high` whose receivers see a steeper direct or surface-reflected path warns.
+A finite cut also leaves a hard `k_min` edge that rings even for paths inside
+it: in a Lloyd geometry over a transparent bottom (source 25 m, receiver
+200 m, 150 Hz), `c_high = 1575` reads 63.64 dB at 1.2 km against the exact
+61.18, though every path there sits below the cut. The unbounded default has
+no such edge — the `√k` kernel vanishes at `k → 0` on its own — and reads
+61.16 dB; over 21 depths × 40 ranges to 2 km it matches the exact image sum to
+0.01 dB median (0.06 dB p90). Narrow the window only to
 isolate a mechanism, never to save time.
 
 [Kraken's version of this figure](kraken.md) shows the same window bounding a
@@ -351,20 +353,35 @@ drops shear by default; passing `elastic=True` keeps it — `c_s = 3000 m/s` in
 the granite, 110 m/s in the sand — and Scooter carries those into the
 finite-element system natively. No auto-BOUNCE, no fluid approximation.
 
+A fluid sediment layer below an elastic one is refused
+(`UnsupportedFeatureError`, naming OAST and `RAM(backend='rams')`).
+`scooter.f90:206-207` takes `FirstAcoustic … LastAcoustic` over every acoustic
+medium, so the acoustic block (`:139`) assembles the elastic layer between
+them with its elastic-form coefficients (`:213-224`), and `BCImpedance` shoots
+up only through the media below `LastAcoustic` (`:374-379`). The binary
+returns a field without an error, and it is wrong — as a measured
+illustration, 52.44 dB median TL against OAST's 60.07 dB on example 16's
+seabed with a fluid middle layer, whatever the shear speed. Elastic layers
+below the last fluid one, down to a fluid or an elastic half-space, run
+(within 0.07 dB of OAST there), as do all-fluid stacks.
+
 Shear here shifts the interference pattern by a few dB rather than
 transforming it: a granite basement under 8 m of sand is far enough from the
 water for its shear branch to matter mostly at the steep angles. In a thin
 sediment over rock, or with a shear speed close to the water speed, the gap is
 much larger — which is the point of being able to model it exactly.
 
-One thing the defaults hide. `c_low` resolves to `0.95 × min(water SSP)` and
+One thing the defaults hide. `c_low` resolves to `0.90 × min(water SSP)` and
 never looks at shear, so the seismic interface waves an elastic seabed supports
 — which travel *below* the shear speed, 110 m/s in this sand — fall outside the
 integration window entirely. For a source and receiver in the water column that
-costs nothing measurable: `c_low=90` here multiplies the wavenumber count by 20
-and moves TL by 0.01 dB, because a source 75 m above the seabed does not excite
-an interface wave. Move the source down to 1 m above the seabed and the same
-change is worth up to **4 dB** at a receiver near the interface. If that is the
+costs little: `c_low=90` here multiplies the wavenumber count by 15 and moves
+TL by a median 0.004 dB (0.1 dB at the 99th percentile), because a source 75 m
+above the seabed does not excite an interface wave. Move the source down to
+1 m above the seabed and the same change is worth up to **2.4 dB** at a
+receiver near the interface. A run with the
+derived `c_low` says so (a `NumericsWarning`) when the source or a receiver lies
+within one interface wavelength, `0.85·c_s/f`, of the seafloor. If that is the
 physics you are after, set `c_low` below the slowest shear speed and expect the
 cost. For a seabed whose shear physics is the whole question, [OASES](oases.md)
 goes further; [Bounce](bounce.md) gives you the reflection coefficient alone.
@@ -387,9 +404,14 @@ for label, model, colour in others:
 
 ![Scooter benchmark](figures/scooter_benchmark.png)
 
-This is what Scooter is for. Kraken sits within about a dB of it across the
-whole track, spiking only where a deep null moves by a few metres — its
-truncated mode sum is an excellent approximation in this duct. Bellhop is
+This is what Scooter is for. Kraken sits within about a dB of it beyond
+0.4 km (0.13 dB median, 2.4 dB at worst, where a deep null moves by a few
+metres) — its truncated mode sum is an excellent approximation in this duct.
+Closer in it departs by up to 36 dB at 100 m: its default window keeps paths
+up to 30° grazing, the receivers there see steeper direct and
+surface-reflected paths, and Kraken's steep-path notice says so (from 130 m
+on none is steeper), while Scooter's unbounded default window integrates
+them. Bellhop is
 consistently several dB out and misplaces nulls outright: 100 m at 200 Hz is
 `D/λ ≈ 13`, the low end of where rays are trustworthy, and the plot shows what
 that costs.
@@ -459,9 +481,9 @@ and the warning is uacpy saying so.
 `receiver.ranges.max() × rmax_factor`, and it sets the wavenumber spacing:
 `Δk ≈ π / (2·RMax)` (`scooter.f90:69,77`). Replacing the integral by a discrete
 sum over `k` makes the range output **periodic** with period `R = 2π/Δk`, which
-works out at **4·RMax** — so the default multiplier of 2 puts the first source
-image eight times further out than your furthest receiver, and the broadband
-default of 3 puts it twelve. Too small a multiplier and that image folds back
+works out at **4·RMax** — so the default multiplier of 2 (every run mode, as
+the toolbox's own narrowband and broadband decks) puts the first source image
+eight times further out than your furthest receiver. Too small a multiplier and that image folds back
 as a wave travelling in from the far range edge. (The periodicity comes from
 sampling the integral, not from how the sum is evaluated: uacpy's transform is
 a direct summation, not an FFT.) Asking for receivers out to 20 km when you
@@ -469,8 +491,8 @@ care about 5 km quadruples the wavenumber count for nothing.
 
 **Cost scales as `frequency × max range`.** The number of wavenumbers is set by
 the k-window width (`∝ f`) divided by `Δk` (`∝ 1/RMax`), so doubling either
-doubles the work: 200 Hz out to 5 km gives 1034 wavenumbers, 400 Hz or 10 km
-give 2068. Scooter is cheap in shallow water at low frequency and expensive in
+doubles the work: with the default window, 200 Hz out to 5 km gives 5965
+wavenumbers in the channel of §6, 400 Hz or 10 km give 11931. Scooter is cheap in shallow water at low frequency and expensive in
 the deep ocean at high frequency — the opposite of Bellhop.
 
 **Receivers below the deepest interface come back `NaN`.** The finite-element
@@ -502,10 +524,11 @@ multi-frequency run the mesh scales as `f/f₀`, so
 source_with_a_band, receiver)` raises rather than guessing. Pass
 `RunMode.BROADBAND` or `RunMode.TIME_SERIES`.
 
-**`c_high` is a trapped-mode bound, and that is wrong near a boundary.** The
-default `1.05 × max(SSP, bottom)` captures every mode the seabed totally
-reflects — right for far-field propagation, where nothing above `c_bottom`
-survives. But the integral is cut **square** there, and a square cut rings:
+**A finite `c_high` is a trapped-mode bound, and that is wrong near a
+boundary.** A `c_high` pinned just above the seabed speed captures every mode
+the seabed totally reflects — right for far-field propagation, where nothing
+above `c_bottom` survives. But the integral is cut **square** there, and a
+square cut rings:
 the near-bed field then oscillates with a period
 `2π/√(k² − (ω/c_high)²)` — set by the cut, not the physics. Measured on a
 40 kHz, 1500 m case with source and receiver 0.15 m off the seabed, `c_high`
@@ -516,8 +539,8 @@ while the level wandered 4 dB with no trend. Raising `c_high` to `1e6` puts
 left, and the period becomes the physical one (1.93 cm, matching Bellhop).
 It costs only 1.30× here, because `k_min` was already small against `k_max`.
 COA Sect. 4.5 warns the truncation point "is not easily automated"; a source
-within a few wavelengths of a boundary is exactly where the default's
-assumption fails.
+within a few wavelengths of a boundary is exactly where a pinned cut fails,
+and why the default leaves `c_high` unbounded.
 
 **Memory is checked against the host, not a constant.** `read_grn_file`
 allocates the whole `(nfreq, nsd, nrd, nk)` complex64 cube at once, and the
@@ -549,7 +572,7 @@ that the roll-off span "several periods" of `exp(ikr)`, i.e.
 kilometre, not percent. Values far above that attenuate real spectrum. That is
 occasionally what you want, since the far evanescent tail is the worst-
 conditioned part of the solve, but it is never free and should be measured
-against something independent. Widen `c_high` first.
+against something independent. Leave `c_high` unset (unbounded) first.
 
 **The stabilising attenuation is load-bearing.** Scooter offsets the
 integration contour off the real `k` axis by `Δk` (`scooter.f90:129`). That is
@@ -564,7 +587,9 @@ and the transform integrates along that same shifted contour and re-multiplies
 by `e^{εr}` to restore the true range decay. Setting
 `stabilizing_attenuation_off=True` zeroes it, which is occasionally what a
 convergence study wants and otherwise a way to let wrap-around back into a
-result that will still look plausible.
+result that will still look plausible. As a measured illustration, on a 100 m
+Pekeris guide the run without it read 6.7 dB from Kraken at 5 km, against
+0.075 dB with it.
 
 Scooter's measured agreement with closed forms and the published benchmarks, and its known limits there, are on the [validation page](validation.md).
 

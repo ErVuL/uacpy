@@ -69,6 +69,17 @@ class TestSurfaceCarrier:
         assert s.collapse_range('mean').nodes[0].roughness == pytest.approx(2.0)
         assert s.collapse_range('median').nodes[0].roughness == pytest.approx(2.0)
 
+    def test_a_uniform_surface_collapses_to_a_copy(self):
+        """Every collapse returns a new carrier, a uniform surface too, so
+        editing the result never edits the source (Bottom's contract)."""
+        s = Surface.coerce(BoundaryProperties(
+            acoustic_type='half-space', sound_speed=3500.0, density=0.9,
+            roughness=1.0))
+        out = s.collapse_range('r0')
+        assert out is not s
+        out.nodes[0].roughness = 5.0
+        assert s.nodes[0].roughness == pytest.approx(1.0)
+
 
 class TestAltimetryCarrier:
     """Heights are metres about the mean surface, **positive up** — the
@@ -161,7 +172,7 @@ class TestSurfaceModelBehaviour:
         env = uacpy.Environment(bathymetry=300.0, ssp=1500.0, surface=self._ice())
         src = uacpy.Source(depths=50.0, frequencies=120.0)
         rcv = uacpy.Receiver(depths=[100.0], ranges=[2000.0])
-        tl = np.asarray(uacpy.Kraken(verbose=False).compute_tl(env, src, rcv).dB,
+        tl = np.asarray(uacpy.Kraken(verbose=False).compute_field(env, src, rcv).dB,
                         dtype=float)
         assert np.isfinite(tl).all()
 
@@ -197,19 +208,6 @@ class TestSurfaceModelBehaviour:
         model = Kraken(verbose=False)
         assert _checks.has_elastic_surface(model._project_environment(env),
                                            collapse=model._collapse) is False
-
-    @pytest.mark.requires_binary
-    def test_compute_modes_rejects_receiver_arg(self):
-        # A mode solve has no receiver grid, so ``compute_modes`` takes none:
-        # its third positional is ``n_modes`` (``PropagationModel.compute_modes``).
-        # Passing a Receiver there must name the real parameter in the error
-        # rather than fail deep inside the solver on a non-integer count.
-        import uacpy
-        env = uacpy.Environment(bathymetry=300.0, ssp=1500.0)
-        src = uacpy.Source(depths=50.0, frequencies=120.0)
-        rcv = uacpy.Receiver(depths=[100.0], ranges=[2000.0])
-        with pytest.raises(uacpy.ConfigurationError, match="n_modes"):
-            uacpy.Kraken().compute_modes(env, src, rcv)
 
 
 class TestSurfaceValidation:

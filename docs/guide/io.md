@@ -1,6 +1,6 @@
 # File I/O — the layer between metres and the native formats
 
-> `uacpy.io` · 74 public names · every reader and writer the models run on
+> `uacpy.io` · 78 public names · every reader and writer the models run on
 
 Underneath the Python API, uacpy drives seven native solvers by writing text
 and binary files, launching a subprocess, and parsing what comes back. Each of
@@ -27,7 +27,8 @@ uacpy.io.read_shd_file('run/model.shd')
 ## 1. The one rule: metres in Python, kilometres on disk
 
 Every public reader returns metres. Every public writer accepts metres. The
-conversion happens inside, in [`uacpy/core/units.py`](../../uacpy/core/units.py),
+conversion happens inside, by the public `uacpy.units` helpers
+(source: [`uacpy/core/units.py`](../../uacpy/core/units.py)),
 which exists so that "did I convert?" is a grep and not an audit.
 
 Write a bathymetry and read it back:
@@ -80,7 +81,7 @@ file is opened.)
 | Range | metres | **metres** for `ram.in` / `rams.in` / `ramgeo.in`, mpiramS' bathymetry and output-range files, and inside `.shd` (AT converts before writing the header) | — |
 | Depth, thickness | metres | **metres** everywhere — the decks above convert their *range* axes only, so `.env` SSP depths and layer thicknesses, `.bty` / `.ati` depth columns and source/receiver depths all stay in metres | — |
 | Frequency | Hz | Hz | — |
-| Reflection **phase** | radians | degrees | `deg_to_rad` (in `uacpy.core.units`) |
+| Reflection **phase** | radians | degrees | `deg_to_rad` / `rad_to_deg` (in `uacpy.units`) |
 | Grazing **angle** | degrees | degrees | — |
 
 The two that catch people: the RAM family keeps even its *range* axes in
@@ -89,7 +90,7 @@ exceptions are the range axes of mpiramS' SSP and sediment decks), and
 reflection-coefficient tables are
 degrees for the *angle* axis on both sides but radians-in-Python /
 degrees-on-disk for the *phase* column: `read_reflection_coefficient` returns
-a [`ReflectionCoefficient`](results.md) result, `phi` in radians.
+a [`ReflectionCoefficient`](results.md) result whose `phase` is in radians.
 (A reflection table comes from a BOUNCE run or from
 `write_reflection_coefficient`, which writes one from your own angles and
 coefficients; uacpy reads, writes, stages and dedupes them. OASR's `.trc` is a
@@ -194,7 +195,7 @@ of outputs. See [Bellhop](../models/bellhop.md), [Kraken](../models/kraken.md),
 | `.env` | in | ASCII | The whole problem: title, frequency, media, SSP, boundaries, source/receiver geometry |
 | `.flp` | in | ASCII | Field parameters for `field.exe` — how to sum Kraken's modes into a field |
 | `.shd` | out | direct-access binary | Complex pressure, `(Ntheta, Nsz, Nrz, Nrr)` |
-| `.arr` | out | ASCII or binary | Bellhop arrivals: amplitude, delay and bounce counts per path — the binary RunType `'a'` variant is detected and refused |
+| `.arr` | out | ASCII or binary | Bellhop arrivals: amplitude, delay and bounce counts per path — RunType `'A'` writes ASCII, `'a'` Fortran sequential records (`Bellhop/ArrMod.f90:136-178`); `read_arr_file` reads both, the binary one in either byte order |
 | `.ray` | out | ASCII | Bellhop ray paths |
 | `.mod` | out | direct-access binary | Kraken mode shapes and wavenumbers (the only mode format any AT program writes) |
 | `.grn` | out | direct-access binary | Scooter / SPARC wavenumber-domain Green's function |
@@ -214,7 +215,12 @@ contributors in `uacpy.io.oalib_writer`: `write_header`, `write_ssp_section`, `w
 Every model entry point takes `(filepath, env, source, receiver)` and writes
 what the `Environment` says: the SSP letter from `interp_ssp=` (the name the
 models take, resolved by `resolve_ssp_topopt`), the boundary letters from
-`env.surface` and the seabed half-space. Their solver options default:
+`env.surface` and the seabed half-space. The KRAKEN, SCOOTER, SPARC and
+BOUNCE decks hold one sound-speed profile: their writers take `interp_ssp=None`
+as `'linear'`, refuse `'quad'` (Bellhop's `.ssp` file, which
+`ReadEnvironmentMod` cannot read), and refuse a range-dependent `env.ssp`
+(collapse it first, or run the model, which collapses or segments it). Their
+solver options default:
 `n_mesh=0` lets the engine size each medium and `rmax_m` of `None` is the
 farthest receiver range (the models pass their own padded RMax). The
 phase-speed window `c_low`/`c_high` (m/s) is required: deriving it is the
@@ -253,9 +259,11 @@ itself) may differ per profile, since the record length carries no mesh term.
 `read_env(filepath)` is the inverse, and reads a deck any other tool wrote
 the way the Acoustics-Toolbox programs do. It returns
 `(env, source, receiver, options)`, with `options` keyed by the writers' own
-keyword names (`c_low`, `c_high`, `rmax_m`, `n_mesh`, `interp_ssp`, or
-Bellhop's `run_type`, `beam_type`, `n_beams`, `alpha`, `step`, `z_box`,
-`r_box`, …). The sibling files the deck names come with it — a Bellhop
+keyword names (`c_low`, `c_high`, `rmax_m`, `n_mesh` (one per medium),
+`interp_ssp`, or Bellhop's `run_type`, `beam_type`, `n_beams`,
+`launch_angles`, `ray_step`, `z_box`, `r_box`, …) beside `model` and `title`,
+which describe the deck; without those two they write it back unchanged. The
+sibling files the deck names come with it — a Bellhop
 `.bty`/`.ati` (a long-format `.bty` under an `'A'` bottom is a
 range-dependent seabed), a `'Q'` deck's `.ssp` — and a reflection table is
 referenced by path. A KRAKEN deck beside `field.exe`'s `.flp` takes the
@@ -269,7 +277,8 @@ written from. A construct the carriers cannot hold exactly — Np/m or dB/m
 attenuation, the analytic or 3-D SSP, a BELLHOP3D deck, a gradient
 sediment, a BOUNCE deck — raises `UnsupportedFeatureError` rather than
 being approximated. Of the 409 decks the Acoustics Toolbox ships in its
-`tests/`, 245 read. Re-running a uacpy Kraken deck from what `read_env`
+`tests/`, 250 read (the test suite re-reads them all and pins that count).
+Re-running a uacpy Kraken deck from what `read_env`
 returns reproduces its TL exactly.
 
 ```python
@@ -281,8 +290,9 @@ uacpy.Kraken(c_low=options['c_low'] or None,
 ### `.shd` — pressure out
 
 `read_shd_file` is the everyday entry point: it returns a
-[`Field`](results.md) of complex pressure, or a `ResultStack` when the file
-carries several source depths. A multi-frequency file gives a broadband
+[`Field`](results.md) of complex pressure; a file carrying several source
+depths gives one `Field` with a leading `'source_depth'` axis, as a
+multi-depth run returns it. A multi-frequency file gives a broadband
 `Field` with `'frequency'` as the last axis, in the file's frequency order.
 Multi-bearing and multi-source-position files raise `UnsupportedFeatureError`
 — use `read_shd_bin` for those.
@@ -303,13 +313,21 @@ shd = uacpy.io.read_shd_file(tl.metadata['shd_file'])
 shd.data.shape      # (100, 250), complex64
 ```
 
+Example 48 runs this end to end — a `.shd` and an `.arr` read back, then the
+results written to NetCDF, xarray and pandas.
+
 `read_shd_bin` returns the file as written, a `ShdFile` record: `title`,
 `plot_type`, `frequencies`, the source and receiver coordinates (`bearings`,
 `source_x`, `source_y`, `source_depths`, `receiver_depths`,
 `receiver_ranges`, in metres) and a single-frequency `pressure` cube, the
-frequency it holds being `pressure_frequency`. Cells the engine never wrote — Bellhop's `r = 0` column, ray
-shadow zones, an empty modal sum — are exact zeros on disk and come back as
-`NaN`, uacpy's no-data convention.
+frequency it holds being `pressure_frequency`. The pressure is the file's
+values as written, exact zeros included: a zero is usually the writer's own
+answer (an empty beam sum in a ray shadow zone, an empty modal sum, a receiver on
+a pressure-release boundary), which uacpy's dB views report at the 600 dB
+no-energy marker. Where a zero is not a field value — Bellhop's `r = 0` column,
+which the engine never evaluates (`Bellhop/influence.f90:786-787`) — the model
+wrapper returns NaN there; the reader cannot tell which engine wrote the file,
+so it does not.
 
 ### `.grn` — the Green's function, and the transform onto ranges
 
@@ -332,7 +350,7 @@ The file stores a phase-speed grid, not wavenumbers: `wavenumbers(f)` returns
 the `k = 2πf/c` axis (rad/m) the solver sampled at `f` — per frequency for
 Scooter, at the header's source frequency for SPARC — which is the axis to plot
 or integrate `G` against. The methods call the array functions of
-`uacpy.core.acoustics` (`hankel_transform`, `wavenumber_taper`,
+`uacpy.acoustics` (`hankel_transform`, `wavenumber_taper`,
 `wavenumbers_from_phase_speeds`, `snapshot_frequency_component`), which take
 any `G(k)`, not only a `.grn`'s.
 
@@ -415,13 +433,13 @@ different binary per output.
 
 `read_oast_tl(filepath, receiver_depths=None, *, frequencies=None)` returns TL on OAST's **native** range
 grid, not yours: OAST picks its own range sampling via an FFT, and the `.plp`
-metadata file is the only record of it. It is always a `ResultStack` over
-frequency — one TL `Field` per frequency, a stack of one for a single
-frequency — because OAST rebuilds the range grid inside its frequency loop, so
-each slab carries its own range axis. Resampling onto your receiver grid is
+metadata file is the only record of it. It is always a list of TL `Field`s,
+one per frequency (a list of one for a single frequency), because OAST
+rebuilds the range grid inside its frequency loop, so each carries its own
+range axis and they are not one `Field`. Resampling onto your receiver grid is
 an explicit `Field.resample_to` call, so the interpolation is visible rather
-than buried in the reader. The frequency coordinate is the `.plp`'s `Freq:`
-labels; a `.plp` without them needs `frequencies=` (the deck's frequencies,
+than buried in the reader. Each `Field`'s frequency is the `.plp`'s `Freq:`
+label; a `.plp` without them needs `frequencies=` (the deck's frequencies,
 one per plotted block), and a `frequencies=` more than 0.05 Hz from the
 labels is refused.
 
@@ -460,8 +478,9 @@ writes; stock mpiramS writes a direct-access `psif.dat` plus `recl.dat`
 (`third_party/mpiramS/README.RECL`), and a file with a `recl.dat` beside it
 is refused with that explanation rather than as a truncated run.
 
-The header scalars are renamed on the way out — Fortran's `Nsam` and `cmin`
-become `n_samples` and `c_min` — so a consumer can forward them straight into
+The header scalars are renamed on the way out — Fortran's `Nsam`, `cmin`,
+`fs` and `Q` become `n_samples`, `water_min`, `sample_rate` and `q_factor`
+(`c0` keeps its name) — so a consumer can forward them straight into
 `Result.metadata` without a second mapping table.
 
 ### The Collins binaries: rams0.5, ramsurf1.5, ramgeo
@@ -621,7 +640,7 @@ reader of *model output* (`.shd`, `.arr`, `.ray`, `.mod`, `.grn`, `.flp`,
 `.ssp`, `.rts`, `.ts`, RAMSurf grids, and `.brc`/`.irc` after a BOUNCE run)
 raises `FileFormatError` — the run failed before writing the file. A reader of
 a deck or recording the *user* supplied — `read_bathymetry`,
-`read_altimetry`, `read_source_beam_pattern`, `read_wav`,
+`read_altimetry`, `read_source_beam_pattern`, `read_wav`, `read_wav_info`,
 `read_wav_metadata` — raises `ConfigurationError`: the argument names a
 file that is not there. `typed_format_error` converts neither, because a
 decorator wrapped around both kinds cannot tell them apart; each reader states
@@ -664,12 +683,12 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 
 | Name | |
 |---|---|
-| `read_shd_file` | `.shd` → `Field` (or `ResultStack` for several source depths), broadband when the file carries several frequencies; the engine's native normalisation (§3); multi-bearing / multi-source-position files raise `UnsupportedFeatureError` — use `read_shd_bin` |
+| `read_shd_file` | `.shd` → `Field` (a leading `source_depth` axis for several source depths), broadband when the file carries several frequencies; the engine's native normalisation (§3); multi-bearing / multi-source-position files raise `UnsupportedFeatureError` — use `read_shd_bin` |
 | `read_shd_bin` | `.shd` binary → `ShdFile`, one frequency's pressure cube as written |
 | `ShdFile` | The record `read_shd_bin` / `read_shd_asc` return; `to_dict`, `to_xarray` |
 | `read_env` | KRAKEN-family / 2-D Bellhop `.env` (+ its `.bty`/`.ati`/`.ssp`/`.flp`) → `(Environment, Source, Receiver, options)`, read as the AT programs read it; a construct the carriers cannot hold raises `UnsupportedFeatureError` |
 | `read_shd_asc` | ASCII shade file → the `ShdFile` `read_shd_bin` returns; one frequency, bearing and source depth (more raises `UnsupportedFeatureError`) |
-| `read_arr_file` | `.arr` → `Arrivals` |
+| `read_arr_file` | `.arr` → `Arrivals` (ASCII RunType `'A'` or binary `'a'`) |
 | `read_ray_file` | `.ray` → `Rays` |
 | `read_ssp_2d` | 2-D `.ssp` → `SspTable`: profile `ranges` (m), `sound_speed` `(n_depth, n_profiles)`; `to_ssp(depths)` builds the carrier on the deck's depths |
 | `SspTable` | The record `read_ssp_2d` returns |
@@ -708,12 +727,14 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | `read_bathymetry` | `.bty` → `BoundaryTable` (m), interpolation type; long format carries geoacoustics; `to_bathymetry()` |
 | `read_altimetry` | `.ati` → `BoundaryTable` (m, positive down as on disk), interpolation type; `to_altimetry()` |
 | `BoundaryTable` | The record `read_bathymetry` / `read_altimetry` return; `to_dataframe` |
-| `read_reflection_coefficient` | `.brc`/`.trc` → a `ReflectionCoefficient`: `theta` (deg), `R`, `phi` (rad); an `.irc` is refused |
-| `read_source_beam_pattern` | `.sbp` → angle / level array |
+| `read_reflection_coefficient` | `.brc`/`.trc` → a `ReflectionCoefficient`: `angles` (deg), `magnitude`, `phase` (rad); an `.irc` is refused |
+| `read_source_beam_pattern` | `.sbp` → `BeamPatternTable`: `angles` (deg), `levels_dB` (dB re peak) |
+| `BeamPatternTable` | The record `read_source_beam_pattern` returns; `to_dataframe`, `to_xarray`; `Source(beam_pattern=)` and `plot_beam_pattern` take it as is, and `np.asarray(record)` is its `(N, 2)` `[angle_deg, level_dB]` table |
 | `write_bty_file` | `.bty`, short format (range, depth) |
 | `write_bty_long_format` | `.bty` with per-range `c_p`, `c_s`, `ρ`, `α_p`, `α_s` |
 | `write_bty_3d` | BELLHOP3D `.bty` grid from `X`/`Y` (m) and a `(ny, nx)` depth array — **3-D, retained for planned support** |
-| `read_boundary_3d` | BELLHOP3D `.bty`/`.ati` grid → `x`, `y` (m), `z` `(ny, nx)` — **3-D, retained for planned support** |
+| `read_boundary_3d` | BELLHOP3D `.bty`/`.ati` grid → `Boundary3dFile`: `interpolation` (`'R'`/`'C'`), `x`, `y` (m), `depths` `(n_y, n_x)` (m) — **3-D, retained for planned support** |
+| `Boundary3dFile` | The record `read_boundary_3d` returns; `to_dict`, `to_xarray` |
 | `write_ati_file` | `.ati` altimetry |
 | `write_reflection_coefficient` | `.brc`/`.trc` from angles (deg) + complex or `(|R|, phase_rad)` coefficients — the writer side of `read_reflection_coefficient` |
 | `write_source_beam_pattern` | `.sbp` from angles (deg) + dB re peak |
@@ -730,7 +751,7 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | `OasnReplicaGrid` | The replica grid `write_oasn_input` writes (Block X): `(min, max, count)` per axis in metres, `None` ends taking the defaults, and the integration's phase-speed bounds |
 | `write_oass_input` | OASS `.dat` (reverberation from a producer's `.rhs` mean field) |
 | `write_oassp_input` | OASSP `.dat` (one scattered-field realization from a producer's `.rhs`) |
-| `read_oast_tl` | `.plp` + `.plt` → a `ResultStack` over frequency of TL `Field`s, each on its own native range grid (length 1 for one frequency); the depths come from the curves' `RD:` labels, refined to full precision by an optional `receiver_depths` |
+| `read_oast_tl` | `.plp` + `.plt` → a list of TL `Field`s, one per frequency, each on its own native range grid (length 1 for one frequency); the depths come from the curves' `RD:` labels, refined to full precision by an optional `receiver_depths` |
 | `read_oasp_trf` | `.trf` → the pressure `Field` of OASP's normal-stress output `'N'` (negated, `oasp.tex:185`; any other output parameter is refused); `receiver_depths` is required — the header carries only a uniform `RD`…`RDLOW` grid whatever the deck asked for, so it cannot reproduce a non-uniform array |
 | `read_oasr_reflection_coefficients` | `.trc` grazing-angle table → `ReflectionCoefficient`, phase unwrapped along angle; a slowness-sampled `.rco` raises `UnsupportedFeatureError` (no sound speed in the file to convert with) |
 | `read_oasn_covariance` | `.xsm` → `Covariance`; `receiver_depths=` fills the positions of a vertical array; the header fields ride in `metadata` |
@@ -761,7 +782,9 @@ The submodules (`uacpy.io.oalib_reader`, …) are importable but not listed in
 | Name | |
 |---|---|
 | `write_wav(filepath, signal, sample_rate, *, encoding, normalize, metadata)` | a real signal to `.wav`; `pcm16`/`pcm24`/`pcm32` for players and recorders, `float32`/`float64` to keep a calibrated level. `normalize` defaults to on for PCM, off for float. `metadata` writes a `LIST`/`INFO` chunk |
-| `read_wav(filepath)` | `.wav` → `(signal, sample_rate)`, mono `(n,)` or `(n, n_channels)`. PCM 16/24/32-bit or IEEE float, in a plain or a `WAVE_FORMAT_EXTENSIBLE` header (what most 24-bit and multichannel recorders write); a malformed file raises `FileFormatError`, a data chunk shorter than its header declares warns and returns the whole frames present. An integer encoding comes back divided by its full scale, so it lands in ±1 whatever its depth; a float one comes back as written, which is the point of it |
+| `read_wav(filepath, *, start=0, frames=None)` | `.wav` → `(signal, sample_rate)`, mono `(n,)` or `(n, n_channels)`. PCM 16/24/32-bit or IEEE float, in a plain or a `WAVE_FORMAT_EXTENSIBLE` header (what most 24-bit and multichannel recorders write); a malformed file raises `FileFormatError`, a data chunk shorter than its header declares warns and returns the whole frames present. An integer encoding comes back divided by its full scale, so it lands in ±1 whatever its depth; a float one comes back as written, which is the point of it. `start=` / `frames=` read only that span of frames (a span past the end is refused): the headers are walked without reading the samples and the span is decoded block by block, so a read takes its float64 output (8 bytes per sample) plus under 0.5 MiB, whatever the file's length — `read_wav(path, start=int(600 * fs), frames=int(10 * fs))` is ten seconds of an hour |
+| `read_wav_info(filepath)` | the headers alone → `WavInfo`: `encoding` (`write_wav`'s keys), `bits`, `n_channels`, `sample_rate` (Hz), `n_frames`. `bits` turns `read_wav`'s ±1 fractions back into ADC counts, `x * (2**(bits-1) - 1)`, for `uacpy.acoustics.pressure_from_recording(..., volt_params=(bits, v_ref))` |
+| `WavInfo` | The record `read_wav_info` returns; `to_dict` |
 | `read_wav_metadata(filepath)` | the `LIST`/`INFO` block as `write_wav`'s own keys, or `{}` — most recorders write none, so empty is the common case and not an error |
 
 ---

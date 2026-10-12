@@ -13,6 +13,8 @@ from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.bathymetry import mask_below_seafloor
 from uacpy.core.exceptions import ModelExecutionError, NumericsWarning
 from uacpy.core.results import ResultStack
+from uacpy.core.results._superposition import (restack_source_depths,
+                                               split_source_depths)
 from uacpy.io.oalib_reader import (
     read_arr_file, read_prt, read_ray_file, read_shd_file,
 )
@@ -21,7 +23,7 @@ from uacpy.models._extract import (
 )
 from uacpy.models._launch import require_output
 from uacpy.models.bellhop._backend import arrivals_need_merge
-from uacpy.models.bellhop._tables import grid_is_paired
+from uacpy.models.bellhop._tables import grid_is_paired, writes_origin_column
 
 # A line source carries the 2-D Green's function's exp(-i*pi/4). In AT's
 # e^{+i*omega*t} convention (index.htm:801) the free-space line field is
@@ -140,7 +142,7 @@ def trim_padded_ranges(result, run_type, lo, hi):
 
 def assemble(env, source, receiver, result, work_dir, base_name, run_type,
              trim=None, *, model_name, provenance, backend, cleanup,
-             grid_type, log):
+             grid_type, beam_type, log):
     """Turn what :func:`read_bellhop_output` read into the tagged
     :class:`Result` the caller gets: the padded range columns trimmed,
     the depth axis restored, the source-type phase and level
@@ -202,8 +204,12 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
         # unclamped but ray-free), matching the RAM / Scooter /
         # SPARC below-domain convention. The irregular grid
         # (RunType(5:5)='I') carries no depth axis: its pairs are
-        # masked in place.
+        # masked in place. The r = 0 cells and the unpadded first range
+        # column Bellhop never evaluates go first, on either grid.
         def _restore_depths_and_mask(slab):
+            slab = mask_unwritten_origin(slab, source_type=source.source_type,
+                                         beam_type=beam_type)
+            slab = mask_unwritten_first_range(slab, trim=trim)
             if list(slab.coords) == ['range']:
                 return mask_paired_receivers_below_seafloor(
                     slab, receiver, env, model_name=model_name)
@@ -213,11 +219,12 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
                 model_name, slab, receiver, float(env.depth))
             return slab.mask_below_seafloor(env.bathymetry)
 
-        if isinstance(result, ResultStack):
-            result.slabs = [_restore_depths_and_mask(s)
-                            for s in result.slabs]
-        else:
-            result = _restore_depths_and_mask(result)
+        # Each source depth of a multi-depth .shd on its own, then joined on
+        # its source_depth axis again.
+        result = restack_source_depths(
+            [_restore_depths_and_mask(s)
+             for s in split_source_depths(result)],
+            result, who=f"{model_name}.run")
 
         if run_type in ('I', 'S'):
             # An incoherent / semi-coherent beam sum is a magnitude
@@ -291,6 +298,46 @@ def assemble(env, source, receiver, result, work_dir, base_name, run_type,
 
     log("Simulation complete")
     return result
+
+
+def mask_unwritten_origin(slab, *, source_type, beam_type):
+    """Return one Bellhop TL slab with its ``r = 0`` cells NaN when the run
+    wrote no field value there
+    (:func:`~uacpy.models.bellhop._tables.writes_origin_column`): the exact
+    zero the ``.shd`` holds at ``r = 0`` is then the engine's guard against
+    ``1/sqrt(0)`` or the grid's start value, not an empty beam sum. Every
+    other cell, exact zeros included, is the engine's own value."""
+    if 'range' not in slab.coords or writes_origin_column(source_type,
+                                                          beam_type):
+        return slab
+    origin = np.asarray(slab.coords['range'], dtype=float) == 0.0
+    if not origin.any():
+        return slab
+    data = np.array(slab.data, copy=True)
+    index = [slice(None)] * data.ndim
+    index[list(slab.coords).index('range')] = origin
+    data[tuple(index)] = np.nan
+    slab.data = data
+    return slab
+
+
+def mask_unwritten_first_range(slab, *, trim):
+    """Return one Bellhop slab with its first receiver-range column NaN when
+    the deck could not pad a range ahead of it (``trim`` starts at 0,
+    :func:`~uacpy.models.bellhop._plan.pad_receiver_ranges`). The
+    ray-centred influence routines ('C', 'R', 'g') clamp the receiver index
+    to at least 1 and step from ``irA + 1`` (``influence.f90:223-228``), so
+    they never evaluate that column: its exact zero is the grid's start
+    value, not an empty beam sum. ``trim`` is ``None`` for every other beam
+    type and grid, which this leaves as written."""
+    if trim is None or trim[0] != 0 or 'range' not in slab.coords:
+        return slab
+    data = np.array(slab.data, copy=True)
+    index = [slice(None)] * data.ndim
+    index[list(slab.coords).index('range')] = 0
+    data[tuple(index)] = np.nan
+    slab.data = data
+    return slab
 
 
 def mask_paired_receivers_below_seafloor(field, receiver, env, *,

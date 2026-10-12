@@ -16,6 +16,7 @@ from typing import Optional, Tuple, Union
 import numpy as np
 
 from uacpy.core.exceptions import ConfigurationError
+from uacpy.core._validate import real_scalar_or_none
 
 __all__ = [
     'Coordinate', 'EARTH_RADIUS_M', 'EARTH_RADIUS_KM', 'as_coordinate',
@@ -64,12 +65,17 @@ def as_coordinate(point, label: Optional[str] = None) -> Coordinate:
     prefix = f"{label}: " if label else ""
     try:
         lat, lon = point
-        lat, lon = float(lat), float(lon)
     except (TypeError, ValueError):
+        lat = lon = None
+    else:
+        # Each degree read by the package's one rule for numbers: a bool or
+        # text is not a degree.
+        lat, lon = real_scalar_or_none(lat), real_scalar_or_none(lon)
+    if lat is None or lon is None:
         raise ConfigurationError(
             f"{prefix}expected a (lat, lon) coordinate pair; got {point!r}.",
             remediation="Pass a 2-tuple of degrees, e.g. (43.2, 7.5).",
-        ) from None
+        )
     if not (np.isfinite(lat) and np.isfinite(lon)):
         raise ConfigurationError(
             f"{prefix}coordinate must be finite; got (lat={lat}, lon={lon}).",

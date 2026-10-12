@@ -75,10 +75,15 @@ def typed_plot_error(plotter=None, *, who=None):
             return plotter(*args, **kwargs)
         except (IndexError, KeyError, ValueError) as exc:
             _close_figures_since(before)
+            # An index past the end is what an empty or mismatched array
+            # raises, so that one gets the array remedy; a bad value or key
+            # (a colormap name, a keyword's value) explains itself.
+            remedy = (". Check the arrays are non-empty and their "
+                      "lengths/shapes match the plotter's expected inputs"
+                      if isinstance(exc, IndexError) else "")
             raise ConfigurationError(
                 f"{_name(args, kwargs)}: invalid plot input "
-                f"({type(exc).__name__}: {exc}). Check the arrays are non-empty "
-                f"and their lengths/shapes match the plotter's expected inputs."
+                f"({type(exc).__name__}: {exc}){remedy}."
             ) from exc
         except AttributeError as exc:
             _close_figures_since(before)
@@ -515,6 +520,35 @@ def _checked_dynamic_range_dB(who: str, value) -> float:
     return span
 
 
+#: How far (dB) below its peak a dB curve of a magnitude that can reach zero
+#: is drawn before it sits on its floor, unless the plotter's
+#: ``dynamic_range_dB=`` says otherwise.
+NULL_FLOOR_DB = 120.0
+
+
+def _floored_dB(x, *, power=False, dynamic_range_dB=None, who='plot'):
+    """``20·log10|x|`` (``10·log10|x|`` with ``power=True``), floored
+    ``dynamic_range_dB`` (default :data:`NULL_FLOOR_DB`) below the largest
+    ``|x|``.
+
+    The one null policy of the magnitude-in-dB plotters: ``20·log10`` of a
+    null is ``-inf``, which no axis can show, so a null (and anything
+    deeper than the floor) is drawn ON the floor — not dropped from the line
+    with numpy's divide warning, and not lifted by an added epsilon that
+    biases every small value. The floor is relative to the peak, so it
+    follows the data's own scale. A NaN (a value the data does not define)
+    stays NaN and takes no part in the peak."""
+    span = (NULL_FLOOR_DB if dynamic_range_dB is None
+            else _checked_dynamic_range_dB(who, dynamic_range_dB))
+    factor = 10.0 if power else 20.0
+    magnitude = np.abs(np.asarray(x))
+    finite = magnitude[np.isfinite(magnitude)]
+    peak = float(np.max(finite)) if finite.size else 0.0
+    with np.errstate(divide='ignore'):
+        return factor * np.log10(
+            np.maximum(magnitude, peak * 10.0 ** (-span / factor)))
+
+
 def _require_nonempty(who: str, **arrays) -> None:
     """Refuse an empty input array by name: an empty panel with axes and a
     title reads as a result, and the guide promises degenerate input raises."""
@@ -545,7 +579,7 @@ def _default_value(field: Field) -> str:
 def _is_multi_source_total(field) -> bool:
     """Whether ``field`` is the sum of more than one source.
 
-    ``ResultStack.superpose`` stamps ``metadata['superposed_sources']`` with
+    ``Field.superpose`` stamps ``metadata['superposed_sources']`` with
     the depths it added; a one-source stamp (the ``n = 1`` weight
     ``PropagationModel.run`` applies) is still one source and is left alone.
     """
@@ -577,16 +611,33 @@ def _value_label(field: Field, value: str, *, who: str = 'plot_field') -> str:
         # view — but the label has to come from the field, or the dB view of
         # a signal-excess grid announces itself as transmission loss.
         #
-        # A superposed multi-source field is the one pressure field whose dB
-        # view is NOT a transmission loss. TL is defined against a single
-        # unit source at 1 m (JKPS §1.3.4), and superposing keeps that
-        # reference, so the array's gain lands inside the number and enough
-        # in-phase sources drive it negative — which no loss does. Same
-        # quantity, honest caption.
+        # A superposed multi-source field is still a loss, -20·log10|p|, but
+        # not the TL of one source: TL is defined against a single unit
+        # source at 1 m (JKPS §1.3.4), and superposing keeps that reference,
+        # so the array's gain lands inside the number (in-phase sources lower
+        # it, and can drive it negative — a propagation loss "is generally,
+        # but not always, a positive quantity", Abraham §2.3.4). The caption
+        # names the loss and its single-source reference.
         if (_is_multi_source_total(field)
                 and quantity_label(field.kind, 'dB') == 'TL (dB)'):
-            return 'Total level (dB re 1 source @ 1 m)'
-        return quantity_label(field.kind, 'dB' if field.is_complex else field.unit)
+            return 'Total propagation loss (dB re 1 source @ 1 m)'
+        # The reference names a non-default one on the levels that carry it
+        # (an SEL or peak map at ref=20 µPa); every other kind ignores it.
+        label = quantity_label(field.kind,
+                               'dB' if field.is_complex else field.unit,
+                               reference=getattr(field, 'reference', None))
+        if field.kind == 'sound_exposure':
+            # A track sum adds every event's exposure, and a weighting
+            # changes which criterion the level is read against: both name
+            # the map, as plot_track_exposure's colorbar names them.
+            name, sep, unit = label.partition(' (')
+            events = getattr(field, 'track_events', None)
+            if events:
+                name = f"cumulative {name}, {events} events"
+            if getattr(field, 'weighting', None):
+                name = f"{field.weighting}-weighted {name}"
+            label = f"{name[0].upper()}{name[1:]}{sep}{unit}"
+        return label
     if value == 'real':
         # A time trace is p(t); a real field that is not pressure (a
         # probability, a signal excess) is named by what it is — 'Re(p)'
@@ -601,7 +652,8 @@ def _value_label(field: Field, value: str, *, who: str = 'plot_field') -> str:
             # from the tag spelling: mangling ``kind`` produced 'probability
             # of detection' where the dedicated plotter's colorbar and the
             # registry both say 'Probability of detection'.
-            return quantity_label(field.kind, field.unit)
+            return quantity_label(field.kind, field.unit,
+                                  reference=getattr(field, 'reference', None))
     try:
         return _VALUE_LABELS[value]
     except KeyError:
@@ -650,18 +702,30 @@ def _value_array(field: Field, value: str, *,
     return field.view(value), label
 
 
-def _coord_label(name: str) -> str:
+def _coord_label(name: str, field=None) -> str:
+    """The label of axis ``name``; a ``time`` axis of a ``field`` whose
+    :attr:`~uacpy.core.results.Field.reduction_speed` is set is the reduced
+    time ``t − r/c`` and says so, with its ``c``."""
     label, unit = _AXIS_LABELS.get(name, (name, ''))
+    speed = getattr(field, 'reduction_speed', None)
+    if name == 'time' and speed is not None:
+        label = f"Reduced time t − r/{speed:g} m/s"
+    # A track sum's range axis is the closest-approach distance
+    # (Field.track_exposure), not the range from one source.
+    if name == 'range' and getattr(field, 'track_events', None):
+        label = "Distance from track"
     return f"{label} ({unit})" if unit else label
 
 
-def _coord_axis(coord: np.ndarray, name: str) -> Tuple[np.ndarray, str]:
-    """``(plot_values, axis_label)`` for a coordinate axis, converting a
-    ``range`` axis from metres to km so 1-D cuts, 2-D heatmaps and ``compare``
-    all share one x-scale."""
+def _coord_axis(coord: np.ndarray, name: str,
+                field=None) -> Tuple[np.ndarray, str]:
+    """``(plot_values, axis_label)`` for a coordinate axis of ``field``,
+    converting a ``range`` axis from metres to km so 1-D cuts, 2-D heatmaps
+    and ``compare`` all share one x-scale (:func:`_coord_label` names a
+    reduced time axis)."""
     if name == 'range':
-        return m_to_km(coord), _coord_label(name)
-    return np.asarray(coord), _coord_label(name)
+        return m_to_km(coord), _coord_label(name, field)
+    return np.asarray(coord), _coord_label(name, field)
 
 
 # Fixed TL colour scale used everywhere TL is drawn: ``vmin = 20 dB`` →
@@ -875,6 +939,25 @@ def _overlay_seafloor(ax, env: Environment, ranges_m: np.ndarray, *,
     ax.set_xlim(x_lo, x_hi)
 
 
+def _coordinate_caption(name: str, value) -> str:
+    """``'Source depth = 20 m'``: one coordinate value named and in the unit
+    its axis is drawn in — a range in km, a frequency of 1 kHz or more in
+    kHz."""
+    label, unit = _AXIS_LABELS.get(name, (name, ''))
+    value = float(value)
+    if name == 'range':
+        # Range axes are drawn in km everywhere (see _coord_axis), so a
+        # range value reads in km too.
+        return f"{label} = {m_to_km(value):.3g} km"
+    if unit == 'Hz' and abs(value) >= 1000:
+        return f"{label} = {value / 1000.0:.2f} kHz"
+    return f"{label} = {value:.3g} {unit}".strip()
+
+
+#: Kinds of band-collapsed map that span their band rather than average it.
+_BAND_SPANNING_KINDS = ('sound_exposure', 'peak_pressure')
+
+
 def _pinned_subtitle(field: Field) -> str:
     if not field.pinned:
         return ''
@@ -883,24 +966,27 @@ def _pinned_subtitle(field: Field) -> str:
     # centre would caption identically, naming the one frequency the map is
     # not. ``band_hz`` is what the reducers record for exactly this, so
     # the band wins over the pin when it is there.
+    # An exposure or a peak integrates the band's energy, or reads its
+    # loudest excursion, and is not an average over it: those maps are
+    # captioned by the band they span, with the weighting an exposure was
+    # taken under.
     band = field.band_hz
     parts = []
     for name, v in field.pinned.items():
-        label, unit = _AXIS_LABELS.get(name, (name, ''))
         if name == 'frequency' and band is not None and len(band) == 2:
+            label, _unit = _AXIS_LABELS.get(name, (name, ''))
             lo, hi = float(band[0]), float(band[1])
             scale, tag = ((1000.0, 'kHz') if max(abs(lo), abs(hi)) >= 1000.0
                           else (1.0, 'Hz'))
-            parts.append(f"{label} = {lo / scale:.3g}-{hi / scale:.3g} "
-                         f"{tag} average")
-        elif name == 'range':
-            # Range axes are drawn in km everywhere (see _coord_axis), so a
-            # range pin reads in km too.
-            parts.append(f"{label} = {m_to_km(v):.3g} km")
-        elif unit == 'Hz' and abs(v) >= 1000:
-            parts.append(f"{label} = {v / 1000.0:.2f} kHz")
+            span = f"{lo / scale:.3g}-{hi / scale:.3g} {tag}"
+            if field.kind in _BAND_SPANNING_KINDS:
+                parts.append(f"{label} band {span}")
+                if getattr(field, 'weighting', None):
+                    parts.append(f"{field.weighting}-weighted")
+            else:
+                parts.append(f"{label} = {span} average")
         else:
-            parts.append(f"{label} = {v:.3g} {unit}".strip())
+            parts.append(_coordinate_caption(name, v))
     return ", ".join(parts)
 
 
@@ -941,14 +1027,21 @@ def _credit_attributions(show_data_credit, *, carrier=None):
 
 
 def _model_attribution(result):
-    """One-line model credit ``"<model> — <author>, <engine>"`` from a result's
-    :class:`~uacpy.models.provenance.ModelProvenance`, or ``None`` when the result
-    carries no model provenance. The model-side counterpart of the data-source
-    attributions resolved by :func:`_credit_attributions`."""
+    """One-line model credit ``"<model> (<backend>) — <author>, <engine>"``
+    from a result's :class:`~uacpy.models.provenance.ModelProvenance`, or
+    ``None`` when the result carries no model provenance. ``(<backend>)``
+    names the binary that ran (``result.backend``) when it is not the model's
+    own name: Bellhop's ``cuda`` / ``cxx`` / ``fortran``, Kraken's
+    ``krakenc``, RAM's ``mpirams`` / ``ramgeo`` / ``rams`` / ``ramsurf``. The
+    model-side counterpart of the data-source attributions resolved by
+    :func:`_credit_attributions`."""
     src = getattr(result, 'model_source', None)
     if src is None:
         return None
     name = getattr(result, 'model', '') or src.name
+    backend = getattr(result, 'backend', '') or ''
+    if backend and backend.lower() != name.lower():
+        name = f"{name} ({backend})"
     return f"{name} — {src.attribution}"
 
 

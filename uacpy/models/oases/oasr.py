@@ -11,6 +11,7 @@ import numpy as np
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.source import VALID_SOURCE_TYPES
+from uacpy.models._knobs import whole_count
 from uacpy.models._spec import ModelSpec
 from uacpy.core.run_settings import EngineSettings, OutputSpec, RunMode
 from uacpy.core.results import PhaseReference, ReflectionCoefficient
@@ -19,17 +20,20 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.oases_writer import write_oasr_input, REFL_TYPE_TO_OPTION
 from uacpy.io.oases_reader import read_oasr_reflection_coefficients
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
 from uacpy.models.oases._common import (
-    _OASES_TRAITS, _SCTOUT_BARE_FORT46, _oases_find_executable,
+    _OASES_TRAITS, _SCTOUT_BARE_FORT46, _oases_binary,
 )
-from uacpy.models.oases._sampling import _oases_resample_frequencies
+from uacpy.models.oases._sampling import _oases_frequency_sweep
 from uacpy.models.oases._base import OASES
 from uacpy.core.engine_defaults import OASR_ANGLE_TYPE, OASR_REFLECTION_TYPE
+from uacpy.models._extract import attach_output_paths
+from uacpy.models._launch import require_output
 
 
 #: OASR's default grazing-angle grid as ``(first, last, count)`` in
-#: degrees: 0 to 90 in 0.5° steps. A tuple, so no caller can edit
+#: degrees: 0 to 90 in 0.5° steps, the grid of the manual's worked OASR
+#: deck (``0 90 181 0``, oasr.tex:373). A tuple, so no caller can edit
 #: the default through an array it was handed.
 OASR_DEFAULT_ANGLES_DEG = (0.0, 90.0, 181)
 
@@ -237,16 +241,15 @@ def _oasr_settings(*, options, reflection_type, angles, angle_type,
 
     The deck carries the sweep as ``(freq_min, freq_max, N)`` only, so a
     ``source.frequencies`` vector that is not equispaced — or, under
-    option ``'C'``, not log-spaced — is evaluated on the grid the
-    binary generates, with a warning naming it
-    (:func:`_oases_resample_frequencies`).
+    option ``'C'``, not log-spaced — is refused
+    (:func:`_oases_frequency_sweep`).
     """
     reflection_type = _resolve_reflection_type(options, reflection_type)
     log_swept = _oasr_is_log_swept(options)
     source_freqs = np.atleast_1d(np.asarray(source.frequencies,
                                             dtype=float))
     if source_freqs.size > 1:
-        freq_min, freq_max, n_freq = _oases_resample_frequencies(
+        freq_min, freq_max, n_freq = _oases_frequency_sweep(
             source_freqs, 'OASR', log_spaced=log_swept,
             argument='source.frequencies')
     else:
@@ -278,7 +281,7 @@ class OASR(OASES):
     Notes
     -----
     Range-independent reflection-vs-angle/freq solver. Supports
-    elastic / poro-elastic bottom layers. Returns a
+    elastic bottom layers. Returns a
     :class:`ReflectionCoefficient` with ``theta`` (1-D grazing-angle grid in
     degrees, whichever ``angle_type`` the input angles were given in; the
     ``angle_type`` used is stamped in the metadata) and ``R``/``phi`` shaped
@@ -295,11 +298,10 @@ class OASR(OASES):
     line, the angle axis, the frequency sweep — without launching anything;
     every result carries its own as ``result.run_settings.engine``.
 
-    **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'bottom_range': 'median'`` (the layer stack is
-    kept). SSP collapse left at the global ``'r0'`` because the
-    SSP boundary speed is essentially irrelevant to the reflection
-    coefficient.
+    **Collapse defaults.** The global :data:`DEFAULT_COLLAPSE` (the median
+    seabed column; the layer stack is kept). SSP collapse left at the
+    global ``'r0'`` because the SSP boundary speed is essentially
+    irrelevant to the reflection coefficient.
 
     Examples
     --------
@@ -324,6 +326,10 @@ class OASR(OASES):
 
     spec = ModelSpec(
         modes=(RunMode.REFLECTION,),
+        # No 'rough_surface': the deck has no sea surface — its layer 1 is
+        # the water half-space the plane wave arrives through, whose RG
+        # INENVI discards (oaseun31.f:377) — so a surface roughness is
+        # collapsed with a warning.
         supports={'layered_bottom', 'elastic_media', 'rough_bottom'},
         # A plane-wave reflection coefficient is independent of source
         # geometry, and this deck writer proves it: OASR.run reads only
@@ -333,7 +339,6 @@ class OASR(OASES):
         # models, so every type is accepted — the same reasoning Bounce
         # states for the same run mode.
         source_types=VALID_SOURCE_TYPES,
-        collapse={'bottom_range': 'median'},
         # The water is a lossless half-space and a plane-wave interface
         # reflection coefficient has no path for volume absorption to act
         # on.
@@ -341,6 +346,7 @@ class OASR(OASES):
                                    consumes_volume_absorption=False),
     )
     provenance_id = 'oases'
+    _BINARIES = MappingProxyType({'oasr': _oases_binary('oasr')})
     # The .trc table in the travelling-wave phase convention the reader
     # stamps on every ReflectionCoefficient.
     outputs = MappingProxyType({
@@ -373,12 +379,11 @@ class OASR(OASES):
         executable : Path, optional
             Path to OASR binary. Auto-detected if ``None``.
         angles : ndarray, optional
-            Angle grid in degrees, uniformly spaced. Default:
-            ``np.linspace(0, 90, 181)``. OASR's deck carries only
+            Angle grid in degrees, uniformly spaced. OASR's deck carries only
             ``(ANGLE1, ANGLE2, NANG)`` and generates the grid itself
             (``unoasr21.f:173-177``), so a non-uniform array raises
             ``ConfigurationError`` rather than being silently resampled.
-            Default ``linspace(0, 90, 181)``.
+            Default ``np.linspace(0, 90, 181)``.
         angle_type : str, optional
             'grazing' (OASES native) or 'incidence' (converted via
             ``grazing = 90 - incidence`` before being written to the input
@@ -402,15 +407,17 @@ class OASR(OASES):
             in the returned :class:`ReflectionCoefficient`. ``None`` leaves
             the knob out of the writer call, which applies its own
             ``max(1, n_angles // 10)`` — every 18th sample on the default
-            181-angle grid, not every sample.
-        plot_angle_step, plot_frequency_step : int, optional
-            ``NAOU`` / ``NFOU``, which decimate only OASES' own plot curves; the
-            tables uacpy reads carry every sample.
+            181-angle grid, not every sample (uacpy guidance: plot
+            decimation only, the binary sizes its plot output from it,
+            ``unoasr21.f:160-168``). A whole number >= 0; ``0`` leaves the
+            plot out.
         plot_frequency_step : int, optional
             OASR's ``NFOU`` (``unoasr21.f:116``): decimates only OASES' own
             reflection-vs-frequency *plot* curves; like ``NAOU`` it never
             touches the tables uacpy returns. ``None`` → the writer's
-            ``max(1, n_frequencies // 10)``.
+            ``max(1, n_frequencies // 10)`` (uacpy guidance, as for
+            ``plot_angle_step``). A whole number >= 0; ``0`` leaves the plot
+            out.
         interface_roughness : list, optional
             Per-interface RMS roughness in metres, one entry per layer
             record, ordered top → bottom. Entry 0 is OASR's layer-1
@@ -423,10 +430,7 @@ class OASR(OASES):
         use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
             Standard plumbing (see :class:`PropagationModel`).
         """
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse,
-        )
+        super().__init__(**_host_options(locals()))
         self.angles = (
             np.asarray(angles, dtype=float) if angles is not None else None
         )
@@ -438,6 +442,12 @@ class OASR(OASES):
         self.options = options
         self._check_knobs()
         _warn_zero_reflection_options(self.options, self.reflection_type)
+        # OASR reads IOUTF / IOUTA as INTEGER plot decimations
+        # (unoasr21.f:116, :128); 0 leaves that plot out (:160, :167).
+        for name, step in (('plot_angle_step', plot_angle_step),
+                           ('plot_frequency_step', plot_frequency_step)):
+            if step is not None:
+                whole_count(f'OASR: {name}', step, 0)
         self.plot_angle_step = (
             int(plot_angle_step)
             if plot_angle_step is not None else None
@@ -455,7 +465,7 @@ class OASR(OASES):
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
         self._exe = self._resolve_executable(
-            executable, lambda: _oases_find_executable(self, 'oasr'),
+            executable, lambda: self._find_binary('oasr'),
         )
 
     def _check_knobs(self) -> None:
@@ -536,7 +546,8 @@ class OASR(OASES):
         """Stage 4: run ``oasr`` on the deck, and refuse a run that wrote
         no reflection-coefficient table, quoting the binary's streams."""
         proc = self._execute(deck.stem, inputs.work_dir)
-        self._require_output(
+        require_output(
+            self.model_name,
             [inputs.work_dir / f'{deck.stem}{ext}'
              for ext in self._TABLE_SEARCH],
             what='a reflection-coefficient table', process=proc,
@@ -546,7 +557,8 @@ class OASR(OASES):
         """Stage 4: the grazing-angle table as
         :func:`~uacpy.io.oases_reader.read_oasr_reflection_coefficients`
         returns it."""
-        output_file = self._require_output(
+        output_file = require_output(
+            self.model_name,
             [inputs.work_dir / f'{deck.stem}{ext}'
              for ext in self._TABLE_SEARCH],
             what='a reflection-coefficient table',
@@ -571,12 +583,13 @@ class OASR(OASES):
             sampling_type='angle',
             angle_type=engine.angle_type,
         )
-        self._attach_output_paths(
+        attach_output_paths(
             field, inputs.work_dir, deck.stem,
             primary_files=(
                 ('trc_file', '.trc'),
                 ('rco_file', '.rco'),
             ),
+            cleanup=self.cleanup,
         )
 
         self._log("OASR simulation complete")

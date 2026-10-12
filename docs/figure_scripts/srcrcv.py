@@ -52,18 +52,20 @@ def geometry_to_grid():
 
 
 def source_depth():
-    """One `Source`, three depths: a ResultStack and three different oceans."""
+    """One `Source`, three depths: one Field over source_depth and three
+    different oceans."""
     env, _, _ = deep_water()
     source = uacpy.Source(depths=[100.0, 1300.0, 3000.0], frequencies=50.0)
     receiver = uacpy.Receiver(depths=np.linspace(0.0, 5000.0, 140),
                               ranges=np.linspace(2000.0, 100_000.0, 320))
-    stack = Bellhop(n_beams=3000).run(env, source, receiver,
+    field = Bellhop(n_beams=3000).run(env, source, receiver,
                                       run_mode=RunMode.INCOHERENT_TL)
 
     fig, axes = plt.subplots(3, 1, figsize=(9.0, 9.5), sharex=True, sharey=True)
-    for ax, (depth, slab) in zip(axes, stack):
-        slab.plot(env=env, source=uacpy.Source(depths=depth, frequencies=50.0),
-                  ax=ax, show_colorbar=False)
+    for ax, depth in zip(axes, field.coords['source_depth']):
+        field.at(source_depth=depth).plot(
+            env=env, source=uacpy.Source(depths=depth, frequencies=50.0),
+            ax=ax, show_colorbar=False)
         ax.set_title(f'Source depth {depth:.0f} m',
                      fontweight='bold', fontsize=11)
         if ax is not axes[-1]:

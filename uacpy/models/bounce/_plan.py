@@ -20,13 +20,9 @@ from uacpy.models._knobs import is_real_number
 # bounce.f90 zeroes kMin (drops the 1/cHigh term in NkTab) once cHigh > 1e6.
 _KMIN_CUTOFF_CHIGH = 1.0e6
 
-# Mesh density of each medium of the sediment stack: 20 points per wavelength,
-# the same density misc/ReadEnvironmentMod.f90:103 uses for its own automatic
-# mesh, floored so a thin layer still gets a usable mesh. The cap bounds the
-# difference-equation grid bounce.f90:78 allocates (B1..B4/rho/cP/cS sized from
-# the sum over media); a stack that needs more than that is refused rather than
-# clipped, since a clipped count below Nneeded/2 is a deck the binary rejects
-# (ReadEnvironmentMod.f90:110-112).
+# Mesh density of each medium of the sediment stack, floored so a thin layer
+# still gets a usable mesh; bounce.f90:78 allocates the difference-equation grid
+# (B1..B4/rho/cP/cS) to the deck's count, so no cap applies.
 #: BOUNCE's own manual asks for this, and it is NOT the generic AT auto-mesh
 #: density. ``doc/bounce.htm``: "BOUNCE is very fast, there's no reason to
 #: skimp. The finer the grid, the more accurate the result. I'll suggest
@@ -43,19 +39,16 @@ _KMIN_CUTOFF_CHIGH = 1.0e6
 #: 0.00015 at 200. The cost is what the manual says it is — 0.02 s against
 #: 0.03 s for the same run at 2 kHz.
 _MESH_POINTS_PER_WAVELENGTH = 100
-
-#: The density AT's own automatic mesh uses, kept because the binary's
-#: acceptance floor is derived from it (``Nneeded/2``), not because it is the
-#: right density to ask for.
-_AT_AUTO_MESH_POINTS_PER_WAVELENGTH = 20
+#: At least this many points per medium, uacpy guidance; BOUNCE's own
+#: automatic mesh takes at least 10 (``misc/ReadEnvironmentMod.f90:105``).
 _MIN_MESH_POINTS = 100
-_MAX_MESH_POINTS = 20000
 
 
 def check_knobs(*, c_low, c_high, rmax_m, n_angles) -> None:
     """Refuse a constructor knob no run could use: a value that is not a
     number, a non-positive phase velocity or range, a pinned ``c_low`` at
-    or above ``c_high``, fewer than two angles.
+    or above ``c_high``, fewer than two angles, and ``n_angles`` pinned
+    beside ``rmax_m`` (each sets the other).
 
     Run on the knobs at construction and again by every run (the attributes
     can be reassigned in between). A ``c_low`` left ``None`` is held to
@@ -95,6 +88,16 @@ def check_knobs(*, c_low, c_high, rmax_m, n_angles) -> None:
                 f"tabulated angle divides by zero and the binary spins "
                 f"until the model timeout."
             )
+        if rmax_m is not None:
+            raise ConfigurationError(
+                f"Bounce(n_angles={n_angles}, rmax_m={rmax_m:g}) pins the "
+                f"table's angular sampling twice: bounce.f90:49 derives the "
+                f"count from RMax, NkTab = INT(1000 * RMax_km * (kMax - "
+                f"kMin) / 2 pi), so n_angles sets RMax and the two "
+                f"contradict each other.",
+                remediation=("Pass n_angles= for the count, or rmax_m= for "
+                             "the range the sampling is sized for, not "
+                             "both."))
 
 
 def resolve_c_high(c_high) -> Tuple[float, str]:
@@ -175,10 +178,10 @@ def resolve_c_low(env: Environment, *, c_low: Optional[float]) -> float:
     the lowest speed in the problem (say 1400.0) CMax to 1.0E9." The rule
     is *the lowest speed in the problem*; the 1400 is that sentence's
     illustrative example. ``min(SSP)`` reads the rule directly, and capping
-    it at ``DEFAULT_C_MIN`` keeps the tabulation grid identical to the
-    historical fixed default for every column whose water never drops below
-    1400 m/s — ``NkTab = rmax_m * f / c_low`` moves only once ``min(SSP)``
-    undercuts it.
+    it at ``DEFAULT_C_MIN`` keeps the tabulation grid at ``c_low = 1400``
+    for every column whose water never drops below 1400 m/s —
+    ``NkTab = rmax_m * f / c_low`` moves only once ``min(SSP)`` undercuts
+    it.
 
     ``env.ssp.sound_speed``, not :meth:`~uacpy.core.ssp.SoundSpeedProfile.to_pairs`:
     that method returns the **range-0 column** of a range-dependent profile
@@ -246,11 +249,14 @@ def resolve_rmax_m(receiver, frequency: float, c_low: float, *, n_angles,
     """``(rmax_m, origin)``: the range (m) the table's angular sampling
     is sized for, and where it came from.
 
-    ``n_angles`` wins over a pinned ``rmax_m``: it is inverted through
-    bounce.f90:49 ``NkTab = INT(1000*RMax_km*(kMax-kMin)/(2π))``. Then
-    the pinned ``rmax_m``, then ``receiver.range_max``, and 10 km when
-    no receiver range is positive. ``receiver=None`` reaches here only
-    with one of the two knobs set (:func:`refuse_unsized_table`).
+    A pinned ``n_angles`` is inverted through bounce.f90:49
+    ``NkTab = INT(1000*RMax_km*(kMax-kMin)/(2π))`` to the RMax half an
+    angle above it, so the binary tabulates exactly ``n_angles``
+    (:func:`tabulated_angle_count` on the deck's six-decimal km); a count
+    that RMax cannot give is refused, naming the count it gives. Else the
+    pinned ``rmax_m``, then ``receiver.range_max``, and 10 km when no
+    receiver range is positive. ``receiver=None`` reaches here only with
+    one of the two knobs set (:func:`refuse_unsized_table`).
     """
     if n_angles is not None:
         omega = 2.0 * np.pi * float(frequency)
@@ -265,9 +271,22 @@ def resolve_rmax_m(receiver, frequency: float, c_low: float, *, n_angles,
             )
         # NkTab = INT(1000 * RMax_km * (kMax - kMin) / 2π) and
         # 1000 * RMax_km IS RMax in metres, so the km conversion cancels
-        # out of the inversion and this lands directly in metres.
-        return (float(n_angles) * 2.0 * np.pi / (omega * inv_c_diff),
-                f'n_angles={n_angles}')
+        # out of the inversion and this lands directly in metres. Half an
+        # angle above n_angles keeps INT on n_angles through the deck's
+        # millimetre rounding of RMax.
+        rmax = ((int(n_angles) + 0.5) * 2.0 * np.pi
+                / (omega * inv_c_diff))
+        got = tabulated_angle_count(rmax, frequency, c_low, c_high=c_high)
+        if got != int(n_angles):
+            raise ConfigurationError(
+                f"Bounce(n_angles={n_angles}): bounce.f90:49 derives the "
+                f"count from RMax, which the deck carries in km at six "
+                f"decimals, and at {frequency:.6g} Hz with c_low={c_low:g} "
+                f"and c_high={c_high:g} m/s the nearest RMax gives "
+                f"{got} angles, not {n_angles}.",
+                remediation=(f"Pass n_angles={got}, or rmax_m= for the "
+                             f"range the sampling is sized for."))
+        return rmax, f'n_angles={n_angles}'
     if rmax_m is not None:
         return float(rmax_m), 'Bounce(rmax_m=…)'
     recv_rmax = float(receiver.range_max)
@@ -342,10 +361,13 @@ def resolve_n_mesh(env: Environment, frequency: float) -> list:
     against cp ~ 1700 m/s) needs an order of magnitude more points than its
     compressional wavelength suggests.
 
-    ``doc/bounce.htm`` does NOT state the same rule: it asks for 100
-    points/wavelength and calls 10 "very poor", where the Fortran merely
-    sets the floor at that 10. This wrapper follows the manual and uses the
-    Fortran only for the floor — see
+    ``doc/bounce.htm`` states that automatic rule ("If you set the number
+    of finite-difference grid points (NPTS) to zero, then BOUNCE
+    automatically calculates a value to have 20 points per wavelength. ...
+    you may need to increase that to as much as 100 points per
+    wavelength.") and elsewhere suggests 100 points/wavelength, calling 10
+    "very poor", where the Fortran merely sets the acceptance floor at that
+    10. This wrapper asks for the manual's 100 — see
     :data:`_MESH_POINTS_PER_WAVELENGTH`.
     """
     counts = []
@@ -354,27 +376,7 @@ def resolve_n_mesh(env: Environment, frequency: float) -> list:
         shear = float(layer.shear_speed)
         speed = shear if shear > 0.0 else float(layer.sound_speed)
         needed = _MESH_POINTS_PER_WAVELENGTH * thickness * frequency / speed
-        # The binary's own requirement, and the floor it rejects below.
-        at_needed = (_AT_AUTO_MESH_POINTS_PER_WAVELENGTH
-                     * thickness * frequency / speed)
-        if needed > _MAX_MESH_POINTS and _MAX_MESH_POINTS >= at_needed / 2:
-            # Asking for the manual's density would exceed the ceiling, but
-            # the ceiling itself still clears what the binary demands, so
-            # clip instead of refusing a deck that BOUNCE accepts.
-            counts.append(_MAX_MESH_POINTS)
-            continue
-        if needed > _MAX_MESH_POINTS:
-            raise ConfigurationError(
-                f"Bounce: the {thickness:g} m sediment layer needs "
-                f"{int(np.ceil(needed))} mesh points at {frequency:.4g} Hz "
-                f"({_MESH_POINTS_PER_WAVELENGTH} per wavelength of its "
-                f"{speed:.1f} m/s "
-                f"{'shear' if shear > 0.0 else 'compressional'} speed), "
-                f"above the {_MAX_MESH_POINTS}-point ceiling on a single "
-                f"BOUNCE medium.",
-                remediation="Lower the frequency, split the layer into "
-                            "thinner ones, or drop the shear speed if the "
-                            "layer is meant to be fluid.",
-            )
+        # bounce.f90:78 allocates the mesh arrays to the deck's count, so
+        # the manual's density is asked for at any size.
         counts.append(max(_MIN_MESH_POINTS, int(np.ceil(needed))))
     return counts

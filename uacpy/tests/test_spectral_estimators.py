@@ -351,8 +351,30 @@ class TestEveryLadderComesFromOneBuilder:
                            match='n_bands must be positive'):
             standard_bands(10.0, 100.0, band_type='linear')
         with pytest.raises(ConfigurationError,
-                           match='require freq_min > 0 and freq_max > freq_min'):
+                           match='require freq_min > 0 and freq_max > freq_min'
+                           ) as caught:
             standard_bands(100.0, 10.0)
+        assert 'Pass a positive freq_min (Hz) below freq_max' in str(
+            caught.value)
+
+    @pytest.mark.parametrize('nperseg, refused', [(None, False), (2048, False),
+                                                  ('default', True),
+                                                  (1024, True)])
+    def test_an_array_window_is_the_segment(self, nperseg, refused):
+        """An array window sets the segment length; a different nperseg
+        (welch's default 8192 included) is refused naming welch and the
+        length to pass, not scipy's raw ValueError."""
+        from uacpy.acoustic_signal import welch
+        x = np.random.default_rng(0).standard_normal(20000)
+        kw = {} if nperseg == 'default' else {'nperseg': nperseg}
+        call = lambda: welch(x, 1000.0, window=np.hamming(2048), **kw)
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match=r'^welch: an array window of 2048') as e:
+                call()
+            assert 'Pass nperseg=2048' in str(e.value)
+        else:
+            assert call().power.shape == (1025,)
 
     def test_band_levels_on_the_decidecade_ladder_are_decidecade_band_levels(
             self):
@@ -383,7 +405,7 @@ class TestEveryLadderComesFromOneBuilder:
 
     def test_band_levels_carry_the_ladder_they_are_stated_on(self):
         """The levels come back as a ``BandLevels`` that still unpacks to
-        ``(centres, levels)`` and carries the edges, the ladder and the
+        ``(centers, levels)`` and carries the edges, the ladder and the
         reference, through a copy and a pickle; its unit names the ref."""
         import copy
         import pickle
@@ -400,7 +422,7 @@ class TestEveryLadderComesFromOneBuilder:
         for twin in (copy.deepcopy(result), pickle.loads(pickle.dumps(result))):
             assert (twin.band_type, twin.ref) == ('octave', 1.0)
             np.testing.assert_array_equal(twin.upper, upper)
-        assert result.units == {'centres': 'Hz', 'levels': 'dB re 1 Pa²'}
+        assert result.units == {'centers': 'Hz', 'levels': 'dB re 1 Pa²'}
         assert sig.decidecade_band_levels(np.full(f.size, 1e-10),
                                           frequencies=f).units['levels'] == 'dB re 1 µPa²'
 
@@ -415,9 +437,37 @@ class TestEveryLadderComesFromOneBuilder:
         try:
             # The micro prefix appears exactly when the levels are re 1 µPa.
             assert ('µPa' in ax.get_ylabel()) == (ref == 1e-6)
-            assert len(ax.patches) == result.centres.size
+            assert len(ax.patches) == result.centers.size
         finally:
             plt.close(fig)
+
+    @pytest.mark.parametrize('ref', [1e-6, 1.0])
+    def test_the_free_plotter_takes_band_levels_whole_with_their_reference(
+            self, ref):
+        """``plot_band_levels(result)`` is the ``.plot()`` call: the levels
+        and their reference come off the result."""
+        from uacpy.acoustic_signal import band_levels
+        from uacpy.plot import plot_band_levels
+        f = np.linspace(0.0, 8000.0, 16001)
+        result = band_levels(np.full(f.size, 1e-10), f, ref=ref,
+                             band_type='octave')
+        fig, ax = plot_band_levels(result)
+        try:
+            assert ('µPa' in ax.get_ylabel()) == (ref == 1e-6)
+            assert ax.get_xlabel().startswith('Octave')
+            np.testing.assert_array_equal(
+                [p.get_height() for p in ax.patches], result.levels)
+        finally:
+            plt.close(fig)
+
+    def test_the_free_plotter_refuses_a_reference_the_levels_do_not_have(self):
+        from uacpy.acoustic_signal import band_levels
+        from uacpy.plot import plot_band_levels
+        f = np.linspace(0.0, 8000.0, 16001)
+        result = band_levels(np.full(f.size, 1e-10), f, ref=1.0)
+        with pytest.raises(ConfigurationError, match='contradicts the BandLevels'):
+            plot_band_levels(result, ref=1e-6)
+        plt.close('all')
 
     def test_band_levels_refuse_a_ladder_without_standard_edges(self):
         from uacpy.acoustic_signal import band_levels
@@ -1449,6 +1499,54 @@ class TestEveryEstimatorSpellsTheRangeAndTheRecordTheSameWay:
         assert r.bands is not None
 
 
+class TestAWeightedExposureWeightsEachBinBeforeTheBandsSumIt:
+    """``weighting=`` scales each FFT bin's energy at the bin's own
+    frequency, so the bands hold the weighted exposure and their total is
+    the weighted SEL of the band span."""
+
+    FS = 48000.0
+
+    def _record(self):
+        t = np.arange(int(20 * self.FS)) / self.FS
+        rng = np.random.default_rng(0)
+        return (0.1 * rng.standard_normal(t.size)
+                + 20.0 * np.sin(2 * np.pi * 63.0 * t) * np.hanning(t.size))
+
+    @pytest.mark.parametrize('weighting', ['LF', 'VHF'])
+    def test_the_bands_total_the_weighted_sel_of_their_span(self, weighting):
+        from uacpy.core.acoustics import (frequency_weighting,
+                                          sound_exposure_level)
+        x = self._record()
+        bands = sound_exposure(x, self.FS, weighting=weighting)
+        lo, hi = bands.bands[0][0], bands.bands[-1][2]
+        span = lambda f: np.where((f >= lo) & (f <= hi),
+                                  frequency_weighting(f, weighting), -np.inf)
+        total = 10 * np.log10(bands.power.sum() / 1e-12)
+        assert total == pytest.approx(
+            sound_exposure_level(x, self.FS, weighting=span), abs=1e-3)
+
+    def test_a_band_where_the_weighting_is_flat_drops_by_it(self):
+        from uacpy.core.acoustics import frequency_weighting
+        x = self._record()
+        plain = sound_exposure(x, self.FS)
+        lf = sound_exposure(x, self.FS, weighting='LF')
+        k = int(np.argmin(np.abs(plain.frequencies - 2000.0)))
+        assert 10 * np.log10(lf.power[k] / plain.power[k]) == pytest.approx(
+            float(frequency_weighting(plain.frequencies[k], 'LF')), abs=0.05)
+
+    def test_the_histogram_takes_the_same_weighting(self):
+        x = self._record()[: int(10 * self.FS)]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            plain = probabilistic_sound_exposure(x, self.FS,
+                                                 segment_duration=2.0)
+            vhf = probabilistic_sound_exposure(x, self.FS,
+                                               segment_duration=2.0,
+                                               weighting='VHF')
+        low = int(np.argmin(np.abs(plain.frequencies - 63.0)))
+        assert plain.mean_dB[low] - vhf.mean_dB[low] > 60.0
+
+
 class TestTheExposureHistogramSummarisesPerSegmentEnergy:
     """``probabilistic_sound_exposure`` is how a monitoring record reports what
     a day of piling delivered rather than what its loudest minute did: each
@@ -1589,13 +1687,56 @@ class TestMultichannelTimeAxis:
                 est.power[ch], welch(x[:, ch], self.FS, nperseg=1024).power,
                 rtol=1e-12)
 
-    def test_sound_exposure_takes_one_channel(self):
-        from uacpy.acoustic_signal import sound_exposure
-        from uacpy.core.exceptions import ConfigurationError
-        x = self._record()
-        for arr in (x, x.T):
-            with pytest.raises(ConfigurationError, match="one channel"):
-                sound_exposure(arr, self.FS)
+    def test_sound_exposure_refuses_the_wav_layout_without_axis(self):
+        with pytest.raises(ConfigurationError, match="axis=0"):
+            sound_exposure(self._record(), self.FS)
+
+    def test_sound_exposure_is_one_band_row_per_channel(self):
+        """Channels first, time last: one band row per channel, bands last,
+        each the channel's own exposure on the same ladder."""
+        x = self._record().T                            # (3, 16000)
+        est = sound_exposure(x, self.FS)
+        one = [sound_exposure(x[ch], self.FS) for ch in range(3)]
+        assert est.power.shape == (3, est.frequencies.size)
+        np.testing.assert_array_equal(est.frequencies, one[0].frequencies)
+        np.testing.assert_array_equal(est.bands, one[0].bands)
+        for ch in range(3):
+            np.testing.assert_allclose(est.power[ch], one[ch].power,
+                                       rtol=1e-12)
+        np.testing.assert_array_equal(
+            sound_exposure(x, self.FS, axis=-1).power, est.power)
+
+    def test_sound_exposure_axis_zero_reads_the_wav_layout(self):
+        x = self._record()                              # (16000, 3)
+        np.testing.assert_array_equal(
+            sound_exposure(x, self.FS, axis=0).power,
+            sound_exposure(x.T, self.FS).power)
+
+    def test_sound_exposure_keeps_every_leading_axis_of_a_grid(self):
+        """A (2, n, 3) record along axis=1 is a (2, 3) grid of channels, and
+        a batch shorter than the channel count is still read along time."""
+        rng = np.random.default_rng(4)
+        x = rng.standard_normal((2, 8030, 3))
+        est = sound_exposure(x, self.FS, axis=1, batch_size=8000)
+        assert est.power.shape == (2, 3, est.frequencies.size)
+        np.testing.assert_allclose(
+            est.power[1, 2],
+            sound_exposure(x[1, :, 2], self.FS, batch_size=8000).power,
+            rtol=1e-12)
+
+    def test_sound_exposure_reads_a_short_last_batch_along_time(self):
+        """80 channels whose last batch holds 30 samples: a (80, 30) chunk
+        is shaped like read_wav's layout, and is still read along time."""
+        x = np.random.default_rng(6).standard_normal((80, 8030))
+        est = sound_exposure(x, self.FS, batch_size=8000)
+        np.testing.assert_allclose(
+            est.power[7], sound_exposure(x[7], self.FS,
+                                         batch_size=8000).power, rtol=1e-12)
+
+    def test_sound_exposure_refuses_a_single_number(self):
+        with pytest.raises(ConfigurationError,
+                           match="sound_exposure: data is a single number"):
+            sound_exposure(1.0, self.FS)
 
     def test_spectrogram_axis_puts_time_last(self):
         from uacpy.acoustic_signal import spectrogram
@@ -1674,6 +1815,57 @@ class TestSpectralResultsKeepWhatTheyMean:
         res = spectrogram(x, 1000.0, nperseg=256, mode='angle')
         with pytest.raises(ConfigurationError, match="phase"):
             res.plot()
+
+
+class TestTheLevelOfAnEstimate:
+    """``SpectralEstimate.level_dB(ref)`` is ``power_to_dB(power, ref)``:
+    the level of the statistic the estimate holds, drawn by its plot."""
+
+    FS = 1000.0
+
+    def _tone(self):
+        t = np.arange(10_000) / self.FS
+        return np.sin(2 * np.pi * 100.0 * t)
+
+    def test_a_unit_tone_reads_its_power_re_one_micropascal_squared(self):
+        """A sine of 1 Pa amplitude holds 0.5 Pa² on its bin: 10 log10(0.5 /
+        (1e-6)²) = 116.99 dB re 1 µPa², and 10 log10(0.5 / (2e-5)²) =
+        90.97 dB re 20 µPa²."""
+        from uacpy.core.constants import REFERENCE_PRESSURE_AIR
+        est = welch(self._tone(), self.FS, scaling='spectrum', nperseg=1000)
+        peak = int(np.argmax(est.power))
+        assert est.level_dB()[peak] == pytest.approx(116.9897, abs=1e-4)
+        assert est.level_dB(ref=REFERENCE_PRESSURE_AIR)[peak] == \
+            pytest.approx(90.9691, abs=1e-4)
+
+    @pytest.mark.parametrize('estimate', [
+        lambda x, fs: welch(x, fs, nperseg=500),
+        lambda x, fs: constant_q(x, fs, freq_min=50.0, freq_max=400.0),
+        lambda x, fs: sound_exposure(x, fs, band_type='octave',
+                                     freq_min=30.0, freq_max=400.0),
+    ], ids=['welch', 'constant_q', 'sound_exposure'])
+    def test_the_level_is_power_to_dB_of_the_power(self, estimate):
+        est = estimate(self._tone(), self.FS)
+        np.testing.assert_array_equal(est.level_dB(), power_to_dB(est.power))
+        np.testing.assert_array_equal(est.level_dB(2e-5),
+                                      power_to_dB(est.power, 2e-5))
+
+    def test_the_level_is_the_line_the_plot_draws(self):
+        est = welch(self._tone(), self.FS, nperseg=500)
+        fig, ax = est.plot()
+        try:
+            line = ax.lines[0]
+            drawn = np.isin(est.frequencies, line.get_xdata())
+            np.testing.assert_allclose(line.get_ydata(),
+                                       est.level_dB()[drawn])
+        finally:
+            plt.close(fig)
+
+    def test_the_method_wraps_the_array_function(self):
+        import inspect
+        from uacpy.acoustic_signal import SpectralEstimate
+        source = inspect.getsource(SpectralEstimate.level_dB)
+        assert 'power_to_dB(' in source and 'log10' not in source
 
 
 # ── one Welch default overlap, set by the window (Abraham §9.2.10.1) ──────
@@ -1899,3 +2091,128 @@ def test_decidecade_band_levels_takes_frequencies_as_band_levels_does():
     sibling = band_levels(psd, f)
     np.testing.assert_array_equal(by_position.levels, by_name.levels)
     np.testing.assert_array_equal(by_position.levels, sibling.levels)
+
+
+class TestWelchReadsALongRecordInBatches:
+    """``welch`` averages whole-segment batches of a long record, so scipy
+    never holds more than one batch's segment matrix, and the answer is the
+    one ``scipy.signal.welch`` gives for the whole record."""
+
+    FS = 8000.0
+    N = 600_000                       # several batches at nperseg = 1024
+
+    def _record(self, channels=()):
+        return np.random.default_rng(4).standard_normal(channels + (self.N,))
+
+    @pytest.mark.parametrize('channels, axis', [((), None), ((2,), -1)])
+    def test_the_batched_mean_is_scipys_whole_record_mean(self, channels,
+                                                          axis):
+        from uacpy.acoustic_signal.spectral import welch
+        x = self._record(channels)
+        est = welch(x, self.FS, nperseg=1024, axis=axis)
+        f0, p0 = _scipy_welch(x, self.FS, window='hann', nperseg=1024,
+                              noverlap=512, detrend='constant')
+        np.testing.assert_allclose(est.frequencies, f0)
+        np.testing.assert_allclose(est.power, p0, rtol=1e-12)
+
+    def test_no_scipy_call_sees_more_than_one_batch(self, monkeypatch):
+        import uacpy.acoustic_signal.spectral as spectral
+        seen = []
+        real = spectral._sig.welch
+
+        def spy(x, *args, **kwargs):
+            seen.append(np.shape(x)[-1])
+            return real(x, *args, **kwargs)
+
+        monkeypatch.setattr(spectral._sig, 'welch', spy)
+        spectral.welch(self._record(), self.FS, nperseg=1024)
+        assert len(seen) > 1
+        assert max(seen) <= spectral._TARGET_BATCH_SAMPLES + 1024
+
+    @pytest.mark.parametrize('noverlap', [100, None])
+    def test_an_array_window_without_nperseg_segments_at_its_length(
+            self, noverlap):
+        """scipy's rule: ``nperseg=None`` with an array window is a segment
+        of the window's length, and the default overlap is half of it."""
+        from uacpy.acoustic_signal.spectral import welch
+        x = self._record()
+        window = np.hamming(2048)
+        est = welch(x, self.FS, window=window, nperseg=None,
+                    noverlap=noverlap)
+        f0, p0 = _scipy_welch(x, self.FS, window=window, nperseg=None,
+                              noverlap=noverlap)
+        np.testing.assert_allclose(est.frequencies, f0)
+        np.testing.assert_allclose(est.power, p0, rtol=1e-12)
+
+    def test_a_median_is_taken_over_the_whole_record_at_once(self,
+                                                              monkeypatch):
+        import uacpy.acoustic_signal.spectral as spectral
+        seen = []
+        real = spectral._sig.welch
+        monkeypatch.setattr(spectral._sig, 'welch',
+                            lambda x, *a, **k: (seen.append(np.shape(x)[-1]),
+                                                real(x, *a, **k))[1])
+        spectral.welch(self._record(), self.FS, nperseg=1024,
+                       average='median')
+        assert seen == [self.N]
+
+
+#: Octave band edges (base 10), as the ladder computes them.
+_OCTAVE_EDGES = [1000.0 * 10.0 ** (0.3 * k + 0.15) for k in range(-4, 3)]
+
+
+@pytest.mark.parametrize('edge', _OCTAVE_EDGES)
+def test_an_octave_range_starting_on_a_band_edge_opens_the_band_above(edge):
+    """The band whose lower edge is ``freq_min``, never the one below whose
+    upper edge it is, whichever parity the edge has."""
+    from uacpy.acoustic_signal import standard_bands
+    lower, _, _ = standard_bands(edge, 20000.0, band_type='octave')
+    assert lower[0] == pytest.approx(edge, rel=1e-9)
+
+
+@pytest.mark.parametrize('edge', _OCTAVE_EDGES)
+def test_an_octave_range_ending_on_a_band_edge_closes_the_band_below(edge):
+    from uacpy.acoustic_signal import standard_bands
+    _, _, upper = standard_bands(10.0, edge, band_type='octave')
+    assert upper[-1] == pytest.approx(edge, rel=1e-9)
+
+
+#: Octave band edges as people type them, each with the index of the edge in
+#: ``_OCTAVE_EDGES`` it stands for: 4 or 5 significant digits, rounded down
+#: and up (1413 for 1412.54 Hz is the farthest 4-digit spelling).
+_TYPED_OCTAVE_EDGES = [(177.8, 1), (354.8, 2), (707.9, 3), (1412.5, 4),
+                       (1413.0, 4), (2818.4, 5), (5623.0, 6)]
+
+
+@pytest.mark.parametrize('typed, k', _TYPED_OCTAVE_EDGES)
+def test_a_typed_octave_edge_starting_a_range_opens_the_band_above(typed, k):
+    from uacpy.acoustic_signal import standard_bands
+    lower, _, _ = standard_bands(typed, 20000.0, band_type='octave')
+    assert lower[0] == pytest.approx(_OCTAVE_EDGES[k], rel=1e-9)
+
+
+@pytest.mark.parametrize('typed, k', _TYPED_OCTAVE_EDGES)
+def test_a_typed_octave_edge_ending_a_range_closes_the_band_below(typed, k):
+    from uacpy.acoustic_signal import standard_bands
+    _, _, upper = standard_bands(10.0, typed, band_type='octave')
+    assert upper[-1] == pytest.approx(_OCTAVE_EDGES[k], rel=1e-9)
+
+
+@pytest.mark.parametrize('steps, on_edge', [(5e-4, True), (-5e-4, True),
+                                            (2e-3, False), (-2e-3, False)])
+def test_a_range_end_off_the_edge_selects_the_band_it_falls_in(steps,
+                                                               on_edge):
+    """Both sides of the edge tolerance: half a thousandth of a band step
+    from an edge is on it; two thousandths (0.14 % of the frequency) is
+    inside the band it falls in, at either end of the range."""
+    from uacpy.acoustic_signal import standard_bands
+    edge = _OCTAVE_EDGES[2]
+    f = edge * 10.0 ** (0.3 * steps)
+    lower, _, _ = standard_bands(f, 20000.0, band_type='octave')
+    _, _, upper = standard_bands(10.0, f, band_type='octave')
+    opens_above = on_edge or steps > 0
+    closes_below = on_edge or steps < 0
+    assert lower[0] == pytest.approx(edge if opens_above else _OCTAVE_EDGES[1],
+                                     rel=1e-9)
+    assert upper[-1] == pytest.approx(edge if closes_below
+                                      else _OCTAVE_EDGES[3], rel=1e-9)

@@ -95,7 +95,10 @@ def _scooter_bb(env, src, rcv):
 
 
 def _ram_bb(env, src, rcv):
-    return RAM(verbose=False, q_factor=2.0, record_duration=4.0, dr=2.0, dz=0.25).run(
+    # Padé order 6 on this pinned 2 m step: at the default 8 mpiramS's root
+    # finder stops at the 36.5 Hz bin (epade.f90:296-301, a typed error).
+    return RAM(verbose=False, q_factor=2.0, record_duration=4.0, dr=2.0, dz=0.25,
+               n_pade=6).run(
         env, src, rcv, run_mode=RunMode.BROADBAND,
     )
 
@@ -285,7 +288,7 @@ def test_broadband_time_series_envelope_peak_in_arrival_window(label):
     # envelope-peak quantisation ~400x below the 100 ms gate.
     fs = 4096.0
     pulse = _gaussian_pulse(FC, fs)
-    ts = tf.synthesize_time_series(pulse, sample_rate=fs)
+    ts = tf.synthesize_time_series(source_waveform=pulse, sample_rate=fs)
     trace = np.asarray(ts.data[0, 0])
     time = np.asarray(ts.times)
 
@@ -316,7 +319,7 @@ def test_broadband_peak_times_agree_across_models():
     peaks = {}
     for label, runner in _RUNNERS.items():
         tf = runner(env, src, rcv)
-        ts = tf.synthesize_time_series(pulse, sample_rate=fs)
+        ts = tf.synthesize_time_series(source_waveform=pulse, sample_rate=fs)
         times = np.asarray(ts.times)
         peaks[label] = _envelope_peak_time(
             np.asarray(ts.data[0, 0]), times, win)
@@ -343,7 +346,7 @@ def test_synthesize_time_series_honors_user_sample_rate():
     tf = _scooter_bb(env, src, rcv)
     fs = 4096.0
     pulse = _gaussian_pulse(FC, fs)
-    ts = tf.synthesize_time_series(pulse, sample_rate=fs)
+    ts = tf.synthesize_time_series(source_waveform=pulse, sample_rate=fs)
     assert ts.sample_rate == pytest.approx(fs, rel=1e-6), (
         f'expected sample_rate={fs}, got {ts.sample_rate}'
     )
@@ -359,9 +362,9 @@ def test_single_frequency_broadband_auto_expands_the_band(model_cls):
     vector IS the band, verbatim. Resolver-level, one shared code path per
     engine; nothing runs."""
     from uacpy.models._defaults import (
-        DEFAULT_BROADBAND_BANDWIDTH_FACTOR, DEFAULT_BROADBAND_N_FREQS,
+        DEFAULT_BROADBAND_BANDWIDTH_FACTOR, DEFAULT_BROADBAND_N_FREQUENCIES,
     )
-    assert DEFAULT_BROADBAND_N_FREQS == 128
+    assert DEFAULT_BROADBAND_N_FREQUENCIES == 128
     assert DEFAULT_BROADBAND_BANDWIDTH_FACTOR == 0.5
     model = model_cls(verbose=False)
     freqs = model._requested_frequencies(
@@ -491,8 +494,8 @@ def test_a_record_ending_inside_the_arrival_train_is_announced(n_freq, fires):
         tf = Kraken(verbose=False).run(
             env, src, rcv, frequencies=np.linspace(F_LO, F_HI, n_freq),
             run_mode=RunMode.BROADBAND)
-    said = _wrap_notices(lambda: tf.synthesize_time_series(
-        _gaussian_pulse(FC, 4096.0), sample_rate=4096.0))
+    said = _wrap_notices(lambda: tf.synthesize_time_series(source_waveform=_gaussian_pulse(FC, 4096.0),
+                                                           sample_rate=4096.0))
     assert bool(said) is fires, said
     if fires:
         assert '[2.273, 2.773] s' in said[0]
@@ -511,8 +514,8 @@ def test_bellhop_at_its_default_window_is_silent():
         warnings.simplefilter('ignore')
         tf = Bellhop(verbose=False).run(env, src, rcv,
                                         run_mode=RunMode.BROADBAND)
-    assert not _wrap_notices(lambda: tf.synthesize_time_series(
-        pulse, sample_rate=fs))
+    assert not _wrap_notices(lambda: tf.synthesize_time_series(source_waveform=pulse,
+                                                               sample_rate=fs))
     assert not _wrap_notices(lambda: Bellhop(verbose=False).run(
         env, src, rcv, run_mode=RunMode.TIME_SERIES,
         source_waveform=pulse, sample_rate=fs))
@@ -539,7 +542,8 @@ class TestRecordEdgeNoticeOnASyntheticArrival:
 
     def _said(self, tau, **kw):
         return _wrap_notices(lambda: self._field(tau).synthesize_time_series(
-            _gaussian_pulse(100.0, 1024.0), sample_rate=1024.0, **kw))
+            source_waveform=_gaussian_pulse(100.0, 1024.0),
+            sample_rate=1024.0, **kw))
 
     def test_an_arrival_mid_record_is_silent(self):
         assert not self._said(2.0)
@@ -566,8 +570,8 @@ class TestRecordEdgeNoticeOnASyntheticArrival:
             model='Synthetic', source_depths=np.array([50.0]),
             frequencies=freqs, speeds=SoundSpeeds(water_max=1500.0),
             phase_reference=PhaseReference.TRAVELLING_WAVE)
-        return _wrap_notices(lambda: tf.synthesize_time_series(
-            _gaussian_pulse(100.0, 1024.0), sample_rate=1024.0))
+        return _wrap_notices(lambda: tf.synthesize_time_series(source_waveform=_gaussian_pulse(100.0, 1024.0),
+                                                               sample_rate=1024.0))
 
     def test_a_record_a_lone_arrival_already_crosses_is_not_judged(self):
         # Edges are judged when T(1 - 0.05) - lead > the 0.2 s pulse, with

@@ -151,11 +151,32 @@ class TestThreeDBoundaryFilesRoundTrip:
     def test_a_written_grid_reads_back_unchanged(self, tmp_path):
         path = tmp_path / 'seamount.bty'
         write_bty_3d(path, self.X, self.Y, self.Z, interp_type='C')
-        x, y, z, n_x, n_y = read_boundary_3d(path)
-        assert (n_x, n_y) == (3, 3)
-        assert np.array_equal(x, self.X)
-        assert np.array_equal(y, self.Y)
-        assert np.array_equal(z, self.Z)
+        grid = read_boundary_3d(path)
+        assert (grid.n_x, grid.n_y) == (3, 3)
+        assert grid.interpolation == 'C'
+        assert np.array_equal(grid.x, self.X)
+        assert np.array_equal(grid.y, self.Y)
+        assert np.array_equal(grid.depths, self.Z)
+
+    def test_the_grid_record_exports_its_depths_on_its_axes(self, tmp_path):
+        """The record is a labelled grid: ``values()`` is the depth array,
+        ``to_xarray`` puts it on ``(y, x)`` in metres, and ``to_dict`` /
+        ``from_dict`` rebuild it."""
+        from uacpy.io import Boundary3dFile
+        path = tmp_path / 'seamount.bty'
+        write_bty_3d(path, self.X, self.Y, self.Z)
+        grid = read_boundary_3d(path)
+        assert isinstance(grid, Boundary3dFile)
+        assert np.array_equal(grid.values(), self.Z)
+        assert not grid.depths.flags.writeable
+        back = Boundary3dFile.from_dict(grid.to_dict())
+        assert np.array_equal(back.depths, grid.depths)
+        assert back.interpolation == grid.interpolation == 'R'
+        pytest.importorskip('xarray')
+        ds = grid.to_xarray()
+        assert ds['depths'].dims == ('y', 'x')
+        assert ds['depths'].attrs['units'] == 'm'
+        assert np.array_equal(ds['x'].values, self.X)
 
     def test_the_axes_are_metres_on_both_sides(self, tmp_path):
         """The file holds km (``bdry3DMod.f90:290-291`` scales by 1000); the
@@ -163,8 +184,7 @@ class TestThreeDBoundaryFilesRoundTrip:
         path = tmp_path / 'units.bty'
         write_bty_3d(path, self.X, self.Y, self.Z)
         assert '2.000000' in path.read_text()          # 2000 m written as km
-        x, _, _, _, _ = read_boundary_3d(path)
-        assert x[-1] == 2000.0                          # and read back as m
+        assert read_boundary_3d(path).x[-1] == 2000.0   # and read back as m
 
     def test_the_depth_grid_is_indexed_row_by_y(self, tmp_path):
         """``bdry3DMod.f90:300-301`` reads one row of ``n_x`` depths per y, so
@@ -205,10 +225,10 @@ class TestThreeDBoundaryFilesRoundTrip:
         path = _write_lines(tmp_path / 'sub.bty', [
             "'R'", '5', '0.0 1.0 /', '2', '0.0 1.0',
             '1 2 3 4 5', '6 7 8 9 10'])
-        x, _, z, n_x, n_y = read_boundary_3d(path)
-        assert np.array_equal(x, [0.0, 250.0, 500.0, 750.0, 1000.0])
-        assert (n_x, n_y) == (5, 2)
-        assert z.shape == (2, 5)
+        grid = read_boundary_3d(path)
+        assert np.array_equal(grid.x, [0.0, 250.0, 500.0, 750.0, 1000.0])
+        assert (grid.n_x, grid.n_y) == (5, 2)
+        assert grid.depths.shape == (2, 5)
 
     def test_a_two_d_interpolation_code_is_refused(self, tmp_path):
         """The 3-D codes are ``'R'``/``'C'`` (``bdry3DMod.f90:241-247``), not
@@ -627,6 +647,17 @@ class TestAsciiModeFile:
         assert modes['freq'] == 100.0
         assert (modes['Nmedia'], modes['ntot'], modes['nmat']) == (1, 3, 3)
         assert np.array_equal(modes['z'], [0.0, 50.0, 100.0])
+
+    def test_read_modes_refuses_a_profile_a_moa_does_not_hold(self, tmp_path):
+        """A ``.moa`` holds one profile: ``profile=2`` is refused rather than
+        ignored, and the default reads the file, its one frequency whatever
+        ``frequency=`` asks (the closest, as on a one-frequency ``.mod``)."""
+        from uacpy.io import read_modes
+        path = _write_lines(tmp_path / 'p.moa', self.DECK)
+        with pytest.raises(ConfigurationError, match='holds one profile'):
+            read_modes(path, profile=2)
+        got = read_modes(path, frequency=200.0)
+        assert float(np.atleast_1d(got.frequencies)[0]) == 100.0
 
     def test_m_counts_the_modes_returned(self, tmp_path):
         """``M`` means ``len(k)`` in both readers, so a ``modes=`` subset does

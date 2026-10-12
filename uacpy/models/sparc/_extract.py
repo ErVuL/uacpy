@@ -16,14 +16,13 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Field
 from uacpy.io.oalib_reader import RtsFile
 from uacpy.models._conventions import _source_density
-from uacpy.models._extract import mask_zero_range_columns, result_kwargs
+from uacpy.models._knobs import positive_finite
+from uacpy.models._extract import (
+    RECORD_TAIL_FRACTION, RECORD_TAIL_LEVEL, mask_zero_range_columns,
+    record_tail_ratio, result_kwargs,
+)
 from uacpy.models._launch import attach_prt_tail
 from uacpy.models.sparc._plan import _LOOPED_TIME_SERIES_MODES
-
-# Tail of the output window measured by ``_warn_on_truncated_window``, and the
-# peak-relative level (-20 dB) at which that tail counts as a truncated trace.
-_TRUNCATION_TAIL_FRACTION = 0.1
-_TRUNCATION_LEVEL = 0.1
 
 # The factor, with the division by rho(z_s), that brings SPARC's field onto
 # the package's point source of unit amplitude at 1 m. Scooter forces the
@@ -33,22 +32,6 @@ _TRUNCATION_LEVEL = 0.1
 # -S(t) delta(z - z_s) of the Hankel-transformed time-marched FFP, JKPS
 # section 8.3.2 eq. (8.36), whose field is s(t - R/c) / (2R) for rho = 1.
 _UNIT_SOURCE_GAIN = 2.0
-
-
-def _peak_ignoring_nan(data: np.ndarray) -> float:
-    """``np.nanmax(data)`` as a float, returning NaN for an all-NaN input.
-
-    ``np.nanmax`` reports that case by raising a RuntimeWarning, and the only
-    way to mute one is a change to the warnings filters — a stack that is
-    process-global, so the change would also swallow warnings other threads
-    raise while it holds. Masking the NaNs decides the same thing without
-    touching global state. ``where=``/``initial=`` keep ``nanmax``'s treatment
-    of the infinities: they are values, not gaps, and propagate to the result.
-    """
-    present = ~np.isnan(data)
-    if not present.any():
-        return float('nan')
-    return float(np.max(data, where=present, initial=-np.inf))
 
 
 def _output_times(time_max: float, n_time_samples: int) -> np.ndarray:
@@ -224,24 +207,15 @@ def warn_on_truncated_window(result, *, pinned_by: Optional[str] = None
     velocity, which falls to zero at cutoff, and SPARC's vacuum / rigid
     boundaries leave the near-cutoff tail undamped. An arrival past
     ``time_max`` is absent from p(t) with nothing in the output marking it —
-    so measure the tail that did come back (the peak over the final tenth
-    of the window against the peak over the whole of it) and say so while
-    it is within ``_TRUNCATION_LEVEL`` of the peak.
+    so measure the tail that did come back
+    (:func:`~uacpy.models._extract.record_tail_ratio`: the peak over the
+    final tenth of the window against the peak over the whole of it) and
+    say so while it is within ``RECORD_TAIL_LEVEL`` of the peak. An all-NaN
+    window (every receiver masked) is not a finding.
     """
     time = np.asarray(result.coords.get('time', ()), dtype=float)
-    data = np.abs(np.asarray(result.data))
-    if time.size < 10 or data.ndim == 0 or data.shape[-1] != time.size:
-        return
-    n_tail = max(1, int(round(_TRUNCATION_TAIL_FRACTION * time.size)))
-    # An all-NaN slice (every receiver masked) is not a finding, and
-    # :func:`_peak_ignoring_nan` returns NaN for one without raising the
-    # warning that would have to be muted process-wide.
-    peak = _peak_ignoring_nan(data)
-    tail = _peak_ignoring_nan(data[..., -n_tail:])
-    if not (np.isfinite(peak) and np.isfinite(tail) and peak > 0.0):
-        return
-    ratio = tail / peak
-    if ratio < _TRUNCATION_LEVEL:
+    ratio = record_tail_ratio(time, result.data)
+    if ratio is None or ratio < RECORD_TAIL_LEVEL:
         return
     if pinned_by is None:
         cause = ("The auto window is 2.5 direct travel times, which does not "
@@ -252,7 +226,7 @@ def warn_on_truncated_window(result, *, pinned_by: Optional[str] = None
                  f"there")
     warnings.warn(
         f"SPARC TIME_SERIES: p(t) is still at {100.0 * ratio:.0f}% of "
-        f"its peak over the last {100.0 * _TRUNCATION_TAIL_FRACTION:.0f}%"
+        f"its peak over the last {100.0 * RECORD_TAIL_FRACTION:.0f}%"
         f" of the [0, {float(time[-1]):.4g}] s output window, so arrivals "
         f"past it are missing from the returned trace. {cause} (and keep "
         f"n_time_samples / rmax_factor in step with the longer window).",
@@ -261,14 +235,15 @@ def warn_on_truncated_window(result, *, pinned_by: Optional[str] = None
 
 
 def rts_to_pressure(
-    rts: RtsFile, frequency: float, method: str = "fft",
+    rts: RtsFile, frequency: float,
     *, pulse_type: Optional[str] = None,
+    pulse_frequency: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Project SPARC time-series data onto complex pressure at one frequency.
 
-    ``method='fft'`` (the only method) evaluates the Hanning-windowed
-    transform **at** ``frequency`` — :func:`~uacpy.acoustic_signal.tone_phasor`,
+    Without ``pulse_type``, it evaluates the Hann-windowed transform **at**
+    ``frequency`` — :func:`~uacpy.acoustic_signal.tone_phasor`,
     the same estimator :meth:`~uacpy.Field.extract_tone` uses — and returns
     ``(p_at_freq, ranges)`` where ``p_at_freq`` is the model-native,
     source-normalised complex pressure suitable for wrapping in a complex
@@ -283,6 +258,16 @@ def rts_to_pressure(
     known source pulse, and their ratio is returned (see the note there).
     Both evaluate on the file's own ``time`` axis, so a record whose output
     times start after 0 keeps its phase.
+
+    The canned pulse is shaped by its own characteristic frequency ``F``,
+    the deck frequency of the SPARC run (``sparc.f90:525``; a SPARC
+    result's ``run_settings.engine.deck_frequency``), which the ``.rts``
+    does not record: pass it as ``pulse_frequency``. ``None`` takes
+    ``frequency``, right only when projecting at ``F`` — elsewhere the
+    record is divided by another pulse's spectrum (measured on a 50 Hz
+    'PN+B' run: 0.65 dB and 36° off at 40 Hz). The deconvolution also needs
+    the record to hold the whole response: a record still ringing at its
+    end breaks the convolution theorem it rests on.
 
     A post-processing utility for a ``.rts`` read by
     :func:`uacpy.io.read_rts_file`;
@@ -312,6 +297,8 @@ def rts_to_pressure(
                         "larger n_time_samples / shorter output interval).",
         )
 
+    positive_finite('rts_to_pressure: pulse_frequency (Hz)', pulse_frequency,
+                    optional=True)
     if pulse_type is not None:
         # Deconvolve the known source spectrum (convolution theorem): the range
         # time-series r(t) = s(t) ⊛ h(t), so rfft(r)/rfft(s) = h(w0) — the CW
@@ -328,7 +315,9 @@ def rts_to_pressure(
         from uacpy.acoustic_signal.generate import sparc_pulse
         from uacpy.acoustic_signal.spectrum_at import _tone_phasor
         t = np.asarray(rts.times, dtype=float)
-        s_t, _ = sparc_pulse(t, frequency, pulse_type[0])
+        s_t, _ = sparc_pulse(
+            t, frequency if pulse_frequency is None else pulse_frequency,
+            pulse_type[0])
         # Both sides evaluated AT ``frequency``, with NO taper: the
         # rectangular transform is what the convolution theorem needs (a
         # window would null the transient source pulse in the first few
@@ -351,22 +340,14 @@ def rts_to_pressure(
         return (_tone_phasor(p, t, frequency, window=None, axis=0,
                             who="rts_to_pressure") / S_at_f0), ranges
 
-    if method == "fft":
-        # The Hann-windowed transform evaluated AT `frequency` on the file's
-        # own output times (sparc.f90:159 reads them with ReadVector, so
-        # they may start anywhere); tone_phasor normalises by the window's
-        # coherent gain, so a steady tone returns its own amplitude and
-        # phase. Deferred: acoustic_signal pulls scipy, and uacpy's public
-        # surface is imported without it (test_lazy_imports).
-        from uacpy.acoustic_signal.spectrum_at import _tone_phasor
-        p_at_freq = _tone_phasor(p, np.asarray(rts.times, dtype=float),
-                                frequency, window='hann', axis=0,
-                                who="rts_to_pressure")
-    else:
-        raise ConfigurationError(
-            f"rts_to_pressure: unknown method {method!r}; only 'fft' is "
-            f"supported (a windowed steady-tone estimate evaluated at the "
-            f"frequency)."
-        )
-
+    # The Hann-windowed transform evaluated AT `frequency` on the file's own
+    # output times (sparc.f90:159 reads them with ReadVector, so they may
+    # start anywhere); tone_phasor normalises by the window's coherent gain,
+    # so a steady tone returns its own amplitude and phase. Deferred:
+    # acoustic_signal pulls scipy, and uacpy's public surface is imported
+    # without it (test_lazy_imports).
+    from uacpy.acoustic_signal.spectrum_at import _tone_phasor
+    p_at_freq = _tone_phasor(p, np.asarray(rts.times, dtype=float),
+                             frequency, window='hann', axis=0,
+                             who="rts_to_pressure")
     return p_at_freq, ranges

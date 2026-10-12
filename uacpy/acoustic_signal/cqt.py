@@ -57,7 +57,8 @@ class CQSpectrogramResult(PlottedResult,
     keeps working; :meth:`plot` is the one obvious way to draw it. What the
     panel holds rides on ``scaling`` (``'density'`` Pa²/Hz or
     ``'spectrum'`` Pa²), as on :class:`SpectrogramResult`, so the plot
-    labels the unit the power is in.
+    labels the unit the power is in. :meth:`level_dB` gives the panel as
+    levels in dB re a reference pressure.
     """
 
     _attrs = ("scaling",)
@@ -69,6 +70,24 @@ class CQSpectrogramResult(PlottedResult,
         self = super().__new__(cls, frequencies, times, power)
         self.scaling = str(scaling)
         return self
+
+    def level_dB(self, ref=REFERENCE_PRESSURE_WATER):
+        """The panel as levels in dB re the reference pressure ``ref`` (Pa,
+        1 µPa by default): :func:`~uacpy.core.acoustics.power_to_dB` of
+        ``power``, in dB re 1 µPa²/Hz under ``scaling='density'`` and
+        dB re 1 µPa² under ``'spectrum'`` — the levels :meth:`plot` draws.
+
+        Parameters
+        ----------
+        ref : float, optional
+            Reference pressure (Pa).
+
+        Returns
+        -------
+        numpy.ndarray
+            The levels, shaped as ``power``.
+        """
+        return power_to_dB(self.power, ref)
 
     def _field_units(self):
         return {"frequencies": "Hz", "times": "s",
@@ -82,10 +101,13 @@ _SCALINGS = _BIN_SCALINGS
 
 
 # ── shared kernel construction ──────────────────────────────────────────────
-def _cq_frequencies(freq_min, freq_max, bins_per_octave):
+def _cq_frequencies(freq_min, freq_max, bins_per_octave, *,
+                    who="constant_q"):
+    """Bin centres of the ladder, refused by the name of the function the
+    caller used (``who``) when the range is empty."""
     if freq_min <= 0 or freq_max <= freq_min:
         raise ConfigurationError(
-            "constant-Q: require 0 < freq_min < freq_max; got "
+            f"{who}: require 0 < freq_min < freq_max; got "
             f"freq_min={freq_min}, freq_max={freq_max}.")
     n = int(np.floor(bins_per_octave * np.log2(freq_max / freq_min))) + 1
     return freq_min * 2.0 ** (np.arange(n) / float(bins_per_octave))
@@ -99,8 +121,10 @@ def _cq_quality(bins_per_octave):
 def _cq_kernels(frequencies, Q, sample_rate, window):
     """List of ``(N_k, kernel, density_factor)`` per bin.
 
-    ``kernel = w·exp(-2j·pi·f_k·n/sample_rate) / Σw`` (so ``|X|**2`` is band power, the
-    'spectrum' scaling). ``density_factor = (Σw)**2 / (sample_rate·Σw**2)`` converts that
+    ``kernel = w·exp(-2j·pi·f_k·(n - N_k//2)/sample_rate) / Σw`` (so ``|X|**2``
+    is band power, the 'spectrum' scaling); the phase is referenced to the
+    frame's centre sample ``N_k//2``, so every bin of one frame measures phase
+    at the same instant whatever its kernel length. ``density_factor = (Σw)**2 / (sample_rate·Σw**2)`` converts that
     band power to a one-sided PSD (per Hz), matching ``scipy.signal.welch``
     density scaling; the one-sided factor 2 is applied in
     :func:`_cq_band_power`.
@@ -111,7 +135,7 @@ def _cq_kernels(frequencies, Q, sample_rate, window):
         w = get_window(window, Nk, fftbins=True)
         sw = float(np.sum(w))
         sw2 = float(np.sum(w * w))
-        n = np.arange(Nk)
+        n = np.arange(Nk) - Nk // 2
         ker = (w * np.exp(-2j * np.pi * fk * n / sample_rate)) / sw
         # |X|**2 captures only the positive-frequency sideband of a real signal
         # (a tone A·cos gives |X|=A/2); _cq_band_power doubles it to one-sided
@@ -200,16 +224,25 @@ def _cq_step(Nk):
     return max(1, Nk // 4)
 
 
-def _cq_coefficients(x, starts, Nk, ker):
+def _cq_coefficient_blocks(x, starts, Nk, ker):
     """Complex band amplitudes of the ``Nk``-sample frames of ``x`` that start
-    at ``starts``; every frame lies inside ``x``."""
+    at ``starts`` (every frame inside ``x``), yielded one block of at most
+    :data:`_CQ_BLOCK_SAMPLES` frame samples at a time."""
     frames = sliding_window_view(x, Nk)
     basis = np.stack([ker.real, ker.imag], axis=1)
-    coeffs = np.empty(starts.size, dtype=np.complex128)
     block = max(1, _CQ_BLOCK_SAMPLES // Nk)
     for a in range(0, starts.size, block):
         re_im = frames[starts[a:a + block]] @ basis
-        coeffs[a:a + block] = re_im[:, 0] + 1j * re_im[:, 1]
+        yield re_im[:, 0] + 1j * re_im[:, 1]
+
+
+def _cq_coefficients(x, starts, Nk, ker):
+    """Every coefficient of :func:`_cq_coefficient_blocks`, as one array."""
+    coeffs = np.empty(starts.size, dtype=np.complex128)
+    a = 0
+    for block in _cq_coefficient_blocks(x, starts, Nk, ker):
+        coeffs[a:a + block.size] = block
+        a += block.size
     return coeffs
 
 
@@ -225,26 +258,49 @@ def _cq_band_power(coeffs, density_factor, scaling):
     return p * density_factor if scaling == "density" else p
 
 
-def _cq_bin_powers(x, kernels, scaling):
-    """Per bin, the band power of every frame lying fully inside ``x``.
+def _cq_frame_starts(n, Nk):
+    """Starts of one bin's frames lying fully inside an ``n``-sample record.
 
-    Each bin steps by :func:`_cq_step` of its own kernel, so every sample of
-    the record reaches every bin. Returns one 1-D array per bin, empty for a
-    bin whose kernel is longer than the record. The frames of a bin sit on a
-    grid centred in the record, the leftover samples split between its ends.
-    """
+    The bin steps by :func:`_cq_step` of its own kernel, so every sample of
+    the record reaches it; the frames sit on a grid centred in the record,
+    the leftover samples split between its ends."""
+    step = _cq_step(Nk)
+    n_frames = (n - Nk) // step + 1
+    offset = (n - Nk - (n_frames - 1) * step) // 2
+    return offset + step * np.arange(n_frames)
+
+
+def _cq_bin_powers(x, kernels, scaling):
+    """Per bin, the band power of every frame lying fully inside ``x``
+    (:func:`_cq_frame_starts`): one 1-D array per bin, empty for a bin whose
+    kernel is longer than the record."""
     powers = []
     for Nk, ker, density_factor in kernels:
         if Nk > x.size:
             powers.append(np.empty(0))
             continue
-        step = _cq_step(Nk)
-        n_frames = (x.size - Nk) // step + 1
-        offset = (x.size - Nk - (n_frames - 1) * step) // 2
-        starts = offset + step * np.arange(n_frames)
+        starts = _cq_frame_starts(x.size, Nk)
         powers.append(_cq_band_power(_cq_coefficients(x, starts, Nk, ker),
                                      density_factor, scaling))
     return powers
+
+
+def _cq_bin_mean_powers(x, kernels, scaling):
+    """Per bin, the mean band power of the frames :func:`_cq_bin_powers`
+    reads, NaN for a bin whose kernel is longer than the record. Summed block
+    by block, so no bin's frame powers are held whole: the memory is one
+    block's, whatever the record length."""
+    means = np.full(len(kernels), np.nan)
+    for i, (Nk, ker, density_factor) in enumerate(kernels):
+        if Nk > x.size:
+            continue
+        starts = _cq_frame_starts(x.size, Nk)
+        total = 0.0
+        for block in _cq_coefficient_blocks(x, starts, Nk, ker):
+            total += float(np.sum(_cq_band_power(block, density_factor,
+                                                 scaling)))
+        means[i] = total / starts.size
+    return means
 
 
 def _cq_spectrogram_cells(x, sample_rate, kernels, hop, scaling):
@@ -307,7 +363,7 @@ def _cq_setup(data, sample_rate, freq_min, freq_max, bins_per_octave, window, wh
     # because a caller may ask for exactly that bin.
     require_at_most_nyquist(freq_max, fs, who, "freq_max",
                             "the bin has no signal to analyse")
-    freqs = _cq_frequencies(freq_min, freq_max, bins_per_octave)
+    freqs = _cq_frequencies(freq_min, freq_max, bins_per_octave, who=who)
     Q = _cq_quality(bins_per_octave)
     kernels = _cq_kernels(freqs, Q, fs, window)
     n_lowest = kernels[0][0]
@@ -364,7 +420,10 @@ def constant_q_transform(data, sample_rate, *, freq_min=20.0, freq_max=None,
 
     Returns a :class:`CQTResult` ``(frequencies, coefficients)`` — the centre
     frequencies (Hz) and complex band amplitudes (``abs`` is the magnitude
-    spectrum). Best for short transients; for longer signals use
+    spectrum). Each bin's window is centred on sample ``len(data) // 2`` and
+    its phase is referenced to that sample, so a tone ``A·cos(2π f_k t + φ)``
+    on a bin centre, ``t = 0`` at that sample, reads ``(A/2)·exp(jφ)``: the
+    analytic band amplitude, half the one-sided band power's ``A``. Best for short transients; for longer signals use
     :func:`constant_q_spectrogram`, or :func:`constant_q`. An unset ``freq_max``
     stops below the near-Nyquist bins whose image leaks into a tone's level,
     as on :func:`constant_q`.
@@ -407,7 +466,7 @@ def constant_q_spectrogram(data, sample_rate, *, freq_min=20.0, freq_max=None,
     ``2|X_cq|**2`` (a tone of amplitude ``A`` reads ``A**2/2``). An unset
     ``freq_max`` stops below the near-Nyquist bins whose image leaks into a
     tone's level, as on :func:`constant_q`. Returns a :class:`CQSpectrogramResult`
-    ``(frequencies, times, power)`` with ``power`` shaped ``(n_freqs,
+    ``(frequencies, times, power)`` with ``power`` shaped ``(n_frequencies,
     n_frames)`` — every frame is kept, so edge frames carry visible edge
     effects.
 
@@ -452,9 +511,7 @@ def _constant_q_estimate(data, sample_rate, *, window, scaling, who,
     x, fs, freqs, kernels = _cq_setup(
         data, sample_rate, freq_min, freq_max, bins_per_octave, window,
         who, drops_short_bins=True)
-    avg = np.array([p.mean() if p.size else np.nan
-                    for p in _cq_bin_powers(x, kernels, scaling)])
-    return freqs, avg
+    return freqs, _cq_bin_mean_powers(x, kernels, scaling)
 
 
 def _probabilistic_constant_q(data, sample_rate, *, window, scaling, who,
@@ -489,7 +546,7 @@ def _probabilistic_constant_q(data, sample_rate, *, window, scaling, who,
     :class:`ProbabilisticSpectralEstimate` — ``(frequencies, level_edges,
     pdf)`` carrying ``.mean_dB``, ``.std_dB``, ``.ref``, ``.scaling`` and
     ``.method='constant_q'``;
-    ``pdf`` is shaped ``(n_levels, n_freqs)`` and density-normalised per
+    ``pdf`` is shaped ``(n_levels, n_frequencies)`` and density-normalised per
     frequency column (an empty bin is 0; a bin with no level inside the
     window is a ``NaN`` column). With ``scaling='density'`` the
     levels are PSD levels (dB re ref²/Hz) rather than band-power levels
@@ -513,17 +570,21 @@ def _probabilistic_constant_q(data, sample_rate, *, window, scaling, who,
     pdf = np.zeros((level_edges.size - 1, freqs.size))
     mean_dB = np.full(freqs.size, np.nan)
     std_dB = np.full(freqs.size, np.nan)
+    # Each bin's levels are computed once, here, and serve both the histogram
+    # and the outside-the-window check; the linear powers are released as
+    # their levels are taken.
+    levels = []
     for i in range(freqs.size):
         with np.errstate(divide="ignore"):
             vals = power_to_dB(pooled[i], ref)
+        pooled[i] = None
         vals = vals[np.isfinite(vals)]
+        levels.append(vals)
         if vals.size == 0:
             pdf[:, i] = np.nan
             continue
         pdf[:, i], mean_dB[i], std_dB[i] = level_histogram(vals, level_edges)
-    with np.errstate(divide="ignore"):
-        _warn_levels_outside_window(
-            who, [power_to_dB(p, ref) for p in pooled], freqs, level_edges)
+    _warn_levels_outside_window(who, levels, freqs, level_edges)
     # The reference, the scaling and the method are part of what the levels
     # MEAN, so they travel with them rather than being restated by every
     # consumer. ``segment_duration`` is None: each sample is one unaveraged frame,

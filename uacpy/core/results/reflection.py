@@ -62,6 +62,9 @@ class ReflectionCoefficient(Result):
     coefficient.
     """
 
+    #: The plotter that draws this result (``.plot()``).
+    _plotter = '_plot_reflection_coefficient'
+
     def __init__(
         self,
         *,
@@ -221,7 +224,9 @@ class ReflectionCoefficient(Result):
         ``magnitude``, ``phase`` (radians), :attr:`reflection_type` and the
         identity, as :meth:`Field.to_dict` writes
         it. ``np.savez(f, **d)`` stores it; read it back with
-        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`."""
+        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`. That load
+        unpickles, so use it only on files you wrote; :meth:`to_netcdf` /
+        :meth:`from_netcdf` is the route for a file from elsewhere."""
         return {
             'angles': self.angles.copy(),
             'magnitude': self.magnitude.copy(),
@@ -275,23 +280,19 @@ class ReflectionCoefficient(Result):
     def from_dict(cls, d: dict) -> "ReflectionCoefficient":
         """Reconstruct a :class:`ReflectionCoefficient` from :meth:`to_dict`
         output, or from the mapping ``np.load(f, allow_pickle=True)`` returns
-        for a file written with ``np.savez(f, **table.to_dict())``.
+        for a file written with ``np.savez(f, **table.to_dict())``. Load such
+        a file only if you wrote it: ``allow_pickle=True`` unpickles.
 
         Parameters
         ----------
         d : mapping
             :meth:`to_dict` output, or the mapping ``np.load`` returns for it.
         """
-        d = cls._unwrap_saved(d, payload=('angles', 'magnitude', 'phase'))
+        d = cls._unwrap_saved(d, payload=('angles', 'magnitude', 'phase'),
+                              required=('reflection_type',))
         identity = cls._identity_from_dict(d)
-        # A file that keeps the type in its metadata loads it from there.
-        metadata = dict(identity['metadata'] or {})
-        kept = metadata.pop('reflection_type', None)
-        identity['metadata'] = metadata or None
-        stated = d.get('reflection_type')
         return cls(angles=d['angles'], magnitude=d['magnitude'], phase=d['phase'],
-                   reflection_type=kept if stated is None else stated,
-                   **identity)
+                   reflection_type=d.get('reflection_type'), **identity)
 
     def at(self, **kwargs) -> "ReflectionCoefficient":
         """Nearest-sample slice along the ``angle`` and/or ``frequency`` axis.
@@ -313,7 +314,8 @@ class ReflectionCoefficient(Result):
         ``Field.at`` (which drops any sliced axis) precisely because a
         reflection coefficient is anchored on its angle abscissa."""
         angle, frequency = self._resolve_axes(kwargs, 'at')
-        return self._select(angle, frequency, method='nearest')
+        return self._select(angle, frequency, method='nearest',
+                            who='ReflectionCoefficient.at')
 
     def isel(self, **kwargs) -> "ReflectionCoefficient":
         """Integer-index slice — the positional counterpart of :meth:`at`."""
@@ -347,7 +349,8 @@ class ReflectionCoefficient(Result):
         than a blend, so neither is affected."""
         method = kwargs.pop('method', 'linear')
         angle, frequency = self._resolve_axes(kwargs, 'eval')
-        return self._select(angle, frequency, method=method)
+        return self._select(angle, frequency, method=method,
+                            who='ReflectionCoefficient.eval')
 
     def _resolve_axes(self, kwargs, who):
         valid = {'angle', 'frequency'}
@@ -372,11 +375,23 @@ class ReflectionCoefficient(Result):
         # extrapolation rule would be a worse trap, and 0 is AT's kill
         # convention, not a claim about R at that angle.
         # ``isel``'s angle is a positional index, not degrees, so the
-        # comparison below is meaningless there.
-        if who != 'isel' and angle is not None and np.size(self.angles):
+        # comparison below is meaningless there. A label is checked (one
+        # real finite number, the rule every selection shares) before the
+        # warning speaks of it.
+        if who == 'isel':
+            return angle, frequency
+        from uacpy.core._grid import finite_scalar_label
+        if frequency is not None:
+            finite_scalar_label(frequency, 'frequency',
+                                who=f"ReflectionCoefficient.{who}",
+                                coords=self.frequencies)
+        if angle is not None:
+            a = finite_scalar_label(angle, 'angle',
+                                    who=f"ReflectionCoefficient.{who}",
+                                    coords=self.angles)
+        if angle is not None and np.size(self.angles):
             lo, hi = float(np.min(self.angles)), float(np.max(self.angles))
-            a = np.asarray(angle, dtype=float)
-            if np.any(a < lo) or np.any(a > hi):
+            if a < lo or a > hi:
                 warnings.warn(
                     f"ReflectionCoefficient.{who}: angle {angle} is outside the "
                     f"tabulated range {lo:g}-{hi:g} deg; the end value is held "
@@ -396,21 +411,22 @@ class ReflectionCoefficient(Result):
             **dict(self.id_kwargs(), frequencies=freqs),
         )
 
-    def _select(self, angle, frequency, *, method) -> "ReflectionCoefficient":
+    def _select(self, angle, frequency, *, method,
+                who) -> "ReflectionCoefficient":
         from uacpy.core._grid import collapse_axis
         R, phi, theta = self.magnitude, self.phase, self.angles
         freqs = self.frequencies
         if angle is not None:
             R, av = collapse_axis(R, self.angles, angle, method, axis=0,
-                                  name='angle')
+                                  name='angle', who=who)
             phi, _ = collapse_axis(phi, self.angles, angle, method, axis=0,
-                                   name='angle')
+                                   name='angle', who=who)
             R, phi, theta = R[None, ...], phi[None, ...], np.array([av])
         if frequency is not None:
             R, fv = collapse_axis(R, self.frequencies, frequency, method,
-                                  axis=1, name='frequency')
+                                  axis=1, name='frequency', who=who)
             phi, _ = collapse_axis(phi, self.frequencies, frequency, method,
-                                   axis=1, name='frequency')
+                                   axis=1, name='frequency', who=who)
             freqs = float(fv)
         return self._build(theta, R, phi, freqs)
 

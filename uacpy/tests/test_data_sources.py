@@ -6,6 +6,7 @@ import pytest
 
 import uacpy
 from uacpy.core.environment import BoundaryProperties, SoundSpeedProfile
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.data import sources
 from uacpy.data import bathymetry, sound_speed
 from uacpy.data import environment as env_mod
@@ -77,6 +78,49 @@ def test_citations_from_ids():
     text = sources.citations(['woa23', 'emodnet'])
     assert 'World Ocean Atlas' in text and 'EMODnet' in text
     assert 'GEBCO' not in text
+
+
+def _bathy_grid(provenance):
+    import numpy as np
+    return bathymetry.BathyGrid(lats=np.array([40.0, 41.0]),
+                                lons=np.array([7.0, 8.0]),
+                                depths=np.full((2, 2), 100.0),
+                                provenance=provenance)
+
+
+def test_citations_and_the_table_read_a_fetchers_record():
+    pytest.importorskip('pandas')
+    grid = _bathy_grid(sources.DataProvenance(
+        source=sources.SOURCES['gebco'], data_date='GEBCO_2025'))
+    assert 'GEBCO' in sources.citations(grid)
+    table = sources.provenance_table(grid)
+    assert table['id'].tolist() == ['gebco']
+    assert table['data_date'].tolist() == ['GEBCO_2025']
+
+
+def test_a_record_of_user_supplied_data_cites_nothing():
+    assert sources.citations(_bathy_grid(None)) == ''
+
+
+@pytest.mark.parametrize('call', ['citations', 'provenance_table'])
+def test_an_object_with_no_sources_is_refused_in_the_callers_name(call):
+    if call == 'provenance_table':
+        pytest.importorskip('pandas')
+    with pytest.raises(ConfigurationError,
+                       match=f'{call}: a float carries no data sources'):
+        getattr(sources, call)(3.5)
+
+
+def test_a_model_is_refused_as_carrying_no_data_sources():
+    """A model's ``.provenance`` is its engine's record, not a dataset's:
+    citations() points at the model's ``.citation`` instead of reading it as
+    an unknown source id."""
+    import uacpy
+    with pytest.raises(ConfigurationError,
+                       match='citations: a Scooter carries no data sources; '
+                             'its .provenance is a ModelProvenance') as caught:
+        sources.citations(uacpy.Scooter())
+    assert '.citation' in str(caught.value)
 
 
 @pytest.fixture
@@ -155,7 +199,7 @@ class TestBathymetryProvenanceNamesBackendAndVintage:
         assert 'OpenTopoData' not in SOURCES['gebco'].name
 
     def test_the_vintage_says_which_backend_answered(self):
-        from uacpy.data.environment import _bathymetry_vintage
+        from uacpy.data.bathymetry import _bathymetry_vintage
         assert _bathymetry_vintage('gebco', 'api') == 'gebco2020 via OpenTopoData'
         assert _bathymetry_vintage('gmrt', 'gmrt') == 'gmrt (live)'
         assert _bathymetry_vintage('gebco', None) is None
@@ -198,8 +242,11 @@ class TestEveryPublicHelperOfTheDataLayerIsReachableFromThePackage:
     def test_a_wave_height_inverts_to_the_wind_that_would_raise_it(self):
         import uacpy
 
-        # Pierson-Moskowitz: Hs = 0.0214 U², so the inverse returns that U.
-        assert uacpy.data.hs_to_pm_wind(0.0214 * 10.0 ** 2) == pytest.approx(10.0)
+        # Pierson-Moskowitz: Hs = 0.0214 U² (U in m/s), so the inverse
+        # returns that U, in knots.
+        from uacpy.core.units import ms_to_knots
+        assert uacpy.data.hs_to_pm_wind(0.0214 * 10.0 ** 2) == pytest.approx(
+            ms_to_knots(10.0))
         assert uacpy.data.hs_to_pm_wind(0.0) == pytest.approx(0.0)
 
     def test_a_measured_density_inverts_to_the_grain_size_that_explains_it(self):
@@ -275,6 +322,16 @@ class TestProvenanceIsData:
         d = prov.to_dict()
         assert d['source'] == 'woa23' and d['data_point'] == [45.5, -6.5]
         assert DataProvenance.from_dict(json.loads(json.dumps(d))) == prov
+
+    def test_a_record_naming_a_source_outside_the_catalogue_is_refused(self):
+        from uacpy.core.exceptions import ConfigurationError
+        from uacpy.data import DataProvenance
+        d = dict(self._prov().to_dict(), source='no_such_dataset')
+        with pytest.raises(ConfigurationError,
+                           match="^DataProvenance.from_dict: .*'no_such_dataset'"
+                           ) as err:
+            DataProvenance.from_dict(d)
+        assert "'woa23'" in str(err.value)
 
     def test_the_table_holds_the_data_and_the_engine(self):
         pytest.importorskip('pandas')

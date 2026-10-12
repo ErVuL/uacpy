@@ -26,6 +26,7 @@ import csv
 import dataclasses
 import io
 import tarfile
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -33,7 +34,9 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from uacpy._log import log_message
-from uacpy.core.exceptions import DataFetchError
+from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
+                                   ValidityWarning)
+from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.materials import MATERIALS
 from uacpy.data import _cache
 from uacpy.core.geo import as_coordinate, normalize_lon, EARTH_RADIUS_KM
@@ -41,12 +44,16 @@ from uacpy.data._geo import checked_max_distance, checked_offset
 from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
+from uacpy.data._provenance_notice import provenance_notice
 from uacpy.data.sediment import (SeabedSample, bottom_from_class,
-                                 bottom_from_grain_size)
+                                 bottom_from_grain_size,
+                                 range_dependent_bottom_along,
+                                 water_sound_speed_at)
 
 from uacpy.data._offset_policy import SAMPLE_OFFSET_WARN_KM
 
-__all__ = ['download_sediment_db', 'fetch_sediment_sample', 'fetch_bottom_grainsize']
+__all__ = ['download_sediment_db', 'fetch_sediment_sample', 'fetch_bottom_grainsize',
+           'bottom_from_samples']
 
 #: Farthest sample (km) searched without a caller's ``max_distance_km``: past
 #: it no sample answers, so ``bottom_sources='auto'`` falls through to the
@@ -75,8 +82,8 @@ _DECK41_LITHOLOGY_TO_PHI = {
     #    route the EMODnet substrate path uses for hard substrata
     #    (seabed.py _FOLK5_TO_BOTTOM class 5);
     #  - 'gravel' and 'gravel and coarser' are coarser than the fits: both
-    #    models stop at -1 phi (2 mm), and the default 'hamilton' answers
-    #    anything below 0 phi with its 0.92 phi coarse-sand end row. They take
+    #    models stop at -1 phi (2 mm), gravel's fine end, and answer anything
+    #    coarser with their -1 phi value (GRAIN_SIZE_MODEL_RANGES). They take
     #    the 'gravel' preset, whose geoacoustics are JKPS Table 1.3's. The two
     #    terms share it because the coarse classes are not separable here
     #    either: TR 9407 Table 2 carries one "Cobble, Gravel, Pebble" row.
@@ -312,7 +319,13 @@ def _index(path, value_cols, transform):
             ) from exc
     if not phis:
         return None
-    lats, lons = np.array(lats), np.array(lons)
+    return _sample_index(lats, lons, phis)
+
+
+def _sample_index(lats, lons, phis):
+    """``(tree, phis, lats, lons)``: the nearest-neighbour index of samples
+    at ``(lats, lons)`` carrying ``phis``, which :func:`_nearest` queries."""
+    lats, lons = np.array(lats, dtype=float), np.array(lons, dtype=float)
     return cKDTree(_unit_vectors(lats, lons)), np.array(phis), lats, lons
 
 
@@ -531,3 +544,199 @@ def fetch_bottom_grainsize(point, *, roughness=0.0, water_sound_speed=None,
     # requested position; the sample's own record says where it came from,
     # so ``citations(env)`` reports the hop and ``prov.offset_km`` measures it.
     return dataclasses.replace(bottom, data_sources=(sample.provenance,))
+
+
+def _checked_samples(lats, lons, phis, who):
+    """``(lats, lons, phis)`` as equal-length 1-D float arrays of finite
+    samples, longitudes in [-180, 180)."""
+    columns = [np.asarray(v, dtype=float) for v in (lats, lons, phis)]
+    shapes = [c.shape for c in columns]
+    if any(c.ndim != 1 for c in columns) or len(set(shapes)) != 1 \
+            or columns[0].size == 0:
+        raise ConfigurationError(
+            f"{who}: lats, lons and phis must be 1-D arrays of one length "
+            f"(one entry per sample); got shapes {shapes}.",
+            remediation="Pass one latitude, longitude and mean grain size "
+                        "(ϕ) per sample, at least one sample.")
+    lats, lons, phis = columns
+    for name, values in (('lats', lats), ('lons', lons), ('phis', phis)):
+        bad = np.flatnonzero(~np.isfinite(values))
+        if bad.size:
+            raise ConfigurationError(
+                f"{who}: {name}[{int(bad[0])}] is {float(values[bad[0]])}; "
+                f"{bad.size} of the {values.size} samples are not finite.",
+                remediation="Drop the samples without a position or a grain "
+                            "size before passing them.")
+    if np.any(np.abs(lats) > 90.0):
+        index = int(np.flatnonzero(np.abs(lats) > 90.0)[0])
+        raise ConfigurationError(
+            f"{who}: lats[{index}] = {lats[index]:g} is outside "
+            f"[-90, 90].",
+            remediation="Pass latitudes in decimal degrees; check that "
+                        "latitude and longitude are not swapped.")
+    return lats, (lons + 180.0) % 360.0 - 180.0, phis
+
+
+def _report_sample_substitutions(phis, who, **conversion):
+    """One ``ValidityWarning``, under ``who``, naming the samples whose
+    grain size lies outside the data the relations come from: the array
+    report of :func:`~uacpy.data.grain_size_to_geoacoustics` over every
+    sample's ϕ, so a survey of any size reports once. Its counts are of
+    samples. That report, a ``ValidityWarning``, is the only warning the
+    conversion of finite ϕ values gives."""
+    from uacpy.core.sediment import grain_size_to_geoacoustics
+    prefix = 'grain_size_to_geoacoustics: '
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        grain_size_to_geoacoustics(np.asarray(phis, dtype=float),
+                                   **conversion)
+    for w in caught:
+        text = str(w.message)
+        if text.startswith(prefix):
+            text = f"{who}: of the samples, {text[len(prefix):]}"
+        warnings.warn(text, ValidityWarning,
+                      skip_file_prefixes=USER_FRAME_SKIP)
+
+
+def bottom_from_samples(lats, lons, phis, start, end, *, n_points='auto',
+                        max_points=None, max_distance_km=None,
+                        model=DEFAULT_GRAIN_SIZE_MODEL, hamilton_fit=None,
+                        water_sound_speed=None, roughness=0.0):
+    """A range-dependent bottom along the geodesic ``start`` → ``end`` from
+    seabed samples of your own (cores, grabs, a survey's mean grain sizes).
+
+    Each transect waypoint takes the grain size of its nearest sample — the
+    great-circle nearest, through the unit-sphere KD-tree
+    :func:`fetch_sediment_sample` uses — converted to a fluid half-space by
+    :func:`~uacpy.data.grain_size_to_geoacoustics`, once per distinct
+    sample; the samples whose ϕ lies outside the relations' data are named in
+    one ``ValidityWarning`` under this function's name, counted in samples.
+    The waypoints are those of
+    :func:`~uacpy.data.sediment.range_dependent_bottom_along`, which builds
+    the :class:`~uacpy.core.environment.Bottom`: with ``n_points='auto'``
+    the transect is probed at ``max_points`` waypoints and each run of
+    waypoints that took the same sample becomes the columns at its edges, so
+    a change of nearest sample lands within one probe step of where it
+    happens. Each column carries its sample's ``grain_size_phi`` and no
+    ``data_sources`` (the samples are yours, not a catalogued dataset).
+
+    Parameters
+    ----------
+    lats, lons : array_like
+        The samples' positions (decimal degrees), one entry per sample.
+    phis : array_like
+        The samples' mean grain sizes on the Wentworth ϕ scale.
+    start, end : (lat, lon)
+        The transect's endpoints, ranges measured from ``start``.
+    n_points : int or 'auto', optional
+        Waypoints sampled along the transect; ``'auto'`` (default) probes
+        ``max_points`` and keeps the edges of each run of one sample.
+    max_points : int, optional
+        The probe count (and the cap on ``n_points``); default 1000.
+    max_distance_km : float, optional
+        Farthest sample (km) a waypoint takes. A waypoint with no sample
+        that close is a gap, filled from the nearest covered waypoint with a
+        ``FallbackWarning``; no covered waypoint at all raises. ``None``
+        (default) sets no limit: every waypoint takes its nearest sample,
+        and one ``ProvenanceWarning`` counts the waypoints whose sample is
+        farther than ``SAMPLE_OFFSET_WARN_KM`` (10 km); a limit you set is
+        the distance you accept, and gives no such warning.
+    model : {'hamilton', 'apl-uw'}, optional
+        The grain-size relations (see
+        :func:`~uacpy.data.grain_size_to_geoacoustics`).
+    hamilton_fit : str, optional
+        Which Hamilton & Bachman fit ``'hamilton'`` evaluates; ``None`` takes
+        the continental-terrace default.
+    water_sound_speed : float or callable, optional
+        The near-seabed water speed (m/s) the velocity ratios scale by, or a
+        ``(lat, lon) -> m/s`` callable evaluated at each waypoint. ``None``
+        uses the relations' reference water.
+    roughness : float, optional
+        RMS interface roughness (m) of every column. Default 0.
+
+    Returns
+    -------
+    Bottom
+        Range-dependent, one fluid half-space column per kept waypoint.
+
+    Raises
+    ------
+    ConfigurationError
+        Samples that are not one finite latitude, longitude and ϕ each, or
+        a ``model`` / ``hamilton_fit`` / ``n_points`` / ``max_distance_km``
+        the conversion or the transect refuses.
+    DataFetchError
+        No waypoint has a sample within ``max_distance_km``; the refusal names
+        the distance that would reach the nearest one.
+
+    Examples
+    --------
+    Three grabs along a 79 km track, five columns, each waypoint within
+    25 km of a grab:
+
+    >>> import uacpy
+    >>> bottom = uacpy.data.bottom_from_samples(
+    ...     lats=[45.00, 45.01, 45.00], lons=[-6.00, -5.60, -5.10],
+    ...     phis=[1.5, 3.0, 7.5], start=(45.0, -6.0), end=(45.0, -5.0),
+    ...     n_points=5, max_distance_km=25.0)
+    >>> [column.halfspace.grain_size_phi for column in bottom.columns]
+    [1.5, 3.0, 3.0, 7.5, 7.5]
+    """
+    who = 'bottom_from_samples'
+    from uacpy.core.sediment import canonical_grain_size_selection
+    model, hamilton_fit = canonical_grain_size_selection(
+        model, hamilton_fit, who=who)
+    samples = _checked_samples(lats, lons, phis, who)
+    index = _sample_index(*samples)
+    limit = checked_max_distance(max_distance_km, who)
+    _report_sample_substitutions(
+        samples[2], who, model=model,
+        **({} if hamilton_fit is None else {'hamilton_fit': hamilton_fit}),
+        water_sound_speed=(None if callable(water_sound_speed)
+                           else water_sound_speed))
+    offsets, misses, converted = [], [], {}
+
+    def nearest_sample_bottom(lat, lon):
+        dist_km, phi, _sample_lat, _sample_lon = _nearest(index, lat, lon)
+        if limit is not None and dist_km > limit:
+            misses.append(dist_km)
+            raise DataFetchError(
+                f"{who}: the nearest sample to ({lat:.4f}, {lon:.4f}) is "
+                f"{dist_km:.1f} km away, past max_distance_km={limit:g}.")
+        offsets.append(dist_km)
+        speed = water_sound_speed_at(water_sound_speed, lat, lon)
+        if (phi, speed) not in converted:
+            # Reported once for every sample above, under this function's
+            # name; the conversion of each sample would repeat it per ϕ.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    'ignore', message='grain_size_to_geoacoustics:',
+                    category=ValidityWarning)
+                converted[phi, speed] = bottom_from_grain_size(
+                    phi, roughness=roughness, model=model,
+                    hamilton_fit=hamilton_fit, water_sound_speed=speed)
+        return converted[phi, speed]
+
+    try:
+        bottom = range_dependent_bottom_along(
+            nearest_sample_bottom, start, end, n_points, source_label=who,
+            max_points=max_points)
+    except DataFetchError as exc:
+        if offsets or not misses:
+            raise
+        raise DataFetchError(
+            f"{who}: no transect waypoint has a sample within "
+            f"max_distance_km={limit:g}; the closest any waypoint comes to a "
+            f"sample is {min(misses):.1f} km.",
+            remediation=(f"Pass max_distance_km={np.ceil(min(misses)):g} or "
+                         f"more, or leave it unset to give every waypoint "
+                         f"its nearest sample.")) from exc
+    far = [d for d in offsets if d > SAMPLE_OFFSET_WARN_KM]
+    if limit is None and far:
+        provenance_notice(
+            f"{who}: {len(far)} of {len(offsets)} transect waypoints take a "
+            f"sample farther than {SAMPLE_OFFSET_WARN_KM:g} km, up to "
+            f"{max(far):.1f} km away. The seabed there is that sample's, not "
+            f"one measured there; pass max_distance_km= to leave such "
+            f"waypoints as gaps filled from the nearest covered waypoint.")
+    return bottom

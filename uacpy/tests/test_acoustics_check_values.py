@@ -11,6 +11,7 @@ breathing frequency); APL-UW TR 9407 eqs. 28a/28b; the worked numbers in
 docs/guide/environment.md §5.
 """
 
+import re
 import warnings
 
 import numpy as np
@@ -25,7 +26,7 @@ from uacpy.core.exceptions import ConfigurationError
 
 from uacpy.core.acoustics import (
     bubble_resonance,
-    pressure,
+    pressure_from_recording,
     spl,
     bubble_sound_speed,
     bubble_surface_loss,
@@ -366,11 +367,11 @@ class TestPressureCalibratesVoltsToPascals:
                       * 10.0 ** (self.GAIN / 20.0))
 
     def test_unity_scale_factors_return_the_voltage_in_pascals(self):
-        got = pressure(np.array([0.0, 0.5, -0.5]), sensitivity=0, gain=0)
+        got = pressure_from_recording(np.array([0.0, 0.5, -0.5]), sensitivity=0, gain=0)
         np.testing.assert_allclose(got, [0.0, 0.5e-6, -0.5e-6])
 
     def test_a_data_sheet_sensitivity_lands_in_pascals(self):
-        got = pressure(np.array([1e-3]), sensitivity=self.SENSITIVITY,
+        got = pressure_from_recording(np.array([1e-3]), sensitivity=self.SENSITIVITY,
                        gain=self.GAIN)
         assert float(got[0]) == pytest.approx(
             1e-6 * 1e-3 * self._micropascals_per_volt(), rel=1e-12)
@@ -381,9 +382,9 @@ class TestPressureCalibratesVoltsToPascals:
         # reference is 0.5 V, and the level it reaches is stated in pascals
         # rather than only against the volt call, which would hold whatever
         # unit the function returned.
-        counts = pressure(np.array([16384]), sensitivity=self.SENSITIVITY,
+        counts = pressure_from_recording(np.array([16384]), sensitivity=self.SENSITIVITY,
                           gain=self.GAIN, volt_params=(16, 1.0))
-        volts = pressure(np.array([0.5]), sensitivity=self.SENSITIVITY,
+        volts = pressure_from_recording(np.array([0.5]), sensitivity=self.SENSITIVITY,
                          gain=self.GAIN)
         np.testing.assert_allclose(counts, volts)
         assert float(counts[0]) == pytest.approx(
@@ -393,7 +394,7 @@ class TestPressureCalibratesVoltsToPascals:
         # dB re 1 µPa is 20*log10 of the µPa count, so the expected level
         # carries no pascal factor: a return in µPa would read 120 dB high.
         volts = np.full(256, 1e-3)
-        level = spl(pressure(volts, sensitivity=self.SENSITIVITY,
+        level = spl(pressure_from_recording(volts, sensitivity=self.SENSITIVITY,
                              gain=self.GAIN))
         assert level == pytest.approx(
             20.0 * np.log10(1e-3 * self._micropascals_per_volt()), rel=1e-12)
@@ -487,7 +488,8 @@ class TestArrayCapableHelpersAnnotateArrayReturns:
     #: so an annotation that admits only one of them fails here.
     CASES = [
         ('sound_speed_mackenzie',
-         dict(temperature=np.array([10.0, 20.0]), salinity=35.0, depth=10.0),
+         dict(temperature=np.array([10.0, 20.0]), salinity=35.0,
+              depth=np.array([10.0, 10.0])),
          dict(temperature=10.0, salinity=35.0, depth=10.0)),
         ('density',
          dict(temperature=np.array([10.0, 20.0]), salinity=35.0),
@@ -608,10 +610,9 @@ class TestTeos10SoundSpeedEvaluatesTheGibbsFunction:
             c = sound_speed_teos10(10.0, 0.0, pressure_dbar=0.0)
         assert c == pytest.approx(1447.284153, abs=1e-5)
 
-    def test_returns_a_python_float_for_scalars_and_broadcasts_arrays(self):
+    def test_returns_a_python_float_for_scalars_and_evaluates_a_grid_point_by_point(self):
         assert isinstance(sound_speed_teos10(15.0, 35.0, pressure_dbar=0.0), float)
-        t = np.array([0.0, 15.0, 25.0])
-        p = np.array([[0.0], [4000.0]])
+        p, t = np.meshgrid([0.0, 4000.0], [0.0, 15.0, 25.0], indexing='ij')
         c = sound_speed_teos10(t, 35.0, pressure_dbar=p)
         assert c.shape == (2, 3)
         assert c[0, 1] == pytest.approx(1506.673601, abs=1e-5)
@@ -858,7 +859,8 @@ class TestEveryIpts68FitReceivesAnIpts68Temperature:
                 + 0.221535969240e-3 * t ** 3)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')      # S = 0 is below the fit
-            got = sound_speed_delgrosso(self.t90, 0.0, pressure_dbar=0.0)
+            got = sound_speed_delgrosso(self.t90, 0.0,
+                                        pressure_dbar=np.zeros(self.t90.shape))
         np.testing.assert_allclose(got, want, rtol=1e-14)
 
     def test_eos80_density_evaluates_its_pure_water_term_on_t68(self):
@@ -974,6 +976,61 @@ class TestTheHankelTransformAnnouncesTheAliasPeriod:
         assert hankel_transform.__name__ == 'hankel_transform'
         assert 'who' not in inspect.signature(hankel_transform).parameters
 
+    @pytest.mark.parametrize('offset, refused', [(5e-7, False), (2e-6, True),
+                                                 (0.05, True)])
+    def test_a_k_grid_off_its_line_is_refused(self, offset, refused):
+        """The trapezoidal weight is one step dk (the mean step), so k must
+        lie on k[0] + i*dk to within 1e-6 of its largest value — room for
+        SPARC's single-precision grid, none for a grid uniform in phase
+        speed: half of the grid shifted by 5e-7·max|k| passes, by 2e-6 is
+        refused (both sides pinned)."""
+        from uacpy.core.acoustics import hankel_transform
+        k = self.k.copy()
+        k[200:-1] += offset * k.max()
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match='^hankel_transform: k is not uniformly'):
+                hankel_transform(self.G, k, np.array([100.0]),
+                                 attenuation=0.0)
+        else:
+            hankel_transform(self.G, k, np.array([100.0]), attenuation=0.0)
+
+    def test_a_grid_uniform_in_phase_speed_is_refused(self):
+        from uacpy.core.acoustics import hankel_transform
+        omega = 2.0 * np.pi * 100.0
+        k = omega / np.linspace(1700.0, 1400.0, 399)
+        with pytest.raises(ConfigurationError, match='not uniformly spaced'):
+            hankel_transform(self.G, k, np.array([100.0]), attenuation=0.0)
+
+
+class TestSnapshotFrequencyComponentRefusesInItsOwnName:
+    """``snapshot_frequency_component`` is a plain-array function: its
+    refusals name it and the ``times`` that cannot carry the frequency."""
+
+    def test_fewer_than_two_times_is_refused_by_name(self):
+        from uacpy.core.acoustics.wavenumber import (
+            snapshot_frequency_component)
+        with pytest.raises(ConfigurationError,
+                           match=r'^snapshot_frequency_component: times holds '
+                                 r'1 output time'):
+            snapshot_frequency_component(np.ones((1, 3)), [0.0], 10.0)
+
+    @pytest.mark.parametrize('frequency, refused', [(50.0, False),
+                                                    (50.001, True)])
+    def test_a_frequency_past_the_nyquist_of_times_is_refused_by_name(
+            self, frequency, refused):
+        from uacpy.core.acoustics.wavenumber import (
+            snapshot_frequency_component)
+        times = np.arange(8) * 0.01            # Nyquist 50 Hz
+        snaps = np.ones((8, 2))
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match=r'^snapshot_frequency_component: '
+                                     r'frequency 50.001 Hz exceeds'):
+                snapshot_frequency_component(snaps, times, frequency)
+        else:
+            snapshot_frequency_component(snaps, times, frequency)
+
 
 def test_doppler_and_the_comms_scale_factor_are_one_relation():
     """``uacpy.acoustics.doppler`` and ``comms.doppler_from_speed`` share the default
@@ -1028,14 +1085,14 @@ class TestAPlainListIsAnArray:
         from uacpy.core.acoustics import (sound_speed_at_depth,
                                           sound_speed_mackenzie)
         np.testing.assert_array_equal(
-            sound_speed_mackenzie([10, 12], 35, [0, 100]),
+            sound_speed_mackenzie([10, 12], 35, depth=[0, 100]),
             sound_speed_mackenzie(np.array([10.0, 12.0]), 35,
-                                  np.array([0.0, 100.0])))
+                                  depth=np.array([0.0, 100.0])))
         np.testing.assert_array_equal(
             sound_speed_at_depth([10, 12], [35, 35], [0, 100],
                                  formula='mackenzie'),
             sound_speed_mackenzie(np.array([10.0, 12.0]), 35,
-                                  np.array([0.0, 100.0])))
+                                  depth=np.array([0.0, 100.0])))
 
     def test_density(self):
         from uacpy.core.acoustics import density
@@ -1047,15 +1104,20 @@ class TestAPlainListIsAnArray:
         np.testing.assert_array_equal(doppler([1, 2], 1000),
                                       doppler(np.array([1.0, 2.0]), 1000))
 
-    def test_pressure(self):
-        from uacpy.core.acoustics import pressure
+    def test_pressure_from_recording(self):
+        from uacpy.core.acoustics import pressure_from_recording
         np.testing.assert_array_equal(
-            pressure([100, 120], -170, 20),
-            pressure(np.array([100.0, 120.0]), -170, 20))
+            pressure_from_recording([100, 120], -170, 20),
+            pressure_from_recording(np.array([100.0, 120.0]), -170, 20))
+
+    def test_depth_is_keyword_only_as_on_the_other_equations(self):
+        from uacpy.core.acoustics import sound_speed_mackenzie
+        with pytest.raises(TypeError, match='positional'):
+            sound_speed_mackenzie(10.0, 35.0, 100.0)
 
     def test_a_scalar_keeps_the_scalar_path(self):
         from uacpy.core.acoustics import sound_speed_mackenzie
-        assert type(sound_speed_mackenzie(10.0, 35.0, 0.0)) is float
+        assert type(sound_speed_mackenzie(10.0, 35.0, depth=0.0)) is float
 
 
 class TestReceivedLevelKeepsTheNoEnergyMarker:
@@ -1239,12 +1301,15 @@ def test_sum_levels_dB_takes_axis_with_one_argument_only():
 
 # ── the one water-property rule ───────────────────────────────────────────
 
-#: (depth or pressure, value) pairs and the evaluation coordinate.
-_T_PAIRS = [(0.0, 22.0), (60.0, 12.0), (200.0, 10.0)]
-_S_PAIRS = [(0.0, 35.5), (300.0, 34.6)]
+#: Profiles measured on depths of their own, as (depth, value) pairs, and the
+#: evaluation coordinate.
+_T_DEPTHS, _T_VALUES = [0.0, 60.0, 200.0], [22.0, 12.0, 10.0]
+_S_DEPTHS, _S_VALUES = [0.0, 300.0], [35.5, 34.6]
+_T_PAIRS = np.column_stack([_T_DEPTHS, _T_VALUES])
+_S_PAIRS = np.column_stack([_S_DEPTHS, _S_VALUES])
 _AT = np.array([0.0, 30.0, 100.0, 500.0])
-_T_AT = np.interp(_AT, *np.array(_T_PAIRS).T)
-_S_AT = np.interp(_AT, *np.array(_S_PAIRS).T)
+_T_AT = np.interp(_AT, _T_DEPTHS, _T_VALUES)
+_S_AT = np.interp(_AT, _S_DEPTHS, _S_VALUES)
 
 
 def _entry_points():
@@ -1269,54 +1334,324 @@ def _entry_points():
     }
 
 
+def _without_coordinate():
+    """The entry points that have a call without a coordinate, as
+    ``(name, call(T))`` (``sound_speed_at_depth`` takes depth as a required
+    argument)."""
+    from uacpy.core.acoustics import attenuation as att, seawater as sw
+    return {
+        'sound_speed_mackenzie': lambda t: sw.sound_speed_mackenzie(t),
+        'sound_speed_unesco': lambda t: sw.sound_speed_unesco(t),
+        'sound_speed_delgrosso': lambda t: sw.sound_speed_delgrosso(t),
+        'sound_speed_teos10': lambda t: sw.sound_speed_teos10(t),
+        'absorption_francois_garrison':
+            lambda t: att.absorption_francois_garrison(1e4, t),
+    }
+
+
 @pytest.mark.parametrize('name', sorted(_entry_points()))
-def test_pairs_are_the_values_interpolated_onto_the_coordinate(name):
-    """Pairs, arrays, single values and a mix give the same answer as the
-    same water given as arrays on the coordinate."""
+def test_pairs_are_their_values_interpolated_onto_the_coordinate(name):
+    """Pairs, arrays of the depth's shape, single values and a mix give the
+    same answer as the same water given as arrays on the coordinate; so does
+    the profile record a law hands back (``law.temperature``)."""
+    from uacpy.core._water import WaterProfile
     call = _entry_points()[name]
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         want = np.asarray(call(_T_AT, _S_AT, _AT))
         np.testing.assert_array_equal(call(_T_PAIRS, _S_PAIRS, _AT), want)
-        np.testing.assert_array_equal(call(_T_PAIRS, _S_AT, _AT), want)
-        one = np.asarray(call(_T_PAIRS, 35.0, _AT))
+        np.testing.assert_array_equal(call(_T_PAIRS.tolist(), _S_AT, _AT),
+                                      want)
         np.testing.assert_array_equal(
-            one, np.asarray(call(_T_AT, np.full(4, 35.0), _AT)))
-        # A single value and an array broadcast as they always did.
-        assert np.ndim(call(10.0, 35.0, 100.0)) == 0 or \
-            np.size(call(10.0, 35.0, 100.0)) == 1
+            call(WaterProfile(_T_DEPTHS, _T_VALUES), _S_PAIRS, _AT), want)
+        np.testing.assert_array_equal(
+            np.asarray(call(_T_PAIRS, 35.0, _AT)),
+            np.asarray(call(_T_AT, np.full(4, 35.0), _AT)))
+        # Pairs at one depth are the profile read at that depth.
+        assert float(np.asarray(call(_T_PAIRS, 35.0, 100.0))) == \
+            float(np.asarray(call(_T_AT[2], 35.0, 100.0)))
 
 
-# sound_speed_at_depth takes depth as a required argument, so there is no
-# call without the coordinate to refuse; the other entry points are checked.
-@pytest.mark.parametrize(
-    'name', sorted(set(_entry_points()) - {'sound_speed_at_depth'}))
+@pytest.mark.parametrize('name', sorted(_without_coordinate()))
 def test_pairs_without_the_coordinate_are_refused(name):
+    from uacpy.core._water import WaterProfile
+    call = _without_coordinate()[name]
+    for profile in (_T_PAIRS, WaterProfile(_T_DEPTHS, _T_VALUES)):
+        with pytest.raises(ConfigurationError,
+                           match=r'temperature is a profile on depths of its '
+                                 r'own.*pass depth='):
+            call(profile)
+
+
+@pytest.mark.parametrize('name', ['sound_speed_unesco', 'sound_speed_delgrosso',
+                                  'sound_speed_teos10'])
+def test_pairs_at_a_pressure_are_refused(name):
+    """Pairs are a profile on depths, so an equation evaluated at a pressure
+    refuses them rather than reading the pressures as their depths."""
+    from uacpy.core.acoustics import seawater as sw
+    from uacpy.core._water import WaterProfile
+    for profile in (_T_PAIRS, WaterProfile(_T_DEPTHS, _T_VALUES)):
+        with pytest.raises(ConfigurationError,
+                           match=r'temperature is a profile on depths of its '
+                                 r'own.*pass depth='):
+            getattr(sw, name)(profile, 35.0, pressure_dbar=_AT)
+
+
+@pytest.mark.parametrize('name', sorted(_entry_points()))
+def test_two_casts_side_by_side_on_a_depth_grid_are_read_point_by_point(name):
+    """Two casts as two columns, on a depth grid of their own shape, give
+    each cast's answer: the (N, 2) temperature, its first column
+    increasing like a depth axis, is values, never a profile of the second
+    column on the first."""
+    call = _entry_points()[name]
+    z = np.array([0.0, 100.0, 200.0])
+    t_a, t_b = np.array([4.0, 10.0, 20.0]), np.array([12.0, 11.0, 9.0])
+    s_a, s_b = np.array([34.0, 34.5, 35.0]), np.array([34.2, 34.6, 34.9])
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got = np.asarray(call(np.column_stack([t_a, t_b]),
+                              np.column_stack([s_a, s_b]),
+                              np.column_stack([z, z])))
+        want = np.column_stack([np.asarray(call(t_a, s_a, z)),
+                                np.asarray(call(t_b, s_b, z))])
+    assert got.shape == (3, 2)
+    np.testing.assert_allclose(got, want, rtol=1e-12)
+
+
+def test_the_two_arctic_casts_are_values_on_their_depth_grid():
+    """Two Arctic casts warming downward, (3, 2), on a depth grid of their
+    shape: the element-wise TEOS-10 speeds. Read as pairs they would be one
+    profile of the second column on the first, 9.3 m/s off at the
+    surface."""
+    t = np.array([[-1.5, -1.0], [0.5, 1.0], [1.0, 1.5]])
+    z = np.array([[0.0, 0.0], [50.0, 50.0], [100.0, 100.0]])
+    np.testing.assert_allclose(
+        sound_speed_teos10(t, 34.0, depth=z),
+        [[1440.65, 1443.02], [1450.78, 1453.04], [1453.86, 1456.09]],
+        atol=0.005)
+
+
+@pytest.mark.parametrize('name, want, atol', [
+    ('sound_speed_mackenzie', [[1491.44, 1498.46], [1505.12, 1511.44]], 0.005),
+    ('absorption_francois_garrison', [[0.0599, 0.0586], [0.0570, 0.0553]],
+     5e-5)])
+def test_m_pairs_on_a_depth_grid_of_their_shape_are_values(name, want, atol):
+    """The documented corner, both sides: a 2x2 temperature on a depth grid
+    of exactly shape (2, 2) is four values, point by point; at one depth, or
+    on a (2, 1) column, the same array is (depth, value) pairs, the profile
+    10 -> 12, 14 -> 16 read at 100 m (16, the held end)."""
     from uacpy.core.acoustics import attenuation as att, seawater as sw
-    calls = {
-        'sound_speed_mackenzie': lambda: sw.sound_speed_mackenzie(_T_PAIRS),
-        'sound_speed_unesco': lambda: sw.sound_speed_unesco(_T_PAIRS),
-        'sound_speed_delgrosso': lambda: sw.sound_speed_delgrosso(_T_PAIRS),
-        'sound_speed_teos10': lambda: sw.sound_speed_teos10(_T_PAIRS),
-        'absorption_francois_garrison':
-            lambda: att.absorption_francois_garrison(1e4, _T_PAIRS),
-    }
-    with pytest.raises(ConfigurationError, match=r'pairs.*pass (depth|pressure)='):
-        calls[name]()
+    call = {'sound_speed_mackenzie':
+            lambda t, z: sw.sound_speed_mackenzie(t, 35.0, depth=z),
+            'absorption_francois_garrison':
+            lambda t, z: att.absorption_francois_garrison(
+                1000.0, t, 35.0, 8.0, depth=z)}[name]
+    t = np.array([[10.0, 12.0], [14.0, 16.0]])
+    np.testing.assert_allclose(call(t, np.full((2, 2), 100.0)), want,
+                               atol=atol)
+    at_100 = float(np.asarray(call(16.0, 100.0)))
+    assert float(np.asarray(call(t, 100.0))) == at_100
+    np.testing.assert_array_equal(call(t, np.full((2, 1), 100.0)),
+                                  np.full((2, 1), at_100))
 
 
-def test_a_grid_shaped_like_its_coordinate_is_not_pairs():
-    """An (N, 2) value the same shape as the coordinate is a grid of
-    values, broadcast as before."""
+#: Arrays that broadcast with, or merely resemble, the (4,) depth axis
+#: ``_AT`` without having its shape and are not (M, 2) pairs: one short, a
+#: column, a row, a single element, three columns.
+_OFF_SHAPES = {
+    'one short': np.full(3, 10.0),
+    'a column': np.full((4, 1), 10.0),
+    'a row': np.full((1, 4), 10.0),
+    'one element': np.array([10.0]),
+    'three columns': np.full((4, 3), 10.0),
+}
+
+
+@pytest.mark.parametrize('name', sorted(_entry_points()))
+def test_an_array_of_exactly_the_depth_shape_is_read_point_by_point(name):
+    """The accepted side of the shape rule: an array of exactly the depth's
+    shape is one value per depth, the same answer as each point alone."""
+    call = _entry_points()[name]
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got = np.asarray(call(_T_AT, 35.0, _AT))
+        want = [float(np.asarray(call(t, 35.0, z)))
+                for t, z in zip(_T_AT, _AT)]
+    assert got.shape == _AT.shape
+    np.testing.assert_allclose(got, want, rtol=1e-12)
+
+
+@pytest.mark.parametrize('off', sorted(_OFF_SHAPES))
+@pytest.mark.parametrize('name', sorted(_entry_points()))
+def test_an_array_not_of_the_depth_shape_is_refused(name, off):
+    """The refused side: an array off the depth's shape that is not pairs
+    is never broadcast against it. The refusal names the property, both
+    shapes, the three forms and the remedy."""
+    call = _entry_points()[name]
+    value = _OFF_SHAPES[off]
+    with pytest.raises(ConfigurationError,
+                       match=re.escape(f"{name}: temperature has shape "
+                                       f"{value.shape}")) as e:
+        call(value, 35.0, _AT)
+    text = str(e.value)
+    assert 'has shape (4,)' in text
+    for form in ('single value', "exactly the depth's shape",
+                 '(depth, value) pairs of shape (M, 2)'):
+        assert form in text
+    assert 'an array of shape (4,) for one value per point' in text
+    assert 'np.column_stack([depths, values]) pairs' in text
+    # Salinity follows the same rule.
+    with pytest.raises(ConfigurationError, match='salinity has shape'):
+        call(10.0, value, _AT)
+
+
+@pytest.mark.parametrize('pairs, match', [
+    ([(0.0, 22.0), (0.0, 12.0)], 'strictly increasing'),
+    ([(60.0, 22.0), (0.0, 12.0)], 'strictly increasing'),
+    ([(-1e-9, 22.0), (60.0, 12.0)], 'non-negative'),
+    ([(0.0, 22.0), (np.nan, 12.0)], 'finite'),
+    ([(0.0, 22.0), (60.0, np.inf)], 'finite'),
+    (np.empty((0, 2)), r'shape \(0, 2\)')],
+    ids=['repeated', 'decreasing', 'above the surface', 'nan depth',
+         'inf value', 'empty'])
+def test_malformed_pairs_are_refused_naming_the_property(pairs, match):
     from uacpy.core.acoustics import sound_speed_mackenzie
-    t = np.array([[10.0, 12.0], [8.0, 9.0]])
-    z = np.array([[0.0, 0.0], [100.0, 100.0]])
+    with pytest.raises(ConfigurationError,
+                       match=r'sound_speed_mackenzie: .*temperature pairs'
+                             r'(.|\n)*' + match):
+        sound_speed_mackenzie(pairs, 35.0, depth=_AT)
+
+
+def test_pairs_from_the_surface_down_are_accepted():
+    """The other side of the depth checks: a first depth of exactly 0 m and
+    a single pair (a constant profile) are profiles."""
+    from uacpy.core.acoustics import sound_speed_mackenzie
     np.testing.assert_array_equal(
-        sound_speed_mackenzie(t, 35.0, z),
-        [[sound_speed_mackenzie(10.0, 35.0, 0.0),
-          sound_speed_mackenzie(12.0, 35.0, 0.0)],
-         [sound_speed_mackenzie(8.0, 35.0, 100.0),
-          sound_speed_mackenzie(9.0, 35.0, 100.0)]])
+        sound_speed_mackenzie([(0.0, 12.0), (1e-9, 11.0)], 35.0, depth=0.0),
+        sound_speed_mackenzie(12.0, 35.0, depth=0.0))
+    np.testing.assert_array_equal(
+        sound_speed_mackenzie([(50.0, 12.0)], 35.0, depth=_AT),
+        sound_speed_mackenzie(np.full(4, 12.0), 35.0, depth=_AT))
+
+
+@pytest.mark.parametrize('name', sorted(_entry_points()))
+def test_an_array_against_one_depth_is_refused(name):
+    """A single depth is one point, shape (): an array of values there would
+    be broadcast, so it is refused and the remedy names a depth of the
+    array's shape, ``np.full_like``."""
+    call = _entry_points()[name]
+    with pytest.raises(ConfigurationError,
+                       match=r"temperature has shape \(4,\).*shape \(\)") as e:
+        call(_T_AT, 35.0, 100.0)
+    assert 'depth=np.full_like(temperature, depth) (shape (4,))' \
+        in str(e.value)
+
+
+@pytest.mark.parametrize('name', sorted(_without_coordinate()))
+def test_an_array_without_the_coordinate_is_refused(name):
+    """No depth is the surface, one point: an array of values there names
+    a surface depth of its shape, ``np.zeros_like``, as the remedy."""
+    with pytest.raises(ConfigurationError,
+                       match='no depth is given') as e:
+        _without_coordinate()[name](_T_AT)
+    assert 'depth=np.zeros_like(temperature) (the surface, shape (4,))' \
+        in str(e.value)
+
+
+@pytest.mark.parametrize('name', ['sound_speed_unesco', 'sound_speed_delgrosso',
+                                  'sound_speed_teos10'])
+def test_a_pressure_equation_holds_water_arrays_to_the_pressure_shape(name):
+    """At ``pressure_dbar=`` the coordinate is the pressure: an array of its
+    shape is read point by point, one off it is refused."""
+    from uacpy.core.acoustics import seawater as sw
+    eq = getattr(sw, name)
+    p = np.array([0.0, 1000.0, 4000.0])
+    t = np.array([15.0, 6.0, 2.0])
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        got = eq(t, 35.0, pressure_dbar=p)
+        want = [eq(ti, 35.0, pressure_dbar=pi) for ti, pi in zip(t, p)]
+    np.testing.assert_allclose(got, want, rtol=1e-12)
+    with pytest.raises(ConfigurationError,
+                       match=r'temperature has shape \(2,\), and the '
+                             r'pressure_dbar it is evaluated at has shape '
+                             r'\(3,\)'):
+        eq(t[:2], 35.0, pressure_dbar=p)
+    with pytest.raises(ConfigurationError, match=r'salinity has shape \(3, 1\)'):
+        eq(t, np.full((3, 1), 35.0), pressure_dbar=p)
+
+
+class TestTheWaterProfileRecordHoldsACarriersPairs:
+    """The record a carrier stores ``(depth, value)`` pairs as: internal,
+    not a public input name."""
+
+    def test_it_interpolates_and_holds_its_end_values(self):
+        from uacpy.core._water import WaterProfile
+        p = WaterProfile([0.0, 60.0, 200.0], [22.0, 12.0, 10.0])
+        np.testing.assert_allclose(p([-10.0, 0.0, 30.0, 200.0, 500.0]),
+                                   [22.0, 22.0, 17.0, 10.0, 10.0])
+
+    @pytest.mark.parametrize('depths, values, match', [
+        ([0.0, 60.0], [22.0], 'equal length'),
+        ([0.0, 0.0], [22.0, 12.0], 'strictly increase'),
+        ([60.0, 0.0], [22.0, 12.0], 'strictly increase'),
+        ([0.0, np.nan], [22.0, 12.0], 'finite'),
+        ([[0.0, 1.0]], [[22.0, 12.0]], '1-D'),
+    ])
+    def test_a_malformed_profile_is_refused(self, depths, values, match):
+        from uacpy.core._water import WaterProfile
+        with pytest.raises(ConfigurationError, match=match):
+            WaterProfile(depths, values)
+
+    def test_omitting_the_values_is_refused_naming_them(self):
+        from uacpy.core._water import WaterProfile
+        with pytest.raises(TypeError, match=r"missing 1 required .*'values'"):
+            WaterProfile([0.0, 60.0])
+
+    def test_it_is_immutable_and_compares_by_value(self):
+        from uacpy.core._water import WaterProfile
+        p = WaterProfile([0.0, 60.0], [22.0, 12.0])
+        assert p == WaterProfile([0, 60], [22, 12])
+        assert p != WaterProfile([0.0, 60.0], [22.0, 13.0])
+        with pytest.raises(AttributeError, match='cannot assign'):
+            p.depths = np.zeros(2)
+        with pytest.raises(ValueError, match='read-only'):
+            p.values[0] = 0.0
+
+    def test_it_saves_and_loads_like_every_record(self):
+        from uacpy.core._water import WaterProfile
+        p = WaterProfile([0.0, 60.0, 200.0], [22.0, 12.0, 10.0])
+        assert WaterProfile.from_dict(p.to_dict()) == p
+
+    def test_it_is_not_a_public_name(self):
+        import uacpy.acoustics
+        from uacpy.core import acoustics
+        from uacpy.core.acoustics import seawater
+        for module in (uacpy.acoustics, acoustics, seawater):
+            assert 'WaterProfile' not in module.__all__
+            assert not hasattr(module, 'WaterProfile')
+
+
+@pytest.mark.parametrize('pairs', [[(0.0, 20.0), (100.0,)],
+                                   [(0.0, 20.0), (100.0, 10.0, 3.0)]])
+@pytest.mark.parametrize('entry', ['formula', 'law'])
+def test_ragged_hand_typed_pairs_are_refused_by_name(entry, pairs):
+    """Pairs typed by hand with an entry missing or extra are malformed
+    pairs, refused naming the property, the call and the pair form — not
+    numpy's raw "inhomogeneous shape" ValueError."""
+    from uacpy.core.absorption import FrancoisGarrison
+    from uacpy.core.acoustics import sound_speed_mackenzie
+    call = {
+        'formula': lambda: sound_speed_mackenzie(
+            pairs, 35.0, depth=np.array([0.0, 50.0])),
+        'law': lambda: FrancoisGarrison(temperature=pairs),
+    }[entry]
+    who = ('sound_speed_mackenzie' if entry == 'formula'
+           else 'FrancoisGarrison')
+    with pytest.raises(ConfigurationError,
+                       match=rf'^{who}: temperature is a ragged sequence') as e:
+        call()
+    assert 'np.column_stack' in str(e.value)
 
 
 def test_every_water_entry_point_uses_the_shared_helper():
@@ -1388,19 +1723,20 @@ def test_thorp_takes_the_francois_garrison_call_shape():
 
 @pytest.mark.parametrize('name', ['sound_speed_unesco', 'sound_speed_delgrosso',
                                   'sound_speed_teos10'])
-def test_a_pressure_equation_takes_depth_pairs_and_converts_them(name):
+def test_a_pressure_equation_takes_depth_profiles_and_converts_them(name):
     """The equations stated in pressure take ``depth=`` like every other
-    formula, with ``(depth, value)`` pairs on it: the answer is the equation
+    formula, with (depth, value) pairs on it: the answer is the equation
     at the pressure ``depth_to_pressure_dbar`` gives, with the water
     interpolated by hand, at the 45° default and at a latitude given."""
     from uacpy.core.acoustics import seawater as sw
     eq = getattr(sw, name)
+    t_profile, s_profile = _T_PAIRS, _S_PAIRS
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         for lat in (None, 70.0):
             p = sw.depth_to_pressure_dbar(_AT, 45.0 if lat is None else lat)
             want = eq(_T_AT, _S_AT, pressure_dbar=p)
-            got = eq(_T_PAIRS, _S_PAIRS, depth=_AT, latitude_deg=lat)
+            got = eq(t_profile, s_profile, depth=_AT, latitude_deg=lat)
             np.testing.assert_array_equal(got, want)
         # Below the surface the latitude moves the pressure, so the speed.
         assert np.all(eq(_T_AT, _S_AT, depth=_AT, latitude_deg=70.0)[1:]
@@ -1424,8 +1760,651 @@ def test_a_pressure_equation_refuses_ambiguous_coordinates(name):
 
 def test_sound_speed_at_depth_requires_its_depth():
     """Its depth is a required argument, so a call without it cannot reach
-    the pairs rule: Python refuses it first."""
+    the profile rule: Python refuses it first."""
     from uacpy.core.acoustics import seawater as sw
     import inspect
     depth = inspect.signature(sw.sound_speed_at_depth).parameters['depth']
     assert depth.default is inspect.Parameter.empty
+
+
+class TestSouthallAuditoryWeighting:
+    """Southall et al. 2019 auditory weighting functions (Table 5)."""
+
+    ALL_GROUPS = ("LF", "HF", "VHF", "SI", "PCW", "OCW", "PCA", "OCA")
+
+    def test_weighting_params_cover_all_eight_groups(self):
+        """Southall Table 5 defines exactly eight hearing groups — the six
+        in-water ones plus the in-air PCA and OCA — each carrying the five
+        curve parameters and the published exposure constant K."""
+        from uacpy.core.acoustics.weighting import (HEARING_GROUPS,
+                                                    WEIGHTING_PARAMS)
+        assert set(WEIGHTING_PARAMS) == set(self.ALL_GROUPS)
+        assert set(HEARING_GROUPS) == set(self.ALL_GROUPS)
+        for params in WEIGHTING_PARAMS.values():
+            assert set(params) == {"a", "b", "f1", "f2", "C", "K"}
+
+    def test_the_weighted_tts_threshold_is_c_plus_k(self):
+        """Southall's Tw = C + K rounds to Table 6's TTS onset in every
+        group (C + K = 133.5 for PCA, Table 6: 134)."""
+        from uacpy.core.acoustics.weighting import (EXPOSURE_THRESHOLDS,
+                                                    WEIGHTING_PARAMS)
+        assert set(EXPOSURE_THRESHOLDS) == set(self.ALL_GROUPS)
+        for g in self.ALL_GROUPS:
+            p = WEIGHTING_PARAMS[g]
+            tts = EXPOSURE_THRESHOLDS[g]['non_impulsive']['TTS']['SEL']
+            assert np.floor(p['C'] + p['K'] + 0.5) == tts, g
+
+    def test_pts_onset_follows_the_tts_growth_rules(self):
+        """Table 6: PTS = TTS + 20 dB SEL; Table 7: PTS = TTS + 15 dB SEL
+        and + 6 dB peak; Table 7's impulsive SEL TTS lies 11 dB below Table
+        6's for the groups without impulsive data (all but HF and VHF)."""
+        from uacpy.core.acoustics.weighting import EXPOSURE_THRESHOLDS
+        for g, kinds in EXPOSURE_THRESHOLDS.items():
+            steady, pulse = kinds['non_impulsive'], kinds['impulsive']
+            assert steady['PTS']['SEL'] - steady['TTS']['SEL'] == 20, g
+            assert pulse['PTS']['SEL'] - pulse['TTS']['SEL'] == 15, g
+            assert pulse['PTS']['peak'] - pulse['TTS']['peak'] == 6, g
+            if g not in ('HF', 'VHF'):
+                assert steady['TTS']['SEL'] - pulse['TTS']['SEL'] == 11, g
+
+    #: Southall et al. (2019), transcribed from the paper
+    #: (PDFs_parsed/45_2_southall.md, Table 6 and Table 7): per group,
+    #: Table 6 TTS, PTS SEL; Table 7 TTS SEL, TTS peak, PTS SEL, PTS peak.
+    SOUTHALL_TABLES_6_7 = {
+        'LF':  (179, 199, 168, 213, 183, 219),
+        'HF':  (178, 198, 170, 224, 185, 230),
+        'VHF': (153, 173, 140, 196, 155, 202),
+        'SI':  (186, 206, 175, 220, 190, 226),
+        'PCW': (181, 201, 170, 212, 185, 218),
+        'OCW': (199, 219, 188, 226, 203, 232),
+        'PCA': (134, 154, 123, 138, 138, 144),
+        'OCA': (157, 177, 146, 161, 161, 167),
+    }
+
+    def test_every_threshold_is_the_papers_number(self):
+        """All 48 values, the ones no relation derives among them: Table
+        7's whole peak column and the empirical HF / VHF impulsive SEL rows."""
+        from uacpy.core.acoustics.weighting import EXPOSURE_THRESHOLDS
+        assert set(EXPOSURE_THRESHOLDS) == set(self.SOUTHALL_TABLES_6_7)
+        for g, (tts, pts, i_tts, pk_tts, i_pts, pk_pts) in \
+                self.SOUTHALL_TABLES_6_7.items():
+            t = EXPOSURE_THRESHOLDS[g]
+            got = (t['non_impulsive']['TTS']['SEL'],
+                   t['non_impulsive']['PTS']['SEL'],
+                   t['impulsive']['TTS']['SEL'], t['impulsive']['TTS']['peak'],
+                   t['impulsive']['PTS']['SEL'], t['impulsive']['PTS']['peak'])
+            assert got == (tts, pts, i_tts, pk_tts, i_pts, pk_pts), g
+
+    def test_peak_is_zero_dB(self):
+        from uacpy.core.acoustics.weighting import auditory_weighting
+        f = np.logspace(1, 5.5, 5000)
+        for g in self.ALL_GROUPS:
+            assert auditory_weighting(f, g).max() == pytest.approx(0.0, abs=0.02)
+
+    def test_low_frequency_slope_is_20a(self):
+        from uacpy.core.acoustics.weighting import (WEIGHTING_PARAMS,
+                                                    auditory_weighting)
+        for g in self.ALL_GROUPS:
+            a = WEIGHTING_PARAMS[g]["a"]
+            f1 = WEIGHTING_PARAMS[g]["f1"] * 1000.0
+            slope = auditory_weighting(0.1 * f1, g) - auditory_weighting(0.01 * f1, g)
+            assert slope == pytest.approx(20.0 * a, abs=0.3)   # +20a dB/decade
+
+    def test_weighting_anchors_at_30_hz(self):
+        """Southall Table 5 closed form at the 30 Hz shipping peak:
+        LF −16.445 dB, VHF −92.314 dB — a 75.87 dB spread between the two
+        groups' reception of the same band."""
+        from uacpy.core.acoustics.weighting import auditory_weighting
+        lf = auditory_weighting(30.0, "LF")
+        vhf = auditory_weighting(30.0, "VHF")
+        assert lf == pytest.approx(-16.4448, abs=1e-3)
+        assert vhf == pytest.approx(-92.3142, abs=1e-3)
+        assert lf - vhf == pytest.approx(75.8694, abs=1e-2)
+
+    def test_unknown_group_raises(self):
+        from uacpy.core.acoustics.weighting import auditory_weighting
+        with pytest.raises(ConfigurationError,
+                           match=r"'MF' is an NMFS \(2018\) group name"):
+            auditory_weighting(1000.0, "MF")
+
+    @pytest.mark.parametrize('nmfs, southall', [('MF', 'HF'), ('PW', 'PCW'),
+                                                ('OW', 'OCW')])
+    def test_an_nmfs_group_name_is_refused_naming_its_southall_twin(
+            self, nmfs, southall):
+        from uacpy.core.acoustics.weighting import auditory_weighting
+        with pytest.raises(ConfigurationError,
+                           match=rf"NMFS {nmfs} is '{southall}'.*NMFS 'HF' "
+                                 rf"is Southall 'VHF'"):
+            auditory_weighting(1000.0, nmfs)
+
+    def test_the_module_states_the_nmfs_label_mapping(self):
+        from uacpy.core.acoustics import weighting
+        doc = ' '.join(weighting.__doc__.split())
+        assert ('NMFS LF / MF / HF / PW / OW are Southall LF / HF / VHF / '
+                'PCW / OCW') in doc
+
+    def test_auditory_weighting_nan_frequency_raises(self):
+        from uacpy.core.acoustics.weighting import auditory_weighting
+        with pytest.raises(ConfigurationError, match="must be > 0 Hz and finite"):
+            auditory_weighting(np.array([np.nan, 1000.0]), 'LF')
+
+
+def _hann_tone(frequency, seconds, fs):
+    """A tone under a Hann window: its energy sits within ±2/seconds Hz of
+    ``frequency``, so a weighting reads it at that frequency."""
+    t = np.arange(int(seconds * fs)) / fs
+    return np.sin(2 * np.pi * frequency * t) * np.hanning(t.size)
+
+
+def _click(n, fs=96000.0):
+    """A 1 ms, 3 kHz Hann click centred in an ``n``-sample record."""
+    pulse = np.hanning(97) * np.sin(2 * np.pi * 3000.0 * np.arange(97) / fs)
+    x = np.zeros(n)
+    x[(n - 97) // 2:(n - 97) // 2 + 97] = 10.0 * pulse
+    return x
+
+
+class TestAFrequencyWeightingScalesEachFrequencysEnergy:
+    """weighting= is one gain W(f) per frequency, applied to the pressure as
+    a zero-phase filter before the energy is integrated (Southall et al.
+    2019: the integral of the squared frequency-weighted pressure)."""
+
+    FS = 48000.0
+
+    @pytest.mark.parametrize('group', ['LF', 'VHF', 'OCW'])
+    @pytest.mark.parametrize('frequency', [20.0, 500.0, 5000.0])
+    def test_a_tone_loses_exactly_its_weighting(self, group, frequency):
+        # VHF at 20 Hz is -105 dB down: a truncated-FIR weighting leaked
+        # +24 dB here, the exact spectral one does not.
+        from uacpy.core.acoustics import sound_exposure_level
+        from uacpy.core.acoustics.weighting import auditory_weighting
+        x = _hann_tone(frequency, 4.0, self.FS)
+        loss = (sound_exposure_level(x, self.FS, weighting=group)
+                - sound_exposure_level(x, self.FS))
+        assert loss == pytest.approx(auditory_weighting(frequency, group),
+                                     abs=2e-3)
+
+    def test_a_flat_weighting_changes_nothing(self):
+        from uacpy.core.acoustics import sound_exposure_level
+        x = _hann_tone(1000.0, 1.0, self.FS)
+        flat = sound_exposure_level(x, self.FS,
+                                    weighting=lambda f: np.zeros_like(f))
+        assert flat == pytest.approx(sound_exposure_level(x, self.FS),
+                                     abs=1e-9)
+
+    def test_a_group_a_function_and_a_table_are_one_weighting(self):
+        from uacpy.core.acoustics import sound_exposure_level
+        from uacpy.core.acoustics.weighting import auditory_weighting
+        x = _hann_tone(300.0, 1.0, self.FS) + _hann_tone(9000.0, 1.0, self.FS)
+        named = sound_exposure_level(x, self.FS, weighting='HF')
+        function = sound_exposure_level(
+            x, self.FS, weighting=lambda f: auditory_weighting(f, 'HF'))
+        grid = np.geomspace(1.0, 24000.0, 4000)
+        table = sound_exposure_level(
+            x, self.FS, weighting=(grid, auditory_weighting(grid, 'HF')))
+        assert function == pytest.approx(named, abs=1e-12)
+        assert table == pytest.approx(named, abs=1e-3)
+
+    def test_a_table_is_interpolated_in_log_frequency_and_empty_outside(self):
+        from uacpy.core.acoustics import frequency_weighting
+        w = frequency_weighting([0.0, 50.0, 100.0, np.sqrt(1e5), 1000.0,
+                                 2000.0], ([100.0, 1000.0], [-20.0, 0.0]))
+        np.testing.assert_allclose(w[[2, 3, 4]], [-20.0, -10.0, 0.0],
+                                   atol=1e-12)
+        assert np.all(np.isneginf(w[[0, 1, 5]]))
+
+    def test_dc_carries_no_weight_and_a_function_never_sees_it(self):
+        from uacpy.core.acoustics import frequency_weighting, weighted_pressure
+        seen = []
+
+        def flat(f):
+            seen.append(np.min(f))
+            return np.zeros_like(f)
+
+        for weighting in ('LF', flat, ([1.0, 10.0], [0.0, 0.0])):
+            assert np.isneginf(frequency_weighting(0.0, weighting))
+        weighted_pressure(np.ones(100), self.FS, flat)
+        assert min(seen) > 0.0
+
+    @pytest.mark.parametrize('weighting', ['LF', 'VHF',
+                                           ([2000.0, 4000.0], [0.0, 0.0])])
+    def test_an_events_exposure_does_not_depend_on_its_record_length(
+            self, weighting):
+        # The brick-wall table has a long impulse response: on the record's
+        # own FFT grid a 2 ms record read it 0.12 dB high. Sampling W at
+        # 1 Hz or finer, and counting the spread past the record's ends,
+        # removes the dependence.
+        from uacpy.core.acoustics import sound_exposure_level
+        levels = [sound_exposure_level(_click(n), 96000.0, weighting=weighting)
+                  for n in (97, 192, 1920)]
+        assert max(levels) - min(levels) < 1e-6
+
+    def test_a_long_record_in_blocks_matches_one_piece(self, monkeypatch):
+        from uacpy.core.acoustics import sound_exposure_level, weighted_pressure
+        from uacpy.core.acoustics import weighting
+        rng = np.random.default_rng(1)
+        x = rng.standard_normal(200_000) * 0.01
+        x[:50] += 5.0 * np.hanning(50)
+        x[-60:] += 5.0 * np.hanning(60)
+        whole = sound_exposure_level(x, 8000.0, weighting='LF')
+        whole_p = weighted_pressure(x, 8000.0, 'LF')
+        monkeypatch.setattr(weighting, '_FFT_BINS', 2 ** 15)
+        blocks = list(weighting._weighted_blocks(x[None, :], 8000.0, 'LF',
+                                                 who='t'))
+        assert len(blocks) > 2
+        assert sound_exposure_level(x, 8000.0, weighting='LF') == \
+            pytest.approx(whole, abs=1e-6)
+        np.testing.assert_allclose(weighted_pressure(x, 8000.0, 'LF'),
+                                   whole_p, atol=1e-5 * np.abs(whole_p).max())
+
+    def test_a_memmap_gives_the_arrays_answer(self, tmp_path, monkeypatch):
+        from uacpy.core.acoustics import sound_exposure_level
+        from uacpy.core.acoustics import weighting
+        x = np.random.default_rng(2).standard_normal(100_000)
+        path = tmp_path / 'record.npy'
+        np.save(path, x)
+        monkeypatch.setattr(weighting, '_FFT_BINS', 2 ** 15)
+        assert sound_exposure_level(np.load(path, mmap_mode='r'), 8000.0,
+                                    weighting='HF') == \
+            pytest.approx(sound_exposure_level(x, 8000.0, weighting='HF'),
+                          abs=1e-9)
+
+    def test_the_weighted_pressure_stays_time_aligned(self):
+        from uacpy.core.acoustics import weighted_pressure
+        x = _click(4801)
+        assert np.argmax(np.abs(weighted_pressure(x, 96000.0, 'HF'))) == \
+            pytest.approx(np.argmax(np.abs(x)), abs=2)
+
+    def test_an_analytic_record_is_weighted_as_its_real_part(self):
+        from uacpy.core.acoustics import sound_exposure_level
+        x = _hann_tone(2000.0, 1.0, self.FS)
+        z = x + 1j * np.imag(np.fft.ifft(np.fft.fft(x) * 2 * (np.arange(
+            x.size) < x.size // 2)))
+        assert sound_exposure_level(z, self.FS, weighting='VHF',
+                                    complex_record='analytic') == \
+            pytest.approx(sound_exposure_level(x, self.FS, weighting='VHF'),
+                          abs=1e-9)
+
+    def test_a_baseband_record_is_refused(self):
+        from uacpy.core.acoustics import sound_exposure_level
+        with pytest.raises(ConfigurationError, match='true acoustic frequency'):
+            sound_exposure_level(np.ones(100, complex), self.FS,
+                                 weighting='LF', complex_record='baseband')
+
+    @pytest.mark.parametrize('weighting, match', [
+        ('XX', 'unknown group'),
+        ('MF', 'NMFS'),
+        (([1000.0, 100.0], [0.0, 0.0]), 'strictly increasing'),
+        (([100.0], [0.0]), 'two'),
+        (lambda f: np.full_like(f, np.nan), 'NaN'),
+        (lambda f: np.zeros(3), 'one W\\(f\\)'),
+        (3.0, 'hearing group name'),
+    ])
+    def test_a_malformed_weighting_is_refused(self, weighting, match):
+        from uacpy.core.acoustics import sound_exposure_level
+        with pytest.raises(ConfigurationError, match=match):
+            sound_exposure_level(np.ones(1000), self.FS, weighting=weighting)
+
+    def test_a_nan_sample_is_refused_with_its_place(self):
+        from uacpy.core.acoustics import weighted_pressure
+        x = np.zeros(1000)
+        x[500] = np.nan
+        with pytest.raises(ConfigurationError, match='NaN or inf'):
+            weighted_pressure(x, self.FS, 'LF')
+
+
+class TestTheCumulativeExposureIsTheRunningEnergy:
+    def test_equal_energy_steps_rise_as_the_log_of_their_count(self):
+        from uacpy.core.acoustics import cumulative_sound_exposure_level
+        p = np.sqrt(2) * np.sin(2 * np.pi * 100.0 * np.arange(8000) / 8000)
+        t, sel = cumulative_sound_exposure_level(p, 8000.0, step=0.25)
+        np.testing.assert_allclose(t, [0.25, 0.5, 0.75, 1.0])
+        np.testing.assert_allclose(
+            sel, 120.0 + 10 * np.log10([0.25, 0.5, 0.75, 1.0]), atol=1e-9)
+
+    @pytest.mark.parametrize('weighting', [None, 'VHF'])
+    def test_the_curve_ends_on_the_total(self, weighting):
+        from uacpy.core.acoustics import (cumulative_sound_exposure_level,
+                                          sound_exposure_level)
+        x = _click(96000 * 2 + 17)
+        _, sel = cumulative_sound_exposure_level(x, 96000.0, step=0.3,
+                                                 weighting=weighting)
+        assert sel[-1] == pytest.approx(
+            sound_exposure_level(x, 96000.0, weighting=weighting), abs=1e-9)
+
+    def test_a_partial_last_step_ends_at_the_record_end(self):
+        from uacpy.core.acoustics import cumulative_sound_exposure_level
+        t, _ = cumulative_sound_exposure_level(np.ones(2500), 1000.0,
+                                               step=1.0)
+        np.testing.assert_allclose(t, [1.0, 2.0, 2.5])
+
+    def test_a_reset_restarts_the_sum_each_period(self):
+        from uacpy.core.acoustics import (cumulative_sound_exposure_level,
+                                          sound_exposure_level)
+        fs = 1000.0
+        burst = np.zeros(4000)
+        burst[100:200] = np.hanning(100)
+        x = np.concatenate([burst, burst])
+        single = sound_exposure_level(burst, fs)
+        _, kept = cumulative_sound_exposure_level(x, fs, step=1.0)
+        _, reset = cumulative_sound_exposure_level(x, fs, step=1.0, reset=4.0)
+        assert reset[3] == pytest.approx(single, abs=1e-9)
+        assert reset[7] == pytest.approx(single, abs=1e-9)
+        assert kept[7] == pytest.approx(single + 10 * np.log10(2), abs=1e-9)
+
+    def test_each_period_restarts_from_its_own_first_step(self):
+        """A steady 1 Pa² record carries energy in every step, so the
+        values inside the second period tell its start apart from any other
+        step: 6 s with a 3 s reset is 120, 123.01, 124.77 dB twice."""
+        from uacpy.core.acoustics import cumulative_sound_exposure_level
+        fs = 1000.0
+        p = np.ones(6000)
+        _, sel = cumulative_sound_exposure_level(p, fs, step=1.0, reset=3.0)
+        one = 120.0 + 10.0 * np.log10([1.0, 2.0, 3.0])
+        np.testing.assert_allclose(sel, np.concatenate([one, one]),
+                                   atol=1e-9)
+
+    @pytest.mark.parametrize('reset, ok', [(2.0, True), (1.5, False)])
+    def test_a_reset_is_a_whole_number_of_steps(self, reset, ok):
+        from uacpy.core.acoustics import cumulative_sound_exposure_level
+        call = lambda: cumulative_sound_exposure_level(
+            np.ones(3000), 1000.0, step=1.0, reset=reset)
+        if ok:
+            call()
+        else:
+            with pytest.raises(ConfigurationError, match='whole number'):
+                call()
+
+    def test_the_curve_replaces_the_time_axis(self):
+        from uacpy.core.acoustics import (cumulative_sound_exposure_level,
+                                          sound_exposure_level)
+        x = np.random.default_rng(3).standard_normal((3000, 2)) * [1.0, 2.0]
+        _, sel = cumulative_sound_exposure_level(x, 1000.0, axis=0)
+        assert sel.shape == (3, 2)
+        np.testing.assert_allclose(sel[-1],
+                                   sound_exposure_level(x, 1000.0, axis=0),
+                                   atol=1e-9)
+
+    def test_a_step_shorter_than_a_sample_is_refused(self):
+        from uacpy.core.acoustics import cumulative_sound_exposure_level
+        with pytest.raises(ConfigurationError, match='shorter than one sample'):
+            cumulative_sound_exposure_level(np.ones(10), 1000.0, step=1e-4)
+
+
+class TestAWeightingThatDoesNotFitTheRecordIsReported:
+    """Two weighting slips change a level by tens of dB without failing: a
+    table typed in kHz (it then spans a few hertz and carries no weight
+    above them) and an in-air hearing group on an underwater level
+    (Southall et al. 2019 state PCA/OCA thresholds re (20 µPa)²·s, the
+    water ones re 1 µPa²·s: 26 dB apart). Each warns; the fitting form is
+    quiet."""
+
+    FS = 8000.0
+
+    def _two_tones(self, outside_share):
+        # 1 kHz inside a 100-2000 Hz table, 3 kHz outside it, whole cycles.
+        t = np.arange(int(self.FS)) / self.FS
+        return (np.sqrt(1.0 - outside_share) * np.sin(2 * np.pi * 1000 * t)
+                + np.sqrt(outside_share) * np.sin(2 * np.pi * 3000 * t))
+
+    @staticmethod
+    def _table_warnings(call):
+        with recorded_warnings() as record:
+            call()
+        return [str(w.message) for w in record
+                if 'weighting table spans' in str(w.message)]
+
+    @pytest.mark.parametrize('share, warns', [(0.45, False), (0.55, True)])
+    def test_a_table_leaving_most_of_the_energy_out_warns(self, share,
+                                                          warns):
+        from uacpy.core.acoustics import sound_exposure_level
+        x = self._two_tones(share)
+        text = self._table_warnings(lambda: sound_exposure_level(
+            x, self.FS, weighting=([100.0, 2000.0], [0.0, 0.0])))
+        assert bool(text) is warns, text
+        if warns:
+            assert 'only 45' in text[0] and 'kHz' not in text[0]
+
+    @pytest.mark.parametrize('entry', ['record', 'cumulative', 'map'])
+    def test_a_table_in_khz_is_named(self, entry):
+        from uacpy.core.acoustics import (cumulative_sound_exposure_level,
+                                          sound_exposure_level)
+        from uacpy.core.results import Field
+        table = ([0.1, 2.0], [0.0, 0.0])
+        x = self._two_tones(0.0)
+        f = np.arange(500.0, 1500.0, 10.0)
+        H = Field(data=np.ones((1, 1, f.size), dtype=complex),
+                  coords={'depth': [10.0], 'range': [100.0], 'frequency': f},
+                  frequencies=f)
+        burst = np.hanning(64) * np.sin(2 * np.pi * 1000.0
+                                        * np.arange(64) / self.FS)
+        call = {
+            'record': lambda: sound_exposure_level(x, self.FS,
+                                                   weighting=table),
+            'cumulative': lambda: cumulative_sound_exposure_level(
+                x, self.FS, weighting=table),
+            'map': lambda: H.sound_exposure_level(
+                source_waveform=burst, sample_rate=self.FS,
+                weighting=table),
+        }[entry]
+        text = self._table_warnings(call)
+        assert len(text) == 1 and 'multiply them by 1000' in text[0], text
+
+    @pytest.mark.parametrize('group, ref, warns', [
+        ('PCA', 1e-6, True), ('oca', 1e-6, True), ('PCA', 20e-6, False),
+        ('PCW', 1e-6, False)])
+    @pytest.mark.parametrize('entry', ['record', 'cumulative', 'map'])
+    def test_an_in_air_group_on_an_underwater_level_warns(self, entry, group,
+                                                          ref, warns):
+        from uacpy.core.acoustics import (cumulative_sound_exposure_level,
+                                          sound_exposure_level)
+        from uacpy.core.results import Field
+        x = self._two_tones(0.0)
+        f = np.arange(500.0, 1500.0, 10.0)
+        H = Field(data=np.ones((1, 1, f.size), dtype=complex),
+                  coords={'depth': [10.0], 'range': [100.0], 'frequency': f},
+                  frequencies=f)
+        burst = np.hanning(64) * np.sin(2 * np.pi * 1000.0
+                                        * np.arange(64) / self.FS)
+        call = {
+            'record': lambda: sound_exposure_level(x, self.FS, ref,
+                                                   weighting=group),
+            'cumulative': lambda: cumulative_sound_exposure_level(
+                x, self.FS, ref, weighting=group),
+            'map': lambda: H.sound_exposure_level(
+                source_waveform=burst, sample_rate=self.FS, ref=ref,
+                weighting=group),
+        }[entry]
+        with recorded_warnings() as record:
+            call()
+        text = [str(w.message) for w in record
+                if 'in-air hearing group' in str(w.message)]
+        assert bool(text) is warns, text
+        if warns:
+            assert '26 dB' in text[0] and 'ref=20e-6' in text[0]
+
+
+class TestEveryLevelRefusesARecordWithAMissingSample:
+    """spl, peak_level, sound_exposure_level (weighted or not) and the
+    cumulative curve refuse a record holding NaN or inf, one refusal for all
+    of them, naming where: the sample along the time axis and, in a block of
+    records, the channel. A finite record of the same shape passes."""
+
+    NAMES = ['spl', 'peak_level', 'sel', 'weighted sel', 'cumulative',
+             'weighted cumulative']
+
+    @staticmethod
+    def _call(name, x):
+        from uacpy.core.acoustics import (cumulative_sound_exposure_level,
+                                          peak_level, sound_exposure_level,
+                                          spl)
+        return {
+            'spl': lambda: spl(x, axis=-1),
+            'peak_level': lambda: peak_level(x, axis=-1),
+            'sel': lambda: sound_exposure_level(x, 1000.0),
+            'weighted sel': lambda: sound_exposure_level(
+                x, 1000.0, weighting='LF'),
+            'cumulative': lambda: cumulative_sound_exposure_level(
+                x, 1000.0, step=0.5),
+            'weighted cumulative': lambda: cumulative_sound_exposure_level(
+                x, 1000.0, step=0.5, weighting='LF'),
+        }[name]()
+
+    @pytest.mark.parametrize('bad', [np.nan, np.inf, -np.inf])
+    @pytest.mark.parametrize('name', NAMES)
+    def test_one_record_names_the_sample(self, name, bad):
+        x = np.ones(3000)
+        x[1234] = bad
+        with pytest.raises(ConfigurationError,
+                           match=r'NaN or inf, the first at sample 1234;'):
+            self._call(name, x)
+
+    @pytest.mark.parametrize('name', NAMES)
+    def test_a_block_names_the_earliest_sample_and_its_channel(self, name):
+        x = np.ones((3, 3000))
+        x[2, 700] = np.nan
+        x[1, 900] = np.inf
+        with pytest.raises(ConfigurationError,
+                           match=r'sample 700 of channel 2 '):
+            self._call(name, x)
+
+    @pytest.mark.parametrize('name', NAMES)
+    def test_a_finite_record_passes(self, name):
+        levels = self._call(name, np.ones((3, 3000)))
+        levels = levels[1] if isinstance(levels, tuple) else levels
+        assert np.all(np.isfinite(levels))
+
+
+class TestATrackSumsOneEventsExposureAtEachEventsDistance:
+    R = np.geomspace(1.0, 20e3, 4000)
+
+    def spherical(self):
+        return 200.0 - 20.0 * np.log10(self.R)
+
+    @pytest.mark.parametrize('duration', [0.5, 1.0, 10.0])
+    def test_a_level_held_per_event_adds_ten_log_its_duration(self, duration):
+        """A continuous source: each event's SEL is the level held over the
+        interval plus 10·log10(Δt / 1 s) (Ainslie Eq. 3.155)."""
+        from uacpy.core.acoustics import track_exposure
+        x = np.arange(-2e3, 2e3 + 1, 10.0)
+        held = track_exposure(self.spherical(), self.R, x,
+                              closest_approach=100.0, event_duration=duration)
+        once = track_exposure(self.spherical(), self.R, x,
+                              closest_approach=100.0)
+        assert held - once == pytest.approx(10 * np.log10(duration),
+                                            abs=1e-9)
+
+    @pytest.mark.parametrize('duration', [0.0, -1.0, np.nan])
+    def test_an_event_duration_must_be_a_positive_time(self, duration):
+        from uacpy.core.acoustics import track_exposure
+        with pytest.raises(ConfigurationError, match='event_duration'):
+            track_exposure(self.spherical(), self.R, [0.0],
+                           closest_approach=100.0, event_duration=duration)
+
+    def test_a_straight_track_meets_the_closed_form(self):
+        # Σ 10^(S/10)/(d² + x²) over events Δx apart → (2/(Δx d))·atan(L/d).
+        from uacpy.core.acoustics import track_exposure
+        x = np.arange(-10e3, 10e3 + 1, 10.0)
+        got = track_exposure(self.spherical(), self.R, x,
+                             closest_approach=[100.0, 1000.0])
+        want = [200 + 10 * np.log10(2 * np.arctan(1e4 / d) / (10.0 * d))
+                for d in (100.0, 1000.0)]
+        np.testing.assert_allclose(got, want, atol=2e-3)
+
+    def test_doubling_the_shot_interval_costs_three_decibels(self):
+        # Breitzke and Bohlen (2010), in Etter sect. 6.16.3: "A doubling of
+        # the shot interval diminished the cumulative SELs by 3 dB".
+        from uacpy.core.acoustics import track_exposure
+        x = np.arange(-10e3 + 5.0, 10e3, 10.0)
+        every, every_other = (track_exposure(self.spherical(), self.R, xs,
+                                             closest_approach=300.0)
+                              for xs in (x, x[::2]))
+        assert every - every_other == pytest.approx(10 * np.log10(2),
+                                                    abs=0.01)
+
+    def test_many_shots_fall_off_cylindrically(self):
+        # Breitzke and Bohlen (2010), in Etter sect. 6.16.3: radii grow
+        # "according to a cylindrical 10 log10 r law in case of multiple
+        # shots". Close to a long line, doubling the distance costs 3 dB, not
+        # the 6 dB of one shot.
+        from uacpy.core.acoustics import track_exposure
+        x = np.arange(-10e3, 10e3 + 1, 5.0)
+        near, far = track_exposure(self.spherical(), self.R, x,
+                                   closest_approach=[100.0, 200.0])
+        energy = lambda d: np.sum(1.0 / (d ** 2 + x ** 2))
+        assert near - far == pytest.approx(
+            10 * np.log10(energy(100.0) / energy(200.0)), abs=1e-3)
+        # A 20 km line is long enough that the end correction,
+        # atan(L/d), moves the 10*log10(2) by under 0.05 dB.
+        assert near - far == pytest.approx(10 * np.log10(2), abs=0.05)
+
+    def test_n_events_at_one_place_add_ten_log_n(self):
+        from uacpy.core.acoustics import track_exposure
+        one = track_exposure(self.spherical(), self.R, [0.0],
+                             closest_approach=250.0)
+        five = track_exposure(self.spherical(), self.R, np.zeros(5),
+                              closest_approach=250.0)
+        assert five - one == pytest.approx(10 * np.log10(5), abs=1e-12)
+
+    @pytest.mark.parametrize('position, ok', [(np.sqrt(20e3 ** 2 - 1e4), True),
+                                              (20e3, False)])
+    def test_an_event_beyond_the_map_is_refused(self, position, ok):
+        from uacpy.core.acoustics import track_exposure
+        call = lambda: track_exposure(self.spherical(), self.R, [position],
+                                      closest_approach=100.0)
+        if ok:
+            assert np.isfinite(call())
+        else:
+            with pytest.raises(ConfigurationError, match='past the'):
+                call()
+
+    def test_an_event_inside_the_first_range_is_refused(self):
+        from uacpy.core.acoustics import track_exposure
+        with pytest.raises(ConfigurationError, match='closer than'):
+            track_exposure(self.spherical(), self.R, [0.0],
+                           closest_approach=0.5)
+
+    def test_abeam_of_the_end_hears_half_the_line(self):
+        # The receiver abeam of an end has one side of the line, at the
+        # same distances as the middle receiver's two sides; the shot abeam
+        # counts once for both, so the gap is just under 10*log10(2):
+        # 2.87 dB for shots 10 m apart, 100 m off the line.
+        from uacpy.core.acoustics import track_exposure
+        x = np.arange(-9e3, 9e3 + 1, 10.0)
+        middle, end = track_exposure(self.spherical(), self.R, x,
+                                     closest_approach=100.0,
+                                     along=[0.0, 9e3])
+        energy = lambda a: np.sum(1.0 / (100.0 ** 2 + (x - a) ** 2))
+        assert middle - end == pytest.approx(
+            10 * np.log10(energy(0.0) / energy(9e3)), abs=1e-3)
+        assert 2.8 < middle - end < 10 * np.log10(2)
+
+    def test_a_scalar_along_of_zero_is_the_default(self):
+        from uacpy.core.acoustics import track_exposure
+        x = np.arange(-1e3, 1e3 + 1, 50.0)
+        assert track_exposure(self.spherical(), self.R, x,
+                              closest_approach=300.0, along=0.0) == \
+            track_exposure(self.spherical(), self.R, x,
+                           closest_approach=300.0)
+
+    def test_the_plan_view_is_symmetric_about_the_lines_middle(self):
+        from uacpy.core.acoustics import track_exposure
+        x = np.arange(-1e3, 1e3 + 1, 50.0)
+        plan = track_exposure(self.spherical(), self.R, x,
+                              closest_approach=[100.0, 400.0],
+                              along=[-1500.0, -200.0, 200.0, 1500.0])
+        assert plan.shape == (4, 2)
+        np.testing.assert_allclose(plan, plan[::-1], atol=1e-9)
+
+    def test_the_range_axis_becomes_the_closest_approach_axis(self):
+        from uacpy.core.acoustics import track_exposure
+        sel = np.stack([self.spherical(), self.spherical() - 3.0])  # 2 depths
+        out = track_exposure(sel, self.R, [-50.0, 50.0],
+                             closest_approach=[100.0, 200.0, 300.0], axis=1)
+        assert out.shape == (2, 3)
+        np.testing.assert_allclose(out[0] - out[1], 3.0, atol=1e-9)
+        scalar = track_exposure(sel, self.R, [0.0], closest_approach=100.0)
+        assert scalar.shape == (2,)
+        plan = track_exposure(sel, self.R, [0.0], closest_approach=[100.0],
+                              along=[0.0, 50.0, 90.0], axis=1)
+        assert plan.shape == (2, 3, 1)

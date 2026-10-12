@@ -17,7 +17,8 @@ from uacpy.core._repr import axis, build, extent
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
 from uacpy.core._validate import (
-    reject_complex, require_non_negative, require_strictly_increasing,
+    real_scalar_or_none, require_non_negative, require_real_array,
+    require_strictly_increasing,
 )
 from uacpy.core._carrier import DeepCopyMixin, RevalidateOnAssignMixin
 from uacpy.core._export import CarrierExport
@@ -26,31 +27,39 @@ from uacpy.core._plotting import plotter
 INTERP_METHODS = ('linear', 'nearest', 'cubic')
 
 
-def _as_finite_scalar_label(value, name):
-    """Coerce a slice label to ``float``, raising ``ConfigurationError`` for
-    array-valued and non-finite labels — the shared ``at``/``eval`` label
-    contract ``Field.at`` included.
+def finite_scalar_label(value, name, *, who, several="", coords=None):
+    """``value`` as one finite ``float`` label, or a ``ConfigurationError``
+    naming ``who``, the call: the ``at``/``eval`` label rule every carrier
+    and result shares. A label is one real number (the package's one rule
+    for a scalar, :func:`~uacpy.core._validate.real_scalar_or_none`): a
+    list, ``None``, a bool (bare or a 0-d array), a complex value or text
+    is not one. A NaN or infinite label is not finite: every distance to
+    the axis is NaN or inf, so a nearest lookup ranks nothing and would fall
+    to index 0 — a real sample, which is why it would read as a successful
+    slice — and an interpolated slice carries the NaN into the result.
+    ``several`` ends the remedy with where several labels go; ``coords``,
+    the axis's values, puts its span in the remedy for a non-finite label.
     """
-    try:
-        v = float(value)
-    except (TypeError, ValueError) as exc:
+    number = real_scalar_or_none(value)
+    if number is None:
         raise ConfigurationError(
-            f"{name}={value!r} is not a scalar label: at()/eval() collapse "
-            f"the {name!r} axis at ONE coordinate. Pass a single number per "
-            f"call, or use isel() for positional indexing."
-        ) from exc
-    if not np.isfinite(v):
+            f"{who}: {name}={value!r} is not one value; it selects at one "
+            f"{name} per call, a real number.",
+            remediation=f"Call {who} once per value{several}.")
+    if not np.isfinite(number):
+        values = (np.empty(0) if coords is None
+                  else np.asarray(coords, dtype=float).ravel())
+        span = (f" (the axis spans [{np.min(values):g}, "
+                f"{np.max(values):g}])" if values.size else "")
         raise ConfigurationError(
-            f"{name}={value!r} is not a finite label. Every "
-            f"|{name} - {value!r}| is NaN or inf, so a nearest lookup ranks "
-            f"nothing and falls to index 0 — a real sample, which is why it "
-            f"would read as a successful slice — and an interpolated slice "
-            f"propagates the NaN into the result."
-        )
-    return v
+            f"{who}: {name}={value!r} is not a finite label; every distance "
+            f"to the {name!r} axis is NaN or inf, so no sample is nearest "
+            f"and no value lies between two.",
+            remediation=f"Pass a finite {name}{span}.")
+    return number
 
 
-def _reject_label_absorbing_axis(axis, label, name):
+def _reject_label_absorbing_axis(axis, label, name, *, who):
     """Refuse a finite label so far outside ``axis`` that argmin cannot rank.
 
     Outside a spread axis the distances ``|axis - label|`` are strictly
@@ -58,16 +67,20 @@ def _reject_label_absorbing_axis(axis, label, name):
     exponent (every ``|z - 1e300|`` rounds to 1e300) and argmin falls to
     index 0 — a real sample, which is why the slice would read as successful.
     Raises the same ``ConfigurationError`` ``Field.at`` raises on its own
-    argmin path; in-span labels and genuine midpoint ties pass through.
+    argmin path, naming ``who``; in-span labels and genuine midpoint ties
+    pass through.
     """
     span_low, span_high = float(np.min(axis)), float(np.max(axis))
     if (span_high > span_low and not span_low <= label <= span_high
             and float(np.ptp(np.abs(axis - label))) == 0.0):
         raise ConfigurationError(
-            f"{name}={label:g} is so far outside the {name!r} axis "
+            f"{who}: {name}={label:g} is so far outside the {name!r} axis "
             f"([{span_low:g}, {span_high:g}]) that every sample rounds to "
             f"the same distance from it; no sample is nearer than another "
-            f"and index 0 would be returned.")
+            f"and index 0 would be returned.",
+            remediation=f"Pass a {name} near the axis span [{span_low:g}, "
+                        f"{span_high:g}]; past either end the edge sample is "
+                        f"the nearest.")
 
 
 def coarse_axes(axes, limit: float, *, inclusive: bool = False):
@@ -83,28 +96,31 @@ def coarse_axes(axes, limit: float, *, inclusive: bool = False):
     return out
 
 
-def nearest_index_on_axis(axis_values, value, name='range'):
+def nearest_index_on_axis(axis_values, value, name='range', *, who,
+                          several=""):
     """Index of the sample in ``axis_values`` nearest to the label ``value``.
 
     The nearest rule the non-blendable carriers select with (``Surface``,
     ``Bottom``): they cannot interpolate between entries, so ``at`` and its
     read-only counterparts all land on a stored index. The label goes through
-    :func:`_as_finite_scalar_label` first, and *before* the single-entry
+    :func:`finite_scalar_label` first, and *before* the single-entry
     shortcut — a carrier with no axis still refuses a NaN/inf or array-valued
     label rather than answering 0 to a query it never examined. A finite
     label large enough to absorb the whole axis is refused by
-    :func:`_reject_label_absorbing_axis`.
+    :func:`_reject_label_absorbing_axis`. Refusals name ``who``, the call,
+    and end with ``several`` (:func:`finite_scalar_label`).
     """
-    label = _as_finite_scalar_label(value, name)
+    label = finite_scalar_label(value, name, who=who, several=several,
+                                    coords=axis_values)
     if axis_values is None:
         return 0
     axis = np.asarray(axis_values, dtype=float)
-    _reject_label_absorbing_axis(axis, label, name)
+    _reject_label_absorbing_axis(axis, label, name, who=who)
     return int(np.argmin(np.abs(axis - label)))
 
 
 def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
-                  name='axis'):
+                  name='axis', who, several=""):
     """Collapse ``arr`` along ``axis`` at coordinate ``value``.
 
     Returns ``(reduced_array, coord)`` where ``reduced_array`` has ``axis``
@@ -115,22 +131,24 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
     large enough to absorb the whole axis
     (:func:`_reject_label_absorbing_axis`). ``axis_values`` is the 1-D
     coordinate vector, ascending or descending; a non-monotonic axis raises
-    ``ConfigurationError`` for the interpolating methods, and ``name`` labels
-    the axis in these errors. Values outside the axis ends use constant
-    extrapolation.
+    ``ConfigurationError`` for the interpolating methods, ``name`` labels
+    the axis in these errors and ``who``, the call, opens them (``several``
+    as on :func:`finite_scalar_label`). Values outside the axis ends use
+    constant extrapolation.
     """
     if method not in INTERP_METHODS:
         raise ConfigurationError(
-            f"interpolation method must be one of {INTERP_METHODS}; "
+            f"{who}: interpolation method must be one of {INTERP_METHODS}; "
             f"got {method!r}."
         )
-    label = _as_finite_scalar_label(value, name)
+    label = finite_scalar_label(value, name, who=who, several=several,
+                                    coords=axis_values)
     x = np.asarray(axis_values, dtype=float)
     n = x.size
     if n <= 1:
         return np.take(arr, 0, axis=axis), float(x[0])
     if method == 'nearest':
-        _reject_label_absorbing_axis(x, label, name)
+        _reject_label_absorbing_axis(x, label, name, who=who)
         i = int(np.argmin(np.abs(x - label)))
         return np.take(arr, i, axis=axis), float(x[i])
 
@@ -141,7 +159,7 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
         arr = np.flip(arr, axis=axis)
     if not np.all(np.diff(x) >= 0):
         raise ConfigurationError(
-            f"collapse_axis: the {name!r} coordinate is not monotonic, so an "
+            f"{who}: the {name!r} coordinate is not monotonic, so an "
             f"interpolated slice would bracket the query by binary search "
             f"over an unsorted axis. Sort the axis (with its data) first, or "
             f"use method='nearest'."
@@ -159,7 +177,8 @@ def collapse_axis(arr, axis_values, value, method='linear', *, axis=0,
     # cubic
     if n < 4:
         raise ConfigurationError(
-            f"method='cubic' needs at least 4 samples on the axis; got {n}. "
+            f"{who}: method='cubic' needs at least 4 samples on the axis; "
+            f"got {n}. "
             f"Use method='linear' (or 'nearest')."
         )
     from scipy.interpolate import interp1d
@@ -221,13 +240,10 @@ class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
     def _init_range_profile(self) -> None:
         cls = type(self).__name__
-        # Ahead of the float64 casts below, which discard an imaginary part —
-        # see _reject_complex for the two ways they do it.
-        reject_complex(self.ranges, f"{cls} ranges")
-        reject_complex(self._values, f"{cls} {self._VALUE_FIELD}")
-        self.ranges = np.array(self.ranges, dtype=float).reshape(-1)
-        setattr(self, self._VALUE_FIELD,
-                np.array(self._values, dtype=float).reshape(-1))
+        self.ranges = require_real_array(
+            self.ranges, f"{cls} ranges", hint="metres").reshape(-1)
+        setattr(self, self._VALUE_FIELD, require_real_array(
+            self._values, f"{cls} {self._VALUE_FIELD}").reshape(-1))
         if self.ranges.size != self._values.size:
             raise ConfigurationError(
                 f"{cls}: ranges ({self.ranges.size}) and {self._VALUE_FIELD} "
@@ -304,6 +320,9 @@ class _RangeProfile(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     def _query(self, range, method):
         return _query_profile(self.ranges, self._values, range, method)
 
+    #: The plotter :func:`uacpy.plot.plot_carrier` draws this profile with.
+    _plotter = 'plot_range_profile'
+
     def plot(self, ax=None, *, title=None, figsize=(10, 4), **kwargs):
         """Plot the profile against range.
 
@@ -331,7 +350,7 @@ def _query_profile(ranges, values, query, method='linear'):
     x = np.asarray(ranges, dtype=float)
     y = np.asarray(values, dtype=float)
     rq = np.asarray(query, dtype=float)
-    # The array counterpart of ``_as_finite_scalar_label``: this profile query
+    # The array counterpart of ``finite_scalar_label``: this profile query
     # takes a whole vector of ranges (models/base.py hands it the receiver
     # range axis), so the finiteness check is element-wise rather than the
     # scalar helper the collapsing selectors use.

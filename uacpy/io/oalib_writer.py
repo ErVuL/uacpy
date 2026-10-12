@@ -57,7 +57,7 @@ import warnings
 
 import numpy as np
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TextIO, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, TextIO, Tuple, Union
 
 from uacpy.core.absorption import (
     BAND_ABSORPTION_CHECK_DEPTHS, BAND_ABSORPTION_WARN_DB_PER_KM,
@@ -275,19 +275,36 @@ def at_env_media(env):
     return media
 
 
+#: The ``interp_ssp`` names a deck read through the shared AT ``EvaluateSSP``
+#: takes (KRAKEN, KRAKENC, SCOOTER, SPARC, BOUNCE): every name of
+#: :data:`~uacpy.io.at_codes.SSP_INTERP_CODES` but Bellhop's ``'quad'``.
+EVALUATE_SSP_INTERPS = tuple(name for name in SSP_INTERP_CODES
+                             if name != 'quad')
+
+
 def reject_unsupported_ssp_interp(model: str, interp_ssp) -> None:
-    """Reject an SSP interpolation the shared AT ``EvaluateSSP`` cannot read.
+    """Reject an SSP interpolation the shared AT ``EvaluateSSP`` cannot read,
+    naming the values ``model`` takes (:data:`EVALUATE_SSP_INTERPS`).
 
     ``misc/sspMod.f90:61-89`` accepts codes A (analytic), N (N^2-linear),
     C (C-linear), P (PCHIP) and S (spline); anything else falls to
     ``CASE DEFAULT`` and stops with ``ERROUT('EvaluateSSP', 'Unknown profile
     option')``. ``'Q'`` is Bellhop's external 2-D ``.ssp`` scheme, so every
     model that reads its deck through ``EvaluateSSP`` has to refuse it here —
-    otherwise it surfaces as a bare Fortran fatal with no diagnostic.
+    otherwise it surfaces as a bare Fortran fatal with no diagnostic. A name
+    uacpy does not know is refused with this model's list; ``'analytic'``
+    reaches :func:`resolve_ssp_topopt`, which says why it is refused.
     """
     if interp_ssp is None:
         return
-    if str(interp_ssp).lower() in ('q', 'quad', 'quadratic'):
+    key = str(interp_ssp).lower()
+    if key not in EVALUATE_SSP_INTERPS + ('analytic', 'q', 'quad',
+                                          'quadratic'):
+        raise ConfigurationError(
+            f"{model}: interp_ssp={interp_ssp!r} not recognised; {model} "
+            f"takes {list(EVALUATE_SSP_INTERPS)}, or None for 'linear'.",
+            remediation=f"Pass one of {list(EVALUATE_SSP_INTERPS)}.")
+    if key in ('q', 'quad', 'quadratic'):
         # A model-capability refusal, not a bad argument: 'quad' is a real
         # uacpy interpolation that Bellhop honours, so the caller's recourse
         # is another interpolation or another model — the choice
@@ -296,10 +313,35 @@ def reject_unsupported_ssp_interp(model: str, interp_ssp) -> None:
             model,
             "the 'quad' SSP interpolation — it is Bellhop-only, the "
             "external 2-D .ssp scheme the shared EvaluateSSP has no case for",
-            alternatives=["'linear' (C-linear)", "'n2linear'", "'pchip'",
-                          "'spline'"],
+            alternatives=[repr(name) for name in EVALUATE_SSP_INTERPS],
             alternatives_label='SSP interpolations',
         )
+
+
+def _single_profile_ssp_topopt(who: str, env: Environment, interp_ssp) -> str:
+    """``TopOpt(1)`` of a deck that holds one sound-speed profile (KRAKEN,
+    KRAKENC, SCOOTER, SPARC, BOUNCE, all read through
+    ``misc/ReadEnvironmentMod.f90``).
+
+    A range-dependent ``env.ssp`` is refused: the deck has room for one
+    profile, so the others would be dropped. ``interp_ssp=None`` is
+    ``'linear'`` here: the auto ``'quad'`` of :func:`resolve_ssp_interp` is
+    Bellhop's external ``.ssp`` file, which ``ReadTopOpt`` has no case for
+    (``misc/ReadEnvironmentMod.f90:171-184``), and an explicit ``'quad'`` is
+    refused by :func:`reject_unsupported_ssp_interp`.
+    """
+    if env.ssp.is_range_dependent:
+        raise ConfigurationError(
+            f"{who}: env.ssp is range-dependent ({env.ssp.n_ranges} "
+            f"profiles), and this deck holds one sound-speed profile; every "
+            f"profile past range 0 would be dropped.",
+            remediation="Collapse it first (env.ssp = "
+                        "env.ssp.collapse_range('r0'), 'mean' or 'median'), "
+                        "or run the model, which collapses it (or, for "
+                        "Kraken, writes one profile per range segment).")
+    key = 'linear' if interp_ssp is None else interp_ssp
+    reject_unsupported_ssp_interp(who, key)
+    return resolve_ssp_topopt(env, key)
 
 
 #: Spacing (m) of the SSP node pair written across each edge of a
@@ -342,7 +384,7 @@ def reject_biological_edges_under_neighbour_interp(
     """Refuse a Biological layer edge inside the water column when the
     model's ``interp_ssp`` resolves to a PCHIP or spline profile.
 
-    The edge needs its own node pair (:func:`biological_edge_nodes`), which
+    The edge needs its own node pair (:func:`_biological_edge_nodes`), which
     only a piecewise-linear interpolation takes without changing the profile
     or ringing on the ``Im c`` step (see :data:`_NEIGHBOUR_INTERP_CODES`).
     ``interp_ssp`` is resolved (:func:`resolve_ssp_topopt`) only when there
@@ -367,7 +409,7 @@ def reject_biological_edges_under_neighbour_interp(
                     "the node pairs exactly.")
 
 
-def biological_edge_nodes(depths, sound_speed, absorption,
+def _biological_edge_nodes(depths, sound_speed, absorption,
                           ssp_code: str, *, who: str):
     """``depths`` and ``sound_speed`` with a node pair across every
     Biological layer edge strictly inside the profile.
@@ -631,8 +673,11 @@ def resolve_ssp_interp(env: Environment, model_interp) -> str:
     """Return the user-facing ``interp_ssp`` value after auto-resolution.
 
     ``None`` means *auto*: pick ``'quad'`` when the env has a
-    range-dependent SSP (matching Bellhop's ``.ssp`` quad-file path),
-    otherwise ``'linear'``. Explicit values pass through unchanged.
+    range-dependent SSP (matching Bellhop's ``.ssp`` quad-file path: "The
+    range-dependent SSPFIL is read if you select 'Q'", doc/bellhop.htm),
+    otherwise ``'linear'`` — AT's ``'C'``, the manual's choice when unsure
+    ("If your not sure which option to take, I'd suggest you use 'C'.",
+    doc/EnvironmentalFile.htm). Explicit values pass through unchanged.
     """
     if model_interp is None:
         return 'quad' if env.ssp.is_range_dependent else 'linear'
@@ -662,9 +707,12 @@ def resolve_ssp_topopt(env: Environment, model_interp) -> str:
             "interpolation of 'linear', 'n2linear', 'pchip' or 'spline'."
         )
     if key not in _AT_INTERP_TO_CODE:
+        # The decks read through EvaluateSSP refuse an unknown name first,
+        # with their own list (reject_unsupported_ssp_interp); this list is
+        # Bellhop's, the one deck that also takes 'quad'.
         raise ConfigurationError(
             f"interp_ssp={model_interp!r} not recognised. Valid: "
-            f"{sorted(set(_AT_INTERP_TO_CODE))} (or None for auto)"
+            f"{list(_AT_INTERP_TO_CODE)} (or None for auto)"
         )
     # Checked after the model's knob so an isovelocity env cannot swallow an
     # invalid ``interp_ssp``.
@@ -1214,7 +1262,10 @@ def write_phase_speed_and_rmax(
     """Write the cLow/cHigh phase-speed line and the RMax (km) line.
 
     ``c_low`` / ``c_high`` are the resolved window (m/s): the engines
-    derive it (``uacpy.models._window``) and the deck states it.
+    derive it (``uacpy.models._window``) and the deck states it. Each is
+    written as the shortest text that reads back as the same double
+    (``ReadEnvironmentMod.f90:133`` reads the pair list-directed into
+    REAL(KIND=8)), so a pinned bound reaches the binary unrounded.
 
     ``rmax_m`` is converted to the km the deck expects and written at
     millimetre resolution. RMax is the range at which KRAKEN enforces
@@ -1225,7 +1276,7 @@ def write_phase_speed_and_rmax(
     ``ReadEnvironmentMod.f90:138`` reads the field list-directed into a
     REAL(KIND=8), so there is no width constraint to respect.
     """
-    f.write(f"{float(c_low):.1f} {float(c_high):.1f}\n")
+    f.write(f"{float(c_low)!r} {float(c_high)!r}\n")
     f.write(f"{float(m_to_km(rmax_m)):.6f}\n")
 
 
@@ -1249,7 +1300,7 @@ def write_ssp_section(
     ``ssp_topopt`` is the deck's ``TopOpt(1)`` letter
     (:func:`resolve_ssp_topopt`): a Biological ``env.absorption`` gets a
     node pair across every layer edge inside the column, interpolated the
-    way that letter interpolates (:func:`biological_edge_nodes`).
+    way that letter interpolates (:func:`_biological_edge_nodes`).
 
     Both the header line and the SSP samples go through the same quantised
     depth so the AT parser sees ``ssp[-1].z == header.z_max`` exactly.
@@ -1284,7 +1335,7 @@ def write_ssp_section(
     # Biological edge nodes added (the same arrays when there are none).
     guarded = (np.vstack([[0.0, pairs[0, 1]], pairs]) if pairs[0, 0] > 0.0
                else pairs)
-    edge_z, edge_c = biological_edge_nodes(
+    edge_z, edge_c = _biological_edge_nodes(
         guarded[:, 0], guarded[:, 1], env.absorption, ssp_topopt,
         who='AT env writer')
     reject_oversized_at_ssp(
@@ -2224,6 +2275,31 @@ def _rmax_or_farthest_receiver(rmax_m: Optional[float], receiver,
     return float(np.max(np.asarray(ranges, dtype=float)))
 
 
+def _water_and_layer_mesh(n_mesh, who: str, env: Environment):
+    """``n_mesh`` split into the water column's count and the sediment
+    layers' (:func:`write_layer_sections` takes either a scalar or one per
+    layer). A sequence gives one count per MEDIUM, water first: AT sizes
+    each medium separately (``misc/ReadEnvironmentMod.f90:101-112`` takes
+    each one's own thickness and speed), so a scalar broadcast to a thin
+    sediment layer over-resolves it by the ratio of its thickness to the
+    water column's. A scalar is every medium's count. A sequence of the
+    wrong length is refused in ``who``'s name, counted in media."""
+    if not isinstance(n_mesh, (list, tuple, np.ndarray)):
+        return n_mesh, n_mesh
+    counts = [int(n) for n in n_mesh]
+    n_layers = (len(writable_layers(env.bottom))
+                if env.bottom.is_layered and not env.bottom.is_range_dependent
+                else 0)
+    if len(counts) != 1 + n_layers:
+        raise ConfigurationError(
+            f"{who}: n_mesh has {len(counts)} count(s) for {1 + n_layers} "
+            f"media (the water column first, then {n_layers} sediment "
+            f"layer(s)).",
+            remediation="Pass one count per medium, or a single scalar for "
+                        "every medium.")
+    return counts[0], counts[1:]
+
+
 def _write_kraken_family_env_file(
     filepath: Union[str, Path],
     env: Environment,
@@ -2233,7 +2309,7 @@ def _write_kraken_family_env_file(
     who: str,
     interp_ssp: Optional[str],
     frequencies: Optional[np.ndarray],
-    n_mesh: int,
+    n_mesh,
     rmax_m: Optional[float],
     c_low: float,
     c_high: float,
@@ -2244,8 +2320,8 @@ def _write_kraken_family_env_file(
     broadband frequency vector when there is more than one frequency.
     ``topopt_extra`` is the extra TopOpt character only Scooter reads.
     """
-    reject_unsupported_ssp_interp(who, interp_ssp)
-    ssp_topopt = resolve_ssp_topopt(env, interp_ssp)
+    ssp_topopt = _single_profile_ssp_topopt(who, env, interp_ssp)
+    water_mesh, layer_mesh = _water_and_layer_mesh(n_mesh, who, env)
     surface_type, bottom_type = _env_boundary_types(env)
     rmax_m = _rmax_or_farthest_receiver(rmax_m, receiver, who)
     with open(filepath, 'w') as f:
@@ -2257,13 +2333,13 @@ def _write_kraken_family_env_file(
             topopt_extra=topopt_extra,
             filepath=Path(filepath),
         )
-        write_ssp_section(f, env, env.depth, n_mesh=n_mesh,
+        write_ssp_section(f, env, env.depth, n_mesh=water_mesh,
                           ssp_topopt=ssp_topopt,
                           frequency=float(source.frequencies[0]),
                           multi_frequency=(
                               frequencies is not None
                               and len(np.atleast_1d(frequencies)) > 1))
-        write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
+        write_layer_sections(f, env, env.depth, n_mesh=layer_mesh)
         # Both engines read the 'A' halfspace line as ``zTemp, alphaR, betaR,
         # rhoR, alphaI, betaI`` (misc/ReadEnvironmentMod.f90:285), shear
         # attenuation included, and take cLow/cHigh/RMax from the
@@ -2285,7 +2361,8 @@ def _write_kraken_family_env_file(
 def write_kraken_env_file(
     filepath: Union[str, Path], env: Environment, source: Source, receiver, *,
     interp_ssp: Optional[str] = None,
-    frequencies: Optional[np.ndarray] = None, n_mesh: Optional[int] = None,
+    frequencies: Optional[np.ndarray] = None,
+    n_mesh: Optional[Union[int, Sequence[int]]] = None,
     rmax_m: Optional[float] = None,
     c_low: float, c_high: float,
 ) -> None:
@@ -2317,12 +2394,15 @@ def write_kraken_env_file(
     receiver : Receiver or array_like
         The receiver, or its depths.
     interp_ssp : str, optional
-        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is the
-        engine's own choice.
+        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is
+        ``'linear'``. A range-dependent ``env.ssp`` is refused: the deck
+        holds one profile.
     frequencies : array_like, optional
         A broadband frequency vector (Hz), written after the depth blocks.
-    n_mesh : int, optional
-        Mesh points per medium; ``0`` lets the engine size each one.
+    n_mesh : int or sequence of int, optional
+        Mesh points per medium; ``0`` lets the engine size each one. A
+        sequence gives one count per medium, the water column first (the
+        per-medium list :func:`~uacpy.io.env_reader.read_env` returns).
     rmax_m : float, optional
         The deck's RMax (m); ``None`` is the farthest receiver range.
     c_low, c_high : float
@@ -2340,7 +2420,8 @@ def write_scooter_env_file(
     receiver: Receiver, *,
     interp_ssp: Optional[str] = None,
     frequencies: Optional[np.ndarray] = None, topopt_extra: str = '',
-    n_mesh: Optional[int] = None, rmax_m: Optional[float] = None,
+    n_mesh: Optional[Union[int, Sequence[int]]] = None,
+    rmax_m: Optional[float] = None,
     c_low: float, c_high: float,
 ) -> None:
     """Write a Scooter environment file (.env).
@@ -2367,14 +2448,17 @@ def write_scooter_env_file(
     receiver : Receiver
         The receiver depths.
     interp_ssp : str, optional
-        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is the
-        engine's own choice.
+        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is
+        ``'linear'``. A range-dependent ``env.ssp`` is refused: the deck
+        holds one profile.
     frequencies : array_like, optional
         A broadband frequency vector (Hz), written after the depth blocks.
     topopt_extra : str, optional
         ``'0'`` turns off the stabilising attenuation (TopOpt(7)).
-    n_mesh : int, optional
-        Mesh points per medium; ``0`` lets the engine size each one.
+    n_mesh : int or sequence of int, optional
+        Mesh points per medium; ``0`` lets the engine size each one. A
+        sequence gives one count per medium, the water column first (the
+        per-medium list :func:`~uacpy.io.env_reader.read_env` returns).
     rmax_m : float, optional
         The deck's RMax (m); ``None`` is the farthest receiver range.
     c_low, c_high : float
@@ -2396,7 +2480,7 @@ def write_sparc_env_file(
     *,
     interp_ssp: Optional[str] = None,
     output_mode: Optional[str] = None,
-    n_mesh: Optional[int] = None,
+    n_mesh: Optional[Union[int, Sequence[int]]] = None,
     rmax_m: Optional[float] = None,
     c_low: float,
     c_high: float,
@@ -2435,12 +2519,15 @@ def write_sparc_env_file(
     receiver : Receiver
         The receiver.
     interp_ssp : str, optional
-        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is the
-        engine's own choice.
+        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is
+        ``'linear'``. A range-dependent ``env.ssp`` is refused: the deck
+        holds one profile.
     output_mode : {'R', 'D', 'S'}, optional
         Horizontal array, vertical array or snapshot.
-    n_mesh : int, optional
-        Mesh points per medium; ``0`` lets the engine size each one.
+    n_mesh : int or sequence of int, optional
+        Mesh points per medium; ``0`` lets the engine size each one. A
+        sequence gives one count per medium, the water column first (the
+        per-medium list :func:`~uacpy.io.env_reader.read_env` returns).
     rmax_m : float, optional
         The deck's RMax (m); ``None`` is the farthest receiver range.
     c_low, c_high : float
@@ -2460,8 +2547,8 @@ def write_sparc_env_file(
     """
     n_mesh = SPARC_N_MESH if n_mesh is None else n_mesh
     output_mode = SPARC_OUTPUT_MODE if output_mode is None else output_mode
-    reject_unsupported_ssp_interp('write_sparc_env_file', interp_ssp)
-    ssp_code = resolve_ssp_topopt(env, interp_ssp)
+    ssp_code = _single_profile_ssp_topopt('write_sparc_env_file', env,
+                                         interp_ssp)
     surface_type, bottom_type = _env_boundary_types(env)
     rmax_m = _rmax_or_farthest_receiver(rmax_m, receiver,
                                         'write_sparc_env_file')
@@ -2511,23 +2598,12 @@ def write_sparc_env_file(
         # there is no top half-space row and no .trc to stage.
         write_header(f, env, source, ssp_code, surface_type,
                      pos5=output_mode, filepath=filepath)
-        # One count per MEDIUM when a sequence is given: AT sizes each medium
-        # separately (ReadEnvironmentMod.f90:101-112 takes each one's own
-        # thickness and speed), so a single scalar broadcast to a thin sediment
-        # layer over-resolves it by the ratio of the layer's thickness to the
-        # water column's. Element 0 is the water column, the rest the writable
-        # sediment layers.
-        if isinstance(n_mesh, (list, tuple, np.ndarray)):
-            counts = [int(n) for n in n_mesh]
-            write_ssp_section(f, env, env.depth, n_mesh=counts[0],
-                              ssp_topopt=ssp_code,
-                              frequency=float(source.frequencies[0]))
-            write_layer_sections(f, env, env.depth, n_mesh=counts[1:])
-        else:
-            write_ssp_section(f, env, env.depth, n_mesh=n_mesh,
-                              ssp_topopt=ssp_code,
-                              frequency=float(source.frequencies[0]))
-            write_layer_sections(f, env, env.depth, n_mesh=n_mesh)
+        water_mesh, layer_mesh = _water_and_layer_mesh(
+            n_mesh, 'write_sparc_env_file', env)
+        write_ssp_section(f, env, env.depth, n_mesh=water_mesh,
+                          ssp_topopt=ssp_code,
+                          frequency=float(source.frequencies[0]))
+        write_layer_sections(f, env, env.depth, n_mesh=layer_mesh)
 
         # Bottom section (V or R only, so no halfspace params follow).
         sigma = env.bottom.halfspace_at(range=0.0).roughness
@@ -2570,6 +2646,12 @@ def write_sparc_env_file(
         f.write(f"{march_start:.6f} {courant_factor:.6f} 0.0 0.0 0.0\n")
 
 
+#: ``MaxNST`` of ``tslib/sourceMod.f90:7``: the most source-series values
+#: (rows times source depths) SPARC reads from ``STSFIL`` before it stops
+#: (``:116``).
+_SPARC_MAX_SOURCE_VALUES = 10_000_000
+
+
 def write_sparc_source_time_series(filepath, source, waveform, sample_rate,
                                    rows: int) -> None:
     """Write SPARC's ``STSFIL`` in the layout
@@ -2610,11 +2692,28 @@ def write_sparc_source_time_series(filepath, source, waveform, sample_rate,
     sample_rate : float
         Sample rate (Hz) of ``waveform``.
     rows : int
-        Rows written; ``waveform`` is zero-padded to it.
+        Rows written; ``waveform`` is zero-padded to it, so it holds at
+        least ``waveform.size``. SPARC reads at most ``MaxNST = 10_000_000``
+        values (``rows`` times the number of source depths,
+        ``tslib/sourceMod.f90:7, :116``); a file past that is refused here.
     """
+    who = 'write_sparc_source_time_series'
     waveform = np.asarray(waveform, dtype=float)
     n_depths = int(np.atleast_1d(np.asarray(source.depths)).size)
     depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+    if waveform.size > int(rows):
+        raise ConfigurationError(
+            f"{who}: waveform has {waveform.size} samples but rows={rows}; "
+            f"the series is zero-padded to rows, never cut.",
+            remediation="Pass rows >= the waveform's length.")
+    if int(rows) * n_depths > _SPARC_MAX_SOURCE_VALUES:
+        raise ConfigurationError(
+            f"{who}: {rows} rows x {n_depths} source depth(s) = "
+            f"{int(rows) * n_depths} values, past the "
+            f"{_SPARC_MAX_SOURCE_VALUES} SPARC reads (MaxNST, "
+            f"tslib/sourceMod.f90:7); the binary would stop on the file.",
+            remediation="Use fewer rows (a lower sample rate or a shorter "
+                        "record) or fewer source depths.")
     series = np.zeros(int(rows))
     series[:waveform.size] = waveform
     times = np.arange(int(rows)) / sample_rate
@@ -2692,8 +2791,9 @@ def write_bounce_input_file(
     source : Source
         Source depths and frequency.
     interp_ssp : str, optional
-        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is the
-        engine's own choice.
+        SSP connection scheme (:func:`resolve_ssp_topopt`); ``None`` is
+        ``'linear'``. A range-dependent ``env.ssp`` is refused: the deck
+        holds one profile.
     n_mesh : int
         Mesh points per medium; ``0`` lets BOUNCE size each one.
     c_low, c_high : float
@@ -2704,7 +2804,8 @@ def write_bounce_input_file(
         Logging gate passed through to ``log_message``.
     """
     filepath = Path(filepath)
-    ssp_topopt = resolve_ssp_topopt(env, interp_ssp)
+    ssp_topopt = _single_profile_ssp_topopt('write_bounce_input_file', env,
+                                           interp_ssp)
     _surface_type, bottom_type = _env_boundary_types(env)
     seafloor = float(env.depth)
     layered = env.bottom.is_layered and not env.bottom.is_range_dependent

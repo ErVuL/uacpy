@@ -524,9 +524,8 @@ TWO_LAYER_SALINITY = np.array([35.0, 35.0, 34.0, 34.0])
 def two_layer_absorption():
     """The two-layer column as a Francois-Garrison profile (pH 8)."""
     from uacpy.core.absorption import FrancoisGarrison
-    return FrancoisGarrison(
-        temperature=TWO_LAYER_TEMPERATURE, salinity=TWO_LAYER_SALINITY,
-        pH=8.0, depths=TWO_LAYER_DEPTHS)
+    return FrancoisGarrison.from_temperature_salinity(
+        TWO_LAYER_DEPTHS, TWO_LAYER_TEMPERATURE, TWO_LAYER_SALINITY, pH=8.0)
 
 
 def two_layer_dB_per_m(frequency, depth):

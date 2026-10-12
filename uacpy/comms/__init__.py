@@ -66,6 +66,7 @@ from .sync import (
     doppler_from_speed,
     compensate_doppler,
     estimate_doppler_scale,
+    DopplerEstimate,
     matched_filter_metric,
     detect_preamble,
     detect_frames,
@@ -109,7 +110,8 @@ from .metrics import (
     evm,
     ber_theory,
 )
-# spreading-code workflow reaches it here.
+# The spreading code lives with the other waveform generators; it is
+# re-exported here so the spreading-code workflow reaches it from comms.
 from uacpy.acoustic_signal.generate import m_sequence
 from .janus import (
     JanusPacket,
@@ -145,6 +147,7 @@ __all__ = [
     "complex_gain",
     # doppler
     "doppler_from_speed", "compensate_doppler", "estimate_doppler_scale",
+    "DopplerEstimate",
     # sync
     "matched_filter_metric", "detect_preamble", "detect_frames",
     # link

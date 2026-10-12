@@ -1,41 +1,72 @@
 """Reading a Kraken ``.mod`` and its ``.prt``: the mode set, the group
-speeds krakenc prints, the checks that the modes are trapped, and the error
-text of a run that found none."""
+speeds krakenc prints, which modes are trapped, and the error text of a run
+that found none."""
 
 import dataclasses
 import os
 import re
-import warnings
 import numpy as np
 from pathlib import Path
-from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.boundary import BoundaryType
 from uacpy.core.results import MediaTable, Modes
 from uacpy.core.exceptions import (
-    FileFormatError, ModelExecutionError, ValidityWarning,
+    ConfigurationError, FileFormatError, ModelExecutionError,
 )
 from uacpy.io.oalib_reader import read_prt
 from uacpy.io.modes_reader import read_modes
+from uacpy.models._extract import result_kwargs
 
 
-#: Remedy shared by the two ways a below-cutoff run reaches the caller: the
-#: binary's own empty-spectrum ERROUT (:func:`modes_error_message`) and
-#: a mode set in which every mode is non-trapped
-#: (:func:`check_non_trapped_modes`). Phrased as a sentence fragment so
-#: both sites can splice it into their own opening clause.
-_BELOW_CUTOFF_REMEDY = (
-    "raise the frequency above the waveguide's modal cutoff — below it the "
-    "field is carried by the continuous spectrum, which needs a "
-    "wavenumber-integration model (Scooter)"
-)
+def below_cutoff_remedy(range_dependent) -> str:
+    """The remedy of a frequency with no trapped mode, a sentence: below the
+    first modal cut-off the field is carried by the continuous spectrum,
+    which Scooter's wavenumber integration holds on a range-independent
+    waveguide and RAM's parabolic equation on a ``range_dependent`` one."""
+    model = ("a parabolic-equation model (RAM), which also takes the "
+             "range dependence" if range_dependent
+             else "a wavenumber-integration model (Scooter)")
+    return (f"Raise the frequency above the waveguide's first modal cut-off "
+            f"— below it the field is carried by the continuous spectrum, "
+            f"which needs {model}.")
+
 
 #: The ERROUT text both mode finders print when ``[cLow, cHigh]`` holds no mode
 #: — ``Kraken/kraken.f90:962`` and ``Kraken/krakenc.f90:445``, identical in both
 #: (only the 'KRAKEN' / 'KRAKENC' banner differs). Named once because two sites
-#: match on it: :func:`modes_error_message`, which turns it into the
-#: typed no-modes error, and ``spec.traits.benign_fortran_fatals``, which lets the
-#: broadband floor search read it as "below cutoff" instead of a run failure.
+#: match on it: :func:`zero_mode_stop`, which reads where the run stopped, and
+#: ``spec.traits.benign_fortran_fatals``, which lets the run's launch through
+#: so the run reads where it stopped rather than raising a bare error.
 _NO_MODES_ERROUT = 'No modes for given phase speed interval'
+
+#: What gfortran prints when a binary's zero-mode branch re-OPENs the mode
+#: file it already holds open, on the deck's first solve only (``IF ( ifreq
+#: == 1 .AND. iProf == 1 )``): kraken.exe with a new RECL
+#: (``Kraken/kraken.f90:954-955``), krakenc.exe with STATUS='REPLACE'
+#: (``Kraken/krakenc.f90:437-439``), after printing 'No modes OPEN statement'
+#: on stdout. The run stops there, before the ERROUT is written.
+_ZERO_MODE_REOPEN = ('Cannot change RECL parameter in OPEN statement',
+                     'Cannot change STATUS parameter in OPEN statement',
+                     'No modes OPEN statement')
+
+
+def zero_mode_stop(prt_text):
+    """Where a modes run stopped on a window holding no mode, from its
+    ``.prt``: ``(profile, frequency)``, the 0-based indices of the solve
+    that printed the empty-spectrum ERROUT (:data:`_NO_MODES_ERROUT`), or
+    ``None`` when the ``.prt`` holds none.
+
+    Both binaries loop over profiles, then frequencies, and stop at the
+    first empty solve (``Kraken/kraken.f90:42-56``). ``cLow =`` opens each
+    profile's block (``misc/ReadEnvironmentMod.f90:134``) and ``Frequency =``
+    each frequency's within it when the deck carries more than one
+    (``Kraken/kraken.f90:60-65``, ``Kraken/krakenc.f90:60-65``), so the
+    stop is the last of each."""
+    if not prt_text or _NO_MODES_ERROUT not in prt_text:
+        return None
+    blocks = prt_text.split('cLow =')
+    profile = max(len(blocks) - 1, 1) - 1
+    frequencies = len(re.findall(r'^\s*Frequency\s*=', blocks[-1], re.M))
+    return profile, max(frequencies, 1) - 1
 
 
 def read_group_speeds_from_prt(work_dir, base_name, n_modes, *, fills_vg):
@@ -62,37 +93,14 @@ def read_group_speeds_from_prt(work_dir, base_name, n_modes, *, fills_vg):
     """
     if not fills_vg:
         return None
-    prt = Path(work_dir) / f'{base_name}.prt'
-    text = read_prt(prt)
-    if not text or n_modes < 1:
+    if n_modes < 1:
         return None
-    # A .prt cut off mid-write ends in a partial row whose last field
-    # is a truncated number; parsing it fabricated a plausible speed.
-    lines = text.splitlines()
-    if lines and not text.endswith('\n'):
-        lines = lines[:-1]
-    try:
-        head = next(i for i, L in enumerate(lines) if 'Group Speed' in L)
-    except StopIteration:
+    tables = [rows for rows in printed_tables(
+        read_prt(Path(work_dir) / f'{base_name}.prt')) if rows]
+    if not tables:
         return None
-
-    speeds = {}
-    for line in lines[head + 1:]:
-        parts = line.split()
-        if len(parts) != 5:
-            if speeds:
-                break          # table ended
-            continue           # still in the units header
-        try:
-            mode = int(parts[0])
-            vg = float(parts[4])
-        except ValueError:
-            if speeds:
-                break
-            continue
-        if 1 <= mode <= n_modes:
-            speeds[mode] = vg
-
+    speeds = {mode: vg for mode, _cp, vg in tables[0]
+              if 1 <= mode <= n_modes}
     if not speeds:
         return None
     out = np.full(n_modes, np.nan, dtype=float)
@@ -104,7 +112,7 @@ def read_group_speeds_from_prt(work_dir, base_name, n_modes, *, fills_vg):
 def build_modes_field(modes, n_modes, source, *, backend_exe=None,
                        group_velocity=None,
                        water_density=None, leaky_modes, model_exe, model_name,
-                       result_kwargs):
+                       provenance):
     """Restamp the :class:`Modes` :func:`~uacpy.io.read_modes` returned
     as this run's result.
 
@@ -132,7 +140,7 @@ def build_modes_field(modes, n_modes, source, *, backend_exe=None,
         group_velocity=group_velocity,
         media=media,
         **result_kwargs(
-            source,
+            model_name, provenance, source,
             backend=Path(exe).stem if exe else model_name.lower(),
             frequencies=float(source.frequencies[0]),
             n_modes_requested=n_modes,
@@ -144,51 +152,192 @@ def build_modes_field(modes, n_modes, source, *, backend_exe=None,
     return result
 
 
-def read_modes_file(filepath: Path, *, model_name) -> Modes:
-    """Read the Kraken ``.mod`` at ``<filepath>.mod`` as a :class:`Modes`;
-    ``filepath`` is the deck's base path without a suffix, which
-    :func:`~uacpy.io.read_modes` takes (it appends its own '.mod')."""
-    basename = str(filepath)
-    mod_file = basename + '.mod'
+def _prt_lists_no_mode(prt_text) -> bool:
+    """Whether a modes run's ``.prt`` says it kept no mode: the empty-spectrum
+    ERROUT, or a mode table with no row under it (:func:`printed_tables`),
+    which krakenc leaves when it keeps no root at its last mesh (30 m over
+    sand at 1 Hz) or inverse iteration failed on every root it found."""
+    if not prt_text:
+        return False
+    return (_NO_MODES_ERROUT in prt_text
+            or any(rows == [] for rows in printed_tables(prt_text)))
 
+
+def printed_tables(prt_text):
+    """The mode table a modes run's ``.prt`` prints for each frequency
+    block, in order — every profile's blocks on a multi-profile deck: the
+    rows ``(mode, phase speed,
+    group speed)`` (m/s), ``[]`` for a table with no row, ``None`` for a
+    block with no table. The one reading of the table: :func:`_prt_lists_no_mode`,
+    :func:`printed_mode_tables` and :func:`read_group_speeds_from_prt` all
+    take it from here.
+
+    ``Frequency =`` opens each block when the deck carries more than one
+    (``Kraken/kraken.f90:60-65``); else the one block follows the last
+    ``cLow =`` (``misc/ReadEnvironmentMod.f90:134``). A table is its header,
+    a units line, then the rows ``DO mode = 1, M, MAX(1, M/30)``
+    (``kraken.f90:95-103``, ``krakenc.f90:97-105``): the index, Re and Im
+    of k, the phase speed ``omega / Re(k)`` to ten digits and the group
+    speed, which only krakenc fills (``kraken.f90:815-819``). A ``.prt`` cut
+    off mid-write ends in a partial row, whose truncated last number would
+    read as a plausible speed; it is dropped."""
+    if not prt_text:
+        return []
+    lines = prt_text.splitlines()
+    if not prt_text.endswith('\n'):
+        lines = lines[:-1]
+    starts = [i for i, line in enumerate(lines)
+              if re.match(r'^\s*Frequency\s*=', line)]
+    if not starts:
+        starts = [max([i for i, line in enumerate(lines)
+                       if 'cLow =' in line], default=0)]
+    tables = []
+    for a, b in zip(starts, starts[1:] + [len(lines)]):
+        heads = [i for i in range(a, b)
+                 if 'Phase Speed' in lines[i] and 'Group Speed' in lines[i]]
+        if not heads:
+            tables.append(None)
+            continue
+        rows = []
+        for line in lines[heads[-1] + 2:b]:
+            parts = line.split()
+            if len(parts) != 5:
+                break
+            try:
+                rows.append((int(parts[0]), float(parts[3]),
+                             float(parts[4])))
+            except ValueError:
+                break
+        tables.append(rows)
+    return tables
+
+
+def read_mode_record(mod_base, frequency, profile=1, *, model_name):
+    """The :class:`Modes` of one record of the ``.mod`` at ``mod_base`` (the
+    deck's base path without a suffix): ``profile`` (1-based) at
+    ``frequency`` Hz, or ``None`` when the solver kept no mode there — a
+    record of ``M = 0`` (``Kraken/kraken.f90:947-962`` writes one into a
+    normal-sized file), or one the reader cannot finish after a ``.prt``
+    that says no mode was kept (:func:`_prt_lists_no_mode`; krakenc's
+    zero-mode header is 640 bytes, ``Kraken/krakenc.f90:432-446``). Any other
+    unreadable file is a :class:`ModelExecutionError` naming its ``.prt``
+    (:func:`modes_error_message`)."""
+    basename = str(mod_base)
+    mod_file = basename + '.mod'
     # A .mod with no bytes at all means the binary died before it opened
     # the file — no header to read, so there is nothing to diagnose from.
     if os.path.exists(mod_file) and os.path.getsize(mod_file) == 0:
         raise ModelExecutionError(
             model_name, return_code=0, stdout=None,
-            stderr=modes_error_message(basename),
-        )
-
-    # The MODES path writes a single-frequency ``.mod``; broadband goes
-    # through ``field.exe`` instead. ``freq=0.0`` selects the only bin
-    # present, closest-frequency matching.
-    # A short or unreadable .mod arrives as FileFormatError:
-    # ``read_modes`` wraps every parse failure (its ``except
-    # PARSE_ERRORS`` arm, which already contains IndexError). The empty
-    # spectrum is one of those on krakenc — see the M == 0 note below —
-    # so the diagnosis has to happen on this branch too, not only on the
-    # mode-count one.
+            stderr=modes_error_message(basename))
     try:
-        modes_data = read_modes(basename, frequency=0.0)
+        modes = read_modes(basename, frequency=float(frequency),
+                           profile=int(profile))
     except (FileFormatError, IndexError) as e:
+        if _prt_lists_no_mode(read_prt(basename + '.prt')):
+            return None
         raise ModelExecutionError(
             model_name, return_code=0, stdout=None,
             stderr=modes_error_message(basename, original_error=e),
         ) from e
+    return modes if modes.n_modes > 0 else None
 
-    # "No modes for given phase speed interval" is an ERROUT that still
-    # leaves a file behind. kraken.f90:947-962 writes records 1 and 7, so
-    # its .mod is a normal 4*LRecordLength*7 bytes and only the mode count
-    # reports the state — this branch. krakenc.f90:432-446 writes records 1
-    # and 5 of the same header, a 640-byte file the reader cannot finish,
-    # so that path lands on the FileFormatError above instead.
-    if modes_data.n_modes == 0:
-        raise ModelExecutionError(
-            model_name, return_code=0, stdout=None,
-            stderr=modes_error_message(basename),
-        )
 
-    return modes_data
+def halfspace_compressional_speed(env, range_m=0.0):
+    """The compressional speed (m/s) of the fluid or elastic half-space
+    under the column at ``range_m``, ``None`` for vacuum, rigid or a
+    reflection table. Above it a root lies in the continuous spectrum
+    (Computational Ocean Acoustics §2.4.5.1; over an elastic bottom "for
+    wavenumbers up to k_r = 2πf/c_p", §4.10.1)."""
+    halfspace = env.bottom.halfspace_at(range=float(range_m))
+    if not BoundaryType.from_string(halfspace.acoustic_type).is_geoacoustic:
+        return None
+    return float(halfspace.sound_speed)
+
+
+def fluid_halfspace_speed(env):
+    """The compressional speed (m/s) of the fluid half-space under the
+    r = 0 column, which a trapped mode's phase speed stays below; ``None``
+    for a seabed with no such speed: vacuum, rigid, a reflection table, or
+    an elastic half-space (:func:`halfspace_compressional_speed`). The
+    ``.mod`` records the same speed for each profile
+    (:attr:`~uacpy.core.results.MediaTable.halfspace_sound_speed`)."""
+    halfspace = env.bottom.halfspace_at(range=0.0)
+    if float(halfspace.shear_speed) > 0.0:
+        return None
+    return halfspace_compressional_speed(env)
+
+
+def trapped_phase_speeds(k, freq, c_bottom) -> np.ndarray:
+    """The phase speeds (m/s, ascending) of the modes ``k`` at ``freq`` Hz
+    that are trapped.
+
+    Computational Ocean Acoustics §2.4.5.1: the characteristic equation has
+    real (lossless) roots only for ``k2 < kr < k1``; a root with
+    ``kr < k2`` radiates into the bottom, a leaky mode. So a mode is trapped
+    when its phase speed ``omega / Re(k)`` is below the half-space's
+    compressional speed ``c_bottom`` (over an elastic half-space, too:
+    above it lies the continuous spectrum, §4.10.1). With ``c_bottom=None``
+    (a seabed with no such speed) every mode counts.
+
+    Each binary's roots are its own: kraken.exe's attenuation is a
+    first-order perturbation of a real root (``kraken.f90:766-773``) and
+    krakenc's root is exact, so near the line one can sit just below
+    ``c_bottom`` where the other sits just above. And on real-arithmetic
+    kraken.exe a root above ``c_bottom`` is no leaky mode:
+    ``Kraken/BCImpedanceMod.f90:83-89`` (CASE 'A', ``cS <= 0``) forms
+    ``gammaP = SQRT( x - omega2 / cP**2 )``, pure imaginary there, and
+    ``DBLE( f )`` keeps its real part = 0, leaving ``f = 0, g = rho`` —
+    CASE 'R', the RIGID bottom (``:60-63``). Measured: a 5 m / 150 Hz duct
+    over 1700 m/s returns cp = 1730.70 m/s against the rigid-bottom
+    prediction 1732.05."""
+    k = np.atleast_1d(np.asarray(k, dtype=complex))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        cp = 2.0 * np.pi * float(freq) / np.real(k)
+    return trapped_among(cp, c_bottom)
+
+
+def trapped_among(cp, c_bottom) -> np.ndarray:
+    """The phase speeds (m/s, ascending) of ``cp`` that are a trapped
+    mode's: positive, finite and below ``c_bottom``
+    (:func:`trapped_phase_speeds`)."""
+    cp = np.atleast_1d(np.asarray(cp, dtype=float))
+    keep = np.isfinite(cp) & (cp > 0.0)
+    if c_bottom is not None:
+        keep &= cp < float(c_bottom)
+    return np.sort(cp[keep])
+
+
+def record_seabed_speed(modes, env, range_m=0.0):
+    """The compressional speed (m/s) of the bottom half-space the mode
+    record ``modes`` was solved over: a fluid half-space's as its ``.mod``
+    records it (:attr:`~uacpy.core.results.MediaTable.halfspace_sound_speed`,
+    ``Kraken/kraken.f90:602-605``), else an elastic half-space's from the
+    environment ``env`` the deck was written from, at the profile's
+    ``range_m`` (m, :func:`halfspace_compressional_speed`); ``None`` for a
+    vacuum, rigid or tabulated seabed."""
+    media = modes.media
+    speed = None if media is None else media.halfspace_sound_speed
+    if speed is None:
+        return halfspace_compressional_speed(env, range_m)
+    return float(speed)
+
+
+def printed_mode_tables(prt_text, n_frequencies):
+    """The mode table a single-profile deck's ``.prt`` prints for each of
+    its ``n_frequencies`` (:func:`printed_tables`): ``(complete, cp)``, the
+    phase speeds ``omega / Re(k)`` (m/s) of its rows and whether they are
+    every mode of that frequency — every mode when the rows number 1, 2,
+    ... in turn, every ``M/30``-th one otherwise — or ``None`` where the
+    table is not found, or every entry ``None`` when the blocks found are
+    not ``n_frequencies``."""
+    tables = printed_tables(prt_text)
+    if len(tables) != n_frequencies:
+        return [None] * n_frequencies
+    return [None if rows is None else (
+        [mode for mode, _cp, _vg in rows] == list(range(1, len(rows) + 1))
+        and bool(rows), np.array([cp for _mode, cp, _vg in rows], dtype=float))
+        for rows in tables]
 
 
 def non_trapped_phase_speeds(k, env, freq, *, leaky_modes):
@@ -202,19 +351,18 @@ def non_trapped_phase_speeds(k, env, freq, *, leaky_modes):
     it: no modes to measure; a non-geoacoustic boundary (vacuum, rigid, or
     a reflection table), which has no half-space to leak into and resolves
     to an unbounded ``c_high`` anyway (:func:`resolve_phase_speed_bounds`);
-    an elastic half-space, which traps on its *shear* speed instead and is
-    the one case ``kraken.f90:209`` really does clamp ``cHigh`` for; or
-    ``leaky_modes=True``, where the caller asked for exactly these modes.
+    an elastic half-space, whose water-borne roots between its shear and
+    compressional speeds leak shear (Computational Ocean Acoustics
+    §4.10.1), and where kraken.exe's own window stops at the shear speed
+    (``kraken.f90:205-210``) and krakenc's does not; or
+    ``leaky_modes=True``, where the caller asked for exactly these
+    modes.
     """
     if leaky_modes:
         return None
     k = np.atleast_1d(np.asarray(k, dtype=complex))
-    if k.size == 0:
-        return None
-    halfspace = env.bottom.halfspace_at(range=0.0)
-    if not BoundaryType.from_string(halfspace.acoustic_type).is_geoacoustic:
-        return None
-    if float(halfspace.shear_speed) > 0.0:
+    c_bottom = fluid_halfspace_speed(env)
+    if k.size == 0 or c_bottom is None:
         return None
     kr = np.real(k)
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -222,41 +370,21 @@ def non_trapped_phase_speeds(k, env, freq, *, leaky_modes):
     cp = cp[np.isfinite(cp) & (cp > 0.0)]
     if cp.size == 0:
         return None
-    return cp, float(halfspace.sound_speed)
+    return cp, c_bottom
 
 
-def check_non_trapped_modes(k, env, freq, *, exe=None,
-                             field_run=False, leaky_modes, log,
-                             model_name) -> None:
-    """Act on the modes whose phase speed sits above the seabed speed.
+def log_non_trapped_modes(k, env, freq, *, leaky_modes, log) -> None:
+    """Log the modes of a modes solve whose phase speed sits above the
+    seabed speed, when there are any.
 
-    Every mode non-trapped means the frequency is below the waveguide's
-    modal cutoff and the field is carried by the continuous spectrum, so
-    the modal sum answers a different problem than the one asked. The
-    auto ``c_high`` sits 5 % past the bottom speed
-    (:data:`~uacpy.models._window.C_HIGH_FACTOR`), so the mode search still
-    finds something there and the binary's own empty-spectrum ERROUT —
-    the existing diagnosis in :func:`modes_error_message` — never fires.
-    A modes solve raises; a field run warns, because the broadband
-    sub-cutoff recovery at :meth:`Kraken._band_with_sub_cutoff_bins` legitimately
-    drives single below-cutoff bins through this path and NaN-fills them.
-
-    On real-arithmetic ``kraken.exe`` those eigenvalues are not leaky modes
-    at all. ``Kraken/BCImpedanceMod.f90:83-89`` (CASE 'A', ``cS <= 0``)
-    forms ``gammaP = SQRT( x - omega2 / cP**2 )``; above the half-space
-    speed the radicand is negative, ``gammaP`` is pure imaginary, and
-    ``DBLE( f )`` keeps its real part = 0 — leaving ``f = 0, g = rho``,
-    which is CASE 'R', the RIGID bottom (``:60-63``). What comes back is a
-    rigid-bottom waveguide's spectrum plus the first-order radiation-loss
-    perturbation of ``kraken.f90:766-773``. Measured: a 5 m / 150 Hz duct
-    over 1700 m/s returns cp = 1730.70 m/s against the rigid-bottom
-    prediction 1732.05.
-
-    Some modes non-trapped is the ordinary default (14 modes at 200 Hz in
-    100 m of water, 3 of them above the 1650 m/s seabed —
-    ``docs/models/kraken.md §6.1 "Fourteen modes at 200 Hz"``), so that
-    only logs.
-    """
+    That is the ordinary default (14 modes at 200 Hz in 100 m of water, 3
+    of them above the 1650 m/s seabed —
+    ``docs/models/kraken.md §6.1 "Fourteen modes at 200 Hz"``): the auto
+    ``c_high`` sits 5 % past the bottom speed
+    (:data:`~uacpy.models._window.C_HIGH_FACTOR`); a set with every mode
+    above it holds no trapped mode. ``leaky_modes=True`` asked for exactly
+    these modes (krakenc's complex roots, the leaky modes of Computational
+    Ocean Acoustics §2.4.5.1), so it logs nothing."""
     probe = non_trapped_phase_speeds(k, env, freq, leaky_modes=leaky_modes)
     if probe is None:
         return
@@ -264,50 +392,31 @@ def check_non_trapped_modes(k, env, freq, *, exe=None,
     above = cp > c_bottom
     if not above.any():
         return
-    if not above.all():
-        log(
-            f"{int(above.sum())} of {above.size} modes are non-trapped "
-            f"(phase speed above the {c_bottom:.1f} m/s half-space speed, "
-            f"up to {cp.max():.2f} m/s): the auto c_high sits 5 % past the "
-            f"bottom speed and kraken.f90:212 leaves the acoustic cHigh "
-            f"clamp commented out. On kraken.exe they are a rigid-bottom "
-            f"solve plus a first-order radiation-loss perturbation, not "
-            f"true leaky modes; leaky_modes=True computes those on "
-            f"krakenc.exe."
-        )
-        return
-
-    rigid = (
-        " Real-arithmetic kraken.exe cannot represent a leaky mode: above "
-        "the half-space speed BCImpedanceMod.f90:83-89 collapses to the "
-        "rigid-bottom condition, so these eigenvalues are a rigid-bottom "
-        "waveguide's plus the radiation-loss perturbation of "
-        "kraken.f90:766-773."
-        if exe is not None and Path(exe).stem == 'kraken' else ""
-    )
-    message = (
-        f"Kraken returned {above.size} mode(s) and every one of them is "
-        f"non-trapped: the slowest has a phase speed of {cp.min():.2f} m/s, "
-        f"above the {c_bottom:.1f} m/s half-space speed, so it radiates "
-        f"into the seabed rather than propagating in the duct.{rigid} The "
-        f"modal sum is not a physical answer here; "
-        f"{_BELOW_CUTOFF_REMEDY}."
-    )
-    if field_run:
-        warnings.warn(
-            f"{model_name}: {message}",
-            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        return
-    raise ModelExecutionError(
-        model_name, return_code=0, stdout=None, stderr=message,
+    log(
+        f"{int(above.sum())} of {above.size} modes are non-trapped "
+        f"(phase speed above the {c_bottom:.1f} m/s half-space speed, "
+        f"up to {cp.max():.2f} m/s): the auto c_high sits 5 % past the "
+        f"bottom speed and kraken.f90:212 leaves the acoustic cHigh "
+        f"clamp commented out. On kraken.exe they are a rigid-bottom "
+        f"solve plus a first-order radiation-loss perturbation, not "
+        f"true leaky modes; leaky_modes=True computes those on "
+        f"krakenc.exe."
     )
 
 
-def refuse_a_profile_without_modes(mod_base, env, profile_ranges_m, exe, *,
-                                   model_name) -> None:
-    """Raise when the modes binary stopped on a profile of a multi-profile
-    deck that holds no mode.
+def profile_location(env, profile_ranges_m, profile):
+    """``(range, seafloor depth)`` (m) of the deck's ``profile`` (0-based)
+    of a multi-profile deck whose profiles sit at ``profile_ranges_m``."""
+    r = float(profile_ranges_m[min(profile, len(profile_ranges_m) - 1)])
+    return r, float(np.asarray(env.bathymetry.eval(range=r)).flat[0])
+
+
+def profile_without_modes_refusal(profile, env, profile_ranges_m, exe,
+                                  frequency, reason, *, model_name
+                                  ) -> ConfigurationError:
+    """The typed refusal of a multi-profile deck the modes binary stopped
+    on, finding no mode in its later ``profile`` (0-based) at ``frequency``
+    Hz: the track crosses that profile's cut-off.
 
     Both binaries end the whole solve at the first such profile: the
     empty-spectrum ERROUT (``kraken.f90:962``, ``krakenc.f90:445``) stops the
@@ -317,61 +426,43 @@ def refuse_a_profile_without_modes(mod_base, env, profile_ranges_m, exe, *,
     field. Measured: ``leaky_modes=True`` on the ASA wedge (200 m to 0.1 m
     over 4 km, 25 Hz) stopped on a profile at 20 m or less, at every c_high
     from 3400 to 1e5 m/s; to 50 m it solved. The binary names neither the
-    profile nor its depth, so they are read here: one ``cLow =`` line opens
-    each profile's block of the ``.prt``."""
-    prt = read_prt(Path(f"{mod_base}.prt"))
-    if prt is None or _NO_MODES_ERROUT not in prt:
-        return
-    index = max(prt.count('cLow ='), 1) - 1
-    r = float(profile_ranges_m[min(index, len(profile_ranges_m) - 1)])
-    depth = float(np.asarray(env.bathymetry.eval(range=r)).flat[0])
-    raise ModelExecutionError(
-        model_name, return_code=0, stdout=None,
-        stderr=(
-            f"{Path(exe).name} found no mode in profile {index + 1} of "
-            f"{len(profile_ranges_m)} (r = {r:g} m, seafloor {depth:g} m) and "
-            f"stopped there, leaving every later profile out of the mode file "
-            f"(and, on krakenc, the first profile's header overwritten), so "
-            f"field.exe cannot sum a field. The solver found no mode of that "
-            f"profile in the phase-speed window at this frequency, as on water "
-            f"too shallow to trap one. End the "
-            f"track (bathymetry and receivers) before r = {r:g} m, or use "
-            f"RAM, which takes the shallow end."))
+    profile nor its depth, so they are read here
+    (:func:`zero_mode_stop`, :func:`profile_location`); ``reason`` is the
+    binary's own words for the stop."""
+    r, depth = profile_location(env, profile_ranges_m, profile)
+    return ConfigurationError(
+        f"{model_name}: {Path(exe).name} found no mode at "
+        f"{float(frequency):g} Hz in profile {profile + 1} of "
+        f"{len(profile_ranges_m)} (r = {r:g} m, seafloor {depth:g} m) and "
+        f"stopped there ({reason}), leaving every later profile out of the "
+        f"mode file (and, on krakenc, the first profile's header "
+        f"overwritten), so field.exe cannot sum a field.",
+        remediation=end_track_or_ram(env, profile_ranges_m, profile))
 
 
-def check_field_modes_trapped(mod_base, env, source, exe, *, leaky_modes, log,
-                              model_name) -> None:
-    """Apply :func:`check_non_trapped_modes` to the ``.mod`` field.exe is
-    about to sum — the only place a below-cutoff field run is visible,
-    since the ``.shd`` it produces is a full, plausible-looking curve.
-
-    Best effort: an unreadable mode file is not a diagnosis. The
-    empty-spectrum ``.mod`` is precisely that — a zero-mode record breaks
-    the reader's stride (see :func:`read_modes_file`) — and that case is
-    already reported by the all-NaN guard further down
-    :meth:`Kraken._field_of_launch`, so a read failure here stays quiet.
-    """
-    try:
-        modes_data = read_modes(str(mod_base), frequency=0.0)
-    except (FileFormatError, IndexError, OSError) as e:
-        log(f"non-trapped-mode check skipped: unreadable mode file "
-                  f"({type(e).__name__}: {e})", level="debug")
-        return
-    check_non_trapped_modes(
-        modes_data.k, env,
-        float(np.atleast_1d(source.frequencies)[0]),
-        exe=exe, field_run=True, leaky_modes=leaky_modes, log=log,
-        model_name=model_name)
+def end_track_or_ram(env, profile_ranges_m, profile) -> str:
+    """The remedy of a segmented solve that stopped on its later
+    ``profile`` (0-based): below a profile's first modal cut-off its
+    waveguide has no mode to carry the field on (Computational Ocean
+    Acoustics §2.4.5), so ending the track — bathymetry and receivers — at
+    the last profile that solved, whose depth the deck then ends on (every
+    deck carries a profile at its track's end, so a track ended past it
+    reaches the stopped one again), or RAM."""
+    r, depth = profile_location(env, profile_ranges_m, max(profile - 1, 0))
+    return (f"End the track (bathymetry and receivers) at or before "
+            f"r = {r:g} m, the last profile that solved at this frequency "
+            f"(seafloor {depth:g} m), or use RAM, which takes the track "
+            f"whole.")
 
 
 def modes_error_message(basename, original_error=None):
     """Build error message for invalid mode files, checking .prt for clues.
 
-    Two ``.prt`` strings carry a diagnosis specific enough to act on: the
-    empty-spectrum ERROUT, which is a physical statement about
-    ``[c_low, c_high]``, and the secant root-finder's convergence
-    failure, which names interfacial modes. Anything else gets a pointer
-    to the file rather than a guess.
+    One ``.prt`` string carries a diagnosis specific enough to act on: the
+    secant root-finder's convergence failure, which names interfacial
+    modes. Anything else gets a pointer to the file rather than a guess. (A
+    ``.prt`` saying no mode was kept never gets here: :func:`read_mode_record`
+    reads that first.)
 
     Deliberately NOT diagnosed here: the elastic seabed.
     ``misc/ReadEnvironmentMod.f90:260-266`` echoes
@@ -389,30 +480,17 @@ def modes_error_message(basename, original_error=None):
     error_msg = "Kraken did not produce valid modes. "
     prt_content = read_prt(prt_file)
     if prt_content is not None:
-        # 1. Slow/failed root-finding on interfacial (Scholte/Stoneley)
-        #    modes. misc/RootFinderSecantMod.f90:80,136 sets the message;
-        #    Kraken/kraken.f90:359,407 and Kraken/krakenc.f90:388 echo it
-        #    into the .prt behind their own 'Warning in KRAKEN[C] -
-        #    RootFinderSecant' banner. kraken.htm's remedy is to raise cLow
-        #    to the minimum p-wave speed so those modes are skipped.
+        # Slow/failed root-finding on interfacial (Scholte/Stoneley)
+        # modes. misc/RootFinderSecantMod.f90:80,136 sets the message;
+        # Kraken/kraken.f90:359,407 and Kraken/krakenc.f90:388 echo it
+        # into the .prt behind their own 'Warning in KRAKEN[C] -
+        # RootFinderSecant' banner. kraken.htm's remedy is to raise cLow
+        # to the minimum p-wave speed so those modes are skipped.
         secant_failure = bool(
             re.search(r'converge\s+in\s+RootFinderSecant',
                       prt_content, re.IGNORECASE)
         )
-
-        # 2. The empty-spectrum ERROUT (Kraken/kraken.f90:962). This is a
-        #    physical statement about [cLow, cHigh], not a solver failure,
-        #    and it names its own remedy, so it is tested first.
-        empty_spectrum = _NO_MODES_ERROUT in prt_content
-
-        if empty_spectrum:
-            error_msg += (
-                "Kraken found no mode with a phase speed inside "
-                "[c_low, c_high] at this frequency. Widen the window "
-                "(lower c_low, raise c_high, or leaky_modes=True), or "
-                f"{_BELOW_CUTOFF_REMEDY}."
-            )
-        elif secant_failure:
+        if secant_failure:
             error_msg += (
                 "Kraken reported 'Failure to converge in "
                 "RootFinderSecant': the root finder is converging slowly "

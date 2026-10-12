@@ -27,7 +27,6 @@ themselves (with a ``FallbackWarning``); ``grain_size_phi`` is retained as
 informational metadata. There is no ``'grain-size'`` boundary type.
 """
 
-import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Mapping, Optional, Tuple, Union
 
@@ -35,14 +34,12 @@ import numpy as np
 
 from uacpy.core._export import ExportRecord, require_extra
 from uacpy.core.environment import BoundaryProperties, Bottom
-from uacpy.core.exceptions import (
-    ConfigurationError, DataFetchError, FallbackWarning,
-)
-from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.materials import MATERIALS, list_materials
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL, GRAIN_SIZE_MODELS
 from uacpy.data._cache import UnreadableCacheError
 from uacpy.data.sources import DataProvenance
+from uacpy.data._provenance_notice import provenance_fallback
 from uacpy.core.geo import geodesic_waypoints
 from uacpy.data._geo import (
     run_boundary_indices, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
@@ -374,15 +371,14 @@ def _warn_filled_gaps(source_label, filled, n_total):
     # rho*c 2.883e6 against 2.256e6 kg m^-2 s^-1 (+27.8%) for the seabed a
     # point fetch of the far end returns from the next source in the chain.
     n_filled, worst_km = filled
-    warnings.warn(
+    provenance_fallback(
         f"{source_label}: {n_filled} of {n_total} transect waypoints "
         f"have no seabed data and were filled from the nearest covered "
         f"waypoint, up to {worst_km:.0f} km away. The seabed over those "
         f"stretches is the covered sample's, not a measurement at those "
         f"ranges, and the per-column provenance names where each sample "
         f"was fetched rather than the range it was applied at. Narrow the "
-        f"transect to the covered region, or name a source that spans it.",
-        FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        f"transect to the covered region, or name a source that spans it.")
 
 
 def _fill_gaps_from_nearest(values: List, ranges_m):

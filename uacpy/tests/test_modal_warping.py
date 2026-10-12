@@ -881,3 +881,12 @@ class TestStorageSpacingReadsTheBitsNotTheContainer:
         with warnings.catch_warnings():
             warnings.simplefilter('error')
             modal_group_velocity(f, k_horizontal=kr)
+
+
+@pytest.mark.parametrize('data, match', [
+    (np.ones(256) * (1.0 + 1.0j), 'must be real'),
+    (np.ones((2, 256)), r'must be 1-D \(n_samples,\)'),
+])
+def test_warp_signal_refuses_a_complex_or_multichannel_trace(data, match):
+    with pytest.raises(ConfigurationError, match=f'warp_signal: data {match}'):
+        warp_signal(data, 1000.0, 5000.0)

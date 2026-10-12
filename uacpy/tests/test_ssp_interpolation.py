@@ -41,7 +41,7 @@ class TestSSPInterpolationMethods:
         )
 
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        result = bellhop.compute_field(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
 
     @staticmethod
@@ -69,7 +69,7 @@ class TestSSPInterpolationMethods:
 
         bellhop = Bellhop(verbose=False, interp_ssp='linear',
                           work_dir=tmp_path, cleanup=False)
-        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        result = bellhop.compute_field(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
         assert self._deck_topopt_char(tmp_path) == 'C'
 
@@ -88,7 +88,7 @@ class TestSSPInterpolationMethods:
 
         bellhop = Bellhop(verbose=False, interp_ssp='spline',
                           work_dir=tmp_path, cleanup=False)
-        result = bellhop.compute_tl(env=env, source=source, receiver=receiver)
+        result = bellhop.compute_field(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
         assert self._deck_topopt_char(tmp_path) == 'S'
 
@@ -112,7 +112,7 @@ class TestSSPInterpolationMethods:
                        ranges=np.linspace(500.0, 8000.0, 30))
         tl = {}
         for scheme in ('linear', 'spline'):
-            field = Bellhop(verbose=False, interp_ssp=scheme).compute_tl(
+            field = Bellhop(verbose=False, interp_ssp=scheme).compute_field(
                 env=env, source=src, receiver=rcv)
             tl[scheme] = np.asarray(field.dB).ravel()
         both = np.isfinite(tl['linear']) & np.isfinite(tl['spline'])

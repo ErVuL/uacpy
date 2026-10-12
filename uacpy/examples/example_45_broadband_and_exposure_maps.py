@@ -158,10 +158,8 @@ rate, source_level = 8000.0, 190.0
 _, pulse = tone_burst(tone, 20, sample_rate=rate)                # 20 cycles = 20 ms
 duration = pulse.size / rate
 unit = pulse / np.sqrt(np.mean(pulse ** 2))
-with warnings.catch_warnings():        # the 1/df record holds the pulse
-    warnings.simplefilter('ignore')
-    exposure = H.sound_exposure_level(
-        unit * 1e-6 * 10 ** (source_level / 20.0), rate)
+exposure = H.sound_exposure_level(source_waveform=unit * 1e-6 * 10 ** (source_level / 20.0),
+                                  sample_rate=rate)
 
 # The transmission loss OF THIS SIGNAL — pass the waveform and it is
 # weighted by its own spectrum, evaluated on the field's axis by the same
@@ -179,7 +177,7 @@ print(f"\n  one {duration * 1e3:.0f} ms burst at SL = {source_level:.0f} dB "
 print(f"    its own TPL                 {np.nanmedian(burst_loss.tl):7.2f} dB"
       f"   (median over the panel)")
 print(f"    ESL = SL + 10log10(T)       {energy_source_level:7.1f} dB "
-      f"re 1 µPa²·s")
+      f"re 1 µPa² m² s")
 print(f"    SEL, integrated from p(t)   "
       f"{np.nanmedian(exposure.dB):7.2f} dB")
 print(f"    SEL, as ESL - TPL           {np.nanmedian(by_equation):7.2f} dB")
@@ -204,10 +202,8 @@ print(f"    it is NOT panel A's flat 50 Hz window: those two part by up to "
 # either of which triggers (Southall et al. 2019) — and a peak is a property
 # of the waveform in time, not of the energy in the band. Same synthesis,
 # different reduction.
-with warnings.catch_warnings():
-    warnings.simplefilter('ignore')
-    peak_field = H.peak_sound_pressure_level(
-        unit * 1e-6 * 10 ** (source_level / 20.0), rate)
+peak_field = H.peak_sound_pressure_level(source_waveform=unit * 1e-6 * 10 ** (source_level / 20.0),
+                                         sample_rate=rate)
 peak = np.asarray(peak_field.dB)
 # A crest factor is deliberately NOT reported here. It needs the received
 # pulse's own duration, and multipath stretches that well past the 20 ms
@@ -259,24 +255,25 @@ look_depth, look_range = 150.0, 1500.0
 # Do not guess df. ``Arrivals.synthesis_band`` sizes it from the arrivals
 # themselves — it measures where 99.9 % of their energy sits
 # (``energy_support``) rather than assuming which paths exist, which is the
-# difference between a record that holds this channel and one that holds the
-# two paths I happened to think of. ``record=`` is stated because the helper
-# sizes for the ARRIVALS and the transmitted pulse's own length has to be
-# added to them.
+# difference between a record that holds this channel and one that holds only
+# the paths a reader thought of. ``output_duration=`` is stated because the
+# helper sizes for the ARRIVALS and the transmitted pulse's own length has to
+# be added to them.
 look = uacpy.Receiver(depths=[look_depth], ranges=[look_range])
 paths = model.run(env, uacpy.Source(depths=source_depth, frequencies=tone),
                   look, run_mode=uacpy.RunMode.ARRIVALS)
 spread = paths.energy_support(0.999)
 span = spread + chirp.size / rate
-# ``record=`` is taken as given, bypassing synthesis_band's own ``margin``,
-# so the headroom is supplied here. It is not a token factor: the pulse has
-# to fit AND the rectangular band's precursor has to have somewhere to sit.
+# ``output_duration=`` is taken as given, bypassing synthesis_band's own
+# ``margin``, so the headroom is supplied here. It is not a token factor: the
+# pulse has to fit AND the rectangular band's precursor has to have somewhere
+# to sit.
 # Measured on this geometry, energy landing before the direct path could
 # arrive ran about ten times its floor at 1.5x the span and had converged by
 # 4x; that floor (the "energy before the direct path" line printed below) is
 # the band edge's own precursor rather than anything folded.
-trace_band = paths.synthesis_band(bandwidth=2.0 * sweep, centre=tone,
-                                  record=6.0 * span)
+trace_band = paths.synthesis_band(bandwidth=2.0 * sweep, fc=tone,
+                                  output_duration=6.0 * span)
 trace_df = float(np.diff(trace_band)[0])
 trace_field = model.run(
     env, uacpy.Source(depths=source_depth, frequencies=trace_band),
@@ -285,13 +282,16 @@ direct = np.hypot(look_range, look_depth - source_depth)
 image = np.hypot(look_range, look_depth + source_depth)
 gap = (image - direct) / 1500.0
 with warnings.catch_warnings():
-    warnings.simplefilter('ignore')
-    # nfft sets the output RATE (nfft*df), not the record length, which
-    # stays 1/df. The automatic size only guarantees Nyquist; a display of
-    # the waveform wants several samples per cycle, not two.
+    # window=None keeps the band rectangular, so the notice that the band
+    # cuts the chirp (its peak moves under 0.5 dB, and the edges ring) is
+    # expected here; every other warning still shows.
+    warnings.filterwarnings(
+        'ignore', message=r"Field\.to_time_trace: the band .* cuts the source "
+                          r"waveform", category=uacpy.NumericsWarning)
+    # The trace comes back at the chirp's own rate, on the 1/df record.
     sent = trace_field.to_time_trace(
         depth=look_depth, range=look_range, source_waveform=chirp,
-        sample_rate=rate, window=None, nfft=8192)
+        sample_rate=rate, window=None)
 received = np.asarray(sent.data).real
 clock = np.asarray(sent.coords['time'])
 # The record's own audit. Nothing can arrive before the direct path, so
@@ -323,8 +323,8 @@ print(f"    transmitted {chirp.size / rate * 1e3:5.1f} ms, "
       f"received span {(clock[-1] - clock[0]) * 1e3:5.1f} ms at "
       f"{1e-3 / float(np.diff(clock)[0]):.1f} kHz")
 print(f"    the low ripple before the arrival is the rectangular band edge "
-      f"at\n    {band[0]:.0f}/{band[-1]:.0f} Hz — window=None keeps the "
-      f"energy exact and pays a sinc skirt")
+      f"at\n    {trace_band[0]:.0f}/{trace_band[-1]:.0f} Hz — window=None "
+      f"keeps the energy exact and pays a sinc skirt")
 # The image path is the one reflected off the surface: it leaves the source
 # as if from source_depth ABOVE it, so its extra length is the difference of
 # the two slant ranges, and the gap is that over the sound speed.
@@ -371,10 +371,7 @@ uacpy.plot.plot_field(exposure, axes[0], env=env,
                        f'{duration * 1e3:.0f} ms burst at '
                        f'SL = {source_level:.0f} dB re 1 µPa @ 1 m')
 uacpy.plot.plot_field(
-    uacpy.core.results.Field(
-        data=peak, coords={'depth': depths, 'range': ranges},
-        kind='level', unit='dB'),
-    axes[1], env=env,
+    peak_field, axes[1], env=env,
     title='Peak sound pressure level of the same burst — the other half of '
           'the dual metric, and not a band average')
 for ax in axes:

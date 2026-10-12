@@ -44,6 +44,7 @@ from uacpy.core.units import m_to_km
 from uacpy.io.oalib_writer import writable_layers
 from uacpy.io._fortran_helpers import deck_title
 from uacpy.core.engine_defaults import (
+    C_LOW_FACTOR,
     OASN_INTEGRATION_OFFSET,
     OASP_FREQ_MIN,
     OASP_INTEGRATION_OFFSET,
@@ -65,6 +66,18 @@ MIN_SPECTRAL_EXPONENT = 1.5
 #: dB — OASN reads a noise source level smaller than this in magnitude
 #: as switched off (oasnun22.f:183, :276, :324).
 OASN_LEVEL_DEAD_BAND_DB = 0.01
+
+
+def _oasn_reads(value) -> float:
+    """``value`` as OASN holds it: NOIPAR reads the noise levels
+    list-directed (oasnun22.f:179, :380) into default REALs (implicit
+    typing, noiprm.f:17), and the 0.01 of its gates is a REAL literal, so
+    each gate is OASN's test of single-precision values."""
+    return float(np.float32(value))
+
+
+#: :data:`OASN_LEVEL_DEAD_BAND_DB` as OASN's gates hold it.
+_OASN_DEAD_BAND_AS_READ = _oasn_reads(OASN_LEVEL_DEAD_BAND_DB)
 #: Relative spread of the water sound speeds below which a profile
 #: is written as one isovelocity layer.
 ISOVELOCITY_RTOL = 1e-6
@@ -923,7 +936,7 @@ def _emit_oases_freq_line(
 def oases_wavenumber_bounds(
     ssp_data: np.ndarray,
     *,
-    ssp_factor: float = 0.9,
+    ssp_factor: float = C_LOW_FACTOR,
     cmax: float = 1e8,
 ) -> Tuple[float, float]:
     """Return the (cmin, cmax) wavenumber-integration bounds.
@@ -932,10 +945,14 @@ def oases_wavenumber_bounds(
     ``k_max = 2*pi*f/cmin`` and ``k_min = 2*pi*f/cmax`` (oast.tex:505-515),
     so ``cmin`` must sit below the slowest phase speed in the problem for the
     steep and evanescent part of the spectrum to be sampled at all. The
-    ``ssp_factor`` margin below ``min(SSP)`` (0.9 here, 0.95 in the OASN
-    noise blocks) is uacpy's own choice — OASES states no rule for it.
+    ``ssp_factor`` margin below ``min(SSP)`` is the shared
+    :data:`~uacpy.core.engine_defaults.C_LOW_FACTOR` (``scooter.f90:258``'s
+    0.90; Jensen et al. call ``k_max ≈ 1.1·ω/c_min`` "in general,
+    conservative"). OASES states no rule for it, and its worked decks pin
+    CMIN by hand (1300 m/s under 1480 m/s water, oast.tex:568).
 
-    ``cmax`` is the "no upper limit" value; 1e8 is the one OASES substitutes
+    ``cmax`` is the "no upper limit" value; 1e8 is the value of the manual's
+    worked OAST decks (oast.tex:487, :568) and the one OASES substitutes
     itself when the deck's CMIN/CMAX signs conflict (unoast31.f:226,
     unoasp22.f:169).
     """
@@ -943,15 +960,17 @@ def oases_wavenumber_bounds(
     return cmin, float(cmax)
 
 
-#: CMAX's format in the OAST and OASP/OASSP Block-VII records. Six
-#: significant digits, not a fixed decimal count, because the same token has
-#: to carry both a user's ``c_high`` (1550 m/s) and the 1e8 "no upper limit"
-#: sentinel of :func:`oases_wavenumber_bounds`; ``%.6g`` writes those as
-#: ``1550`` and ``1e+08``. The reads are list-directed (unoast31.f:213,
-#: unoasp22.f:159), so no width is imposed. CMAX sets the LOWER edge of the
-#: wavenumber integration, ``WK0 = 2*pi*f/CMAX``, and with a pinned NW it also
-#: moves DLWVNO and hence the FFT range step, so rounding it is not cosmetic.
-_OASES_CMAX_FMT = '{:.6g}'
+def _exact_real(value) -> str:
+    """``value`` as the shortest text that reads back as the same double.
+
+    Every OASES record carrying a phase speed or a noise level is read
+    list-directed (CMIN CMAX: unoast31.f:213, unoasp22.f:159,
+    unoassp30.f:168, unoass21.f:188; CPHASE: unoass21.f:151; OASN:
+    oasnun22.f:179, :277, :326, :380, :420, unoasn22.f:226), so no width is
+    imposed and a given value reaches the binary unrounded. CMAX sets the
+    LOWER edge of the wavenumber integration, ``WK0 = 2*pi*f/CMAX``, and
+    with a pinned NW it also moves DLWVNO and hence the FFT range step."""
+    return repr(float(value))
 
 
 def _count_bottom_layers(env: Environment) -> int:
@@ -1020,19 +1039,51 @@ def _check_receiver_depth_tokens(depths, tokens, *, what: str) -> None:
     )
 
 
-#: NW*C NW*D NW*E — the counts the OASN manual's worked deck uses for the
-#: continuous / discrete / evanescent bands (oasn.tex:480).
-_OASN_NOISE_SAMPLES = (400, 400, 100)
+#: NWSC NWSD NWSE, the surface-noise block's (Block VII) continuous / discrete /
+#: evanescent counts when ``n_wavenumbers`` is not pinned. uacpy guidance,
+#: measured: the manual gives no rule beyond its worked deck's 400 400 100
+#: (oasn.tex:480). OASES adds an artificial attenuation of
+#: 60 c (1/CMN - 1/CMX) / NWSD dB/wavelength to the discrete band
+#: (unoasn22.f:288-289), which lowers the level as 1/NWSD, so that band takes
+#: every sample left under NP (the three sum to exactly NP, oasnun22.f:312,
+#: :319). Measured on a 100 m Pekeris column (50/100/400 Hz) and a 2000 m
+#: sound-channel column (25/50/100 Hz); each band's count against a
+#: 16384 / 40960 / 8192 deck:
+#:
+#:   continuous  1600 samples       <= 0.09 dB
+#:   evanescent   100 samples       0.00 dB (50 already)
+#:   discrete    within 0.5 dB from 6400 (100 m, 50 Hz), 12800 (100 Hz),
+#:               25600 (400 Hz; 2000 m, 25 Hz), about 32768 (2000 m,
+#:               50/100 Hz)
+#:
+#: Against the integral taken on the real axis (integration_offset 1e-9),
+#: this deck reads 0.05-0.47 dB low on the 100 m column and 1.2-3.5 dB low on
+#: the 2000 m one, where the lossless channel modes keep that integral from
+#: converging within NP; the worked deck's 400 400 100 reads 2.9-5.4 dB and
+#: 8.4-10.2 dB low. Cost per frequency: 0.11 s (100 m) and 0.8-1.5 s
+#: (2000 m), against 0.01-0.05 s for 400 400 100.
+_OASN_SURFACE_NOISE_SAMPLES = (1600, 63836, 100)
+
+#: NWDC NWDD NWDE, the deep-noise block's (Block VIII) counts when
+#: ``n_wavenumbers`` is not pinned: the manual's worked-deck counts
+#: (oasn.tex:480), Block VIII taking Block VII's format (oasn.tex:335-336).
+#: OASES spans the deep block's discrete band from 1/CMX to 1/CMX
+#: (oasnun22.f:349, where Block VII has 1/CMN at :299), so NWDD samples a band
+#: of zero width that NOISE weights by DLWVNO = 0 (oasnun22.f:1012); the trapped
+#: modes fall in the NWDE band.
+_OASN_DEEP_NOISE_SAMPLES = (400, 400, 100)
 
 
 def _noise_cmin(c_low, ssp_data) -> float:
     """Slow phase-speed edge for an OASN noise block: the model's ``c_low``
-    when pinned, else 0.95*c_min. The 0.95 margin is uacpy's own — OASES
-    states no rule for it; the manual's worked deck just pins CMINS = 1400
-    m/s under a 1431 m/s water column (oasn.tex:438, :479)."""
+    when pinned, else :data:`~uacpy.core.engine_defaults.C_LOW_FACTOR` ×
+    c_min (``scooter.f90:258``'s 0.90). OASES states no rule for it ("CMINS should be chosen small enough to include
+    all important evanescent components", oasn.tex:286-287); the manual's
+    worked deck just pins CMINS = 1400 m/s under a 1431 m/s water column
+    (oasn.tex:441, :479)."""
     if c_low:
         return float(c_low)
-    return float(ssp_data[:, 1].min()) * 0.95
+    return float(ssp_data[:, 1].min()) * C_LOW_FACTOR
 
 
 def _noise_cmax(c_high) -> float:
@@ -1041,19 +1092,23 @@ def _noise_cmax(c_high) -> float:
     return float(c_high) if c_high else 1.0e8
 
 
-#: Documented minimum for the discrete-band count, ``oasn.tex:313``
+#: Documented minimum for the discrete-band count, ``oasn.tex:308``
 #: ("NWSD $\\ge 10$"). OASES never checks it; see :func:`_noise_nw`.
 _OASN_MIN_DISCRETE_SAMPLES = 10
 
 
-def _noise_nw(nw) -> str:
+def _noise_nw(nw, unpinned) -> str:
     """``NW*C NW*D NW*E`` wavenumber-sample counts for a noise block.
 
     Unlike the replica and discrete-source blocks, the surface- and deep-noise
     blocks have no automatic-sampling branch: NOIPAR reads three explicit counts
     and sums them into ``NWVNON``/``NWVNOP`` (oasnun22.f:312, :358). A negative
     count would make that total negative and the block would contribute nothing,
-    so ``n_wavenumbers <= 0`` falls back to the manual's counts.
+    so ``n_wavenumbers`` None or ``<= 0`` writes the block's own ``unpinned``
+    counts (:data:`_OASN_SURFACE_NOISE_SAMPLES`,
+    :data:`_OASN_DEEP_NOISE_SAMPLES`). A pinned ``n`` writes ``n``,
+    ``max(n, 10)`` and ``max(1, n // 4)`` to the continuous, discrete and
+    evanescent bands of either block.
 
     The three-band total is bounded by OASES' wavenumber array: NOIPAR
     STOPs with '*** TOO MANY SAMPLING POINTS ***' when it exceeds NP
@@ -1061,7 +1116,7 @@ def _noise_nw(nw) -> str:
     writer derives from a pinned ``n_wavenumbers`` is checked here first.
 
     The DISCRETE band has a documented floor the binary does not enforce.
-    ``oasn.tex:313`` writes the parameter as ``NWSD >= 10``, and nothing in
+    ``oasn.tex:308`` writes the parameter as ``NWSD >= 10``, and nothing in
     ``unoasn22.f`` checks it — the only use of ``NWS(2)`` anywhere is as a
     DIVISOR, ``OFFDB = 60*V*(SLS(3)-SLS(2))/NWS(2)`` at ``:289``, the default
     complex-contour offset when the deck asks for one without a value. That
@@ -1080,7 +1135,7 @@ def _noise_nw(nw) -> str:
                 f"write_oasn_input: n_wavenumbers={n} would put "
                 f"{n} sample(s) in the discrete spectral band, below the "
                 f"NWSD >= {_OASN_MIN_DISCRETE_SAMPLES} the OASES manual "
-                f"specifies (oasn.tex:313). OASES does not check it, and the "
+                f"specifies (oasn.tex:308). OASES does not check it, and the "
                 f"band count divides the default contour offset "
                 f"(unoasn22.f:289), so a smaller count silently over-damps "
                 f"the modal poles. Raised to "
@@ -1099,11 +1154,11 @@ def _noise_nw(nw) -> str:
                 f"(oasnun22.f:319) and writes no output.",
                 remediation=(f"Pass n_wavenumbers <= "
                              f"{int(_OASES_MAX_WAVENUMBERS / 2.25)} so the "
-                             f"2.25x band total stays within NP, or <= 0 for "
-                             f"the manual's 400/400/100 counts."),
+                             f"2.25x band total stays within NP, or leave it "
+                             f"unset for each noise block's default counts."),
             )
         return " ".join(str(v) for v in counts)
-    return " ".join(str(v) for v in _OASN_NOISE_SAMPLES)
+    return " ".join(str(v) for v in unpinned)
 
 
 def _emit_receiver_array(
@@ -1194,8 +1249,9 @@ def _oases_nw_line(n_wavenumbers, icut2_auto: int) -> str:
     are inert. Exactly ``-1`` is emitted, never a more negative value: OAST
     reads ``NW < -1`` as a request for the Padé approximation with
     ``NPADE = -NW`` and IC1/IC2 as its parameters (unoast31.f:419-423).
-    A pinned ``NW`` is clamped by ``ICUT2 = MIN0(NW, ICUT2)``
-    (oast.tex:73-75), so emit ``ICUT2 = NW`` to keep the whole spectrum.
+    A pinned ``NW`` is clamped by ``ICW2=MIN0(NWVNO,ICW2)``
+    (unoast31.f:436; the manual's constraint IC2 <= NW, oast.tex:75), so emit
+    ``ICUT2 = NW`` to keep the whole spectrum.
     """
     nw = int(n_wavenumbers) if n_wavenumbers else -1
     if nw <= 0:
@@ -1223,10 +1279,11 @@ def _check_oasn_noise_level(name: str, level, *, dead_band: float = 0.0,
     ``dead_band`` is the surface level's extra step: ``abs(SNLEVDB).LT.0.01``
     switches the source off before the sign test runs (oasnun22.f:183), so a
     tiny negative value is simply "off". The discrete-source level has no
-    such band (oasnun22.f:381).
+    such band (oasnun22.f:381). Both tests run on the single-precision
+    values OASN holds (:func:`_oasn_reads`).
     """
-    value = float(level)
-    if value >= 0.0 or abs(value) < dead_band:
+    value = _oasn_reads(level)
+    if value >= 0.0 or abs(value) < _oasn_reads(dead_band):
         return
     raise ConfigurationError(
         f"{who}: {name}={value:g} is negative, which OASN "
@@ -1877,7 +1934,7 @@ def _resolve_source_record(
                              if c != _OASES_LINEAR_ARRAY_CHAR).strip())
                 + " (one source)",
                 "OASP(run_mode=COHERENT_TL) with Source(depths=[...], "
-                "weights=[1/n]*n), then ResultStack.superpose(): one deck "
+                "weights=[1/n]*n), then Field.superpose(): one deck "
                 "per element, summed coherently; OASES's in-phase array "
                 "(LTYP=1, THETA=0) divides each element by LS "
                 "(oaseun31.f:1776-1777). OAST returns dB only and cannot be "
@@ -2093,9 +2150,13 @@ def write_oast_input(
         Number of wavenumber samples (default: None, automatic). A value
         below -1, OAST's Pade request, is refused.
     range_min : float
-        Minimum range for plots in **metres** (default: 0)
+        First range (**metres**) of OAST's native TL grid (default 0): the
+        ``XLEFT`` OAST takes ``R0`` and the point count from
+        (``unoast31.f:482-490``), so it decides which ranges the returned
+        TL holds, not only a plot window. OAST floors it at one range step.
     range_max : float
-        Maximum range for plots in **metres** (default: max receiver range)
+        Last range (**metres**) of that grid, ``XRIGHT`` (default: the
+        farthest receiver range); a short value drops the far ranges.
     dip_angle : float
         Fault dip angle in degrees for the ``'4'`` dip-slip moment
         source (default 0). Only read when ``'4'`` is in ``options``.
@@ -2112,8 +2173,8 @@ def write_oast_input(
     -----
     A source with a frequency sweep writes ``NFREQ > 1`` on Block III; the
     run then emits one TL curve per receiver per frequency, which
-    :func:`~uacpy.io.oases_reader.read_oast_tl` returns as a ResultStack
-    over frequency.
+    :func:`~uacpy.io.oases_reader.read_oast_tl` returns as a list of TL
+    Fields, one per frequency.
 
     OAST input file has 12 blocks:
     I.   Title
@@ -2225,7 +2286,7 @@ def write_oast_input(
             cmin = float(c_low)
         if c_high is not None:
             cmax = float(c_high)
-        f.write(f"{cmin:.1f} {_OASES_CMAX_FMT.format(cmax)}\n")
+        f.write(f"{_exact_real(cmin)} {_exact_real(cmax)}\n")
 
         # NW IC1 IC2 (unoast31.f:230) — automatic sampling (NW=-1) ignores
         # IC1/IC2 per oast.tex:541-550 and forces the complex contour even
@@ -2341,7 +2402,9 @@ class OasnNoise(FieldsRepr, CarrierExport):
         Block VIII is read for ``DPLEVDB >= 0.01`` (oasnun22.f:324), so exactly
         0.01 reads the block and radiates nothing. Unlike the surface level
         the deep source has no spectrum-file form, so a negative level simply
-        disables it.
+        disables it. OASES computes the sheet with two defects in its deep
+        loop, which the deck keeps; see :class:`~uacpy.models.OASN`'s
+        ``deep_noise_level``.
     deep_source_depth : float, optional
         Depth (m) of the deep source sheet (default: half the water depth).
     discrete_sources : sequence of dict
@@ -2353,10 +2416,11 @@ class OasnNoise(FieldsRepr, CarrierExport):
         dB, and is rejected.
     c_low, c_high : float, optional
         Phase-speed bounds (m/s) of the surface- and deep-noise integrations
-        (Blocks VII, VIII); default 0.95 x the slowest water speed and 1E8.
+        (Blocks VII, VIII); default C_LOW_FACTOR (0.9) x the slowest water
+        speed and 1E8.
     c_low_discrete, c_high_discrete : float, optional
         Phase-speed bounds of the discrete-source integration (Block IX);
-        default 0.95 x the slowest water speed and 1E8.
+        default C_LOW_FACTOR (0.9) x the slowest water speed and 1E8.
 
     On the export protocol: ``to_dict`` / ``from_dict`` through the
     constructor, ``to_xarray`` / ``to_netcdf`` with the fields as JSON.
@@ -2382,18 +2446,18 @@ class OasnNoise(FieldsRepr, CarrierExport):
                            tuple(dict(ds) for ds in self.discrete_sources))
 
     def deck_levels(self) -> Tuple[float, float, float]:
-        """``(SSLEV, WNLEV, DSLEV)`` as the deck carries them. The levels are
-        gated on the value OASN reads back from the deck, so the surface and
-        deep levels are rounded to the '%.1f' the deck writes before any gate
-        tests them: a level of 0.03 is written as 0.0 and OASN then skips the
-        sub-block the unrounded value would have demanded. WNLEV has no dead
-        band — WNOISE adds 10**(WNLEVDB/10) to every covariance diagonal
-        unconditionally (oasnun22.f:228, :670, :1157) — so "disabled" is
-        written as -200 dB (1e-20 linear); an explicit 0.0 is a literal 0 dB.
+        """``(SSLEV, WNLEV, DSLEV)`` as the deck carries them. The deck
+        writes each level as given; the surface and deep levels are returned
+        as OASN holds them, a single-precision REAL (:func:`_oasn_reads`),
+        because every gate on them is OASN's own test of that value. WNLEV
+        has no dead band — WNOISE adds 10**(WNLEVDB/10) to every covariance
+        diagonal unconditionally (oasnun22.f:228, :670, :1157) — so
+        "disabled" is written as -200 dB (1e-20 linear); an explicit 0.0 is a
+        literal 0 dB.
         """
         white = -200.0 if self.white_level is None else float(self.white_level)
-        return (round(float(self.surface_level), 1), white,
-                round(float(self.deep_level), 1))
+        return (_oasn_reads(self.surface_level), white,
+                _oasn_reads(self.deep_level))
 
 
 @dataclass(frozen=True)
@@ -2405,8 +2469,8 @@ class OasnReplicaGrid(FieldsRepr, CarrierExport):
     the km the deck holds). A ``None`` end takes the default: depths a 10 m
     stand-off inside the water column (a tenth of the column where the water
     is 20 m or shallower), x 100 m to 10 km, y 0. ``c_low`` / ``c_high`` bound
-    the replica integration's phase speeds (m/s); default 0.95 x the slowest
-    water speed and 1E8.
+    the replica integration's phase speeds (m/s); default C_LOW_FACTOR (0.9) x
+    the slowest water speed and 1E8.
 
     On the export protocol: ``to_dict`` / ``from_dict`` through the
     constructor, ``to_xarray`` / ``to_netcdf`` with the fields as JSON.
@@ -2429,39 +2493,39 @@ def _write_oasn_noise_blocks(f: TextIO, noise: OasnNoise, *, ssp_data, depth,
     n_discrete = len(noise.discrete_sources)
     # Block VI: Sources — SSLEV WNLEV DSLEV NDNS (oasnun22.f:179).
     # These four values are what gates Blocks VII, VIII and IX below.
-    f.write(f"{surface_level:.1f} {white_level:.1f} "
-            f"{deep_level:.1f} {n_discrete}\n")
+    f.write(f"{_exact_real(noise.surface_level)} {_exact_real(white_level)} "
+            f"{_exact_real(noise.deep_level)} {n_discrete}\n")
 
     # Block VII: surface-noise wavenumber parameters. NOIPAR reads
     # them only when `abs(SNLEVDB).GE.0.01` (oasnun22.f:276).
-    if abs(surface_level) >= OASN_LEVEL_DEAD_BAND_DB:
+    if abs(surface_level) >= _OASN_DEAD_BAND_AS_READ:
         # CMINS CMAXS (oasnun22.f:277) — the given c_low/c_high, else the
         # slow edge below the water column and 1E8 for "no upper limit",
         # which oasn.tex:284-287 requires here because the continuous
         # spectrum always matters for surface noise.
-        f.write(f"{_noise_cmin(noise.c_low, ssp_data):.1f} "
-                f"{_noise_cmax(noise.c_high):.6g}\n")
+        f.write(f"{_exact_real(_noise_cmin(noise.c_low, ssp_data))} "
+                f"{_exact_real(_noise_cmax(noise.c_high))}\n")
         # NWSC NWSD NWSE, samples in the continuous / discrete /
         # evanescent bands (oasnun22.f:278). NWSD > 1 splits the
         # slowness axis into those three bands (:282); NWSD <= 1
         # collapses them into one equidistant band (:305-310).
-        f.write(f"{_noise_nw(n_wavenumbers)}\n")
+        f.write(f"{_noise_nw(n_wavenumbers, _OASN_SURFACE_NOISE_SAMPLES)}\n")
 
     # Block VIII: deep-noise parameters. NOIPAR reads them only when
     # `DPLEVDB.GE.0.01` (oasnun22.f:324) — deliberately asymmetric
     # with the surface gate above: a negative deep level just disables
     # the source, so emitting these lines would desynchronise every
     # later READ.
-    if deep_level >= OASN_LEVEL_DEAD_BAND_DB:
+    if deep_level >= _OASN_DEAD_BAND_AS_READ:
         # DPSD, depth of the deep source sheet (oasnun22.f:325).
         deep_source_depth = (depth * 0.5 if noise.deep_source_depth is None
                              else noise.deep_source_depth)
         f.write(f"{deep_source_depth:.2f}\n")
         # CMIND CMAXD (oasnun22.f:326), then NWDC NWDD NWDE (:327) —
         # the same three-band split as Block VII.
-        f.write(f"{_noise_cmin(noise.c_low, ssp_data):.1f} "
-                f"{_noise_cmax(noise.c_high):.6g}\n")
-        f.write(f"{_noise_nw(n_wavenumbers)}\n")
+        f.write(f"{_exact_real(_noise_cmin(noise.c_low, ssp_data))} "
+                f"{_exact_real(_noise_cmax(noise.c_high))}\n")
+        f.write(f"{_noise_nw(n_wavenumbers, _OASN_DEEP_NOISE_SAMPLES)}\n")
 
     # Block IX: Discrete sources, gated on NDNS > 0 (oasnun22.f:371).
     if n_discrete > 0:
@@ -2489,17 +2553,18 @@ def _write_oasn_noise_blocks(f: TextIO, noise: OasnNoise, *, ssp_data, depth,
             # consuming the CMIN/CMAX and NW records as source 2 and dying
             # at :380 with "End of file", exit 2. N = 1 is indistinguishable
             # either way, which is why every existing test missed it.
-            f.write(f"{z_ds:.2f} {x_ds:.9f} {y_ds:.9f} {level_ds:.1f}\n")
+            f.write(f"{z_ds:.2f} {x_ds:.9f} {y_ds:.9f} "
+                    f"{_exact_real(level_ds)}\n")
 
         # CMINDIN CMAXDIN (oasnun22.f:420). 1E8 keeps the whole
         # spectrum, as in Block VII; the caller can pin it for
         # fast-bottom critical-angle work.
         c_water_min = float(ssp_data[:, 1].min())
-        cmins = (c_water_min * 0.95 if noise.c_low_discrete is None
+        cmins = (c_water_min * C_LOW_FACTOR if noise.c_low_discrete is None
                  else noise.c_low_discrete)
         cmaxs = (1.0e8 if noise.c_high_discrete is None
                  else noise.c_high_discrete)
-        f.write(f"{cmins:.1f} {cmaxs:.1f}\n")
+        f.write(f"{_exact_real(cmins)} {_exact_real(cmaxs)}\n")
         # NWDIN ICUT1D ICUT2D (oasnun22.f:421).
         f.write(f"{_oases_nw_line(n_wavenumbers, 2000)}\n")
 
@@ -2567,9 +2632,10 @@ def _write_oasn_replica_block(f: TextIO, replica: OasnReplicaGrid, *,
     # CMINSIN CMAXSIN (unoasn22.f:226). Same 1E8 upper bound as the
     # discrete-source block — overridable by the caller.
     c_water_min = float(ssp_data[:, 1].min())
-    cmins = c_water_min * 0.95 if replica.c_low is None else replica.c_low
+    cmins = (c_water_min * C_LOW_FACTOR if replica.c_low is None
+             else replica.c_low)
     cmaxs = 1.0e8 if replica.c_high is None else replica.c_high
-    f.write(f"{cmins:.1f} {cmaxs:.1f}\n")
+    f.write(f"{_exact_real(cmins)} {_exact_real(cmaxs)}\n")
     # NWSIN ICUT1S ICUT2S (unoasn22.f:227).
     f.write(f"{_oases_nw_line(n_wavenumbers, 2000)}\n")
 
@@ -2626,8 +2692,16 @@ def write_oasn_input(
         request for its own default, 60*c*(1/c_min - 1/c_max)/N_k dB/wavelength
         (unoasn22.f:283-293). A value above 1e-10 is used as given.
     n_wavenumbers : int or None
-        Number of wavenumber samples for every integration block;
-        ``None`` selects OASES's automatic sampling (the default)
+        Number of wavenumber samples for every integration block. ``None``
+        (the default) selects OASES's automatic sampling for the replica and
+        discrete-source blocks and writes each noise block's default counts,
+        which have no automatic form: 1600 / 63836 / 100 continuous /
+        discrete / evanescent samples for surface noise
+        (:data:`_OASN_SURFACE_NOISE_SAMPLES`), 400 / 400 / 100 for deep noise
+        (:data:`_OASN_DEEP_NOISE_SAMPLES`). A pinned ``n`` writes ``n``,
+        ``max(n, 10)`` and ``max(1, n // 4)`` to those three bands of either
+        noise block; in the deep block the middle band has zero width
+        (oasnun22.f:349) and the trapped modes take the ``n // 4``.
 
     Notes
     -----
@@ -2679,7 +2753,7 @@ def write_oasn_input(
     # '*** UPPER HALFSPACE MUST BE VACUUM OR AIR ***'`, reached whenever
     # SNLEVDB >= 0.01. Name the surface here rather than let the binary die.
     surface_c_p = _upper_halfspace_sound_speed(env)
-    if surface_level >= OASN_LEVEL_DEAD_BAND_DB and surface_c_p > 500.0:
+    if surface_level >= _OASN_DEAD_BAND_AS_READ and surface_c_p > 500.0:
         surface_kind = env.surface.acoustic_type
         raise ConfigurationError(
             f"OASN surface noise requires a vacuum or air upper halfspace, "
@@ -2768,8 +2842,18 @@ def write_oasn_input(
 #: The default upper band edge FR2 of an OASP deck, per unit of the centre
 #: frequency: band headroom above the carrier, so the pulse's upper sidelobes
 #: fall inside FR2 rather than being truncated. OASES ties FR2 to nothing but
-#: FR1 (oasp.tex:131), so the 2.5 is uacpy's default, not a model constraint.
+#: FR1 (oasp.tex:131); 2.5 is the ratio of the manual's worked OASP deck (FRC
+#: 5 Hz at oasp.tex:572, FR2 12.5 Hz at oasp.tex:583), not a model constraint.
 OASP_FREQ_MAX_PER_CENTER = 2.5
+
+
+def oasp_centre_frequency(frequencies) -> float:
+    """Block III's ``FRC`` when unpinned: the midpoint of the band the run
+    sweeps (Hz), the one rule the OASP / OASSP engines and their deck
+    writers share — a single frequency is its own centre. The manual's FRC
+    is the "Center frequency of source" (oasp.tex:84)."""
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    return float(0.5 * (f.min() + f.max()))
 
 
 def write_oasp_input(
@@ -2779,7 +2863,7 @@ def write_oasp_input(
     receiver: Receiver,
     options: Optional[str] = None,
     *,
-    center_frequency: Optional[float] = None,
+    fc: Optional[float] = None,
     n_time_samples: Optional[int] = None,
     freq_min: Optional[float] = None,
     freq_max: Optional[float] = None,
@@ -2821,8 +2905,9 @@ def write_oasp_input(
         - C: Omega-k contour plot
         - Z: Sound speed profile plot
         - f: Full Hankel transform for near field
-    center_frequency : float
-        Center frequency in Hz (default: source frequency)
+    fc : float
+        Center frequency in Hz (default: the midpoint of
+        ``source.frequencies``, :func:`oasp_centre_frequency`)
     integration_offset : float
         Integration contour offset in dB/wavelength. Default 0, which under the
         'J' option of the default option line is not "no offset": OASES takes
@@ -2834,11 +2919,15 @@ def write_oasp_input(
     freq_min : float
         Lower frequency limit in Hz (default: 0)
     freq_max : float
-        Upper frequency limit in Hz (default: center_freq*2.5)
+        Upper frequency limit in Hz (default: fc*2.5)
     time_step : float
         Time sampling increment in seconds (default: auto)
-    range_step : float
-        Range increment in **metres** (default: auto)
+    range_step : float, optional
+        Range increment in **metres** across the receiver's span: the deck
+        evaluates ``r_min + i*range_step`` up to the receiver's farthest
+        range, so the step must divide that span and the field holds
+        ``span/range_step + 1`` ranges. Default ``None``: the receiver's own
+        ranges, which must then be uniformly spaced.
     n_wavenumbers : int or None
         Number of wavenumber samples (default: None, automatic)
     dip_angle : float
@@ -2881,11 +2970,10 @@ def write_oasp_input(
     integration_offset = OASP_INTEGRATION_OFFSET if integration_offset is None else integration_offset
     freq_min = OASP_FREQ_MIN if freq_min is None else freq_min
     n_time_samples = OASP_N_TIME_SAMPLES if n_time_samples is None else n_time_samples
-    center_freq = (float(source.frequencies[0]) if center_frequency is None
-                   else center_frequency)
+    fc = oasp_centre_frequency(source.frequencies) if fc is None else fc
     n_time = n_time_samples
     if freq_max is None:
-        freq_max = center_freq * OASP_FREQ_MAX_PER_CENTER
+        freq_max = fc * OASP_FREQ_MAX_PER_CENTER
 
     # DT fixes both the bin spacing DLFREQ = 1/(DT*NX) and the highest bin
     # index MX = FR2/DLFREQ + 2 (unoasp22.f:237-238), so Nyquist against FR2
@@ -2895,7 +2983,9 @@ def write_oasp_input(
     dt = 1.0 / (2.0 * freq_max) if time_step is None else time_step
 
     # Options string. Default is single-component (normal stress / pressure)
-    # plus the complex-contour integration flag. A second output letter such
+    # plus the complex-contour integration flag — ``N J``, the manual's OASP
+    # TL deck (oasp.tex:764), 'J' keeping real frequencies under automatic
+    # sampling (oasp.tex:45-46). A second output letter such
     # as ``V`` raises NOUT, and the .trf reader keeps only the first
     # component, so the default asks for one.
     if options is None:
@@ -2916,10 +3006,9 @@ def write_oasp_input(
         filepath, env, source, receiver, options,
         writer='write_oasp_input',
         title="OASP Simulation via UACPY",
-        center_freq=center_freq,
+        fc=fc,
         integration_offset=integration_offset,
         dip_angle=dip_angle,
-        cmax=1e9,
         n_wavenumbers=n_wavenumbers,
         block_vii_token4=(40 if integrand_plot_step is None
                           else int(integrand_plot_step)),
@@ -2974,14 +3063,34 @@ def _oasp_range_axis(writer: str, receiver: Receiver,
     about the range axis (``unoasp22.f:176``, ``unoassp30.f:179``), so a
     non-uniform request cannot be honoured — it would silently return a
     different set of ranges than asked for. OAST warns and interpolates;
-    neither of these has that option.
+    neither of these has that option. A ``range_step`` spaces the axis
+    across the receiver's span and must tile it.
     """
     ranges = np.asarray(receiver.ranges, dtype=float)
     r_min_m, r_max_m = float(ranges.min()), float(ranges.max())
     r1_km = float(m_to_km(r_min_m))
 
     if range_step is not None:
-        return r1_km, float(m_to_km(range_step)), len(ranges)
+        # The Receiver sets the span and range_step its spacing, so the
+        # step has to tile the span: NPLOTS is read off it, never the
+        # receiver's own count.
+        step = float(range_step)
+        if not (np.isfinite(step) and step > 0.0):
+            raise ConfigurationError(
+                f"{writer}: range_step must be a positive finite step (m); "
+                f"got {range_step!r}.")
+        span = r_max_m - r_min_m
+        n_steps = int(round(span / step))
+        if not np.isclose(n_steps * step, span, rtol=1e-6, atol=1e-6):
+            raise ConfigurationError(
+                f"{writer}: range_step={step:g} m does not tile the "
+                f"receiver's span {r_min_m:g}-{r_max_m:g} m ({span / step:.6g} "
+                f"steps); the deck's axis r0 + i*range_step would miss "
+                f"{r_max_m:g} m.",
+                remediation="Pass a range_step that divides the span, or "
+                            "give the Receiver the ranges themselves "
+                            "(np.linspace) and leave range_step=None.")
+        return r1_km, float(m_to_km(step)), n_steps + 1
 
     n_ranges = len(ranges)
     if n_ranges <= 1:
@@ -3009,10 +3118,9 @@ def _write_oasp_family_deck(
     *,
     writer: str,
     title: str,
-    center_freq: float,
+    fc: float,
     integration_offset,
     dip_angle: Optional[float],
-    cmax: float,
     n_wavenumbers,
     block_vii_token4: int,
     n_time: int,
@@ -3058,7 +3166,10 @@ def _write_oasp_family_deck(
         writer, options, nr,
         int(np.atleast_1d(np.asarray(receiver.depths)).size))
 
-    cmin, cmax = oases_wavenumber_bounds(ssp_data, cmax=cmax)
+    # An unpinned CMAX is OASP's own "no upper limit", 1E8 (unoasp22.f:169
+    # CMAXIN=1E8; every worked OASP deck, oasp.tex:581, :695, :771), which
+    # cylindrical OASSP replaces with 1e12 (unoassp30.f:205-217).
+    cmin, cmax = oases_wavenumber_bounds(ssp_data)
     if c_low is not None:
         cmin = float(c_low)
     if c_high is not None:
@@ -3080,7 +3191,7 @@ def _write_oasp_family_deck(
         # list-directed read (unoasp22.f:131-132, unoassp30.f:140-142).
         # Option 'd' would demand a 5-token Doppler form and is rejected by
         # the callers.
-        f.write(f"{center_freq:.9f} {integration_offset}\n")
+        f.write(f"{fc:.9f} {integration_offset}\n")
 
         # Block IV: Environment, read by INENVI from unoasp22.f:144 /
         # unoassp30.f:153. OASSP's scattering interface carries its roughness
@@ -3106,7 +3217,7 @@ def _write_oasp_family_deck(
 
         # Block VII: Wavenumber sampling — CMIN CMAX (unoasp22.f:159,
         # unoassp30.f:168).
-        f.write(f"{cmin:.1f} {_OASES_CMAX_FMT.format(cmax)}\n")
+        f.write(f"{_exact_real(cmin)} {_exact_real(cmax)}\n")
 
         # NWVNO ICW1 ICW2 <token4> (unoasp22.f:160, unoassp30.f:169). Anything
         # below 1 selects automatic sampling (``AUSAMP=(NWVNO.LT.1)``), which
@@ -3193,7 +3304,7 @@ def write_oassp_input(
     spectral_exponent: Optional[float] = None,
     rms_roughness: Optional[float] = None,
     realization: Optional[int] = None,
-    center_frequency: Optional[float] = None,
+    fc: Optional[float] = None,
     integration_offset: Optional[float] = None,
     n_wavenumbers: Optional[int] = None,
     c_low: Optional[float] = None,
@@ -3241,8 +3352,9 @@ def write_oassp_input(
         ``.rhs`` at ``unoassp30.f:181-188`` but its mismatch test covers only
         ``NT`` and ``DT``, so a band that differs from the mean field's is
         replaced with no message at all.
-    center_frequency : float, optional
-        Block III's ``FRC``. Defaults to the source's first frequency.
+    fc : float, optional
+        Block III's ``FRC``. Defaults to the midpoint of
+        ``source.frequencies`` (:func:`oasp_centre_frequency`).
     integration_offset, n_wavenumbers, c_low, c_high, range_step
         As for :func:`write_oasp_input`. The range axis starts at the first
         receiver range.
@@ -3413,14 +3525,10 @@ def write_oassp_input(
         filepath, env, source, receiver, options,
         writer='write_oassp_input',
         title="OASSP Simulation via UACPY",
-        center_freq=(float(np.atleast_1d(source.frequencies)[0])
-                     if center_frequency is None else float(center_frequency)),
+        fc=(oasp_centre_frequency(source.frequencies)
+            if fc is None else float(fc)),
         integration_offset=integration_offset,
         dip_angle=None,
-        # Cylindrical geometry forces CMAX = 1e12 anyway (:205-217); the OASP
-        # writer's own 1e9 default is kept so the two decks agree wherever the
-        # binary does not override.
-        cmax=1e9,
         n_wavenumbers=n_wavenumbers,
         block_vii_token4=int(realization),
         n_time=int(n_time_samples), freq_min=float(freq_min),
@@ -4137,7 +4245,7 @@ def write_oass_input(
             bottom_suffix_fn=_roughness_tail)
 
         # Block V: CPH INTFC (unoass21.f:151).
-        f.write(f"{float(phase_speed):.2f} {int(interface)}\n")
+        f.write(f"{_exact_real(phase_speed)} {int(interface)}\n")
 
         # Block VI: the 3-D receiver array, which also picks the field
         # parameter (§2.2a).
@@ -4162,7 +4270,7 @@ def write_oass_input(
         # sentinel, because the override only happens under REVERB: on a
         # plots-only deck (say 'I' alone) a -1 would survive into NWVNO as a
         # negative wavenumber count.
-        f.write(f"{cmin:.2f} {cmax:.2f}\n")
+        f.write(f"{_exact_real(cmin)} {_exact_real(cmax)}\n")
         f.write(f"{n_wavenumbers} 1 {n_wavenumbers}\n")
 
         # Block VIII: RMIN RMAX NR, in km (unoass21.f:263).

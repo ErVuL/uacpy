@@ -14,6 +14,8 @@ Each is pinned against a closed form, because both are averages and an average
 is the kind of quantity that looks plausible while being wrong by a constant.
 """
 
+import re
+
 import numpy as np
 import pytest
 import warnings
@@ -22,6 +24,7 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
 from uacpy.core.results.quantities import is_loss
 from uacpy.acoustic_signal import tone_burst
+from uacpy.tests.conftest import recorded_warnings
 
 SPEED = 1500.0
 RATE = 8000.0
@@ -203,7 +206,8 @@ class TestTheBandAverageIsTheLossABandwidthSees:
             assert band.broadband_loss().band_hz == (low, high)
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                exposure = band.sound_exposure_level(waveform, RATE)
+                exposure = band.sound_exposure_level(source_waveform=waveform,
+                                                     sample_rate=RATE)
             assert exposure.band_hz == (low, high)
             # and the identity really is narrowed, so band_hz is the only
             # place the span survives
@@ -395,8 +399,8 @@ class TestAnySignalGetsItsOwnTransmissionLoss:
                 source_waveform=scaled, sample_rate=self.RATE).tl[0, 0])
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                sel = float(field.sound_exposure_level(
-                    scaled, self.RATE).dB[0, 0])
+                sel = float(field.sound_exposure_level(source_waveform=scaled,
+                                                       sample_rate=self.RATE).dB[0, 0])
             energy_source_level = (source_level
                                    + 10.0 * np.log10(duration))
             assert sel == pytest.approx(energy_source_level - loss, abs=1e-6)
@@ -459,7 +463,37 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
     def quiet(field, waveform, **kw):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            return field.sound_exposure_level(waveform, RATE, **kw)
+            return field.sound_exposure_level(source_waveform=waveform,
+                                              sample_rate=RATE, **kw)
+
+    @pytest.mark.parametrize('level', ['sel', 'weighted sel', 'peak'])
+    @pytest.mark.parametrize('domain', ['transfer function', 'traces'])
+    def test_a_no_data_cell_stays_nan_on_the_map(self, domain, level):
+        # The plain level functions refuse a record holding NaN; on a map a
+        # cell no model output reached is no data, NaN, and its neighbours
+        # keep their levels.
+        field = free_field(ranges=(100.0, 200.0))
+        data = np.array(field.data, copy=True)
+        data[0, 1, :] = np.nan
+        field = field.replace(data=data)
+        kw = {}
+        if domain == 'traces':
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                field = field.synthesize_time_series(
+                    source_waveform=self.burst(), sample_rate=RATE)
+        else:
+            kw = dict(source_waveform=self.burst(), sample_rate=RATE)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            if level == 'peak':
+                out = field.peak_sound_pressure_level(**kw)
+            else:
+                out = field.sound_exposure_level(
+                    weighting='LF' if level == 'weighted sel' else None,
+                    **kw)
+        values = np.asarray(out.data, dtype=float)
+        assert np.isfinite(values[0, 0]) and np.isnan(values[0, 1])
 
     def test_a_flat_band_reproduces_the_source_energy_over_r_squared(self):
         # The whole unit contract in one assertion: a waveform in Pa at 1 m
@@ -661,23 +695,80 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
         waveform = self.burst()
         for lost in (field.to_dB(), field.at_source_level(190.0)):
             with pytest.raises(ConfigurationError, match="complex"):
-                lost.sound_exposure_level(waveform, RATE)
+                lost.sound_exposure_level(source_waveform=waveform,
+                                          sample_rate=RATE)
 
     def test_a_non_positive_reference_is_refused(self):
         field = free_field(ranges=(100.0,))
         for bad in (0.0, -1e-6, np.nan):
             with pytest.raises(ConfigurationError, match="positive pressure"):
-                field.sound_exposure_level(self.burst(), RATE, ref=bad)
+                field.sound_exposure_level(source_waveform=self.burst(),
+                                           sample_rate=RATE, ref=bad)
 
     def test_a_cell_sliced_out_of_the_grid_gives_that_cells_exposure(self):
         # The sliced depth sits in `pinned`; the synthesis re-inflates it
         # rather than refusing the slice.
         grid = free_field(ranges=(100.0,))
-        whole = grid.sound_exposure_level(self.burst(), RATE, t_start=0.0)
-        one_cell = grid.isel(depth=0).sound_exposure_level(
-            self.burst(), RATE, t_start=0.0)
+        whole = grid.sound_exposure_level(source_waveform=self.burst(),
+                                          sample_rate=RATE, t_start=0.0)
+        one_cell = grid.isel(depth=0).sound_exposure_level(source_waveform=self.burst(),
+                                                           sample_rate=RATE,
+                                                           t_start=0.0)
         assert list(one_cell.coords) == ['range']
         np.testing.assert_array_equal(one_cell.data, whole.data[0])
+
+    def test_a_band_cutting_the_waveform_states_the_energy_the_sel_keeps(
+            self):
+        """For an exposure the band edge's cost is the energy outside the
+        band, not ringing, and a window would cost more: the warning gives
+        the band's share of the waveform's energy, which is exactly what a
+        flat H = 1 map loses against the waveform's own SEL, and gives no
+        window advice."""
+        from uacpy.core.acoustics import sound_exposure_level
+        f = np.arange(400.0, 700.0, 5.0)
+        H = Field(data=np.ones((1, 1, f.size), dtype=complex),
+                  coords={'depth': [10.0], 'range': [100.0], 'frequency': f},
+                  frequencies=f)
+        burst = np.hanning(64) * np.sin(2 * np.pi * 500.0
+                                        * np.arange(64) / RATE)
+        with recorded_warnings() as caught:
+            sel = H.sound_exposure_level(source_waveform=burst,
+                                         sample_rate=RATE)
+        text = [str(w.message) for w in caught if 'band' in str(w.message)
+                and 'edge' in str(w.message)]
+        assert len(text) == 1 and "window='hann'" not in text[0], text
+        share = float(re.search(r'holds ([0-9.]+) %', text[0]).group(1))
+        lost = float(np.asarray(sel.data).ravel()[0]) - sound_exposure_level(
+            burst, RATE)
+        assert 100 * 10 ** (lost / 10) == pytest.approx(share, rel=1e-3)
+
+    def test_a_peak_or_a_trace_keeps_the_ringing_advice(self):
+        f = np.arange(400.0, 700.0, 5.0)
+        H = Field(data=np.ones((1, 1, f.size), dtype=complex),
+                  coords={'depth': [10.0], 'range': [100.0], 'frequency': f},
+                  frequencies=f)
+        burst = np.hanning(64) * np.sin(2 * np.pi * 500.0
+                                        * np.arange(64) / RATE)
+        for call in (H.peak_sound_pressure_level, H.synthesize_time_series):
+            with recorded_warnings() as caught:
+                call(source_waveform=burst, sample_rate=RATE)
+            assert any('rings at the band edges' in str(w.message)
+                       for w in caught)
+
+    @pytest.mark.parametrize('call', ['sel', 'peak', 'series'])
+    def test_a_single_frequency_field_is_sent_to_a_broadband_run(self, call):
+        # A narrowband TL run has no frequency axis: no slice can give it
+        # one, so the refusal names the run that does.
+        tl = free_field(ranges=(100.0, 200.0)).isel(frequency=0)
+        kw = dict(source_waveform=self.burst(), sample_rate=RATE)
+        with pytest.raises(ConfigurationError,
+                           match=r"needs the transfer function H\(f\) over a "
+                                 r"band") as caught:
+            {'sel': tl.sound_exposure_level,
+             'peak': tl.peak_sound_pressure_level,
+             'series': tl.synthesize_time_series}[call](**kw)
+        text = str(caught.value)
+        assert 'RunMode.BROADBAND' in text and '.at(' not in text, text
 
     def test_a_field_whose_axes_are_out_of_order_is_refused(self):
         grid = free_field(ranges=(100.0, 200.0))
@@ -686,7 +777,197 @@ class TestTheExposureLevelIsTheEnergyOneTransmissionDelivers:
                                 'range': grid.coords['range']},
                         frequencies=grid.frequencies)
         with pytest.raises(ConfigurationError, match="'frequency' axis"):
-            swapped.sound_exposure_level(self.burst(), RATE)
+            swapped.sound_exposure_level(source_waveform=self.burst(),
+                                         sample_rate=RATE)
+
+
+class TestAWeightedMapIsTheWeightedReceivedPressure:
+    """weighting= multiplies H(f) by 10**(W/20) before synthesis: the map is
+    the plain-array weighted SEL of each cell's received trace."""
+
+    @staticmethod
+    def burst():
+        return tone_burst(500.0, 5, sample_rate=RATE)[1]
+
+    @staticmethod
+    def quiet(call):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return call()
+
+    @pytest.mark.parametrize('weighting, label', [
+        ('VHF', 'VHF'),
+        (([100.0, 1000.0, 3000.0], [-30.0, 0.0, -10.0]), 'custom'),
+        (lambda f: -10.0 * np.log10(1.0 + (f / 1000.0) ** 2), 'custom'),
+    ])
+    def test_it_is_the_weighted_exposure_of_the_received_trace(
+            self, weighting, label):
+        # At 100 m the pulse sits inside the 1/df record, so the trace is
+        # not wrapped and the plain-array route sees all of it.
+        from uacpy.core.acoustics import sound_exposure_level
+        field = free_field(ranges=(100.0,))
+        x = self.burst()
+        sel = self.quiet(lambda: field.sound_exposure_level(source_waveform=x,
+                                                            sample_rate=RATE,
+                                                            weighting=weighting))
+        trace = self.quiet(lambda: field.synthesize_time_series(source_waveform=x,
+                                                                sample_rate=RATE))
+        want = sound_exposure_level(np.asarray(trace.data).real,
+                                    1.0 / trace.dt, weighting=weighting)
+        assert float(sel.data[0, 0]) == pytest.approx(float(want[0, 0]),
+                                                      abs=1e-3)
+        assert sel.weighting == label
+
+    def test_a_flat_weighting_leaves_the_map_unchanged(self):
+        field = free_field()
+        x = self.burst()
+        plain = self.quiet(lambda: field.sound_exposure_level(source_waveform=x,
+                                                              sample_rate=RATE))
+        flat = self.quiet(lambda: field.sound_exposure_level(source_waveform=x,
+                                                             sample_rate=RATE,
+                                                             weighting=lambda f: np.zeros_like(f)))
+        np.testing.assert_allclose(flat.data, plain.data, atol=1e-9)
+        assert plain.weighting is None
+
+    def test_a_weighting_lowers_every_cell_by_the_same_amount(self):
+        # The free field's cells differ only by 1/r, which a weighting
+        # cannot see.
+        field = free_field()
+        x = self.burst()
+        plain = self.quiet(lambda: field.sound_exposure_level(source_waveform=x,
+                                                              sample_rate=RATE)).data
+        lf = self.quiet(lambda: field.sound_exposure_level(source_waveform=x,
+                                                           sample_rate=RATE,
+                                                           weighting='HF')).data
+        drop = plain - lf
+        assert drop[0, 0] > 10.0
+        assert drop[0, 1] == pytest.approx(drop[0, 0], abs=1e-6)
+
+
+class TestATimeDomainFieldIntegratesTheTracesItHolds:
+    """A Field on a time axis already holds the received p(t): its exposure
+    and peak need no waveform, and equal the H(f) route's on the same
+    traces."""
+
+    @staticmethod
+    def pair():
+        field = free_field()
+        x = tone_burst(500.0, 5, sample_rate=RATE)[1]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return field, x, field.synthesize_time_series(source_waveform=x,
+                                                          sample_rate=RATE)
+
+    def test_the_traces_give_the_transfer_functions_exposure_and_peak(self):
+        field, x, traces = self.pair()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            np.testing.assert_allclose(
+                traces.sound_exposure_level().data,
+                field.sound_exposure_level(source_waveform=x, sample_rate=RATE).data, atol=1e-9)
+            np.testing.assert_allclose(
+                traces.peak_sound_pressure_level().data,
+                field.peak_sound_pressure_level(source_waveform=x,
+                                                sample_rate=RATE).data, atol=1e-9)
+        assert traces.sound_exposure_level().axes == ['depth', 'range']
+
+    def test_a_weighting_labels_the_trace_map(self):
+        _, _, traces = self.pair()
+        assert traces.sound_exposure_level(
+            weighting='LF').weighting == 'LF'
+
+    def test_a_waveform_on_traces_and_none_on_h_are_refused(self):
+        field, x, traces = self.pair()
+        with pytest.raises(ConfigurationError, match='takes no source'):
+            traces.sound_exposure_level(source_waveform=x, sample_rate=RATE)
+        with pytest.raises(ConfigurationError, match='needs the transmitted'):
+            field.sound_exposure_level()
+
+
+class TestATrackMapSumsTheSingleEventMap:
+    @staticmethod
+    def single_event_map():
+        r = np.geomspace(5.0, 20e3, 300)
+        field = free_field(ranges=tuple(r), df=50.0, freq_max=3000.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return field.sound_exposure_level(source_waveform=tone_burst(500.0, 5, sample_rate=RATE)[1],
+                                              sample_rate=RATE)
+
+    def test_it_is_the_plain_array_track_sum(self):
+        from uacpy.core.acoustics import track_exposure
+        sel = self.single_event_map()
+        x = np.arange(-10e3, 10e3 + 1, 10.0)
+        track = sel.track_exposure(x, closest_approach=[100.0, 1000.0])
+        want = track_exposure(sel.data, sel.ranges, x,
+                              closest_approach=[100.0, 1000.0], axis=1)
+        np.testing.assert_allclose(track.data, want, atol=1e-12)
+        assert track.kind == 'sound_exposure'
+        np.testing.assert_allclose(track.ranges, [100.0, 1000.0])
+        assert track.track_events == x.size
+
+    def test_along_adds_the_plan_view_axis_before_the_distance(self):
+        sel = self.single_event_map()
+        x = np.arange(-1e3, 1e3 + 1, 50.0)
+        plan = sel.track_exposure(x, closest_approach=[100.0, 500.0],
+                                  along=[-500.0, 0.0, 500.0])
+        assert plan.axes == ['depth', 'along', 'range']
+        np.testing.assert_allclose(plan.coords['along'], [-500.0, 0.0, 500.0])
+        middle = sel.track_exposure(x, closest_approach=[100.0, 500.0])
+        np.testing.assert_allclose(plan.data[:, 1, :], middle.data,
+                                   atol=1e-12)
+
+    def test_a_map_that_is_not_a_single_event_exposure_is_refused(self):
+        sel = self.single_event_map()
+        track = sel.track_exposure([0.0], closest_approach=[100.0])
+        with pytest.raises(ConfigurationError, match='already a track sum'):
+            track.track_exposure([0.0], closest_approach=[100.0])
+        with pytest.raises(ConfigurationError, match='single-event SEL map'):
+            free_field().track_exposure([0.0], closest_approach=[100.0])
+
+    @staticmethod
+    def band_route_level_map(source_level=170.0):
+        """The band route's received-level map: the band-averaged loss of a
+        white source over the run's band, at a source level."""
+        r = np.geomspace(5.0, 20e3, 300)
+        return free_field(ranges=tuple(r), df=50.0, freq_max=3000.0
+                          ).broadband_loss().at_source_level(source_level)
+
+    def test_a_received_level_map_sums_one_event_per_interval(self):
+        """The band route reaches the track sum: each event's SEL is the
+        level held over event_duration plus 10·log10(Δt / 1 s), and the
+        result is an SEL map like the waveform route's, plan view included."""
+        from uacpy.core.acoustics import track_exposure
+        level = self.band_route_level_map()
+        assert level.kind == 'level'
+        x = np.arange(-2e3, 2e3 + 1, 5.0)
+        track = level.track_exposure(x, closest_approach=[100.0, 1000.0],
+                                     event_duration=2.0)
+        want = track_exposure(np.asarray(level.data) + 10 * np.log10(2.0),
+                              level.ranges, x,
+                              closest_approach=[100.0, 1000.0], axis=1)
+        np.testing.assert_allclose(track.data, want, atol=1e-12)
+        assert track.kind == 'sound_exposure' and track.unit == 'dB'
+        assert track.reference == pytest.approx(1e-12)
+        assert track.source_level_dB is None and track.track_events == x.size
+        plan = level.track_exposure(x, closest_approach=[100.0, 500.0],
+                                    along=[-500.0, 0.0, 500.0],
+                                    event_duration=2.0)
+        assert plan.axes == ['depth', 'along', 'range']
+
+    def test_event_duration_belongs_to_a_level_map_only(self):
+        level = self.band_route_level_map()
+        with pytest.raises(ConfigurationError,
+                           match='with the time the source holds that level'):
+            level.track_exposure([0.0], closest_approach=[100.0])
+        with pytest.raises(ConfigurationError,
+                           match="already one event's energy"):
+            self.single_event_map().track_exposure(
+                [0.0], closest_approach=[100.0], event_duration=1.0)
+        with pytest.raises(ConfigurationError,
+                           match='or a received-level map'):
+            free_field().track_exposure([0.0], closest_approach=[100.0],
+                                        event_duration=1.0)
 
 
 class TestThePeakIsTheOtherHalfOfTheDualMetric:
@@ -701,7 +982,8 @@ class TestThePeakIsTheOtherHalfOfTheDualMetric:
     def quiet(field, waveform, **kw):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            return field.peak_sound_pressure_level(waveform, RATE, **kw)
+            return field.peak_sound_pressure_level(source_waveform=waveform,
+                                                   sample_rate=RATE, **kw)
 
     @staticmethod
     def burst():
@@ -717,10 +999,11 @@ class TestThePeakIsTheOtherHalfOfTheDualMetric:
 
     def test_doubling_the_range_costs_spherical_spreading(self):
         out = self.quiet(free_field(ranges=(100.0, 200.0)), self.burst())
-        # Not exact like SEL's: a peak is a sample, so it lands within the
-        # output grid's resolution of the analytic value.
+        # Not exact like SEL's: a peak is a sample, read at the waveform's
+        # own rate. At 8 kHz a 500 Hz cycle holds 16 samples, so a sampled
+        # crest sits up to 1 - cos(pi/16), 0.17 dB, under the true one.
         assert float(out.dB[0, 0]) - float(out.dB[0, 1]) == pytest.approx(
-            20.0 * np.log10(2.0), abs=0.05)
+            20.0 * np.log10(2.0), abs=0.2)
 
     def test_the_level_follows_the_waveform_amplitude(self):
         field = free_field(ranges=(100.0,))
@@ -737,29 +1020,33 @@ class TestThePeakIsTheOtherHalfOfTheDualMetric:
         peak = float(self.quiet(field, x).dB[0, 0])
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            sel = float(field.sound_exposure_level(x, RATE).dB[0, 0])
+            sel = float(field.sound_exposure_level(source_waveform=x,
+                                                   sample_rate=RATE).dB[0, 0])
         assert abs(peak - sel) > 10.0
 
-    def test_it_depends_on_the_output_rate_where_the_exposure_does_not(self):
-        """The documented asymmetry, and the reason this method warns about
-        ``nfft`` where its sibling does not: a maximum is a sample, an
-        integral is not. Measured spread across nfft: peak 0.0615 dB, SEL
-        0.0000 dB."""
+    def test_it_is_read_off_the_trace_at_the_callers_rate(self):
+        """A maximum is a sample, so the peak is the largest sample of the
+        received trace at the waveform's own rate — the trace a recorder at
+        that rate holds — and the exposure the same trace's integral."""
         f = np.arange(25.0, 4000.0, 25.0)
         h = (1.0 + 0.6 * np.exp(-2j * np.pi * f * 4e-3)) / 100.0
         field = Field(data=h.reshape(1, 1, -1),
                       coords={'depth': [10.0], 'range': [100.0],
                               'frequency': f}, frequencies=f)
         x = self.burst()
-        peaks, sels = [], []
-        for nfft in (320, 1024, 16384):
-            peaks.append(float(self.quiet(field, x, nfft=nfft).dB[0, 0]))
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                sels.append(float(field.sound_exposure_level(
-                    x, RATE, nfft=nfft).dB[0, 0]))
-        assert max(sels) - min(sels) == pytest.approx(0.0, abs=1e-9)
-        assert 0.0 < max(peaks) - min(peaks) < 0.2
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            trace = field.synthesize_time_series(source_waveform=x,
+                                                 sample_rate=RATE)
+            peak = float(self.quiet(field, x).dB[0, 0])
+            sel = float(field.sound_exposure_level(source_waveform=x,
+                                                   sample_rate=RATE).dB[0, 0])
+        p = np.asarray(trace.data).ravel()
+        assert trace.sample_rate == pytest.approx(RATE, rel=1e-12)
+        assert peak == pytest.approx(
+            20.0 * np.log10(np.max(np.abs(p)) / 1e-6), abs=1e-9)
+        assert sel == pytest.approx(
+            10.0 * np.log10(np.sum(p ** 2) / RATE / 1e-12), abs=1e-9)
 
     def test_it_records_the_band_it_collapsed(self):
         f = np.arange(800.0, 1201.0, 5.0)
@@ -775,14 +1062,15 @@ class TestThePeakIsTheOtherHalfOfTheDualMetric:
         field = free_field(ranges=(100.0,))
         for lost in (field.to_dB(), field.at_source_level(190.0)):
             with pytest.raises(ConfigurationError, match="complex"):
-                lost.peak_sound_pressure_level(self.burst(), RATE)
+                lost.peak_sound_pressure_level(source_waveform=self.burst(),
+                                               sample_rate=RATE)
 
     def test_a_non_positive_reference_is_refused(self):
         field = free_field(ranges=(100.0,))
         for bad in (0.0, -1e-6, np.nan):
             with pytest.raises(ConfigurationError, match="positive pressure"):
-                field.peak_sound_pressure_level(self.burst(), RATE,
-                                                ref=bad)
+                field.peak_sound_pressure_level(source_waveform=self.burst(),
+                                                sample_rate=RATE, ref=bad)
 
 
 class TestTheTwoQuantitiesAnswerDifferentQuestions:
@@ -801,3 +1089,174 @@ class TestTheTwoQuantitiesAnswerDifferentQuestions:
         assert averaged == pytest.approx(-10 * np.log10(1 + a ** 2), abs=1e-3)
         assert gated_loss == pytest.approx(0.0, abs=0.2)
         assert gated_loss > averaged
+
+
+class TestTheExposureRecordSurvivesEveryWriter:
+    """``weighting`` and ``track_events`` are the Field's own attributes,
+    not metadata, so they must cross the dict, xarray and netCDF round trips
+    a reader acts on."""
+
+    @staticmethod
+    def track_map():
+        r = np.geomspace(5.0, 5000.0, 100)
+        sel = Field(data=(200.0 - 20.0 * np.log10(r))[None, :],
+                    coords={'depth': [10.0], 'range': r},
+                    kind='sound_exposure', unit='dB', weighting='VHF')
+        return sel.track_exposure(np.arange(-500.0, 501.0, 50.0),
+                                  closest_approach=[100.0, 200.0])
+
+    def test_a_dict_round_trip_keeps_both(self):
+        back = Field.from_dict(self.track_map().to_dict())
+        assert (back.weighting, back.track_events) == ('VHF', 21)
+
+    def test_an_xarray_round_trip_keeps_both(self):
+        pytest.importorskip('xarray')
+        back = Field.from_xarray(self.track_map().to_xarray())
+        assert (back.weighting, back.track_events) == ('VHF', 21)
+
+    def test_a_netcdf_round_trip_keeps_both(self, tmp_path):
+        pytest.importorskip('netCDF4')
+        path = tmp_path / 'track.nc'
+        self.track_map().to_netcdf(path)
+        back = Field.from_netcdf(path)
+        assert (back.weighting, back.track_events) == ('VHF', 21)
+
+    def test_metadata_naming_either_is_refused(self):
+        for key in ('weighting', 'track_events'):
+            with pytest.raises(ConfigurationError, match='attributes'):
+                Field(data=np.zeros((1, 2)),
+                      coords={'depth': [1.0], 'range': [1.0, 2.0]},
+                      metadata={key: 'x'})
+
+
+class TestADerivedMapStatesWhatItHolds:
+    """The band-collapsed and trace-level maps state their own quantity: a
+    band-averaged loss is not coherent, no real-dB map keeps a phase
+    convention, an exposure or peak map records the reference pressure it is
+    in dB re and carries no source level it was not computed with."""
+
+    @staticmethod
+    def h_field(**identity):
+        field = free_field()
+        return field.replace(phase_reference='travelling_wave', coherent=None,
+                             **identity)
+
+    @staticmethod
+    def sonar_budget(loss):
+        from uacpy.sonar import passive_signal_excess_field
+        return passive_signal_excess_field(
+            loss, source_level_dB=170.0, noise_level_dB=60.0,
+            detection_threshold_dB=0.0)
+
+    def test_a_band_averaged_loss_passes_a_budget_without_the_coherent_warning(
+            self):
+        from uacpy.core.exceptions import ValidityWarning
+        field = self.h_field()
+        assert field.coherent is True
+        with pytest.warns(ValidityWarning, match='coherent TL'):
+            self.sonar_budget(field.at(frequency=1000.0))
+        loss = field.broadband_loss()
+        assert loss.coherent is False
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', ValidityWarning)
+            self.sonar_budget(loss)
+
+    def test_no_real_dB_map_keeps_a_phase_convention(self):
+        field = self.h_field()
+        x = tone_burst(500.0, 5, sample_rate=RATE)[1]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            traces = field.synthesize_time_series(source_waveform=x,
+                                                  sample_rate=RATE)
+            maps = [field.to_dB(), field.broadband_loss(),
+                    field.sound_exposure_level(source_waveform=x,
+                                               sample_rate=RATE),
+                    field.peak_sound_pressure_level(source_waveform=x,
+                                                    sample_rate=RATE),
+                    traces.sound_exposure_level(),
+                    traces.peak_sound_pressure_level()]
+        assert [m.phase_reference for m in maps] == [None] * len(maps)
+
+    def test_to_dB_keeps_the_coherence_of_the_pressure(self):
+        assert self.h_field().to_dB().coherent is True
+
+    @pytest.mark.parametrize('ref, sel_label, peak_label', [
+        (1e-6, 'SEL (dB re 1 µPa²·s)', 'Peak SPL (dB re 1 µPa)'),
+        (20e-6, 'SEL (dB re (20 µPa)²·s)', 'Peak SPL (dB re 20 µPa)'),
+    ])
+    def test_an_exposure_map_is_labelled_with_the_reference_it_is_in(
+            self, ref, sel_label, peak_label):
+        from uacpy.core.results.quantities import label
+        field = self.h_field()
+        x = tone_burst(500.0, 5, sample_rate=RATE)[1]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            sel = field.sound_exposure_level(source_waveform=x,
+                                             sample_rate=RATE, ref=ref)
+            peak = field.peak_sound_pressure_level(source_waveform=x,
+                                                   sample_rate=RATE, ref=ref)
+            traces = field.synthesize_time_series(source_waveform=x,
+                                                  sample_rate=RATE)
+            trace_sel = traces.sound_exposure_level(ref=ref)
+        assert sel.reference == pytest.approx(ref ** 2, rel=1e-12)
+        assert (sel.reference_unit, peak.reference_unit) == ('Pa²·s', 'Pa²')
+        assert label(sel.kind, sel.unit, reference=sel.reference) == sel_label
+        assert label(peak.kind, peak.unit,
+                     reference=peak.reference) == peak_label
+        assert trace_sel.reference == pytest.approx(ref ** 2, rel=1e-12)
+        # 0 dB is the reference: the linear exposure comes back from it.
+        linear = sel.reference * 10.0 ** (sel.data / 10.0)
+        np.testing.assert_allclose(
+            linear, 1e-12 * 10.0 ** (field.sound_exposure_level(source_waveform=x,
+                                                                sample_rate=RATE).data
+                                     / 10.0), rtol=1e-9)
+
+    def test_a_reference_names_nothing_on_a_kind_without_one(self):
+        from uacpy.core.results.quantities import label
+        assert label('ambiguity', 'dB', reference=4e-10) == \
+            'Normalised power (dB re max)'
+
+    def test_an_exposure_map_carries_no_source_level_and_a_loss_keeps_it(self):
+        field = self.h_field(source_level_dB=190.0)
+        x = tone_burst(500.0, 5, sample_rate=RATE)[1]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            traces = field.synthesize_time_series(source_waveform=x,
+                                                  sample_rate=RATE)
+            levels = [field.sound_exposure_level(source_waveform=x,
+                                                 sample_rate=RATE),
+                      field.peak_sound_pressure_level(source_waveform=x,
+                                                      sample_rate=RATE),
+                      traces.sound_exposure_level(),
+                      traces.peak_sound_pressure_level()]
+        assert [m.source_level_dB for m in levels] == [None] * len(levels)
+        assert field.broadband_loss().source_level_dB == 190.0
+
+    def test_a_reference_crosses_the_netcdf_round_trip(self, tmp_path):
+        pytest.importorskip('netCDF4')
+        x = tone_burst(500.0, 5, sample_rate=RATE)[1]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            sel = self.h_field().sound_exposure_level(source_waveform=x,
+                                                      sample_rate=RATE,
+                                                      ref=20e-6)
+        path = tmp_path / 'sel.nc'
+        sel.to_netcdf(path)
+        back = Field.from_netcdf(path)
+        assert back.reference == pytest.approx(4e-10, rel=1e-12)
+        assert back.reference_unit == 'Pa²·s'
+
+    @pytest.mark.parametrize('ref', [0.0, -1e-6, np.nan])
+    def test_a_reference_that_is_not_a_positive_pressure_is_refused_on_traces(
+            self, ref):
+        x = tone_burst(500.0, 5, sample_rate=RATE)[1]
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            traces = self.h_field().synthesize_time_series(source_waveform=x,
+                                                           sample_rate=RATE)
+        assert np.isfinite(traces.sound_exposure_level(ref=1e-9).data).all()
+        for level in (traces.sound_exposure_level,
+                      traces.peak_sound_pressure_level):
+            with pytest.raises(ConfigurationError,
+                               match='reference must be a positive pressure'):
+                level(ref=ref)

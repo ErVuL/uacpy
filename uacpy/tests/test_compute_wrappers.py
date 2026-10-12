@@ -1,6 +1,6 @@
 """The ``compute_*`` wrappers, and the result each hands back.
 
-``compute_tl``, ``compute_modes``, ``compute_rays`` and their siblings are the
+``compute_field``, ``compute_modes``, ``compute_rays`` and their siblings are the
 one-call route into a model: they pick the run mode, run it, and return a
 carrier. What is pinned here is that the route is the same whichever model
 takes it — the same call on Bellhop and on Kraken returns the same kind of
@@ -23,12 +23,12 @@ pytestmark = pytest.mark.requires_binary
 
 
 class TestComputeAPI:
-    """Tests for compute_tl(), compute_modes(), etc."""
+    """Tests for compute_field(), compute_modes(), etc."""
 
-    def test_compute_tl_with_explicit_receiver(self, simple_env, source, receiver_small):
-        """Test compute_tl with explicit receiver."""
+    def test_compute_field_with_explicit_receiver(self, simple_env, source, receiver_small):
+        """Test compute_field with explicit receiver."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result = bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small)
 
         assert isinstance(result, Field)
         assert result.n_depths == len(receiver_small.depths)
@@ -38,12 +38,13 @@ class TestComputeAPI:
         """``compute_modes`` returns :class:`Modes`, a sibling of ``Field``
         under ``Result`` rather than a subclass of it — the mode set is not a
         gridded field and carries ``k``/``phi`` instead of ``data``. With
-        ``n_modes=10`` the wrapper caps the set via ``Modes.first_n`` and an
-        empty mode set raises instead of returning, so ``0 < len(k) <= 10``;
-        ``phi`` holds one column per mode, tabulated on the dense internal
-        depth grid (>= 100 strictly increasing depths)."""
-        kraken = Kraken(verbose=False)
-        modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
+        ``Kraken(n_modes=10)`` the model caps the set via ``Modes.first_n``
+        and an empty mode set raises instead of returning, so
+        ``0 < len(k) <= 10``; ``phi`` holds one column per mode, tabulated
+        on the dense internal depth grid (>= 100 strictly increasing
+        depths)."""
+        kraken = Kraken(verbose=False, n_modes=10)
+        modes = kraken.compute_modes(env=simple_env, source=source)
 
         assert isinstance(modes, Modes)
         assert 0 < len(modes.k) <= 10
@@ -57,11 +58,23 @@ class TestComputeAPI:
         bellhop = Bellhop(verbose=False)
         kraken = Kraken(verbose=False)
 
-        result_bellhop = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
-        result_kraken = kraken.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result_bellhop = bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small)
+        result_kraken = kraken.compute_field(env=simple_env, source=source, receiver=receiver_small)
 
         assert isinstance(result_bellhop, Field)
         assert isinstance(result_kraken, Field)
+
+    @pytest.mark.requires_binary
+    def test_compute_modes_rejects_receiver_arg(self):
+        # A mode solve has no receiver grid, so ``compute_modes`` takes the
+        # environment and the source only: a Receiver passed after them is
+        # refused at the call, before anything runs.
+        import uacpy
+        env = uacpy.Environment(bathymetry=300.0, ssp=1500.0)
+        src = uacpy.Source(depths=50.0, frequencies=120.0)
+        rcv = uacpy.Receiver(depths=[100.0], ranges=[2000.0])
+        with pytest.raises(TypeError, match="positional argument"):
+            uacpy.Kraken().compute_modes(env, src, rcv)
 
 
 class TestPlottingAPI:
@@ -70,7 +83,7 @@ class TestPlottingAPI:
     def test_field_plot_method_exists(self, simple_env, source, receiver_small):
         """Test that Field has plot() method."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result = bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small)
 
         assert hasattr(result, 'plot')
         assert callable(result.plot)
@@ -78,7 +91,7 @@ class TestPlottingAPI:
     def test_plot_tl_field(self, simple_env, source, receiver_small):
         """Test plotting TL field."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result = bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small)
 
         fig, ax = result.plot(env=simple_env)
 
@@ -88,8 +101,8 @@ class TestPlottingAPI:
 
     def test_plot_modes(self, simple_env, source):
         """Test plotting modes — Result.plot() routes Modes to plot_mode_functions."""
-        kraken = Kraken(verbose=False)
-        modes = kraken.compute_modes(env=simple_env, source=source, n_modes=10)
+        kraken = Kraken(verbose=False, n_modes=10)
+        modes = kraken.compute_modes(env=simple_env, source=source)
 
         fig, ax = modes.plot(n_modes=6)
 
@@ -105,7 +118,7 @@ class TestPlottingAPI:
         vmax=100`` pins the QuadMesh clim to (40, 100) and ``cmap='jet'``
         selects the colormap."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result = bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small)
 
         fig, ax = result.plot(env=simple_env, vmin=40, vmax=100, cmap='jet')
 
@@ -122,8 +135,8 @@ class TestPlottingAPI:
         kraken = Kraken(verbose=False)
 
         results = {
-            'Bellhop': bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small),
-            'Kraken': kraken.compute_tl(env=simple_env, source=source, receiver=receiver_small),
+            'Bellhop': bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small),
+            'Kraken': kraken.compute_field(env=simple_env, source=source, receiver=receiver_small),
         }
 
         fig, axes = plots.compare_models(results, env=simple_env)
@@ -140,7 +153,7 @@ class TestFieldMethods:
         """``Field.at`` drops each pinned axis: pinning both gives a 0-d
         scalar, pinning one leaves a vector along the axis that survives."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result = bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small)
 
         point = result.at(range=3000, depth=50)
         assert isinstance(point, Field)
@@ -156,7 +169,7 @@ class TestFieldMethods:
     def test_field_properties(self, simple_env, source, receiver_small):
         """Test Field properties."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        result = bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small)
 
         assert result.n_depths == len(receiver_small.depths)
         assert result.n_ranges == len(receiver_small.ranges)
@@ -164,7 +177,7 @@ class TestFieldMethods:
 
 
 class TestRunModeAndComputeTl:
-    """run(run_mode=...) and compute_tl() should be interchangeable for TL."""
+    """run(run_mode=...) and compute_field() should be interchangeable for TL."""
 
     def test_run_with_coherent_tl_mode(self, simple_env, source, receiver_small):
         """run(run_mode=RunMode.COHERENT_TL) returns a TL field."""
@@ -174,29 +187,29 @@ class TestRunModeAndComputeTl:
         assert isinstance(result, Field)
         assert result.shape == (len(receiver_small.depths), len(receiver_small.ranges))
 
-    def test_run_and_compute_tl_agree(self, simple_env, source, receiver_small):
-        """compute_tl and run(run_mode=COHERENT_TL) produce the same field."""
+    def test_run_and_compute_field_agree(self, simple_env, source, receiver_small):
+        """compute_field and run(run_mode=COHERENT_TL) produce the same field."""
         bellhop = Bellhop(verbose=False)
         a = bellhop.run(env=simple_env, source=source, receiver=receiver_small,
                         run_mode=RunMode.COHERENT_TL)
-        b = bellhop.compute_tl(env=simple_env, source=source, receiver=receiver_small)
+        b = bellhop.compute_field(env=simple_env, source=source, receiver=receiver_small)
         # The two calls are separate binary runs over separately-written decks,
         # so the tolerance absorbs deck round-tripping (the .env writes depths
         # and speeds at fixed precision) rather than any modelling difference.
         assert np.allclose(a.data, b.data, rtol=1e-3, atol=1e-3)
 
-    def test_compute_tl_accepts_the_run_mode_value_string(
+    def test_compute_field_accepts_the_run_mode_value_string(
             self, simple_env, source, receiver_small):
-        """``compute_tl`` takes the value string ``run()`` takes
+        """``compute_field`` takes the value string ``run()`` takes
         (``'coherent_tl'``) and returns the same field as the enum; a
         non-TL value string still refuses, naming the mode."""
         bellhop = Bellhop(verbose=False)
-        a = bellhop.compute_tl(simple_env, source, receiver_small,
+        a = bellhop.compute_field(simple_env, source, receiver_small,
                                run_mode='coherent_tl')
-        b = bellhop.compute_tl(simple_env, source, receiver_small,
+        b = bellhop.compute_field(simple_env, source, receiver_small,
                                run_mode=RunMode.COHERENT_TL)
         assert isinstance(a, Field)
         assert np.allclose(a.data, b.data, rtol=1e-3, atol=1e-3)
         with pytest.raises(ConfigurationError, match='run_mode=RAYS'):
-            bellhop.compute_tl(simple_env, source, receiver_small,
+            bellhop.compute_field(simple_env, source, receiver_small,
                                run_mode='rays')

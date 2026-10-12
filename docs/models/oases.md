@@ -218,12 +218,10 @@ seabed the same way:
 | Sea-surface altimetry | ❌ | dropped |
 | Multiple source depths | ❌ | one depth per deck; `run()` loops and stacks in the field modes (OAST / OASP / OASSP), OASN / OASR / OASS raise |
 
-Collapse defaults, where they differ from the package-wide ones:
-
-| Model | `ssp` | `bottom_range` |
-|---|---|---|
-| `OAST`, `OASP`, `OASN` | `'mean'` | `'median'` |
-| `OASR` | `'r0'` (global default) | `'median'` |
+Collapse defaults, where they differ from the package-wide ones: `OAST`,
+`OASP`, `OASN`, `OASS` and `OASSP` take the **mean** SSP (`ssp='mean'`); `OASR`
+takes the package-wide `'r0'`, and every sub-model the package-wide
+`bottom_range='median'`.
 
 OASR leaves the SSP alone because the water sound speed barely enters a
 reflection coefficient; the layer stack is the whole answer. The layer stack
@@ -310,7 +308,7 @@ kept (right). Both show the layer's own interference structure — the deep null
 at 34.5° in the fluid case is the sand layer resonating, and it slides along
 the angle axis if you change the thickness. Keeping shear rearranges the whole
 pattern: the deepest null moves to 60.5°, essentially the granite's shear
-critical angle (`arccos(1490/3000) = 60.2°`), and it now tracks the *shear
+critical angle (`arccos(1490/3000) = 60.2°`), and it tracks the *shear
 speed* rather than the layer thickness. Across 20°–60°, the angles that carry
 energy in a shallow-water waveguide, the elastic seabed reflects markedly
 less — `|R|` at 45° falls from 0.88 to 0.62.
@@ -410,8 +408,10 @@ integrates every bin of it (`n_time_samples/2` at the defaults) to return one;
 use [`OAST`](#5-oast--transmission-loss) for narrowband TL. In `TIME_SERIES` mode uacpy derives that
 band from the source waveform's own spectrum and tells you what it picked;
 pass `frequencies=` to pin it yourself. A non-equispaced `frequencies=` vector
-is resampled onto `linspace(freq_min, freq_max, N)` with a warning, because the file
-format cannot express anything else.
+(OASP) or `source.frequencies` (OASR) is refused, with a remedy naming the
+`np.linspace` grid, because the deck carries a sweep as its edges and a count
+(`unoasp22.f:176`, `unoasr21.f:116`); under OASR's option `'C'` a vector that
+is not log-spaced is refused with an `np.geomspace` remedy.
 
 ---
 
@@ -443,10 +443,11 @@ The covariance is in Pa²/Hz, the unit of a `csdm()` of Field pressures, and
 the diagonal is each element's power. Off the diagonal is the vertical spatial
 coherence of the noise field, and it does not simply decay — it oscillates with
 separation. Normalised as `|C_ij| / √(C_ii C_jj)` and averaged over the element
-pairs at each spacing, it runs 1.00, 0.64, 0.42 and 0.77 at 0, 3.0, 6.1 and
-9.1 m, on a scale set by the 15 m wavelength, which is the checkerboard you see.
-The normalisation matters here: this array's diagonal is not flat, so dividing
-the first row by `C₀₀` instead gives a visibly different 1.00, 0.72, 0.48, 0.78. A noise field
+pairs at each spacing, it runs 1.00, 0.61, 0.32 and 0.80 at 0, 3.0, 6.1 and
+9.1 m, and peaks again every third element, at 9.1 and 18.3 m, which is the
+checkerboard you see. The normalisation matters here: this array's diagonal is
+not flat (it varies by 3.6 dB, also every third element), so dividing the
+first row by `C₀₀` instead gives a visibly different 1.00, 0.74, 0.28, 0.78. A noise field
 with vertical structure looks nothing like the white `σ²I` a naive beamformer
 assumes, and that difference is where array gain is won or lost — see
 [array processing](../guide/arrays.md) for what to do with it.
@@ -489,7 +490,8 @@ at the cost of being far more sensitive to environmental mismatch. That is the
 whole trade in MFP.
 
 [`uacpy.sonar`](../guide/sonar.md) owns matched-field processing proper —
-replica banks from any model, mismatch, broadband incoherent averaging. OASN
+replica banks from any model and mismatch, one frequency per surface (a
+broadband processor combines the per-frequency surfaces itself). OASN
 is where the replicas come from when you want them computed by a full elastic
 model.
 
@@ -554,31 +556,36 @@ one. On `OASN` it is additive: the run mode's own letter (`N` for covariance,
 
 | Name | Default | Meaning |
 |---|---|---|
-| `complex_contour` | `None` | The `'J'` option — complex integration contour; unset → `True`. |
+| `complex_contour` | `None` | The `'J'` option — complex integration contour; unset → `True`, giving the option line `N T J`: the manual's worked OAST deck `N I T J Z` (`oast.tex:476`) without its plot-only letters. |
 | `compute_contour` | `None` | `'C'`, range–depth contour output; unset → `False`. |
 | `compute_depth_average` | `None` | `'A'`, depth-averaged TL; unset → `False`. |
-| `integration_offset` | `0.0` | Wavenumber-contour offset (dB/wavelength). |
-| `n_wavenumbers` | `None` | Wavenumber samples; `None` lets OASES choose. |
-| `range_min`, `range_max` | `None` | Range-axis bounds (m). |
+| `integration_offset` | `0.0` | Wavenumber-contour offset (dB/wavelength). `0` asks OASES for its own offset, 60 dB at the longest FFT range, which the manual recommends: "This value is the default which is applied if COFF is specified to 0.0." (`oast.tex:293-303`). |
+| `n_wavenumbers` | `None` | Wavenumber samples; `None` lets OASES choose: `NW = -1`, the automatic sampling the manual offers "to obtain correct answers in the first attempt without the usual convergence testing" (`oast.tex:543-550`). |
+| `c_low`, `c_high` | `None`, `None` | `CMIN` / `CMAX` (m/s), the phase-speed window. `None` derives the pair from the water column alone, which leaves an elastic seabed's shear and interface branches (slower than the slowest water) out of the integral; `c_low` admits them. The derived pair is `0.90 × min(c_water)`, the factor every wavenumber-integration engine shares (`scooter.f90:258`; Jensen et al., *Computational Ocean Acoustics*, ch. 4 App. 1, call `k_max ≈ 1.1 ω/c_min` "in general, conservative"; the OASES manual states no rule and its worked decks pin CMIN by hand), and `1e8`, the CMAX of the manual's worked decks (`oast.tex:487`, `:568`). |
+| `range_min`, `range_max` | `None` | First and last range (m) of OAST's native TL grid, `XLEFT` / `XRIGHT`; `None` → 0, the manual's worked deck (`oast.tex:489`), and the farthest receiver, the range OAST's automatic sampling sizes its wavenumber step against (`unoast31.f:427-430`). |
+| `vrec` | `0.0` | Source/receiver velocity (m/s) of the dynamics option `'d'` (Block III `V`, `oast.tex:37`: source and receiver move at the same speed, `V` its projection on the line joining them, `oast.tex:215-222`); read only under a raw `options` carrying `'d'`, refused non-zero otherwise. `0` is uacpy guidance: a stationary source and receiver (the manual gives no value). |
+| `dip_angle` | `None` | Fault dip angle (degrees) of the dip-slip source option `'4'`; refused without it. |
 
 **`OASP`**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `n_time_samples` | `None` | FFT length (a power of two). `None`: 4096 for the default sweep; for a requested band (`frequencies=`, a TIME_SERIES pulse, COHERENT_TL's source frequency) the smallest power of two whose bins are as fine as the requested spacing. A value given is a floor. |
-| `freq_min`, `freq_max` | `0.0`, `None` | Sweep edges (Hz); `None` derives `2.5 × fc`. |
-| `center_frequency` | `None` | Pulse carrier; defaults to the midpoint of the run's frequency band (a single frequency is its own centre). |
+| `n_time_samples` | `None` | FFT length, a power of two (`oasp.tex:129`: NT = 2^M; any other count is refused). `None`: 4096 for the default sweep; for a requested band (`frequencies=`, a TIME_SERIES pulse, COHERENT_TL's source frequency) the smallest power of two whose bins are as fine as the requested spacing. A value set is written as given on every sweep; when its bins are coarser than the requested spacing, a `NumericsWarning` names the count that reaches it. |
+| `freq_min`, `freq_max` | `None`, `None` | Sweep edges (Hz); `None` derives `0` and `2.5 × fc`. A pinned edge that differs from a band the call names (`run(frequencies=)`, a multi-frequency `Source`) is refused, naming both; beside a band the run derives (a `TIME_SERIES` pulse, `COHERENT_TL`'s source frequency) it gets a notice that it is not used. `0` and `2.5 × FRC` are the manual's worked OASP deck (FRC 5 Hz at `oasp.tex:572`, `0.0 12.5` at `oasp.tex:583`). |
+| `fc` | `None` | Pulse carrier; defaults to the midpoint of the run's frequency band (a single frequency is its own centre). The manual's FRC, "Center frequency of source" (`oasp.tex:84`); OASP only records it (`oasp.tex:278-280`), uacpy derives `freq_max` from it. |
 | `integrand_plot_step` | `None` | Integrand-plot decimation; does **not** thin the `.trf`. |
 | `integration_offset`, `n_wavenumbers` | `0.0`, `None` | As OAST. |
+| `c_low`, `c_high` | `None`, `None` | As OAST: the derived `c_high` is `1e8`, the CMAX every worked OASP deck in the manual writes (`oasp.tex:581`, `:695`, `:771`). |
+| `dip_angle` | `None` | As OAST. |
 
 **`OASR`**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `angles` | `linspace(0, 90, 181)` | Angle grid, degrees. |
-| `angle_type` | `'grazing'` | `'grazing'` (native) or `'incidence'`. |
-| `reflection_type` | `None` | `'P-P'` (unset → this) or `'transmission'`; `'P-SV'` / `'P-Slow'` (Biot) are refused — see below. |
-| `plot_angle_step` | `None` | Decimate the output table. |
+| `angles` | `linspace(0, 90, 181)` | Angle grid, degrees: the grid of the manual's worked OASR deck (`0 90 181 0`, `oasr.tex:373`). |
+| `angle_type` | `'grazing'` | `'grazing'` (native, OASR's default axis: `oasr.tex:151-152`) or `'incidence'`. |
+| `reflection_type` | `None` | `'P-P'` (unset → this, OASR's default: `oasr.tex:138-140`) or `'transmission'`; `'P-SV'` / `'P-Slow'` (Biot) are refused — see below. |
+| `plot_angle_step` | `None` | Decimation of the angle axis of OASR's **plot** (the `.rco` / `.trc` tables carry every angle); a whole number ≥ 0, `0` leaving the plot out. |
 | `interface_roughness` | `None` | Per-interface RMS roughness (m), top → bottom. |
 
 `reflection_type='P-SV'` and `'P-Slow'` raise `UnsupportedFeatureError` at
@@ -596,14 +603,66 @@ escape hatch still runs P-SV: the deck is written verbatim, with a
 
 | Name | Default | Meaning |
 |---|---|---|
-| `surface_noise_level` | `0.0` | Surface-generated noise (dB re 1 µPa²/Hz); `0` disables. |
-| `white_noise_level` | `None` | Uncorrelated per-hydrophone noise. OASES adds it to the covariance diagonal unconditionally, so an explicit `0.0` is a literal 0 dB per sensor; `None` writes −200 dB (numerically nil). |
-| `deep_noise_level`, `deep_source_depth` | `0.0`, `None` | Deep broad-area sheet. |
+| `surface_noise_level` | `0.0` | Surface-generated noise (dB re 1 µPa²/Hz), written exactly as given; a magnitude below 0.01 (OASN's single-precision gate, `oasnun22.f:183`) disables it, so 0.03 dB is on. A negative level at or beyond −0.01 is refused: OASN reads it as a spectrum-file unit (`oasnun22.f:191-193`). |
+| `white_noise_level` | `None` | Uncorrelated per-hydrophone noise. OASES adds it to the covariance diagonal unconditionally, so an explicit `0.0` is a literal 0 dB per sensor; `None` writes −200 dB (numerically nil; uacpy guidance — the manual gives no level, its worked deck writes 50 dB, `oasn.tex:475`). |
+| `deep_noise_level`, `deep_source_depth` | `0.0`, `None` | Deep broad-area sheet; `deep_source_depth=None` → half the water depth, uacpy guidance (the manual names DPSD only as "the depth of the deep noise source sheet", `oasn.tex:334-335`). OASES computes the sheet with two defects in its deep loop, which uacpy keeps. The plane-geometry flag `ICDR = 1` is set only for surface noise (`oasnun22.f:509-511`), while the deep loop divides by `SQRT(FREQ/V)` as for plane geometry (`:705`; `PINIT2` multiplies by it only under `ICDR = 1`, `oaseun31.f:1701-1709`): with surface noise off, the level reads `10·log10(c/f)` dB high, `c` the sound speed at the sheet (11.8 dB at 100 Hz in 1500 m/s water). The deep loop also sets `ICUT1` / `ICUT2` but not the taper window `ICW1` / `ICW2` (`:713-714`; the surface loop sets both, `:591-594`), so `CALIN3` tapers each deep band from a stale index (`oaseun31.f:2157-2158`) — as a measured illustration, 3.5-5.3 dB at a receiver 30 m above a mid-depth sheet, moving with `c_low`. Against the same sheet computed without both defects, whose depth shape then matches a normal-mode sum to 0.04 dB, a deep-only run reads −12 to +10 dB (100 m and 2000 m columns, 25-400 Hz). The deep block's discrete band spans `1/CMX` to `1/CMX` (`oasnun22.f:349`; the surface block's ends at `1/CMN`, `:299`), so its samples are weighted by zero. |
 | `discrete_sources` | `None` | List of `{'depth', 'x', 'y', 'level'}`, metres. Any other key raises — OASES carries no per-source phase. |
-| `replica_xmin`/`replica_xmax`/`replica_nx` | `None`/`None`/`50` | Replica grid in x (m); `None` → 100 m / 10 km. |
+| `replica_xmin`/`replica_xmax`/`replica_nx` | `None`/`None`/`50` | Replica grid in x (m); `None` → 100 m / 10 km, uacpy guidance like the y and z bounds below (OASN reads the whole grid from the deck and has no default, `unoasn22.f:184-186`). The counts `replica_nx` / `ny` / `nz` are whole numbers ≥ 1. |
 | `replica_ymin`/`replica_ymax`/`replica_ny` | `None`/`None`/`1` | Replica grid in y (m); `None` → 0 / 0. |
 | `replica_zmin`/`replica_zmax`/`replica_nz` | `None`/`None`/`20` | Replica grid in depth (m); `None` → 10 m / `depth − 10`. |
-| `c_low`, `c_high` | `None` | Phase-speed bounds for the integrations (m/s). |
+| `c_low`, `c_high` | `None` | Phase-speed bounds for the integrations (m/s); `None` → `0.90 · min(c_water)`, the shared factor of OAST (`scooter.f90:258`; Jensen et al., ch. 4 App. 1 — the OASN manual asks only that "CMINS should be chosen small enough to include all important evanescent components", `oasn.tex:286-287`, and gives no value) and `1e8`, which the manual asks for surface noise: "CMAXS must be specified to a large number (e.g. $10^8$) to include the steep propagation angles" (`oasn.tex:283-285`). |
+| `integration_offset` | `0.0` | Wavenumber-contour offset (dB/wavelength); a value below 1e-10 asks OASES for its own default ("Option J and COFF = 0 will invoke the default integartion offset", `oasn.tex:212-213`). |
+| `n_wavenumbers` | `None` | `None` lets OASES choose (AUTSMN: the step set by the replica grid's far edge, the kernel tapered at the phase-speed bounds). A pinned count is placed equidistantly over the whole window between the wavenumbers of `c_high` and `c_low` and integrated in full (`doc/oast.tex:522-526`), and warns: the manual leaves such a sampling to the usual convergence test — increase it until the replica and covariance levels stop changing (`doc/oast.tex:543-546`). The surface- and deep-noise blocks have no automatic sampling: each reads three counts, for its continuous, discrete and evanescent bands. `None` writes 1600 / 63836 / 100 for surface noise (uacpy guidance, measured; table below) and the manual's worked-deck 400 / 400 / 100 for deep noise (`oasn.tex:480`). A pinned `n` writes `n`, `max(n, 10)` and `max(1, n // 4)` to the three bands of either block; in the deep block the middle band has zero width, so the trapped modes take the `n // 4`. |
+
+Surface-noise sampling, measured (surface noise 50 dB; the worst covariance
+element in dB against the integral taken on the real axis with
+`integration_offset=1e-9`; both decks read low):
+
+| Column | f (Hz) | 400 / 400 / 100 | 1600 / 63836 / 100 | time per frequency (1600 / 63836 / 100) |
+|---|---|---|---|---|
+| 100 m Pekeris (1500 over 1700 m/s, 0.5 dB/λ) | 50 | 2.93 | 0.05 | 0.11 s |
+| same | 100 | 3.80 | 0.16 | 0.11 s |
+| same | 400 | 5.42 | 0.47 | 0.12 s |
+| 2000 m sound channel | 25 | 10.23 | 3.12 | 0.80 s |
+| same | 50 | 8.43 | 1.24 | 0.78 s |
+| same | 100 | 9.40 | 3.46 | 1.53 s |
+
+OASES adds an artificial attenuation of `60·c·(1/CMN − 1/CMX)/NWSD` dB/λ to the
+discrete band (`unoasn22.f:288-289`), which lowers the level as `1/NWSD`, so the
+default gives that band every sample left under OASES's 65 536 limit. On the
+2000 m column the real-axis integral itself does not converge within that limit
+(the channel modes are lossless), so those rows are indicative. 400 / 400 / 100
+takes 0.01-0.05 s per frequency.
+
+**`OASS`**
+
+| Name | Default | Meaning |
+|---|---|---|
+| `correlation_length` | `None` | `CL` (m) of the scattering interface's roughness. Required: the roughness statistics "must be specified. These are not adopted from OASR or OAST" (`oass.tex:182-183`). |
+| `rms_roughness` | `None` | `\|RG\|` (m) at the scattering interface in the OASS deck; `None` takes the environment's own. |
+| `spectral_exponent` | `None` | `M`, the roughness power-spectrum exponent; must exceed 1.5. `None` is 2.5, OASES' own Goff-Jordan exponent (`oaseun31.f:103-104`), the "very smooth variation" end of the manual's realistic range `1.5 < M ≤ 2.5` (`oassp.tex:356-358`); the default Gaussian spectrum does not read it (`oaseun31.f:3689-3692`), so a pin under it gets a notice. |
+| `roughness_spectrum` | `'gaussian'` | `'gaussian'` or `'goff-jordan'` (option `'g'`). Gaussian is OASES' own default (`oass.tex:136-137`). |
+| `interface` | `None` | `INTFC`, the deck layer of the scattering interface (a whole number ≥ 1); `None` selects the seafloor. |
+| `multiple_scattering` | `False` | Option `'p'`: the perturbed boundary operator, re-scattering loss included. Off is OASS's default, which "ignores re-scattering and therefore yields upper bound" (`oass.tex:165-166`). |
+| `mean_field` | `None` | The producer run; `None` builds `OAST(options='N J T s')`. A supplied producer keeps its own configuration, `verbose` and `timeout` included; only `work_dir`, `cleanup` and `use_tmpfs` follow this run, whose directory holds the `.rhs`. |
+| `c_low`, `c_high` | `None`, `None` | `CMIN` / `CMAX` (m/s); `None` takes the mean field's own, and a value that differs from it warns. uacpy guidance, measured: a `CMIN` above the mean field's truncates the scattering integral (30 dB on one `.rhs`), one below it changes nothing; the manual adopts only the sampling from the mean field (`oass.tex:239-243`). |
+| `receiver_gains` | `None` | Per-element gain (dB), one value or one per element. |
+
+**`OASSP`**
+
+| Name | Default | Meaning |
+|---|---|---|
+| `correlation_length` | `None` | As OASS; required. |
+| `rms_roughness` | `None` | As OASS. |
+| `spectral_exponent` | `None` | As OASS. |
+| `roughness_spectrum` | `'gaussian'` | As OASS. |
+| `interface` | `None` | A cross-check on the scattering layer, which OASSP reads from the `.rhs`; a value that disagrees with the file raises (a whole number ≥ 1). |
+| `realization` | `0` | Realisation index `k` (a whole number ≥ 0); the OASES seed is `-123 - k`, so a given `k` repeats. In cylindrical geometry (a point `Source`) the same token sets the azimuthal Fourier order `k/2` (`unoassp30.f:171`): `k` = 0 and 1 are two draws of order 0, `k ≥ 2` a higher order — as a measured illustration, on a 100 m Pekeris guide `k` = 0 and 1 lie within 1 dB of their mean and `k` = 2-7 sit 2-8 dB below it. |
+| `scattered_only` | `True` | Option `'s'`: the `.trf` holds the scattered field alone — as both of the manual's worked OASSP decks (`oassp.tex:592`, `:653`); the program's own default is the total field (`oassp.tex:231-233`). |
+| `mean_field` | `None` | The producer `OASP`; `None` builds one from the four band knobs below and the wavenumber knobs. A supplied producer keeps its own `verbose` and `timeout`; its files share OASSP's directory and `cleanup`. |
+| `n_time_samples`, `freq_min`, `freq_max`, `fc` | `None`, `None`, `None`, `None` | Passed to the mean-field `OASP`; exclusive with `mean_field=`. |
+| `integration_offset`, `n_wavenumbers` | `0.0`, `None` | As OASP, on both decks of the chain. |
+| `c_low`, `c_high` | `None`, `None` | As OASP, on both decks; `c_high` is inert in cylindrical geometry (a point Source). |
 
 ---
 
@@ -615,7 +674,13 @@ grid of its own choosing, and writes only real TL in dB. If your
 warns — which over-fills sharp interference minima, since a true −80 dB null
 between −40 dB neighbours reads back around −50 dB. Read
 `result.metadata['native_ranges']` to see the grid, align to it, or use
-OASP when null depth matters.
+OASP when null depth matters. The step is `2π` over the wavenumber window, about
+half a wavelength by default; uacpy warns past one wavelength, its guidance. As
+a measured illustration (100 m Pekeris guide at 100 and 400 Hz, a 0.5 m Scooter
+field as the dense reference, sampled at OAST's native positions and
+interpolated in dB), the p90 error is at most 0.09 dB at the native step,
+0.13–0.35 dB at one wavelength, 0.5–1.3 dB at two and 1.8–3.8 dB at four, with
+the deepest nulls reading up to 20–34 dB shallow.
 
 **Every deck carries one source depth, and (for OAST) one frequency.** A
 multi-frequency `Source` on `OAST.run` raises `UnsupportedFeatureError` naming
@@ -623,11 +688,12 @@ OASP: OAST rebuilds its range grid for every frequency and writes only real TL,
 so no single Field can carry the sweep, while OASP returns complex pressure on
 one range grid. A multi-depth `Source` on the
 field models (OAST, OASP, OASSP) runs once per depth inside `run()` and comes
-back as a `ResultStack` over `source_depth`. OASP and OASSP slabs are complex
-pressure, so `stack.superpose()` adds them with `Source.weights`; OAST returns
-transmission loss in dB with no phase, so its stack holds the slabs but
-`superpose()` refuses. OASN, OASR and OASS take a single source depth per
-run and raise, naming the field modes that stack.
+back as one `Field` over `source_depth`. OASP and OASSP hold complex
+pressure, so `field.superpose()` adds the sources with `Source.weights`; OAST
+returns transmission loss in dB with no phase, so its field holds every
+source but only `superpose(coherent=False)` adds them. OASN, OASR and OASS take
+a single source depth per run and raise, naming the field modes that take
+several.
 
 **OASSP holds at most 4096 wavenumbers.** Its roughness branch rounds the
 wavenumber count up to a power of two and then indexes arrays sized for half of

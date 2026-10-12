@@ -23,7 +23,7 @@ from uacpy.core._export import ExportRecord
 from uacpy.core.exceptions import DataFetchError
 from uacpy.data import _cache
 from uacpy.core.geo import as_coordinate
-from uacpy.data._geo import checked_max_distance
+from uacpy.data._geo import checked_max_distance, value_at_depth
 from uacpy.data._netcdf import NetcdfGrid, netcdf_lock
 from uacpy.data.sources import DataProvenance
 from uacpy.core.constants import PH_MAX, PH_MIN
@@ -35,8 +35,10 @@ GLODAP_TARBALL = 'GLODAPv2.2016b.MappedProduct.tar.gz'
 GLODAP_URL = ('https://glodap.info/glodap_files/v2.2023/'
               'GLODAPv2.2016b.MappedProduct.tar.gz')
 # The pH variable inside the mapped product; the depth axis is a separate
-# coordinate variable (the mapped files name it ``Depth``).
-_PH_VARS = ('pHtsinsitutp', 'pHts25p0', 'ph')
+# coordinate variable (the mapped files name it ``Depth``). Only in-situ pH on
+# the total scale is read: the product's ``pHts25p0`` is pH at 25 °C and 0 dbar,
+# another quantity, so a file holding only that is refused, not relabelled.
+_PH_VARS = ('pHtsinsitutp', 'ph')
 _DEPTH_VARS = ('depth', 'depth_surface')
 
 
@@ -102,7 +104,7 @@ class _GlodapGrid(NetcdfGrid):
             with netcdf_lock:
                 self._depth = np.asarray(self.var(*_DEPTH_VARS)[:], dtype=float)
         except KeyError as exc:
-            raise DataFetchError(
+            raise _cache.UnreadableCacheError(
                 f"GLODAP NetCDF {Path(path).name} is missing an expected "
                 f"variable ({exc}); its schema may have changed.",
                 remediation="Re-run ./install.sh --data glodap.",
@@ -198,11 +200,12 @@ def fetch_ph(point, *, reference_depth=None, max_distance_km=None):
     """Representative seawater pH at a ``(lat, lon)`` point.
 
     Samples the GLODAP column and returns the value at ``reference_depth`` (m,
-    nearest level), or at the column's **mid-depth** when ``None`` — the
-    depth :func:`uacpy.data.fetch_environment` reads its one pH at beside a
-    fetched T/S profile. The pH column
-    ends at the GLODAP seafloor level, which need not be the T/S column's;
-    pass ``reference_depth`` to pin the row (``fetch_environment`` does).
+    nearest level), or at the column's **mid-depth** when ``None``. The pH
+    column ends at the GLODAP seafloor level, which need not be another
+    column's; pass ``reference_depth`` to pin the row to that column's
+    mid-depth. :func:`uacpy.data.fetch_environment` (``with_absorption=True``)
+    does not read this one value: it takes the whole GLODAP column
+    (:func:`fetch_ph_profile`) as ``(depth, pH)`` pairs.
 
     The value is raw and carries no provenance;
     :func:`uacpy.data.fetch_environment` with ``with_absorption=True``
@@ -224,7 +227,4 @@ def fetch_ph(point, *, reference_depth=None, max_distance_km=None):
 def _ph_at_depth(profile: PHProfile, reference_depth=None) -> float:
     """The pH of ``profile`` at ``reference_depth`` (m, nearest level), or at
     the column's mid-depth when ``None`` — the row :func:`fetch_ph` returns."""
-    depths, ph = profile.depths, profile.ph
-    ref = (0.5 * (float(depths.min()) + float(depths.max()))
-           if reference_depth is None else float(reference_depth))
-    return float(ph[int(np.argmin(np.abs(depths - ref)))])
+    return value_at_depth(profile.depths, profile.ph, reference_depth)

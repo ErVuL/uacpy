@@ -104,7 +104,7 @@ What Bellhop takes natively, and what it routes or collapses first:
 | Range-dependent SSP | ✅ | multi-profile `.ssp`; needs `interp_ssp='quad'` |
 | Range-dependent bottom | ✅ | |
 | Sea-surface altimetry | ✅ | also supported by [RAM](ram.md) (`ramsurf` backend); no other model |
-| Multiple source depths | ✅ | returns a `ResultStack` |
+| Multiple source depths | ✅ | one `Field` over `source_depth` in the field modes; a `ResultStack` of `Rays` / `Arrivals` in `RAYS` / `EIGENRAYS` / `ARRIVALS` |
 | Source beam pattern | ✅ | staged as an `.sbp` |
 | Elastic media | ✅ | native for a half-space — bellhop.f90's exact acousto-elastic `R(θ)`, per column (a step switching midway between range nodes) when the bottom is range-dependent; a layered *elastic* stack goes via auto-BOUNCE — see below |
 | Layered bottom | ✅ | via auto-BOUNCE; layer stack kept, range collapsed to one column |
@@ -193,21 +193,22 @@ Everything is configured on the constructor; `run()` has a fixed signature.
 
 | Name | Default | Meaning |
 |---|---|---|
-| `n_beams` | `0` | Number of rays. `0` lets Bellhop choose. |
-| `launch_angles` | `(-80, 80)` | Launch-angle fan, degrees. Narrow it to isolate paths. |
-| `beam_type` | `'G'` | Cross-beam profile. `'G'` geometric hat and `'B'` geometric Gaussian, both Cartesian; `'g'` the ray-centred hat; `'S'` Bucker simple Gaussian; `'C'`/`'R'` Červený beams in Cartesian / ray-centred coordinates. `'G'` is BELLHOP's own default too; pass `'B'` for finite caustics. |
-| `ray_step` | `0.0` | Ray step (m); `0` auto-selects. |
-| `z_box`, `r_box` | `None` | Ray-trace bounding box; auto-fitted to the receiver grid. |
+| `n_beams` | `0` | Number of rays. `0` lets Bellhop choose, as `doc/bellhop.htm` advises: "use 0 to have the program calculate a value automatically, but conservatively" (`angleMod.f90:38-51`). |
+| `launch_angles` | `(-80, 80)` | Launch-angle fan, degrees. Narrow it to isolate paths. uacpy guidance (no value in the manual: the Bellhop User Guide leaves the fan to "what part of the field the user is interested in seeing"); a receiver whose direct path needs a steeper launch is warned about. |
+| `beam_type` | `'G'` | Cross-beam profile. `'G'` geometric hat and `'B'` geometric Gaussian, both Cartesian; `'g'` the ray-centred hat; `'S'` Bucker simple Gaussian; `'C'`/`'R'` Červený beams in Cartesian / ray-centred coordinates. `'G'` is BELLHOP's own default too (`ReadEnvironmentBell.f90:393-395`); pass `'B'` for finite caustics. The Bellhop User Guide finds `'B'` "In general ... more accurate TL plots" and keeps `'G'` the default "since people are usually most familiar with that approach"; uacpy keeps `'G'` for ducts and reciprocity (measured, `Bellhop.beam_type`). |
+| `ray_step` | `None` | Ray step (m), written to the deck as given. `None` → `env.depth / 50` (uacpy guidance: BELLHOP's own `depth/10` under-resolves a near-horizontal refracted ray); `0` asks BELLHOP for that `depth/10` (`bellhop.f90:170-174`). |
+| `z_box`, `r_box` | `None` | Ray-trace bounding box (m); BELLHOP drops a ray once it leaves it (`bellhop.f90:571-572`). `None` → `1.2 × env.depth` and `1.2 ×` the farthest receiver range (10 km when that is 0), uacpy guidance, measured: paths that turn back from beyond the farthest receiver need room to turn (on the ASA ideal wedge at 25 Hz, receivers to 3 km, 0.57 dB median from the analytic field against 3.06 dB with the manual's "say 1%" margin). A pinned box that stops short of the seafloor or of the farthest receiver runs as given, with a `ValidityWarning` naming the paths it drops, on every mode but `RAYS`, where the box sets the extent of the trace. |
 
 **Numerics and environment**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `grid_type` | `'R'` | Receiver grid: `'R'` rectilinear (every depth × every range); `'I'` irregular — the i-th depth pairs with the i-th range (equal lengths). BELLHOP sorts both lists before pairing (`SourceReceiverPositions.f90:224`), so an `'I'` grid is always a monotone diagonal, shallow-near to deep-far; for arbitrary (depth, range) points run `'R'` and sample with `Field.at`. |
-| `interp_ssp` | `None` | SSP connection scheme: `'linear'` (AT `C`), `'pchip'`, `'spline'`, `'quad'` (2-D `.ssp`), `'n2linear'`. `None` auto-picks `'quad'` for a range-dependent `env.ssp`, `'linear'` otherwise. `'analytic'` (AT's `'A'`, a hard-coded Munk curve that ignores `env.ssp`) raises `ConfigurationError`. |
-| `interp_bathymetry` | `'linear'` | `'linear'` or `'curvilinear'`. |
+| `grid_type` | `'R'` | Receiver grid: `'R'` rectilinear (every depth × every range; BELLHOP's default, `doc/bellhop.htm` OPTION(5:5)); `'I'` irregular — the i-th depth pairs with the i-th range (equal lengths). BELLHOP sorts both lists before pairing (`SourceReceiverPositions.f90:224`), so an `'I'` grid is always a monotone diagonal, shallow-near to deep-far; for arbitrary (depth, range) points run `'R'` and sample with `Field.at`. |
+| `interp_ssp` | `None` | SSP connection scheme: `'linear'` (AT `C`), `'pchip'`, `'spline'`, `'quad'` (2-D `.ssp`), `'n2linear'`. `None` auto-picks `'quad'` for a range-dependent `env.ssp`, `'linear'` otherwise; `'quad'` on a range-independent `env.ssp` runs as `'Q'`, its `.ssp` written from the one profile. `'analytic'` (AT's `'A'`, a hard-coded Munk curve that ignores `env.ssp`) raises `ConfigurationError`. |
+| `interp_bathymetry` | `'linear'` | `'linear'` or `'curvilinear'`. Linear as `doc/ATI_BTY_File.htm` advises: "Generally the piecewise linear option should be selected." |
 | `interp_altimetry` | `'linear'` | as above, for the sea surface. |
-| `auto_bounce` | `True` | Route *layered* bottoms through BOUNCE (elastic half-spaces run natively). |
+| `auto_bounce` | `True` | Route *layered* bottoms through BOUNCE (elastic half-spaces run natively) — the manual's route: "elastic boundaries can be treated using BOUNCE to generate an equivalent reflection coefficient" (`doc/bellhop.htm`). |
+| `beam_shift` | `False` | BELLHOP's beam-displacement correction on boundary reflections (RunType position 7 `'S'`). Off is BELLHOP's own default (`ReadEnvironmentBell.f90:159-165`). |
 
 **Červený beams only** (`beam_type='C'` or `'R'`)
 
@@ -215,32 +216,69 @@ These are written to the env file only for the two Červený beam types. Setting
 any of them under another beam type — including the default `'G'` — emits a
 `FallbackWarning` and does nothing.
 
+The Červený beams run `COHERENT_TL` only: for an incoherent or semi-coherent
+sum they square each beam's contribution and `ScalePressure` takes the root of
+the sum and scales it linearly in the beam spacing (`influence.f90:140, :282,
+:772-779`), so the level falls as `n_beams^-0.5`, 4.8 dB per tripling, and
+`INCOHERENT_TL` / `SEMICOHERENT_TL` are refused. As a measured illustration, on
+a Pekeris guide those runs read +10.0 / +14.6 / +19.4 dB from Kraken at 500 /
+1500 / 4500 beams.
+
+A line source on `beam_type='S'` with `backend='fortran'` keeps the
+point-source launch weight `sqrt(cos α)` (`influence.f90:665`), where the other
+beam types and the C++/CUDA ports weight a line source by 1, so a path launched
+at `α` comes back changed by `10·log10(cos α)` dB; the run says so. As a
+measured illustration, on a 100 m Pekeris guide at 300 Hz the mean TL sits
+0.45 dB from Scooter there and 0.28 dB on the ports.
+
 | Name | Default | Meaning |
 |---|---|---|
-| `beam_width_type` | `'F'` | Beam-width law (`ReadEnvironmentBell.f90:178-181`): `'F'` space-filling, `'M'` minimum width, `'W'` WKB. |
-| `beam_curvature` | `'D'` | Curvature correction. |
-| `component` | `'P'` | Reserved: only `'P'` (pressure) returns a field. `'V'`/`'H'` select particle velocity in the ray-centred routine (`influence.f90:120-130`), which a `Field` cannot carry, so they raise `UnsupportedFeatureError` on `beam_type='R'` and are ignored with a warning on `'C'`. |
+| `beam_width_type` | `None` | Beam-width law (`ReadEnvironmentBell.f90:178-181`): `'F'` space-filling, `'M'` minimum width, `'W'` WKB. `None` is `'F'`, uacpy guidance measured against KRAKENC: BELLHOP has no built-in width, and the toolbox's Cerveny decks write `'M'`, which with `r_loop` 1 km reads twice the error on a Pekeris guide. |
+| `beam_curvature` | `None` | Curvature change on a boundary reflection (`ReadEnvironmentBell.f90:202-210`): `'D'` doubling, `'S'` standard, `'Z'` zeroing. `None` is `'S'`, BELLHOP's built-in value (`bellhopMod.f90:25`). |
+| `eps_multiplier` | `None` | Beam-width epsilon multiplier. `None` is `1.0`, BELLHOP's built-in value (`bellhopMod.f90:23`). |
+| `r_loop` | `None` | Range (m) at which the beam width is chosen; read only by the `'M'` width (`bellhop.f90:378-380`). `None` is 1 km, uacpy guidance: BELLHOP has no built-in value (the toolbox's calib decks write 1 km, its 100 km decks 25-100 km). |
+| `n_image` | `None` | Number of images; a whole number ≥ 0 (`ReadEnvironmentBell.f90:217` reads it as an INTEGER), anything else refused. `None` is `1`, BELLHOP's built-in (`bellhopMod.f90:22`). |
+| `ib_win` | `None` | Beam-windowing parameter; a whole number ≥ 0 (read as an INTEGER, `ReadEnvironmentBell.f90:217`), anything else refused. `None` is `5`, BELLHOP's built-in (`bellhopMod.f90:22`). These six are Cerveny knobs (`beam_type` `'C'` / `'R'`): set on any other beam type, one is not used, and the constructor says so. |
+| `component` | `'P'` | BELLHOP's built-in value (`bellhopMod.f90:24`). Reserved: only `'P'` (pressure) returns a field. `'V'`/`'H'` select particle velocity in the ray-centred routine (`influence.f90:120-130`), which a `Field` cannot carry, so they raise `UnsupportedFeatureError` on `beam_type='R'` and are ignored with a warning on `'C'`. |
 
 **Broadband synthesis**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `n_freqs` | `128` | Frequency bins synthesised from one arrivals run. |
-| `bandwidth_factor` | `0.5` | Band width as a fraction of centre frequency. |
+| `n_frequencies` | `None` | Frequency bins synthesised from one arrivals run; `None` is 128. uacpy guidance (no value in the manuals): the bins are `1/T` apart, `T` the alias-free time window (Jensen et al., *Computational Ocean Acoustics*, Sect. 8.2.1.2). |
+| `bandwidth_factor` | `None` | Band width as a fraction of centre frequency (`None` is 0.5): the band `fc·(1 ± bandwidth_factor/2)` is built as given, so the value must lie in (0, 2) — from 2 up its lower edge reaches 0 Hz and it is refused. uacpy guidance: the Bellhop User Guide §9 asks for sub-bands "so that the appropriate attenuation is used in each sub-band" and names no width. Both are read only by a `BROADBAND` run of a one-frequency `Source` without `frequencies=`; set on any other run, the run says it does not use them. |
 
 The TIME_SERIES record is placed per call, as on every engine:
-`run(..., output_duration=, t_start=)`.
+`run(..., output_duration=, t_start=)`. Each receiver's trace is the source
+waveform through that receiver's arrivals, every path's phase and its
+absorption across the band included: the pulse and its Hilbert transform
+through the arrivals' in-phase and quadrature taps at the waveform's sample
+rate, convolved and placed on the one window every receiver shares
+(`Arrivals.to_time_series`, `simulate_arrival_reception` per receiver).
+Measured against the exact product `X·H` on a lossy shallow-water run (four
+receivers, 24 kHz): a 20 ms 3 kHz pulse within 1e-8 of its peak, 0.2 s of
+white noise up to the Nyquist frequency within 2.4e-3; a 4-cycle 100 Hz
+pulse in 50 m of water (two receivers, 48 kHz and 4 kHz) within 2.4e-5. An
+echo the window omits (`output_duration=`, `t_start=`) is left out whole,
+its Hilbert transform's precursor and tail with it. The
+phase rotation is the pulse's own, so it holds down to the pulse's lowest
+frequency; the taps of `Arrivals.impulse_response`, which a long recording
+is played through instead, cannot rotate content below about one over their
+margin (188 Hz at 48 kHz for a lone arrival).
 
 **Execution**
 
 | Name | Default | Meaning |
 |---|---|---|
-| `backend` | `None` | `'fortran'`, `'cxx'`, `'cuda'`; `None` auto-picks in the order cuda → cxx → fortran, silently. The auto-pick's usual winner, `cuda`, is not run-to-run reproducible — §7. |
+| `backend` | `None` | `'fortran'`, `'cxx'`, `'cuda'`; `None` auto-picks in the order cuda → cxx → fortran, silently (uacpy guidance: fastest first, after the speed-ups `bellhopcuda/README.md` reports under "Speed"). The auto-pick's usual winner, `cuda`, is not run-to-run reproducible — §7. |
 | `dimensionality` | `'2D'` | Only `'2D'`; `'3D'` raises. It is passed to the cxx/cuda CLIs as `--2D` (accepted, not required: without a flag they assume 2D, `cmdline.cpp:186-191`); the Fortran binary takes none. |
+| `executable` | `None` | Path to the Bellhop binary; auto-detected. |
 | `work_dir` | `None` | Pin the scratch dir to keep `.env`/`.shd`/`.prt`. |
 | `cleanup` | `None` | Defaults to *keep* when `work_dir` is pinned. |
-| `timeout` | `600.0` | Subprocess timeout (s). |
+| `use_tmpfs` | `False` | Stage scratch files in RAM. |
+| `timeout` | `600.0` | Subprocess timeout (s). uacpy guidance: a wall-clock guard on the host; no engine reads a time limit. |
 | `verbose` | `False` | `True` / `'info'` / `'debug'`. |
+| `collapse` | `None` | Per-feature collapse overrides, forwarded to an auto-BOUNCE run. |
 
 ---
 
@@ -411,21 +449,33 @@ from the one trace at the band centre `fc`:
 - **volume attenuation** — the attenuation phase `Im(τ)` is traced at `fc`,
   where `2π·fc·Im(τ)` is minus the path integral of the water's `α(fc)` (Jensen et
   al., *Computational Ocean Acoustics* §3.6.2; `Step.f90:73`). BROADBAND and
-  TIME_SERIES both rescale it to each frequency by the environment's law,
-  `α(f)/α(fc)`, which is exact for Thorp, Francois-Garrison and a constant
-  dB/λ (measured arrival by arrival against traces at `f`: within 0.0011 dB,
-  where scaling linearly in `f` missed by 2.7 dB at 20–60 kHz over 1 km).
-  A Biological layer does not separate in frequency and depth, so it is scaled
-  linearly in `f`; a run whose band and water column put that more than
-  0.05 dB/km off the law warns;
-- **beam amplitudes and caustic phases** — held flat, so only first-order correct
-  near `fc` and degrading toward the band edges, worst at caustics;
+  TIME_SERIES both rescale it to each frequency by the environment's law: by
+  `α(f)/α(fc)` for Thorp and one Francois-Garrison water row, and linearly in
+  `f` for a constant dB/λ and for every other law (a Biological layer, a
+  Francois-Garrison profile, a table). The ratio is exact for Thorp (measured
+  arrival by arrival against traces at `f`: within 0.0011 dB, where scaling
+  linearly in `f` missed by 2.7 dB at 20–60 kHz over 1 km) and the linear
+  scaling exact for a constant dB/λ; Francois-Garrison's pressure terms bend
+  its ratio with depth, 0.058 dB/km at worst over 5–15 kHz in a 5 km column,
+  where the linear line misses by 0.54. A run whose band and water column put
+  the scaling applied more than 0.05 dB/km off the law warns;
+- **beam amplitudes** — held flat, and whether that costs anything is the beam
+  type's. The default hat-shaped beams (`'G'`) carry no frequency in their
+  width, and their bins equal a trace run at each frequency: 0.04–0.06 dB
+  median |ΔTL| at every bin of a 50–1950 Hz band (`fc` = 1 kHz, ±95 %) on a
+  30 m sand guide, 0.01 dB on a 5 km Munk profile at 25–475 Hz (±90 %). A
+  Gaussian beam (`'B'`) is floored at `π·c/fc` (`influence.f90:561-563`), so
+  its bins are first-order away from `fc`: on the sand guide the mean energy
+  is off by +0.74 / −0.40 dB at ±25 % and +1.41 / −0.88 dB at ±50 %, on the
+  Munk profile ±0.13 dB at ±50 %; a `'B'` band reaching more than 50 % of `fc`
+  from it warns. Run such a band as sub-bands near their own `fc` (Bellhop
+  User Guide §9);
 - **the seabed reflection coefficient** — native half-spaces and a BOUNCE `.brc`
   table (the route a layered bottom takes) are evaluated at `fc` alone. A
   half-space with attenuation in dB/λ has a frequency-independent `R(θ)`, but a
   layered seabed does not (see [Bounce](bounce.md)), so a layered-bottom
-  BROADBAND/TIME_SERIES run warns. The example above spans 150–450 Hz — `fc = 300 Hz` at ±50 %, which is
-the practical limit. For wider bands, run sub-bands at several `fc` and stitch.
+  BROADBAND/TIME_SERIES run warns. The example above spans 150–450 Hz, `fc = 300 Hz` at ±50 %; with the
+default beams a wider band costs nothing above, and the half-space here has a frequency-independent `R(θ)`.
 
 The phase panel is aliased, not noisy: at 192 bins over 300 Hz the spacing is
 `Δf ≈ 1.57 Hz`, and a ~2 s bulk delay advances the phase ~20 rad per bin
@@ -437,17 +487,32 @@ for timing.
 ## 7. Gotchas
 
 **Ray-box fitting.** `r_box` is auto-fitted to 1.2× the furthest receiver.
-That margin is deliberate: rays that leave the box are killed, and
-back-scattered rays need headroom. Do not "tighten" it.
+That margin is deliberate: BELLHOP drops a ray once it leaves the box
+(`bellhop.f90:571-572`), and paths that turn back from beyond the farthest
+receiver need room to turn — on the ASA ideal wedge the manual's "say 1%"
+margin kills the up-slope rays before they turn (3.06 dB median from the
+analytic field, against 0.57 dB at 1.2×). Do not "tighten" it: a pinned box
+that stops short of the seafloor or of the farthest receiver runs as given, and a `ValidityWarning` names the paths it
+drops (the receivers past `r_box` get the 600 dB no-energy marker).
 
 **Range-dependent SSP needs `interp_ssp='quad'`.** That is what writes
 BELLHOP's Quad (`'Q'`) SSP interpolation and the multi-profile `.ssp`. The
 default `interp_ssp=None` auto-picks `'quad'` whenever `env.ssp` is
 range-dependent, so you normally get it for free; pass `interp_ssp` yourself
-and you own it. (`grid_type` is unrelated — that selects the *receiver* grid.)
+and you own it. On a range-independent profile `'quad'` runs too, its
+`.ssp` written from the one profile. (`grid_type` is unrelated — that selects the *receiver* grid.)
 
-**No-data cells are `NaN`, not zero.** Where no ray reached, TL is `NaN` and
-plots transparent. `np.nanmedian` and friends, not `np.median`.
+**A cell no beam reached is the 600 dB no-energy marker; `r = 0` is `NaN`.**
+Bellhop zeroes its grid before the beam sum (`bellhop.f90:240-241`), so a cell
+outside every beam keeps an exact zero — the engine's answer, reported at the
+600 dB `PRESSURE_FLOOR` and left out of plots and metrics
+(`uacpy.acoustics.no_energy_mask`). The `r = 0` column comes back `NaN` where
+Bellhop never evaluates it: for a point source, whose `1/√r` factor is set to
+0 there (`influence.f90:786-787`), and for a line source on every beam type
+but `'S'`, whose receiver loops start right of the source; a line source on
+`'S'` returns the column it computes. A receiver below the seafloor is `NaN`
+too. Reduce with
+`np.nanmedian(tl[~no_energy_mask(tl)])`, not `np.median(tl)`.
 
 **Beam count is a convergence parameter.** Too few beams gives a speckled,
 under-sampled field. If the TL image looks grainy, raise `n_beams` and confirm
@@ -461,8 +526,11 @@ field.
 whose binary is not built raises `ExecutableNotFoundError`, naming the
 `./install.sh --bellhop …` flag that builds it; no other engine runs in its
 place. `backend=None` picks the first installed binary (CUDA → C++ → Fortran)
-by file presence: a `bellhopcuda` binary on a host with no usable GPU is
-picked and then fails. Check `result.backend` to see what actually ran.
+by file presence, and the model's repr names it (`Bellhop(backend='cuda')`);
+`python -m uacpy` lists the builds installed. A `bellhopcuda` binary on a host
+with no usable GPU is picked, finds no CUDA device on its first launch, and the
+run moves to the next installed binary with a `FallbackWarning`. Check
+`result.backend` to see what actually ran.
 
 **The default backend is not run-to-run reproducible.** `result.backend` tells
 you *which* binary ran; it does not promise that binary returns the same

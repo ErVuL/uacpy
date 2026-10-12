@@ -1,5 +1,5 @@
 """BROADBAND and TIME_SERIES from the arrivals of one ray trace at the
-carrier: the delay-and-sum of a source pulse (:meth:`Arrivals.to_time_series
+carrier: the reception of a source pulse (:meth:`Arrivals.to_time_series
 <uacpy.core.results.Arrivals.to_time_series>`, TIME_SERIES)
 and the transfer function the arrivals sum to (BROADBAND), with the notices
 of what one trace at ``fc`` cannot carry across the band."""
@@ -15,7 +15,9 @@ from uacpy.core.run_settings import RunMode
 from uacpy.models._extract import result_kwargs
 from uacpy.models.base import StageInputs
 from uacpy.models.bellhop._output import (
-    mask_paired_receivers_below_seafloor, restore_broadband_depth_axis,
+    mask_paired_receivers_below_seafloor, mask_unwritten_first_range,
+    mask_unwritten_origin,
+    restore_broadband_depth_axis,
 )
 from uacpy.models.bellhop._settings import _BAND_FROM_CALL, _BAND_FROM_SOURCE
 from uacpy.models.bellhop._tables import grid_is_paired
@@ -25,11 +27,11 @@ from uacpy.core.exceptions import NumericsWarning
 def arrivals_run_settings(settings, source, *, output):
     """The settings the arrivals run behind a BROADBAND / TIME_SERIES call
     ran with: ``settings`` as an ARRIVALS run at the one carrier
-    ``settings.engine.center_frequency``, every depth of ``source`` in one
+    ``settings.engine.fc``, every depth of ``source`` in one
     deck, unweighted, with ``output`` (the model's ARRIVALS output)."""
     return settings._replace(
         mode=RunMode.ARRIVALS,
-        frequencies=np.array([settings.engine.center_frequency]),
+        frequencies=np.array([settings.engine.fc]),
         source_depths=np.atleast_1d(np.asarray(source.depths,
                                                dtype=float)),
         depth_loop='single', source_weights=None, weights_applied=False,
@@ -37,7 +39,7 @@ def arrivals_run_settings(settings, source, *, output):
 
 
 def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
-               backend, grid_type, log):
+               backend, grid_type, beam_type, log):
     """Stage 5 of BROADBAND / TIME_SERIES: the synthesis built from the
     arrivals one ray trace at ``fc`` returned (``arr_field``), as the
     Bellhop User Guide (Sec 9) describes:
@@ -48,26 +50,36 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
        ``Field.synthesize_time_series(source_waveform, sample_rate)``
        (windowed convolution) downstream.
 
-    2. **TIME_SERIES**: a delay-and-sum convolution of the source pulse
-       with each arrival (amplitude, phase, delay) → ``Field`` with data
+    2. **TIME_SERIES**: the source pulse through every receiver's arrivals
+       (amplitude, phase, delay, absorption across the band) — each cell's
+       impulse response, convolved with the pulse → ``Field`` with data
        shape (n_depths, n_ranges, n_samples) and metadata carrying
        'time', 'dt', 'fs'. Its window is ``output_duration`` long and
        opens at ``t_start``, else just before the earliest arrival — the
        placement the wave-equation solvers use — and, when
        ``output_duration`` is unset, it closes after the latest arrival
-       plus twice the pulse.
+       plus the pulse, and a quiet tail of one pulse length capped at the
+       grid's delay span.
 
     This is a key advantage of ray tracing: the ray geometry (paths,
     travel times) is frequency-independent, so a single arrivals
     calculation at fc provides the impulse response. ``arr_field`` is
     kept on ``components['arrivals']``, stamped by the caller as the
     ARRIVALS result it is (:func:`arrivals_run_settings`).
+
+    A cell whose arrival list is empty is Bellhop's empty sum: ``H = 0``
+    and a silent trace. The ``r = 0`` cells, which no beam type that
+    records arrivals evaluates, are NaN
+    (:func:`~uacpy.models.bellhop._output.mask_unwritten_origin`), and so
+    is the first range column a ray-centred beam never evaluates when the
+    deck could not pad ahead of it
+    (:func:`~uacpy.models.bellhop._output.mask_unwritten_first_range`).
     """
     settings = inputs.settings
     engine = settings.engine
     run_mode = settings.mode
     env, source, receiver = inputs.env, inputs.source, inputs.receiver
-    fc = engine.center_frequency
+    fc = engine.fc
     time = settings.time
     if run_mode == RunMode.TIME_SERIES:
         source_waveform = np.array(
@@ -80,8 +92,9 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
         # engines place theirs — an ``output_duration`` anchored at
         # emission would be all zeros for any receiver beyond
         # c·output_duration.
-        effective_time_window = (float(output_duration)
-                                 if output_duration is not None else None)
+        effective_output_duration = (float(output_duration)
+                                     if output_duration is not None
+                                     else None)
         effective_t_start = time.t_start
 
     # The synthesised result is built entirely from these arrivals, so it
@@ -118,7 +131,7 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
             coords = {'depth': np.asarray(rz, dtype=float), **coords}
         return (data[0] if irregular else data), coords
 
-    # ── Path A: time-domain delay-and-sum with source waveform ──
+    # ── Path A: the source waveform through each cell's arrivals ──
     if run_mode == RunMode.TIME_SERIES:
         log(f"Delay-and-sum over {nrd}×{nrr} receiver grid")
         if settings.frequencies is not None:
@@ -126,9 +139,9 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
                 env, settings.frequencies, fc, model_name=model_name)
 
         # One clock for the whole grid, spanning every cell's arrivals.
-        t_vec, data = arr_field.to_time_series(
+        t_vec, data = arr_field._time_series(
             source_waveform, sample_rate,
-            time_window=effective_time_window,
+            output_duration=effective_output_duration,
             t_start=effective_t_start,
             who=f"{model_name}.run(run_mode=TIME_SERIES)")
         t_start_locked = float(t_vec[0])
@@ -139,7 +152,7 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
         # represents, derived from the (padded) source waveform the same
         # way the IFFT-based engines derive their broadband grid — so a
         # TIME_SERIES result names its band identically across engines.
-        # The ray-trace carrier fc stays on metadata['center_frequency'].
+        # The ray-trace carrier fc stays on metadata['fc'].
         stamp_freqs = settings.frequencies
         field = Field(
             data=data,
@@ -149,10 +162,13 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
                 model_name, provenance, source, backend=backend,
                 frequencies=stamp_freqs if stamp_freqs is not None else fc,
                 dt=1.0 / sample_rate, fs=sample_rate, nt=n_t,
-                t_start=t_start_locked, center_frequency=fc,
+                t_start=t_start_locked, fc=fc,
                 components=components, **arr_paths,
             ),
         )
+        field = mask_unwritten_origin(field, source_type=source.source_type,
+                                      beam_type=beam_type)
+        field = mask_unwritten_first_range(field, trim=engine.range_trim)
         # The same no-data rule as Path B and the TL modes: a paired
         # receiver under the seabed is clamped onto it by BELLHOP, so its
         # trace is another receiver's, not a buried one's.
@@ -177,9 +193,9 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
             arrivals_by_rcv, nrd, nrr, frequencies, fc,
             model_name=model_name)
 
-    # H(d, r, f) over every receiver cell (NaN where no arrival reached),
-    # trailing-axis convention; a paired grid's one block carries its
-    # receivers on the range axis.
+    # H(d, r, f) over every receiver cell (zero where the arrival list is
+    # empty), trailing-axis convention; a paired grid's one block carries
+    # its receivers on the range axis.
     H = np.asarray(arr_field.transfer_function(frequencies).data).reshape(
         nrd, nrr, n_freq)
 
@@ -215,11 +231,14 @@ def synthesise(inputs: StageInputs, arr_field, *, model_name, provenance,
             source,
             backend=backend,
             frequencies=frequencies,
-            center_frequency=fc,
+            fc=fc,
             components=components,
             **arr_paths,
         ),
     )
+    field = mask_unwritten_origin(field, source_type=source.source_type,
+                                  beam_type=beam_type)
+    field = mask_unwritten_first_range(field, trim=engine.range_trim)
     if irregular:
         return mask_paired_receivers_below_seafloor(
             field, receiver, env, model_name=model_name)
@@ -288,7 +307,7 @@ def warn_if_default_grid_folds(arrivals_by_rcv, nrd: int, nrr: int,
     """Say what the package-chosen broadband grid folds, per these arrivals.
 
     A transfer function sampled every Δf synthesises to a record 1/Δf
-    long, and the default grid — ``DEFAULT_BROADBAND_N_FREQS`` bins over
+    long, and the default grid — ``DEFAULT_BROADBAND_N_FREQUENCIES`` bins over
     ``fc·(1 ± bw/2)`` — sets Δf from the carrier alone: ``fc/254`` for the
     default band, a record ``254/fc`` s long with no reference to how long
     this channel rings. The arrivals are in hand here, so the fold is
@@ -330,7 +349,7 @@ def warn_if_default_grid_folds(arrivals_by_rcv, nrd: int, nrr: int,
                 f"the band, Δf = {1.0 / record:.4g} Hz — chosen from the "
                 f"carrier alone. Pass frequencies= to set it from the "
                 f"channel: Arrivals.synthesis_band(bandwidth=..., "
-                f"centre=...) on an ARRIVALS run of this geometry sizes "
+                f"fc=...) on an ARRIVALS run of this geometry sizes "
                 f"the record to hold the energy, and Arrivals.window / "
                 f"top_n_by_amplitude drop the tail outright instead of "
                 f"folding it."))

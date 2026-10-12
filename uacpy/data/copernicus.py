@@ -58,6 +58,7 @@ from uacpy.core.geo import (
 from uacpy.data._geo import (
     checked_n_points, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
     capped_n_points, checked_max_distance, checked_offset, cell_half_diagonal_km,
+    checked_max_days, cut_at_first_invalid, value_at_depth,
 )
 from uacpy.core.geo import parse_date
 from uacpy.core.acoustics.seawater import (
@@ -74,7 +75,7 @@ from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy.data.waves import SeaStateRecord
 from uacpy._log import log_message
 
-from uacpy.data._offset_policy import checked_date_offset
+from uacpy.data._offset_policy import checked_date_offset, is_monthly
 from uacpy.data._provenance_notice import one_provenance_notice
 
 __all__ = [
@@ -134,6 +135,26 @@ def _last_time(ds) -> Optional[np.datetime64]:
     if times.size == 0:
         return None
     return np.datetime64(times.max(), 'D')
+
+
+def _time_to_select(ds, when: Optional[str], product: str):
+    """The ``time`` value a nearest-step selection is given for ``when``.
+
+    A monthly-mean (``P1M``) product's step stands for its whole calendar
+    month wherever in the month it is stamped, so the step stamped in the
+    requested month is selected rather than the nearest stamp, which past
+    mid-month is the next month's when the steps are stamped at month start.
+    A month the time axis lacks (a coverage edge), a daily product or a
+    dataset exposing no time axis keeps ``when``, for the nearest step."""
+    if when is None or not is_monthly(product):
+        return when
+    try:
+        times = np.asarray(ds['time'].values).reshape(-1)
+    except (KeyError, AttributeError, TypeError):
+        return when
+    in_month = times[times.astype('datetime64[M]')
+                     == np.datetime64(when, 'M')]
+    return in_month[0] if in_month.size else when
 
 
 def _open_by_date(marine, when: Optional[str], products, *,
@@ -505,6 +526,7 @@ def _snapped_date(da, when: Optional[str], max_days: int,
     carries and the alternative source the remediation recommends
     (:data:`_DATE_GAP_FALLBACKS`).
     """
+    max_days = checked_max_days(max_days, 'Copernicus')
     if when is None or 'time' not in getattr(da, 'coords', {}):
         return None
     actual = np.datetime64(np.asarray(da['time'].values).reshape(-1)[0], 'D')
@@ -641,10 +663,10 @@ def _extract_ts(
     n = min(depth.size, t.size, s.size)
     depth, t, s = depth[:n], t[:n], s[:n]
     # Levels below the seafloor come back masked/non-finite, so the first
-    # invalid level is the seafloor cut (index 0 = the cell is on land).
-    valid = np.isfinite(t) & np.isfinite(s)
-    cut = valid.size if valid.all() else int(np.argmax(~valid))
-    return depth[:cut], t[:cut], s[:cut], actual
+    # invalid level is the seafloor cut (an empty cut: the cell is on land).
+    depth, t, s = cut_at_first_invalid(np.isfinite(t) & np.isfinite(s),
+                                       depth, t, s)
+    return depth, t, s, actual
 
 
 def fetch_waves_operational(
@@ -753,7 +775,9 @@ def fetch_ph_operational(
     point : (lat, lon)
         Site coordinates in decimal degrees.
     date : str or datetime.date
-        Calendar date; the nearest available time step is used.
+        Calendar date. A monthly-mean product gives the mean of the date's
+        calendar month (the nearest step only where the axis lacks that
+        month); a daily product gives the nearest step.
     reference_depth : float, optional
         Depth (m) of the row returned; ``None`` is the mid-depth of the finite
         levels.
@@ -781,7 +805,8 @@ def fetch_ph_operational(
                 else ((dataset_id,),))
     (ds,), product = _open_by_date(marine, when, products)
 
-    sel = {'latitude': lat, 'longitude': normalize_lon(lon), 'time': when}
+    sel = {'latitude': lat, 'longitude': normalize_lon(lon),
+           'time': _time_to_select(ds, when, product)}
     ph_da = ds[BGC_PH_VAR].sel(method='nearest', **sel)
     snapped = _snapped_point(ph_da)
     cell = _check_snapped_point(ds, lat, sel['longitude'], snapped)
@@ -804,10 +829,7 @@ def fetch_ph_operational(
             "(on land or outside the dataset domain).",
             remediation="Pick an ocean location/date within the dataset.",
         )
-    depth, ph = depth[finite], ph[finite]
-    ref = (0.5 * (float(depth.min()) + float(depth.max()))
-           if reference_depth is None else float(reference_depth))
-    return float(ph[int(np.argmin(np.abs(depth - ref)))])
+    return value_at_depth(depth[finite], ph[finite], reference_depth)
 
 
 _LOGIN_HINT = ("Run `copernicusmarine login` (free account) and check "

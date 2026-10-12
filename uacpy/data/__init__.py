@@ -6,10 +6,12 @@
 - **Sound speed** (WOA23 climatology, date/month-aware; Copernicus Marine
   operational; or the nearest Argo float profile): a depth-vs-c profile for
   ``Environment(ssp=...)``, plus the raw T/S column and a Francois-Garrison
-  absorption helper.
+  absorption helper; a cast of your own is continued to depth by the WOA23
+  column (:func:`deepen_with_climatology`).
 - **Bottom**: a grain-size (ϕ) / sediment-class → ``BoundaryProperties``
-  conversion, *or* a fetched seafloor — EMODnet substrate (European seas), the
-  NCEI grain-size DB, the AusSeabed MARS samples (Australian margin), the
+  conversion, your own seabed samples → a range-dependent ``Bottom`` along a
+  transect (:func:`bottom_from_samples`), *or* a fetched seafloor — EMODnet
+  substrate (European seas), the NCEI grain-size DB, the AusSeabed MARS samples (Australian margin), the
   Diesing 2020 deep-sea map, the Graw 2021 seabed-density grid, a pelagic
   depth/latitude fallback (all surficial), or GlobSed thickness + CRUST1.0 → a
   layered elastic bottom for low-frequency work.
@@ -49,7 +51,7 @@ from uacpy.data.sound_speed import (
     TSProfile, fetch_ssp, fetch_ssp_transect, fetch_ts_profile,
     ssp_transect_plan,
     extend_ssp_below_data, extend_column_to_seafloor,
-    assemble_range_dependent,
+    assemble_range_dependent, deepen_with_climatology,
 )
 from uacpy.data.copernicus import (
     fetch_ssp_operational, fetch_ssp_transect_operational,
@@ -67,9 +69,14 @@ from uacpy.data.glodap_local import (
 )
 from uacpy.data.sediment import (SeabedSample, bottom_from_class,
                                  bottom_from_grain_size, samples_table)
+# The ϕ conversion the seabed builders above wrap, and its inverse: plain
+# formulas of uacpy.core.sediment, offered here beside their wrappers.
+from uacpy.core.sediment import (grain_size_from_density,
+                                 grain_size_to_geoacoustics)
 from uacpy.data.seabed import fetch_emodnet_substrate
 from uacpy.data.mars import fetch_mars_sediment
-from uacpy.data.sediment_db import download_sediment_db, fetch_sediment_sample
+from uacpy.data.sediment_db import (bottom_from_samples, download_sediment_db,
+                                    fetch_sediment_sample)
 from uacpy.data.emodnet_local import download_emodnet_db, fetch_emodnet_substrate_local
 from uacpy.data.globsed_local import (
     download_globsed_db, fetch_sediment_thickness, fetch_sediment_thickness_transect,
@@ -120,6 +127,7 @@ __all__ = [
     'TSProfile', 'fetch_ts_profile',
     'extend_ssp_below_data',
     'extend_column_to_seafloor',
+    'deepen_with_climatology',
     'assemble_range_dependent',
     'fetch_ssp_operational',
     'fetch_ssp_transect_operational',
@@ -140,6 +148,8 @@ __all__ = [
     # bottom
     'bottom_from_grain_size',
     'bottom_from_class', 'SeabedSample', 'samples_table',
+    'grain_size_to_geoacoustics', 'grain_size_from_density',
+    'bottom_from_samples',
     'fetch_emodnet_substrate',
     'fetch_bottom',
     'fetch_bottom_transect',

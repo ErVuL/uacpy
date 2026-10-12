@@ -224,9 +224,10 @@ class BoundaryTable(ExportRecord):
     attenuation: Optional[np.ndarray] = None
     shear_attenuation: Optional[np.ndarray] = None
 
+    # The attenuations carry no repr unit: they are in whatever TopOpt(3)
+    # unit the env deck names, which the .bty itself does not record.
     _REPR_UNITS = {'ranges': 'm', 'depths': 'm', 'sound_speed': 'm/s',
-                   'shear_speed': 'm/s', 'density': 'g/cm³',
-                   'attenuation': 'dB/λ', 'shear_attenuation': 'dB/λ'}
+                   'shear_speed': 'm/s', 'density': 'g/cm³'}
 
     _ARRAY_FIELDS = ('ranges', 'depths') + tuple(_GEOACOUSTIC_COLUMNS.values())
 
@@ -442,10 +443,56 @@ def read_altimetry(filepath: Union[str, Path],
         _parse_altimetry(filepath, verbose), 'altimetry', filepath)
 
 
+@dataclass(frozen=True, eq=False)
+class Boundary3dFile(ExportRecord):
+    """A BELLHOP3D 3-D boundary grid (``.bty`` / ``.ati``) as
+    :func:`read_boundary_3d` reads it (``bdry3DMod.f90:239-301``).
+
+    Attributes
+    ----------
+    interpolation : {'R', 'C'}
+        ``TYPE(1:1)``: regular grid or curvilinear (``bdry3DMod.f90:241-247``)
+        — not the 2-D codes of :class:`BoundaryTable`.
+    x, y : ndarray
+        The horizontal axes in metres, shapes ``(n_x,)`` and ``(n_y,)`` (km on
+        disk; the engine scales them by 1000, ``bdry3DMod.f90:290-291``).
+    depths : ndarray
+        Shape ``(n_y, n_x)`` (m), positive down: ``depths[iy, ix]`` is the
+        depth at ``(x[ix], y[iy])``, the file's own row order, one row of
+        ``n_x`` depths per y (``bdry3DMod.f90:300-301``).
+    """
+
+    interpolation: str
+    x: np.ndarray
+    y: np.ndarray
+    depths: np.ndarray
+
+    _REPR_UNITS = {'x': 'm', 'y': 'm', 'depths': 'm'}
+
+    _ARRAY_FIELDS = ('x', 'y', 'depths')
+    _XARRAY_FIELDS = {'depths': 'depths', 'x': 'x', 'y': 'y'}
+
+    @property
+    def n_x(self) -> int:
+        """Grid points along x."""
+        return int(np.asarray(self.x).size)
+
+    @property
+    def n_y(self) -> int:
+        """Grid points along y."""
+        return int(np.asarray(self.y).size)
+
+    def _payload(self):
+        return {'depths': (self.depths, ('y', 'x'), 'm')}
+
+    def _coords(self):
+        return {'x': (self.x, 'm'), 'y': (self.y, 'm')}
+
+
 @typed_format_error
 def read_boundary_3d(
     filepath: Union[str, Path], verbose: Union[bool, str] = False
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+) -> Boundary3dFile:
     """
     Read a BELLHOP3D 3-D boundary grid (``.bty`` bathymetry / ``.ati``
     altimetry).
@@ -471,21 +518,14 @@ def read_boundary_3d(
 
     Returns
     -------
-    x_bot : ndarray
-        X coordinates in **metres**, shape ``(n_x,)``. The file stores km
-        and the engine scales by 1000 at ``bdry3DMod.f90:290``; this reader
-        applies the same conversion so the returned axis follows uacpy's
-        metres-unless-suffixed rule.
-    y_bot : ndarray
-        Y coordinates in **metres**, shape ``(n_y,)``. Same km->m conversion
-        (``bdry3DMod.f90:291``).
-    z_bot : ndarray
-        Depths in metres, shape ``(n_y, n_x)``, positive downward.
-        ``z_bot[iy, ix]`` is the depth at ``(x_bot[ix], y_bot[iy])`` — the
-        file's own row order, one row of ``n_x`` depths per y
-        (``bdry3DMod.f90:300-301``, ``DO iy … READ Bot( :, iy )``).
-    n_x, n_y : int
-        Grid sizes along x and y.
+    Boundary3dFile
+        ``interpolation`` (``'R'`` or ``'C'``), the axes ``x`` / ``y`` in
+        **metres** — the file stores km and the engine scales by 1000 at
+        ``bdry3DMod.f90:290-291``, so this reader applies the same
+        conversion — and ``depths`` ``(n_y, n_x)`` in metres, positive
+        downward, ``depths[iy, ix]`` at ``(x[ix], y[iy])`` (the file's own
+        row order, ``DO iy … READ Bot( :, iy )`` at
+        ``bdry3DMod.f90:300-301``).
 
     Raises
     ------
@@ -535,12 +575,12 @@ def read_boundary_3d(
     ...     with open(path, 'w') as fh:
     ...         for row in deck:
     ...             print(row, file=fh)
-    ...     x, y, z, nx, ny = read_boundary_3d(path)
-    >>> x
+    ...     grid = read_boundary_3d(path)
+    >>> grid.x
     array([   0., 1000., 2000.])
-    >>> z.shape == (ny, nx)
+    >>> grid.depths.shape == (grid.n_y, grid.n_x)
     True
-    >>> float(z[1, 1])
+    >>> float(grid.depths[1, 1])
     95.0
     """
     filepath = Path(filepath)
@@ -639,7 +679,8 @@ def read_boundary_3d(
             IOWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
 
-    return km_to_m(x_bot), km_to_m(y_bot), z_bot, n_x, n_y
+    return Boundary3dFile(interpolation=interp_type, x=km_to_m(x_bot),
+                          y=km_to_m(y_bot), depths=z_bot)
 
 
 def _validate_interp_type(interp_type: str) -> str:
@@ -1106,10 +1147,10 @@ def write_bty_3d(filepath: Union[str, Path], X: np.ndarray, Y: np.ndarray,
     ...                  np.array([0.0, 1000.0]),
     ...                  np.array([[100.0, 90.0, 100.0],
     ...                            [110.0, 95.0, 110.0]]))
-    ...     x, y, z, nx, ny = read_boundary_3d(path)
-    >>> (nx, ny)
+    ...     grid = read_boundary_3d(path)
+    >>> (grid.n_x, grid.n_y)
     (3, 2)
-    >>> float(z[1, 1])
+    >>> float(grid.depths[1, 1])
     95.0
     """
     filepath = Path(filepath)

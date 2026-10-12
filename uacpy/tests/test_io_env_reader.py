@@ -103,6 +103,96 @@ class TestReadEnvInvertsTheDeckWriters:
                 opt['launch_angles']) == ('C', 'X', 500, (-60.0, 60.0))
         assert opt['r_loop'] == pytest.approx(2000.0)
 
+    @staticmethod
+    def _settings(opt):
+        """The writer keywords of ``read_env``'s options."""
+        return {k: v for k, v in opt.items() if k not in ('model', 'title')}
+
+    def test_a_kraken_deck_without_ranges_says_so_in_read_envs_name(
+            self, tmp_path):
+        """The deck holds no receiver ranges and no .flp is beside it: one
+        IOWarning from read_env, naming the deck, and no Receiver warning
+        about an argument the caller never passed."""
+        from uacpy.io import read_env, write_kraken_env_file
+        path = tmp_path / 'k.env'
+        write_kraken_env_file(
+            path, self._env(), Source(depths=[20.0], frequencies=100.0),
+            uacpy.Receiver(depths=[10.0, 50.0], ranges=[1000.0]),
+            interp_ssp='linear', rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            _env, _src, rcv, _opt = read_env(path)
+        texts = [str(w.message) for w in caught]
+        assert [t for t in texts if 'no ranges' in t and 'k.env' in t]
+        assert not [t for t in texts if t.startswith('Receiver:')]
+        assert issubclass(next(w.category for w in caught
+                               if 'no ranges' in str(w.message)),
+                          uacpy.IOWarning)
+        np.testing.assert_array_equal(rcv.ranges, [0.0])
+
+    def test_a_kraken_decks_settings_write_it_back_unchanged(self, tmp_path):
+        """write -> read_env -> write with the returned settings is the
+        identity: per-medium mesh counts included."""
+        from uacpy.io import read_env, write_kraken_env_file
+        src = Source(depths=[20.0], frequencies=100.0)
+        rcv = uacpy.Receiver(depths=[10.0, 50.0, 90.0], ranges=[1000.0])
+        first, second = tmp_path / 'a' / 'k.env', tmp_path / 'b' / 'k.env'
+        first.parent.mkdir(), second.parent.mkdir()
+        write_kraken_env_file(first, self._env(), src, rcv,
+                              interp_ssp='linear', n_mesh=[60, 12],
+                              rmax_m=5000.0, c_low=1400.0, c_high=2000.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            env, gsrc, grcv, opt = read_env(first)
+        assert opt['n_mesh'] == [60, 12]
+        write_kraken_env_file(second, env, gsrc, grcv, **self._settings(opt))
+        assert second.read_text() == first.read_text()
+
+    def test_a_bellhop_decks_settings_write_it_back_unchanged(self, tmp_path):
+        """The Bellhop options carry the writer's own keywords and no
+        n_mesh, so they write the deck back byte for byte."""
+        from uacpy.io import read_env
+        from uacpy.io.bellhop_writer import write_bellhop_env_file
+        env = Environment(
+            bathymetry=100.0,
+            ssp=SoundSpeedProfile(depths=[0.0, 100.0],
+                                  sound_speed=[1500.0, 1520.0]),
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1700.0, density=1.8,
+                                      attenuation=0.4),
+            name='bellhop trip')
+        src = Source(depths=[25.0], frequencies=200.0)
+        rcv = uacpy.Receiver(depths=[10.0, 50.0, 90.0],
+                             ranges=np.linspace(500.0, 5000.0, 10))
+        first, second = tmp_path / 'a' / 'b.env', tmp_path / 'b' / 'b.env'
+        first.parent.mkdir(), second.parent.mkdir()
+        write_bellhop_env_file(first, env, src, rcv, n_beams=500,
+                               launch_angles=(-60.0, 60.0))
+        env2, gsrc, grcv, opt = read_env(first)
+        assert 'n_mesh' not in opt
+        write_bellhop_env_file(second, env2, gsrc, grcv,
+                               **self._settings(opt))
+        assert second.read_text() == first.read_text()
+
+    @pytest.mark.parametrize('near', [4999.996, 4999.99999])
+    def test_a_medium_ends_on_the_row_at_its_base_by_ats_test(self, tmp_path,
+                                                              near):
+        """AT ends a medium on the row within 100*EPSILON(1.0) = 1.19e-5 m
+        of its base (misc/sspMod.f90:353): a row 4 mm above a 5000 m base is
+        read on to the base row; one 1e-5 m above it ends the medium."""
+        from uacpy.io import read_env
+        path = tmp_path / 'deep.env'
+        path.write_text(
+            "'deep'\n100.0\n1\n'CVW'\n0 0.0 5000.0\n"
+            f" 0.0 1500.0 /\n {near} 1510.0 /\n"
+            + (" 5000.0 1511.0 /\n" if near < 4999.999 else "")
+            + "'A' 0.0\n 5000.0 1600.0 0.0 1.5 0.5 /\n"
+            "1400 2000\n10\n1\n50 /\n1\n50 /\n")
+        env, _src, _rcv, _opt = read_env(path)
+        assert env.ssp.depths[-1] == pytest.approx(
+            5000.0 if near < 4999.999 else near)
+        assert env.bottom.halfspace_at(range=0.0).sound_speed == 1600.0
+
     def test_an_attenuation_unit_other_than_db_per_wavelength_is_refused(
             self, tmp_path):
         from uacpy.core.exceptions import UnsupportedFeatureError

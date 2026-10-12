@@ -102,7 +102,10 @@ class ExecutableNotFoundError(UACPYError):
 
 
 class ModelExecutionError(UACPYError):
-    """Raised when a model subprocess exits with a non-zero code."""
+    """Raised when a model binary failed: it exited non-zero or was killed
+    by a signal, exited 0 without the output it owes, timed out, or never
+    launched (:attr:`NEVER_LAUNCHED`). Keeps ``stdout``, ``stderr`` and
+    ``return_code``."""
 
     #: What uacpy itself passes as ``return_code`` when the binary never ran at
     #: all — it would not exec, the work directory was gone, the run timed out.

@@ -1,9 +1,9 @@
 """What a reader acts on travels as a typed attribute of the result:
-the Field's derivation record (band_hz, synthesis_window, sub_cutoff_bins,
-sonar_budget, sigma_dB), Arrivals.absorption and
+the Field's derivation record (band_hz, synthesis_window, no_mode_bins,
+sonar_budget, sigma_dB, reduction_speed), Arrivals.absorption and
 ReflectionCoefficient.reflection_type. Each is carried to a derived result,
-round-trips through to_dict and the xarray export, loads from the metadata
-spelling an older file kept it under, and is refused as a metadata key."""
+round-trips through to_dict and the xarray export, and is refused as a
+metadata key — and a dict keeping it in metadata is refused on load."""
 import numpy as np
 import pytest
 
@@ -21,17 +21,30 @@ BUDGET = {'mode': 'passive', 'source_level_dB': 140.0,
 DERIVATION = {
     'band_hz': ((100.0, 300.0), 'band_hz'),
     'synthesis_window': ('hann', 'window'),
-    'sub_cutoff_bins': (2, 'sub_cutoff_bins'),
+    'no_mode_bins': ((0, 2), 'no_mode_bins'),
     'sonar_budget': (BUDGET, 'sonar_budget'),
     'sigma_dB': (5.6, 'sigma_dB'),
+    'reduction_speed': (1490.0, 'reduction_speed'),
 }
 
 
 def _field(**kw):
-    return Field(data=np.full((2, 3), 60.0),
+    return Field(data=np.full((2, 3, 3), 60.0),
                  coords={'depth': np.array([10.0, 20.0]),
-                         'range': np.array([100.0, 200.0, 300.0])},
+                         'range': np.array([100.0, 200.0, 300.0]),
+                         'frequency': np.array([50.0, 60.0, 70.0])},
                  kind='pressure', unit='dB', **kw)
+
+
+@pytest.mark.parametrize('speed, ok', [
+    (1500.0, True), (1e-9, True), (0.0, False), (-1500.0, False),
+    (np.nan, False), (np.inf, False)])
+def test_a_reduction_speed_is_a_positive_finite_speed(speed, ok):
+    if ok:
+        assert _field(reduction_speed=speed).reduction_speed == speed
+    else:
+        with pytest.raises(ConfigurationError, match="reduction_speed"):
+            _field(reduction_speed=speed)
 
 
 @pytest.mark.parametrize('tag', sorted(DERIVATION))
@@ -60,18 +73,56 @@ class TestFieldDerivationRecord:
         assert getattr(back, tag) == value
         assert not back.metadata
 
-    def test_an_older_file_keeping_it_in_metadata_loads_it(self, tag):
+    def test_a_saved_dict_keeping_it_in_metadata_is_refused(self, tag):
+        """Only the current layout is read: the tag is an attribute, so a
+        dict that holds it in metadata is refused, not read."""
         value, spelling = DERIVATION[tag]
         d = _field().to_dict()
         d['metadata'] = {spelling: value, 'title': 'kept'}
-        back = Field.from_dict(d)
-        assert getattr(back, tag) == value
-        assert back.metadata == {'title': 'kept'}
+        with pytest.raises(ConfigurationError, match=spelling):
+            Field.from_dict(d)
 
     def test_a_metadata_entry_naming_it_is_refused(self, tag):
         value, spelling = DERIVATION[tag]
         with pytest.raises(ConfigurationError, match=spelling):
             _field(metadata={spelling: value})
+
+
+@pytest.mark.parametrize('bins, axis', [
+    ((3,), True), ((-1,), True), ((0.5,), True), ((0,), False)])
+def test_no_mode_bins_index_the_frequency_axis(bins, axis):
+    field = _field() if axis else _field().at(frequency=60.0)
+    with pytest.raises(ConfigurationError, match='no_mode_bins'):
+        field.replace(no_mode_bins=bins)
+
+
+def test_no_mode_bins_are_sorted_distinct_and_none_when_empty():
+    assert _field(no_mode_bins=[2, 0, 2]).no_mode_bins == (0, 2)
+    assert _field(no_mode_bins=()).no_mode_bins is None
+
+
+def test_an_array_narrowed_along_frequency_keeps_the_bins_it_holds():
+    """The attrs index the band they list; an array cut from it keeps the
+    no-mode bins of the frequencies it still holds, at their new index."""
+    pytest.importorskip('xarray')
+    band = np.array([50.0, 60.0, 70.0])
+    da = _field(no_mode_bins=(0, 2), frequencies=band).to_xarray()
+    assert Field.from_xarray(da.isel(frequency=slice(1, None))
+                             ).no_mode_bins == (1,)
+    assert Field.from_xarray(da.isel(frequency=[1])).no_mode_bins is None
+    assert Field.from_xarray(da.isel(frequency=0)).no_mode_bins is None
+    # With no band in the attrs, bins the narrowed axis cannot place go.
+    bare = _field(no_mode_bins=(0, 2)).to_xarray()
+    assert Field.from_xarray(bare.isel(frequency=slice(1, None))
+                             ).no_mode_bins is None
+
+
+def test_no_mode_bins_round_trip_through_netcdf(tmp_path):
+    pytest.importorskip('xarray')
+    path = tmp_path / 'band.nc'
+    _field(no_mode_bins=(0, 2),
+           frequencies=np.array([50.0, 60.0, 70.0])).to_netcdf(path)
+    assert Field.from_netcdf(path).no_mode_bins == (0, 2)
 
 
 def test_a_band_that_is_not_a_pair_is_refused():
@@ -129,12 +180,11 @@ class TestArrivalsAbsorption:
         assert back.absorption.to_dict() == LAW.to_dict()
         assert 'absorption' not in back.metadata
 
-    def test_an_older_file_keeping_it_in_metadata_loads_it(self):
+    def test_a_saved_dict_keeping_it_in_metadata_is_refused(self):
         d = _arrivals().to_dict()
         d['metadata'] = {'absorption': LAW}
-        back = Arrivals.from_dict(d)
-        assert back.absorption is LAW
-        assert not back.metadata
+        with pytest.raises(ConfigurationError, match='absorption'):
+            Arrivals.from_dict(d)
 
     def test_a_metadata_entry_naming_it_is_refused(self):
         with pytest.raises(ConfigurationError, match='absorption'):
@@ -170,11 +220,11 @@ class TestReflectionType:
         assert back.reflection_type == 'transmission'
         assert 'reflection_type' not in back.metadata
 
-    def test_an_older_file_keeping_it_in_metadata_loads_it(self):
+    def test_a_saved_dict_keeping_it_in_metadata_is_refused(self):
         d = _table().to_dict()
         d['metadata'] = {'reflection_type': 'transmission'}
-        assert ReflectionCoefficient.from_dict(d).reflection_type == \
-            'transmission'
+        with pytest.raises(ConfigurationError, match='reflection_type'):
+            ReflectionCoefficient.from_dict(d)
 
     def test_a_metadata_entry_naming_it_is_refused(self):
         with pytest.raises(ConfigurationError, match='reflection_type'):

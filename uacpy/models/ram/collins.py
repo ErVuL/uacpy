@@ -31,6 +31,7 @@ from uacpy.models.ram._interp import interp_envelope_to_receiver_grid
 from uacpy.models.ram._domain import (
     COLLINS_SAMPLES_PER_BEAT,
     absorbing_layer_thickness,
+    check_source_inside_the_domain,
     check_source_row_is_solved,
     compute_zmax,
     cut_water_ssp_at_zmax,
@@ -64,6 +65,7 @@ from uacpy.models.ram._stability import (
     rams_stability,
     resolve_collins_thetas,
     resolve_rams_rotation_angle,
+    stability_terms,
     warn_if_rams_step_unstable,
 )
 from uacpy.models.ram.grid import (
@@ -74,19 +76,22 @@ from uacpy.models.ram.grid import (
     ramsurf_surface_nodes,
     warn_if_trapped_modes_unresolved,
 )
+from uacpy.models._checks import speed_bounds
+from uacpy.models._extract import (
+    attach_output_paths, mask_source_axis, result_kwargs,
+)
 
 
 # Collins-family PE numerics constants.
 #
 # LAMBDA_PER_DZ_FLOOR — depth samples per acoustic wavelength at which the
-#   automatic depth search STARTS (``dz = c_min/(16·f)`` where the optimiser
+#   automatic depth search STARTS (``dz = c_min/(15·f)`` where the optimiser
 #   asked for finer); it bounds the cost of the depth grid on a seabed whose
 #   trapped modes it resolves, which Lytaev's error model on its own does
 #   not. It is not where the search stops: when the steepest trapped mode
 #   scores at or above ``TRAPPED_MODE_SCORE_LIMIT`` on the floored grid, dz
 #   is refined until it passes, within ``MAX_DEPTH_POINTS``. The value is
-#   uacpy's — no samples-per-wavelength floor is prescribed by the RAM
-#   sources, their readme, Collins 1993 or Lytaev 2023 §4.
+#   the Acoustics Toolbox RAM writers' λ/15 (``grid.LAMBDA_PER_DZ_FLOOR``).
 # RAMS_DR_LAMBDA_CAP — empirical upper stability bound on dr for rams0.5's
 #   rotated Padé elastic march, expressed as a divisor of c_min/freq.
 #   ``dr ≤ c_min / (RAMS_DR_LAMBDA_CAP·f)`` ≈ 0.2 λ per step.
@@ -119,6 +124,12 @@ _COLLINS_ARRAY_LIMITS = {
 # ``floor(x + g/dz) - floor(x) >= floor(g/dz)``.
 BLOCK_GAP_PER_DZ = 2.0
 
+#: Each Collins binary's ``zread``: the node assignment with its one-deep
+#: collision push-down and the fill loop that ramps across a gap.
+_ZREAD_LINES = {'ramsurf': 'ramsurf1.5.f:207-219',
+                'ramgeo': 'ramgeo1.5.f:222-234',
+                'rams': 'rams0.5.f:225-237'}
+
 
 # Ceiling on the number of range records a Collins binary writes. The stride
 # ``ndr`` is otherwise lowered until the first written range reaches the
@@ -126,13 +137,18 @@ BLOCK_GAP_PER_DZ = 2.0
 # one record per ``dr``.
 _COLLINS_MAX_OUTPUT_RANGES = 20000
 
+# Range records a Collins march writes before the caps of
+# ``collins_output_stride`` lower its stride: max_range / dr over this.
+_COLLINS_OUTPUT_RANGES_TARGET = 1000.0
 
-#: The Collins codes' marker table: the stdout lines of the two stop
-#: conditions they diagnose themselves and end on a bare Fortran ``stop``
-#: (exit 0) — the array-size checks (``ramgeo1.5.f:138-149``, the same block
-#: in ``rams0.5.f`` and ``ramsurf1.5.f``) and the Padé root finder
-#: (``ramgeo1.5.f:767-771``). See :func:`raise_on_collins_stop`.
-_COLLINS_STOP_MARKERS = ('Laguerre method not converging',
+
+#: The RAM binaries' marker table: the stdout lines of the stop conditions
+#: they diagnose themselves and end on a bare Fortran ``stop`` (exit 0) —
+#: the Collins array-size checks (``ramgeo1.5.f:138-149``, the same block in
+#: ``rams0.5.f`` and ``ramsurf1.5.f``) and the Padé root finder of every
+#: backend (``ramgeo1.5.f:767-771``, ``mpiramS/src/epade.f90:296-301``). See
+#: :func:`raise_on_ram_stop`.
+_RAM_STOP_MARKERS = ('Laguerre method not converging',
                          'Need to increase parameter',
                          'Try a different combination')
 
@@ -143,16 +159,15 @@ MAX_BATHY_SECTIONS = 64
 
 
 def resolve_collins_tl(env, source, receiver, kind: str, *,
-                        notices=None, knobs, log, speed_bounds) -> dict:
+                        notices=None, knobs, log) -> dict:
     """Stage 3 of a Collins COHERENT_TL run: one launch at the source
     frequency."""
     fc = float(np.atleast_1d(source.frequencies)[0])
     theta = resolve_collins_thetas(env, kind, [fc],
-                                   notices=notices, knobs=knobs,
-                                   speed_bounds=speed_bounds)[0]
+                                   notices=notices, knobs=knobs)[0]
     grid = resolve_collins_launch(
         env, source, receiver, kind=kind, freq=fc, theta=theta,
-        notices=notices, knobs=knobs, log=log, speed_bounds=speed_bounds)
+        notices=notices, knobs=knobs, log=log)
     return dict(fc=None, q_factor=None, record_duration=None, bandwidth_hz=None, df_hz=None,
                 marched_frequencies=[fc], requested_frequencies=None,
                 zmax_frequency=fc,
@@ -162,7 +177,7 @@ def resolve_collins_tl(env, source, receiver, kind: str, *,
 
 def resolve_collins_band(env, source, receiver, kind: str, *,
                           require_uniform: bool = True,
-                          notices=None, knobs, log, speed_bounds) -> dict:
+                          notices=None, knobs, log) -> dict:
     """Stage 3 of a Collins BROADBAND / TIME_SERIES run: one launch per
     frequency, every one on the band's grid.
 
@@ -202,23 +217,30 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
     # it, which `_resolve_mpirams_grid` states and the mpiramS path already
     # honours for both steps.
     #
-    # EXCEPT on rams0.5, where dr stays at freq_min. That is a STABILITY
-    # measure, not an accuracy one: a finer dr means more range steps, and
-    # rams0.5's rotated-Pade elastic march is only marginally stable
-    # (|G| ~ 1 near the evanescent boundary), so per-step floating-point
-    # noise compounds — sizing dr at freq_max (~3x more steps) injects a
-    # spurious acausal precursor into its broadband synthesis, verified
-    # against the fluid baseline and confirmed by a rotation-angle sweep
-    # (Milinazzo 1997).
+    # EXCEPT on rams0.5, where dr stays at freq_min, so every bin above it
+    # marches a step past the dr <= c_min/(5 f) cap the single-frequency
+    # rams grid applies (grid.tighten_rams_dr): 0.6 λ at the top of a 3:1
+    # band. That is a cost choice, and the measured price of it is small:
+    # 100 m water over cp 1800 / cs 400 / 1.8, a 100-300 Hz band at 2 Hz,
+    # zs 50 m, zr 30 / 70 m, r 1 km — the default dr 3.0 m (λ/5 at 100 Hz)
+    # against a pinned 1.0 m (λ/5 at 300 Hz): Hann-tapered traces correlate
+    # 1.000 at +0.02 dB, the energy before the head wave is -54.4 dB vs
+    # -55.9 dB of the total (no precursor from either step), per-bin |H|
+    # differs by 0.26 dB rms (0.73 dB over the top ten bins), and the run
+    # takes 58 s against 165 s. The log line below states the λ fraction
+    # the top bin marches; pin dr to march a finer step.
     #
-    # That argument is specific to the elastic march. Applying it to the
-    # FLUID Collins backends only under-resolved them: measured on a 100 m
+    # The fluid Collins backends size at freq_max: sizing them at freq_min
+    # under-resolved them badly, measured on a 100 m
     # Pekeris guide (1700/1.7/0.5) against Scooter at 500 Hz, ramgeo with
     # dr sized at freq_min = 100 Hz (54.05 m) is 8.85 dB rms / 16.86 dB max
     # out, against 1.64 / 5.24 with dr sized at freq_max (12.81 m).
     freq_min = float(frequencies[0])
     freq_max = float(frequencies[-1])
-    dr_sizing_freq = freq_min if kind == 'rams' else freq_max
+    # A pinned accuracy holds for every bin, so it sizes dr at freq_max on
+    # rams too: the freq_min dr above is the default chooser's cost choice.
+    dr_sizing_freq = (freq_min if kind == 'rams' and not knobs.accuracy_pinned
+                      else freq_max)
     rmax_band = float(np.max(np.atleast_1d(receiver.ranges)))
 
     dr_band = float(knobs.dr) if knobs.dr is not None else None
@@ -227,18 +249,17 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
     if dr_band is None:
         dr_band, _ = compute_grid_lytaev(
             env, dr_sizing_freq, max_range=rmax_band, kind=kind,
-            warn_dz=False, zs=zs_band, notices=notices, knobs=knobs, log=log,
-            speed_bounds=speed_bounds
+            warn_dz=False, zs=zs_band, notices=notices, knobs=knobs, log=log
         )
     if dz_band is None:
         _, dz_band = compute_grid_lytaev(
             env, freq_max, max_range=rmax_band, kind=kind, zs=zs_band,
-            notices=notices, knobs=knobs, log=log, speed_bounds=speed_bounds
+            notices=notices, knobs=knobs, log=log
         )
     zmax_band = (float(knobs.zmax) if knobs.zmax is not None
                  else compute_zmax(env, freq_min, max_range=rmax_band,
-                                   notices=notices, knobs=knobs,
-                                   speed_bounds=speed_bounds))
+                                   source_depth=float(np.max(source.depths)),
+                                   notices=notices, knobs=knobs))
     if knobs.dz is None:
         # Coarsen once for the whole band so every frequency marches the
         # same grid and the warning is emitted once, not per frequency.
@@ -246,19 +267,19 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
                                freq=freq_max, notices=notices, knobs=knobs)
     warn_if_trapped_modes_unresolved(env, freq_max, kind, dr_band,
                                      dz_band, rmax_band,
-                                     notices=notices, knobs=knobs, log=log,
-                                     speed_bounds=speed_bounds)
+                                     notices=notices, knobs=knobs, log=log)
 
+    top_wavelength = speed_bounds(env)[0] / freq_max
     log(
         f"{kind} broadband: {len(frequencies)} frequencies, "
         f"{frequencies[0]:.2f}-{frequencies[-1]:.2f} Hz, "
         f"df={'non-uniform' if df is None else f'{df:.2f} Hz'}, "
         f"bw={bw:.2f} Hz, "
-        f"dr={dr_band:.2f}m, dz={dz_band:.3f}m, zmax={zmax_band:.0f}m"
+        f"dr={dr_band:.2f}m ({dr_band / top_wavelength:.2f} λ at "
+        f"{freq_max:.4g} Hz), dz={dz_band:.3f}m, zmax={zmax_band:.0f}m"
     )
     thetas = resolve_collins_thetas(env, kind, frequencies,
-                                    notices=notices, knobs=knobs,
-                                    speed_bounds=speed_bounds)
+                                    notices=notices, knobs=knobs)
     # One profile deck for the whole sweep: only the absorbing ramp
     # inside it moves with frequency (``collins_deck_base``), and
     # ``zmax_band`` is fixed for the band, so the sections are cut once
@@ -274,13 +295,11 @@ def resolve_collins_band(env, source, receiver, kind: str, *,
             # dr_band is the band's one-grid-for-all override; it is
             # caller-set only when self.dr is.
             dr_override_pinned=(knobs.dr is not None),
-            deck_base=deck_base, notices=notices, knobs=knobs, log=log,
-            speed_bounds=speed_bounds
+            deck_base=deck_base, notices=notices, knobs=knobs, log=log
         )
         for freq, theta in zip(frequencies, thetas))
     report_band_grid_cost(env, kind, grids[0], freq_min, freq_max,
-                          notices=notices, knobs=knobs, log=log,
-                          speed_bounds=speed_bounds)
+                          notices=notices, knobs=knobs, log=log)
     return dict(fc=fc, q_factor=Q_used, record_duration=T_used, bandwidth_hz=2.0 * bw,
                 df_hz=df, marched_frequencies=frequencies,
                 requested_frequencies=None, zmax_frequency=freq_min,
@@ -301,7 +320,7 @@ def resolve_collins_launch(
     dz_override: Optional[float] = None,
     zmax_override: Optional[float] = None,
     dr_override_pinned: Optional[bool] = None,
-    deck_base: Optional[dict] = None, notices=None, knobs, log, speed_bounds
+    deck_base: Optional[dict] = None, notices=None, knobs, log
 ) -> RamGrid:
     """Stage 3 of one Collins launch at ``freq``: its grid, stride and
     output depths, with the notices and the refusals of the deck they
@@ -329,8 +348,9 @@ def resolve_collins_launch(
     max_range = float(np.max(np.atleast_1d(receiver.ranges)))
     dr, dz, zmax = resolve_collins_grid(
         env, fc, kind, max_range,
-        dr_override, dz_override, zmax_override, zs=zs, notices=notices,
-        knobs=knobs, log=log, speed_bounds=speed_bounds
+        dr_override, dz_override, zmax_override, zs=zs,
+        source_depth=float(np.max(source.depths)), notices=notices,
+        knobs=knobs, log=log
     )
     if kind == 'ramsurf':
         warn_if_ramsurf_crests(env, notices=notices)
@@ -340,7 +360,7 @@ def resolve_collins_launch(
     # the deck writer adds) is left out.
     bathymetry, surface, range_segments = collins_deck_geometry(
         env, kind, zmax, fc, dz, max_range, deck_base=deck_base,
-        water=False, knobs=knobs, speed_bounds=speed_bounds)
+        water=False, knobs=knobs)
     # The WRITTEN node ranges bound dr, the origin node included: the
     # binary consumes at most one bathymetry node per range step.
     bathy_r = [r for r, _ in bathymetry]
@@ -352,9 +372,8 @@ def resolve_collins_launch(
     dr = constrain_dr_to_sections(
         dr, range_segments,
         pinned=(dr_pinned or knobs.dr is not None),
-        bathymetry_ranges=bathy_r, altimetry_ranges=alti_r,
-        notices=notices, log=log)
-    beat_k = modal_beat_wavenumber(env, fc, speed_bounds=speed_bounds)
+        bathymetry_ranges=bathy_r, altimetry_ranges=alti_r, log=log)
+    beat_k = modal_beat_wavenumber(env, fc)
     ndr, rmax_march = collins_output_stride(
         dr, max_range, receiver.ranges, beat_wavenumber=beat_k)
     log(
@@ -427,6 +446,7 @@ def resolve_collins_launch(
     check_rams_seafloor_index_floor(kind, dz, bathymetry)
     for z in zs_all:
         check_source_row_is_solved(z, dz)
+        check_source_inside_the_domain(z, dz, zmax_deck)
 
     # ``tl.line``'s receiver depth indexes u(ir)/f3(ir+1) with no bounds
     # check (ramsurf1.5.f:427, rams0.5.f:251), so keep it inside the
@@ -442,7 +462,8 @@ def resolve_collins_launch(
 
 def resolve_collins_grid(env, fc, kind, max_range,
                           dr_override, dz_override, zmax_override,
-                          zs=None, *, notices=None, knobs, log, speed_bounds):
+                          zs=None, *, source_depth: float = 0.0,
+                          notices=None, knobs, log):
     """Resolve the PE numerics grid ``(dr, dz, zmax)`` for one Collins run.
 
     Explicit overrides (from the broadband loop, which picks one set for the
@@ -467,27 +488,26 @@ def resolve_collins_grid(env, fc, kind, max_range,
     if dr is None or dz is None:
         dr_auto, dz_auto = compute_grid_lytaev(
             env, fc, max_range=max_range, kind=kind, zs=zs, notices=notices,
-            knobs=knobs, log=log, speed_bounds=speed_bounds
+            knobs=knobs, log=log
         )
         if dr is None:
             dr = dr_auto
         if dz is None:
             dz = dz_auto
     if kind == 'rams' and dr_pinned:
-        warn_if_rams_step_unstable(env, fc, dr, notices=notices, knobs=knobs,
-                                   speed_bounds=speed_bounds)
+        warn_if_rams_step_unstable(env, fc, dr, notices=notices, knobs=knobs)
     if zmax_override is not None:
         zmax = float(zmax_override)
     elif knobs.zmax is not None:
         zmax = float(knobs.zmax)
     else:
-        zmax = compute_zmax(env, fc, max_range=max_range, notices=notices,
-                            knobs=knobs, speed_bounds=speed_bounds)
+        zmax = compute_zmax(env, fc, max_range=max_range,
+                            source_depth=source_depth, notices=notices,
+                            knobs=knobs)
     if (zmax_override is not None or knobs.zmax is not None):
         warn_if_seafloor_outside_grid(zmax, env, dz=dz,
                                       kind=kind, freq=fc,
-                                      notices=notices, knobs=knobs,
-                                      speed_bounds=speed_bounds)
+                                      notices=notices, knobs=knobs)
 
     # ``mz`` bounds the DECK's depth grid, which is written in the mapped
     # frame (``_domain.deck_depth``, up to ~1e-4 relative deeper under
@@ -505,17 +525,16 @@ def resolve_collins_grid(env, fc, kind, max_range,
     # arithmetic in any of its sources and interpolates the profile onto the
     # grid with ``interpolators.f90``'s ``interp1``, so it is exempt.
     if (kind in _COLLINS_ARRAY_LIMITS
-            and block_loses_a_point(env, dz, zmax, kind, fc, knobs=knobs,
-                                    speed_bounds=speed_bounds)):
-        block_cap = block_dz_cap(env, zmax, kind, fc, knobs=knobs,
-                                 speed_bounds=speed_bounds)
+            and block_loses_a_point(env, dz, zmax, kind, fc, knobs=knobs)):
+        block_cap = block_dz_cap(env, zmax, kind, fc, knobs=knobs)
         if dz_pinned:
             raise ConfigurationError(
                 f"RAM(dz={dz:.4f}) cannot represent this sediment block: "
-                f"zread ({kind}) pins block points to nodes 1.5 + z/dz and "
-                f"two of them collide at this dz, so the deeper value "
-                f"overwrites the shallower one and the fill loop replaces "
-                f"the layer with a linear ramp across the whole sub-bottom. "
+                f"zread ({_ZREAD_LINES[kind]}) pins block points to nodes "
+                f"1.5 + z/dz and two of them collide at this dz, so the "
+                f"deeper value overwrites the shallower one and the fill "
+                f"loop replaces the layer with a linear ramp across the "
+                f"whole sub-bottom — the binary marches a different seabed. "
                 f"The thinnest step is "
                 f"{block_cap * BLOCK_GAP_PER_DZ:.4f} m.",
                 remediation=f"Use dz <= {block_cap:.4f} m, leave dz=None to "
@@ -532,8 +551,7 @@ def resolve_collins_grid(env, fc, kind, max_range,
                                                kind=kind, knobs=knobs)
         if (block_aligned > 0
                 and not block_loses_a_point(
-                    env, block_aligned, zmax, kind, fc, knobs=knobs,
-                    speed_bounds=speed_bounds)
+                    env, block_aligned, zmax, kind, fc, knobs=knobs)
                 and (budget is None
                      or budget[0](block_aligned) <= budget[1])):
             block_cap = block_aligned
@@ -560,12 +578,11 @@ def resolve_collins_grid(env, fc, kind, max_range,
     if dr_override is None and dz_override is None:
         warn_if_trapped_modes_unresolved(env, fc, kind, dr, dz,
                                          max_range, notices=notices,
-                                         knobs=knobs, log=log,
-                                         speed_bounds=speed_bounds)
+                                         knobs=knobs, log=log)
     return dr, dz, zmax
 
 
-def write_collins_deck(inputs: StageInputs, *, knobs, speed_bounds) -> Path:
+def write_collins_deck(inputs: StageInputs, *, knobs) -> Path:
     """Stage 4 of one Collins launch: ``ram.in`` / ``rams.in`` /
     ``ramgeo.in`` written by :func:`~uacpy.io.ramsurf_writer.write_ramin`
     from the launch's :class:`RamGrid` and the deck geometry
@@ -579,7 +596,7 @@ def write_collins_deck(inputs: StageInputs, *, knobs, speed_bounds) -> Path:
     max_range = float(np.max(np.atleast_1d(inputs.receiver.ranges)))
     bathymetry, surface, range_segments = collins_deck_geometry(
         env, kind, grid.zmax, fc, grid.dz, max_range,
-        deck_base=inputs.prepared, knobs=knobs, speed_bounds=speed_bounds)
+        deck_base=inputs.prepared, knobs=knobs)
     ram_in = inputs.work_dir / collins_in_name(kind)
     write_ramin(
         str(ram_in),
@@ -589,7 +606,7 @@ def write_collins_deck(inputs: StageInputs, *, knobs, speed_bounds) -> Path:
         zmax=deck_depth(grid.zmax, knobs=knobs), dz=grid.dz,
         depth_decimation=max(1, int(knobs.depth_decimation)), zmplt=grid.zmplt,
         c0=engine.c0, n_pade=int(knobs.n_pade),
-        n_stability=int(knobs.n_stability),
+        n_stability=stability_terms(knobs),
         stability_range_m=float(engine.stability_range_m or 0.0),
         rams_rotation=int(knobs.rams_rotation),
         rams_rotation_angle=float(grid.theta),
@@ -601,27 +618,26 @@ def write_collins_deck(inputs: StageInputs, *, knobs, speed_bounds) -> Path:
     return ram_in
 
 
-def read_collins_output(inputs: StageInputs, *, knobs, speed_bounds) -> dict:
+def read_collins_output(inputs: StageInputs, *, knobs) -> dict:
     """Stage 4 of one Collins launch: its output on the binary's grid
-    (:func:`read_collins_grid`), the diverged samples marked no-data
-    (:func:`mark_diverged_collins_samples`, reported rather than warned
+    (:func:`read_collins_grid`), the non-finite samples marked no-data
+    (:func:`mark_non_finite_collins_samples`, reported rather than warned
     so a band warns once), and the envelope resampled onto the receiver
     grid (:func:`interp_envelope_to_receiver_grid`) — so a band holds
     one receiver-grid slice per bin, not the binary's whole grid.
 
     Keys: ``psi`` (receiver depth × range, complex envelope), ``report``
-    (the diverged-sample report, or ``None``), and the launch's
+    (the non-finite-sample report, or ``None``), and the launch's
     ``frequency`` / ``dr`` / ``dz`` / ``zmax``.
     """
     grid = launch_grid(inputs)
     env = inputs.env
     kind = inputs.settings.engine.backend
     receiver = inputs.receiver
-    raw = read_collins_grid(inputs, knobs=knobs, speed_bounds=speed_bounds)
+    raw = read_collins_grid(inputs, knobs=knobs)
     reports = []
-    psi_marked = mark_diverged_collins_samples(
-        raw, env, kind, reports=reports, knobs=knobs,
-        speed_bounds=speed_bounds)
+    psi_marked = mark_non_finite_collins_samples(
+        raw, env, kind, reports=reports, knobs=knobs)
     # Receivers outside the PE output grid get NaN so pcolormesh and
     # downstream consumers render them transparent rather than as a
     # saturated edge band.
@@ -630,14 +646,13 @@ def read_collins_output(inputs: StageInputs, *, knobs, speed_bounds) -> dict:
         np.atleast_1d(receiver.depths).astype(float),
         np.atleast_1d(receiver.ranges).astype(float),
         carrier_rate=collins_carrier_rate(
-            env, kind, grid.frequency, grid.theta, knobs=knobs,
-            speed_bounds=speed_bounds))
+            env, kind, grid.frequency, grid.theta, knobs=knobs))
     return {'psi': psi, 'report': reports[0] if reports else None,
             'frequency': grid.frequency, 'dr': grid.dr, 'dz': grid.dz,
             'zmax': grid.zmax}
 
 
-def read_collins_grid(inputs: StageInputs, *, knobs, speed_bounds) -> dict:
+def read_collins_grid(inputs: StageInputs, *, knobs) -> dict:
     """One Collins launch's ``tl.grid`` and ``pcomplex.bin`` on the
     binary's own output grid, as pressure (rams0.5's dilatation
     converted, :func:`rams_pressure_from_dilatation`) with the surface
@@ -672,7 +687,7 @@ def read_collins_grid(inputs: StageInputs, *, knobs, speed_bounds) -> dict:
     # The same ``outpt`` call writes both files on one (z, r) grid, so
     # unequal shapes mean one is truncated. Left to itself the
     # mismatch first bites as a numpy broadcast error inside
-    # ``mark_diverged_collins_samples``, naming neither file.
+    # ``mark_non_finite_collins_samples``, naming neither file.
     if tl.shape != pcomplex.shape:
         raise FileFormatError(
             f"RAM:{kind}: {tlgrid} decodes to a {tl.shape} grid but "
@@ -708,8 +723,7 @@ def read_collins_grid(inputs: StageInputs, *, knobs, speed_bounds) -> dict:
         # density blocks the conversion reads are frequency-invariant.
         bathymetry, _, range_segments = collins_deck_geometry(
             env, kind, grid.zmax, grid.frequency, dz, max_range,
-            deck_base=inputs.prepared, water=False, knobs=knobs,
-            speed_bounds=speed_bounds)
+            deck_base=inputs.prepared, water=False, knobs=knobs)
         zs = deck_depth(
             float(np.atleast_1d(inputs.source.depths)[0]), knobs=knobs)
         tl, pcomplex = rams_pressure_from_dilatation(
@@ -727,8 +741,8 @@ def read_collins_grid(inputs: StageInputs, *, knobs, speed_bounds) -> dict:
 
 
 def assemble_collins_tl_field(inputs: StageInputs,
-                               raw: dict, *, attach_output_paths,
-                               mask_source_axis, result_kwargs) -> Field:
+                               raw: dict, *, model_name, provenance,
+                               cleanup) -> Field:
     """Stage 5 of a Collins COHERENT_TL run: the receiver-grid envelope
     of :func:`read_collins_output` as a :class:`Field` of
     travelling-wave pressure."""
@@ -737,7 +751,7 @@ def assemble_collins_tl_field(inputs: StageInputs,
     env = inputs.env
     source = inputs.source
     fc = raw['frequency']
-    warn_on_diverged_collins_samples(
+    warn_on_non_finite_collins_samples(
         kind, [raw['report']] if raw['report'] else [], 1)
     rcv_d = np.atleast_1d(inputs.receiver.depths).astype(float)
     rcv_r = np.atleast_1d(inputs.receiver.ranges).astype(float)
@@ -760,13 +774,13 @@ def assemble_collins_tl_field(inputs: StageInputs,
         data=pressure,
         coords={'depth': rcv_d, 'range': rcv_r},
         **result_kwargs(
-            source,
+            model_name, provenance, source,
             phase_reference=PhaseReference.TRAVELLING_WAVE.value,
             backend=kind,
             frequencies=fc,
         )
     )
-    field = mask_source_axis(field, source)
+    field = mask_source_axis(model_name, field, source)
     attach_output_paths(
         field, inputs.work_dir, '',
         primary_files=(
@@ -774,26 +788,26 @@ def assemble_collins_tl_field(inputs: StageInputs,
             ('tl_line_file', 'tl.line'),
             ('pcomplex_file', 'pcomplex.bin'),
             ('in_file', collins_in_name(kind))
-        )
+        ), cleanup=cleanup
     )
     return field
 
 
 def assemble_collins_band_field(inputs: StageInputs,
-                                 raws, *, attach_output_paths,
-                                 mask_source_axis, result_kwargs) -> Field:
+                                 raws, *, model_name, provenance,
+                                 cleanup) -> Field:
     """Stage 5 of a Collins band: the per-bin receiver-grid envelopes
     stacked into ``(n_d, n_r, n_f)`` and converted to the engineering
     travelling-wave H(f) every other broadband-capable model returns
     (the carrier ``exp(-i k0 r)`` baked in), with one warning for the
-    diverged samples of the whole band."""
+    non-finite samples of the whole band."""
     settings = inputs.settings
     engine = settings.engine
     kind = engine.backend
     env = inputs.env
     source = inputs.source
     frequencies = np.array(engine.marched_frequencies, dtype=float)
-    warn_on_diverged_collins_samples(
+    warn_on_non_finite_collins_samples(
         kind, [r['report'] for r in raws if r['report']], len(raws))
     rcv_d = np.atleast_1d(inputs.receiver.depths).astype(float)
     rcv_r = np.atleast_1d(inputs.receiver.ranges).astype(float)
@@ -829,15 +843,16 @@ def assemble_collins_band_field(inputs: StageInputs,
         data=H,
         coords={'depth': rcv_d, 'range': rcv_r, 'frequency': frequencies},
         **result_kwargs(
-            source,
+            model_name, provenance, source,
             phase_reference=PhaseReference.TRAVELLING_WAVE.value,
             backend=kind,
             frequencies=frequencies,
         )
     )
-    field = mask_source_axis(field, source)
-    # Every frequency ran in the one work directory, so the paths
-    # describe the sweep as a whole rather than any one launch.
+    field = mask_source_axis(model_name, field, source)
+    # Every frequency ran in the one work directory, and each launch
+    # clears the previous one's outputs and rewrites the deck, so the
+    # paths are the LAST bin's files, not the sweep's.
     attach_output_paths(
         field, inputs.work_dir, '',
         primary_files=(
@@ -845,72 +860,51 @@ def assemble_collins_band_field(inputs: StageInputs,
             ('tl_line_file', 'tl.line'),
             ('pcomplex_file', 'pcomplex.bin'),
             ('in_file', collins_in_name(kind))
-        )
+        ), cleanup=cleanup
     )
     return field
 
 
-def mark_diverged_collins_samples(raw: dict, env: Environment,
-                                   kind: str, *,
-                                   reports: Optional[list] = None, knobs,
-                                   speed_bounds
-                                   ) -> np.ndarray:
-    """Return one Collins run's envelope with diverged samples marked
-    no-data, warning on what was marked — or, given a ``reports`` list,
-    appending what was marked to it for one warning over a whole band
-    (:func:`warn_on_diverged_collins_samples`).
+def mark_non_finite_collins_samples(raw: dict, env: Environment,
+                                    kind: str, *,
+                                    reports: Optional[list] = None, knobs
+                                    ) -> np.ndarray:
+    """Return one Collins run's envelope with the samples the binary wrote
+    as NaN or inf — in ``tl.grid`` or ``pcomplex.bin`` — marked no-data,
+    warning on what was marked — or, given a ``reports`` list, appending
+    what was marked to it for one warning over a whole band
+    (:func:`warn_on_non_finite_collins_samples`).
 
-    A sample is no-data when it is NaN/inf, or when its TL is below what
-    the range allows — the rotated-Padé march on a fast-shear seabed
-    diverges into finite but hugely negative values. Those samples come
-    back as NaN, the marker the wrapper already uses for receivers
-    outside the output grid and below the seafloor, so they read as
-    absent rather than as a deep shadow zone. Every other sample is the
-    engine's own number: uacpy does not substitute a level for one the
-    model produced.
+    Every finite sample is the engine's own value, bit for bit, however
+    far below 0 dB its TL lies. No level separates a diverged march from a
+    field: a passive waveguide of depth ``D`` spreads cylindrically beyond
+    ``r ~ D``, its far-field intensity inversely proportional to
+    ``2*pi*r*D`` (JKPS §1.3.4), and over a bottom that reflects every path
+    below the critical grazing angle ``theta_c`` the depth-averaged loss is
+    ``10*log10(r * z_b / (2*theta_c))`` dB (Abraham §3.2.4.1, Eqs.
+    3.86-3.88, after Ainslie §9.1.1.2) — below -6 dB, i.e. ``|p|`` above
+    twice the 1 m level, out to ``r = theta_c / (2*z_b)`` (metres), 1.7 m
+    in a 0.3 m guide with ``theta_c = 60 deg``. The exact zero at the
+    z = 0 pressure-release node is a boundary value too (the shared
+    ``transmission_loss_dB`` floor reports it as the one no-energy level).
     """
-    # How negative a TL may legitimately be is set by the RANGE, not by a
-    # constant: TL is referenced to 1 m, so beyond that radius a passive
-    # medium cannot return more pressure than the source put out and TL
-    # cannot go below 0, while inside it the sample is closer than the
-    # reference and free-field spreading gives 20*log10(r) — -2.5 dB at
-    # dr = 0.75 m, but -44.7 dB where the lambda cap drives dr to 5.8 mm
-    # at 50 kHz. Measured on a 1 kHz ramgeo march, the minimum TL at each
-    # range tracks that bound to 0.06 dB. The allowance below it is one
-    # coherent boundary image, which doubles the pressure.
-    #
-    # Only the inside-1 m branch is a spreading law: past 1 m the bound
-    # stays at 0 dB rather than following 20*log10(r), because a
-    # waveguide spreads cylindrically and a real field at 10 km sits
-    # ~40 dB below the spherical value — bounding on spreading there
-    # would reject the whole far field.
-    IMAGE_GAIN_DB = 6.02
     tl_raw = np.asarray(raw['tl'], dtype=float)
-    ranges = np.asarray(raw['ranges'], dtype=float)
-    with np.errstate(divide='ignore'):
-        floor_dB = 20.0 * np.log10(
-            np.minimum(np.maximum(ranges, np.finfo(float).tiny), 1.0)
-        ) - IMAGE_GAIN_DB
-    # A blow-up cannot be found by a NaN test: rams0.5.f:265 takes TL from
-    # ``alog10(cabs(ur))``, so a march that overflows the field but stays
-    # under the REAL ceiling (8-byte in the shipped build, 4-byte in a
-    # stock one) writes finite, hugely negative samples.
-    invalid = ~np.isfinite(tl_raw) | (tl_raw < floor_dB)
+    psi_raw = np.asarray(raw['pcomplex'], dtype=np.complex128)
+    invalid = ~np.isfinite(tl_raw) | ~np.isfinite(psi_raw)
     n_invalid = int(np.count_nonzero(invalid))
     if n_invalid:
         note = ""
-        c0_pe = resolve_c0(env, knobs=knobs, speed_bounds=speed_bounds)
+        c0_pe = resolve_c0(env, knobs=knobs)
         advice = "Try a larger n_pade or a finer dz."
         if kind == 'rams' and raw.get('dr') is not None:
             theta = raw.get('theta')
             if theta is None:
                 theta = resolve_rams_rotation_angle(env,
                                            float(raw['frequency']),
-                                           knobs=knobs,
-                                           speed_bounds=speed_bounds)
+                                           knobs=knobs)
             stab = rams_stability(
                 env, float(raw['frequency']), dr=float(raw['dr']),
-                theta=theta, knobs=knobs, speed_bounds=speed_bounds)
+                theta=theta, knobs=knobs)
             if stab is not None and stab['margin']['excess'] > 0.0:
                 m = stab['margin']
                 advice = (
@@ -939,30 +933,22 @@ def mark_diverged_collins_samples(raw: dict, env: Environment,
                   'frequency': float(raw['frequency']),
                   'detail': f"{advice}{note}"}
         if reports is None:
-            warn_on_diverged_collins_samples(kind, [report], 1)
+            warn_on_non_finite_collins_samples(kind, [report], 1)
         else:
             reports.append(report)
-    psi_raw = np.asarray(raw['pcomplex'], dtype=np.complex128)
-    # Every surviving sample is the engine's own value, bit for bit:
-    # the exact zero at the z = 0 pressure-release node the fluid codes
-    # emit when ndz = 1 is a valid boundary value, not divergence (the
-    # shared ``transmission_loss_dB`` floor reports it as the one no-energy
-    # level, and it is not counted in the warning above), and inside the
-    # 1 m reference radius |p/p0| > 1 is what the field is.
     return np.where(invalid, complex(np.nan, np.nan), psi_raw)
 
 
-def warn_on_diverged_collins_samples(kind: str, reports,
-                                      n_launches: int) -> None:
-    """One warning for the diverged samples
-    :func:`mark_diverged_collins_samples` reported over a run: the
-    frequency's own when one launch diverged, else the count and span of
+def warn_on_non_finite_collins_samples(kind: str, reports,
+                                       n_launches: int) -> None:
+    """One warning for the non-finite samples
+    :func:`mark_non_finite_collins_samples` reported over a run: the
+    frequency's own when one launch wrote them, else the count and span of
     the affected bins with the first one's diagnosis."""
     if not reports:
         return
-    head = ("are NaN/inf or below the level their range allows (Padé "
-            "instability or PE divergence) and are returned as NaN — no "
-            "data there, not a shadow zone. Every other sample is the "
+    head = ("are NaN/inf as the binary wrote them and are returned as NaN "
+            "— no data there, not a shadow zone. Every other sample is the "
             "march's own value.")
     first = reports[0]
     if len(reports) == 1:
@@ -979,13 +965,16 @@ def warn_on_diverged_collins_samples(kind: str, reports,
     warnings.warn(text, NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
-def raise_on_collins_stop(kind: str, binary, proc_result, *,
-                           dr: float, knobs) -> None:
-    """Raise :class:`ModelExecutionError` when a Collins binary reported
-    a stop condition on stdout and exited 0.
+def raise_on_ram_stop(kind: str, binary, proc_result, *,
+                      dr: float, knobs) -> None:
+    """Raise :class:`ModelExecutionError` when a RAM binary reported a
+    stop condition on stdout and exited 0.
 
-    The three Collins codes end their two self-diagnosed failures on a
-    bare Fortran ``stop``, which exits 0: the array-size checks
+    mpiramS stops on its Padé root finder's failure
+    (``mpiramS/src/epade.f90:296-301``, "Laguerre method not converging.
+    Try a different combination of dr and np.", a uacpy patch) and writes
+    no ``psif.dat``. The three Collins codes end their two self-diagnosed
+    failures on a bare Fortran ``stop``, which exits 0: the array-size checks
     (``ramgeo1.5.f:138-149`` "Need to increase parameter mz/mp/mr to N",
     the same block in ``rams0.5.f`` and ``ramsurf1.5.f``) fire before
     the march and leave an empty ``tl.grid``; the Padé root finder
@@ -1001,16 +990,19 @@ def raise_on_collins_stop(kind: str, binary, proc_result, *,
     text = "\n".join(t for t in (proc_result.stdout, proc_result.stderr)
                      if t)
     quoted = [line.strip() for line in text.splitlines()
-              if any(m in line for m in _COLLINS_STOP_MARKERS)]
+              if any(m in line for m in _RAM_STOP_MARKERS)]
     if not quoted:
         return
     if any('Laguerre' in line for line in quoted):
+        # Measured on the order-8 stops seen (ramgeo 36.5 Hz at 0.5 m and
+        # 75 Hz at 1 m, mpiramS's 25-75 Hz band at 2 m): two fewer terms ran
+        # every one; half the step ran the ramgeo pair but not the band.
         remediation = (
             f"The Padé root finder diverged at this (dr, n_pade) pair; "
             f"the run marched with dr={float(dr):.6g} m and "
-            f"n_pade={int(knobs.n_pade)}. Change one of them, e.g. "
+            f"n_pade={int(knobs.n_pade)}. Use fewer Padé terms, "
             f"RAM(dr={float(dr):.6g}, n_pade="
-            f"{max(2, int(knobs.n_pade) - 2)}) or "
+            f"{max(2, int(knobs.n_pade) - 2)}), or try another step, e.g. "
             f"RAM(dr={0.5 * float(dr):.6g}, n_pade={int(knobs.n_pade)})."
         )
     else:
@@ -1037,30 +1029,29 @@ def collins_deck_geometry(env: Environment, kind: str,
                            zmax: float, freq: float, dz: float,
                            max_range: float, *,
                            deck_base: Optional[dict] = None,
-                           water: bool = True, knobs, speed_bounds):
+                           water: bool = True, knobs):
     """``(bathymetry, surface, range_segments)`` one Collins deck
     carries at ``freq``: the profile sections
     (:func:`collins_range_segments`, or a band's ``deck_base`` ramped
-    at ``freq``), the bathymetry anchored at the origin and reaching
-    ``max_range``, and ramsurf's surface — each cut to what a march to
-    ``max_range`` consumes (:func:`within_march`). ``water=False``
+    at ``freq``), the bathymetry anchored at the origin, and ramsurf's
+    surface — each cut to what a march to ``max_range`` consumes
+    (:func:`within_march`). Past their last node the binaries hold both
+    constant themselves (``rb = 2·rmax``, ``ramgeo1.5.f:113-114``,
+    ``ramsurf1.5.f:87, :95``; ``rmax + 2·dr``, ``rams0.5.f:116-117``),
+    as ``env.bathymetry`` / ``env.altimetry`` evaluate. ``water=False``
     leaves the water-attenuation block out, for callers that read only
     the section markers or the sediment blocks."""
     range_segments = (
         collins_range_segments(env, kind, zmax, freq, dz=dz,
-                               water=water, knobs=knobs,
-                               speed_bounds=speed_bounds)
+                               water=water, knobs=knobs)
         if deck_base is None
         else ramp_range_segments(env, deck_base, freq, kind=kind,
-                                 zmax=zmax, dz=dz, water=water, knobs=knobs,
-                                 speed_bounds=speed_bounds)
+                                 zmax=zmax, dz=dz, water=water, knobs=knobs)
     )
     bathymetry = anchored_at_the_origin(
         [(float(r), deck_depth(float(d), knobs=knobs))
          for r, d in env.bathymetry.to_pairs().tolist()])
-    if bathymetry[-1][0] < max_range:
-        bathymetry.append((float(max_range), bathymetry[-1][1]))
-    surface = (ramsurf_surface_nodes(env, max_range, knobs=knobs)
+    surface = (ramsurf_surface_nodes(env, knobs=knobs)
                if kind == 'ramsurf' else None)
     # Only what the march reaches is written, so the array-size guards,
     # the dr bound and the seafloor checks see what the binary consumes
@@ -1231,7 +1222,7 @@ def prepend_surface_node(depths, tl, pcomplex):
 
 
 def sediment_blocks(env: 'Environment', kind: str, zmax: float,
-                     freq: float, *, knobs, speed_bounds):
+                     freq: float, *, knobs):
     """Exactly the ``(depth, value)`` blocks the deck will carry.
 
     Taken from :func:`collins_range_segments` rather than rebuilt, because
@@ -1249,8 +1240,7 @@ def sediment_blocks(env: 'Environment', kind: str, zmax: float,
     """
     blocks = []
     for segment in collins_range_segments(env, kind, zmax, freq,
-                                          water=False, knobs=knobs,
-                                          speed_bounds=speed_bounds):
+                                          water=False, knobs=knobs):
         for key in ('bottom_c', 'bottom_rho', 'bottom_attn',
                     'bottom_cs', 'bottom_attns'):
             block = segment.get(key)
@@ -1260,8 +1250,8 @@ def sediment_blocks(env: 'Environment', kind: str, zmax: float,
 
 
 def block_loses_a_point(env: 'Environment', dz: float,
-                         zmax: float, kind: str, freq: float, *, knobs,
-                         speed_bounds) -> bool:
+                         zmax: float, kind: str, freq: float, *,
+                        knobs) -> bool:
     """Whether ``zread`` would lose a sediment-block point at this ``dz``.
 
     This runs the vendored node assignment (``ramsurf1.5.f:200-211``) rather
@@ -1279,8 +1269,7 @@ def block_loses_a_point(env: 'Environment', dz: float,
     """
     if dz <= 0:
         return False
-    for block in sediment_blocks(env, kind, zmax, freq, knobs=knobs,
-                                 speed_bounds=speed_bounds):
+    for block in sediment_blocks(env, kind, zmax, freq, knobs=knobs):
         assigned, previous = {}, None
         for depth, value in block:
             node = int(1.5 + depth / dz)
@@ -1294,7 +1283,7 @@ def block_loses_a_point(env: 'Environment', dz: float,
 
 
 def block_dz_cap(env: 'Environment', zmax: float, kind: str,
-                  freq: float, *, knobs, speed_bounds) -> float:
+                  freq: float, *, knobs) -> float:
     """A ``dz`` that ``zread`` is *guaranteed* to represent — the smallest
     positive block gap over :data:`BLOCK_GAP_PER_DZ`. Used only to pick a
     replacement once :func:`block_loses_a_point` has said the current grid
@@ -1302,8 +1291,7 @@ def block_dz_cap(env: 'Environment', zmax: float, kind: str,
     sufficient but not necessary. ``0.0`` when there is no block to resolve.
     """
     gaps = set()
-    for block in sediment_blocks(env, kind, zmax, freq, knobs=knobs,
-                                 speed_bounds=speed_bounds):
+    for block in sediment_blocks(env, kind, zmax, freq, knobs=knobs):
         depths = [z for z, _ in block]
         gaps |= {b - a for a, b in zip(depths, depths[1:]) if b > a}
     if not gaps:
@@ -1317,7 +1305,7 @@ def block_dz_cap(env: 'Environment', zmax: float, kind: str,
     candidates = sorted((g / BLOCK_GAP_PER_DZ for g in gaps), reverse=True)
     for candidate in candidates:
         if not block_loses_a_point(env, candidate, zmax, kind, freq,
-                                   knobs=knobs, speed_bounds=speed_bounds):
+                                   knobs=knobs):
             return candidate
     return candidates[-1]
 
@@ -1330,7 +1318,9 @@ def fit_dz_to_mz(env: 'Environment', kind: str, dz: float,
     Mirrors the ``MAX_DEPTH_POINTS`` clamp in ``grid.compute_grid_lytaev``: an
     auto grid is uacpy's own choice, so a hard array bound it cannot meet
     is coarsened here rather than raised at the caller. A ``dz`` the caller
-    pinned is left alone and rejected by ``check_collins_array_limits``.
+    pinned is left alone and rejected by ``check_collins_array_limits``, and
+    so is one derived from a pinned ``accuracy``, which a coarser grid would
+    not meet: it is refused here.
 
     The replacement comes back through :func:`grid.align_dz_with_seafloor` so
     it keeps the seafloor where the backend wants it in its cell; the
@@ -1356,6 +1346,18 @@ def fit_dz_to_mz(env: 'Environment', kind: str, dz: float,
     needed, mz, dz_min = budget
     if needed(dz) <= mz:
         return dz
+    if knobs.accuracy_pinned:
+        raise ConfigurationError(
+            f"RAM:{kind}: the grid meeting the pinned accuracy="
+            f"{knobs.accuracy:g} has dz={dz:.4g} m, {needed(dz)} depth slots "
+            f"over a zmax={zmax:.1f} m domain, past the {kind} binary's "
+            f"mz={mz} (its parameter statement; it stops on an overrun, "
+            f"ramgeo1.5.f:138-141), and a coarser dz would not meet the "
+            f"accuracy.",
+            remediation=("Pass a looser accuracy=, lower zmax, or use "
+                         "backend='mpirams' (no fixed depth-array bound) "
+                         "where the environment allows it."),
+        )
     dz_aligned = align_dz_with_seafloor(env, dz_min, kind=kind,
                                         coarsen=True, knobs=knobs)
     if dz_aligned >= dz_min and needed(dz_aligned) <= mz:
@@ -1372,8 +1374,8 @@ def fit_dz_to_mz(env: 'Environment', kind: str, dz: float,
             f"{shear_cap:.4f} m to resolve the shear wavelength "
             f"(λ_s/14 at c_s={min_shear_speed(env):.0f} m/s, "
             f"f={float(freq):.0f} Hz). A grid coarser than that cap does "
-            f"not lose accuracy, it diverges — measured 134 dB against "
-            f"OASES at 0.55 λ_s — so this cannot be met by coarsening.",
+            f"not lose accuracy, it diverges, so this cannot be met by "
+            f"coarsening.",
             remediation=("Lower zmax, pin a dz at or below "
                          f"{shear_cap:.4f} m and shrink the domain to fit "
                          "mz, or model a shallower depth range."),
@@ -1404,8 +1406,9 @@ def check_source_below_depressed_surface(surface, zs: float,
 
     The result is a field that is identically zero — TL ``inf``
     everywhere — with nothing to flag it:
-    :func:`mark_diverged_collins_samples` cannot fire because ``|u| = 0`` gives
-    a large POSITIVE TL, not a negative or NaN one.
+    :func:`mark_non_finite_collins_samples` cannot fire because ``|u| = 0``
+    gives a large finite TL (``outpt`` adds ``eps`` before the log), not a
+    NaN or inf one.
 
     Two cases, deliberately handled differently:
 
@@ -1478,8 +1481,9 @@ def warn_if_ramsurf_crests(env, *, notices=None) -> None:
 
 def constrain_dr_to_sections(dr, range_segments, *, pinned,
                               bathymetry_ranges=None,
-                              altimetry_ranges=None, notices=None, log):
-    """Bound ``dr`` by the closest pair of profile-section markers.
+                              altimetry_ranges=None, log):
+    """Bound an automatic ``dr`` by the closest pair of profile-section
+    markers; refuse a pinned one the binary cannot march.
 
     ``profl`` reads exactly ONE section marker per call
     (``ramgeo1.5.f:195`` ``read(1,*,end=1)rp``, defaulted to ``2.0*rmax`` at
@@ -1499,9 +1503,43 @@ def constrain_dr_to_sections(dr, range_segments, *, pinned,
     march could reach 19.
 
     The manual states the rule directly (``ram.pdf`` p.8): "The size of
-    the smallest region is an upper bound on Delta-r."
+    the smallest region is an upper bound on Delta-r." An automatic ``dr``
+    is held to it (with the bathymetry and altimetry nodes counted as
+    regions too). A pinned ``dr`` is marched as given unless a region of
+    one stream past its first is one the march cannot take at that step
+    (:func:`regions_the_march_cannot_take`), and then the run is refused
+    naming it; uacpy's own sections never cause that
+    (:func:`collins_deck_base` thins them against the pinned ``dr``).
     """
     markers = sorted({float(seg['range']) for seg in range_segments})
+    if pinned:
+        for label, stream in (('profile section', markers),
+                              ('bathymetry node', bathymetry_ranges),
+                              ('altimetry node', altimetry_ranges)):
+            pairs = regions_the_march_cannot_take(stream or [], dr)
+            if not pairs:
+                continue
+            a, b = pairs[0]
+            raise ConfigurationError(
+                f"RAM: the pinned dr={dr:.6g} m cannot march the region "
+                f"between the {label}s at {a:.6g} m and {b:.6g} m "
+                f"({len(pairs)} such region(s) in this environment). "
+                f"ram.pdf p.8: \"The size of the smallest region is an "
+                f"upper bound on Delta-r.\" The Collins march takes at "
+                f"most one {label} per step (updat: ramgeo1.5.f:348 "
+                f"bathymetry, :359 profiles; ramsurf1.5.f:346 altimetry) "
+                f"and evaluates the seafloor at r + dr/2 along the current "
+                f"segment (ramgeo1.5.f:350), so a narrower region is "
+                f"marched for a whole step, extrapolated past its end, or "
+                f"leaves the march one behind for the rest of the run.",
+                remediation=(
+                    f"Pin dr at or below {b - a:.6g} m, leave dr unset to "
+                    f"have it chosen, space the environment's {label}s at "
+                    f"least dr apart, or use backend='mpirams' where the "
+                    f"environment allows it (it interpolates the "
+                    f"environment in range, ram.f90:211)."),
+            )
+        return dr
 
     # `updat` advances THREE indices the same way, one step at a time:
     # the profile marker (`if(r.ge.rp)`), the bathymetry index
@@ -1522,7 +1560,8 @@ def constrain_dr_to_sections(dr, range_segments, *, pinned,
         return dr
     # Strictly inside the gap, by more than the march's rounding can
     # lose: the binaries accumulate ``r = r + dr`` in implicit REAL
-    # (``ramgeo1.5.f:56-60``), which the shipped build promotes to 8
+    # (``ramgeo1.5.f:82``, ``ramsurf1.5.f:51``, ``rams0.5.f:78``; the main
+    # programs declare no type for ``r``), which the shipped build promotes to 8
     # bytes (``-fdefault-real-8``, ``install.sh``), so at ``dr == min_gap``
     # the running range can land a few ulps below its marker and the
     # bathymetry index (``:348``) then trails by one segment for the
@@ -1530,29 +1569,17 @@ def constrain_dr_to_sections(dr, range_segments, *, pinned,
     # the arrays allow, in either precision; the step count grows by
     # < 0.01 %.
     dr_out = min_gap * (1.0 - 1e-4)
-    if pinned:
-        give_notice(notices,
-            f"RAM: dr={dr:.4g} m exceeds the closest profile-section "
-            f"spacing ({min_gap:.4g} m), so the binary could consume only "
-            f"part of the {len(markers)}-section environment and the rest "
-            f"would be silently dropped (one section per range step; "
-            f"ramgeo1.5.f:194-195, :359, :78-84). dr has been reduced to "
-            f"{dr_out:.6g} m. Coarsen the environment's range axis to "
-            f"keep the dr you asked for.",
-            NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-    else:
-        log(
-            f"dr reduced {dr:.4g} -> {dr_out:.6g} m so every one of the "
-            f"{len(markers)} profile sections is reachable "
-            f"(ram.pdf p.8: the smallest region bounds dr)."
-        )
+    log(
+        f"dr reduced {dr:.4g} -> {dr_out:.6g} m so every one of the "
+        f"{len(markers)} profile sections is reachable "
+        f"(ram.pdf p.8: the smallest region bounds dr)."
+    )
     return dr_out
 
 
 def collins_range_segments(
     env: Environment, kind: str, zmax: float, freq: float,
-    dz: Optional[float] = None, *, water: bool = True, knobs, speed_bounds
+    dz: Optional[float] = None, *, water: bool = True, knobs
 ) -> list:
     """Build the Collins ``range_segments`` list — one ``ram.in`` profile
     section per range break — from the environment's range-dependent SSP
@@ -1568,9 +1595,92 @@ def collins_range_segments(
     """
     return ramp_range_segments(
         env, collins_deck_base(env, kind, zmax, knobs=knobs), freq,
-        kind=kind, zmax=zmax, dz=dz, water=water, knobs=knobs,
-        speed_bounds=speed_bounds
+        kind=kind, zmax=zmax, dz=dz, water=water, knobs=knobs
     )
+
+
+def section_cells(ranges, switches) -> list:
+    """``(marker, breakpoint, sampled_at)`` of every profile section a
+    Collins deck carries for the sorted breakpoints ``ranges`` and the
+    bottom's column switches ``switches`` (:func:`collins_deck_base`).
+
+    Each breakpoint owns the cell between the midpoints around it; a
+    bottom switch strictly inside a cell splits it into sections, all on
+    the cell's seafloor and SSP. A section that holds its breakpoint
+    samples the bottom there, as an unsplit cell does; any other — or one
+    whose breakpoint is itself a switch, where ``Bottom.at`` ties — at its
+    own middle (just past its start when it runs to the end of the
+    track), so each carries the column nearest to every range it covers.
+    Section 0 is the initial profile; ``write_ramin`` ignores its marker.
+    """
+    sections = []
+    for i, rng in enumerate(ranges):
+        start = rng if i == 0 else 0.5 * (ranges[i - 1] + rng)
+        end = (0.5 * (rng + ranges[i + 1]) if i + 1 < len(ranges)
+               else float('inf'))
+        cuts = [start] + [x for x in switches if start < x < end] + [end]
+        for lo, hi in zip(cuts, cuts[1:]):
+            if lo <= rng < hi and rng not in switches:
+                at = rng
+            elif np.isfinite(hi):
+                at = 0.5 * (lo + hi)
+            else:
+                at = lo + 1.0
+            sections.append((lo, rng, at))
+    return sections
+
+
+def regions_the_march_cannot_take(markers, dr: float) -> list:
+    """The consecutive pairs of ``markers`` (m), past the first, that
+    bound a region a Collins march of step ``dr`` cannot take: one
+    narrower than ``dr`` — ``ram.pdf`` p.8, "The size of the smallest
+    region is an upper bound on Delta-r"; ``updat`` evaluates the seafloor
+    at ``r + dr/2`` along the current segment (``ramgeo1.5.f:350``), so a
+    shorter one is extrapolated past its end — or one exactly ``dr`` wide
+    whose two markers the running range reaches in one step
+    (:func:`markers_sharing_a_step`). The region before the first marker
+    the march reaches is the self-starter's, before any step."""
+    ms = sorted(float(m) for m in markers)[1:]
+    narrow = {(a, b) for a, b in zip(ms, ms[1:])
+              if b - a < float(dr) * (1.0 - 1e-12)}
+    return sorted(narrow | set(markers_sharing_a_step(markers, dr)))
+
+
+def markers_sharing_a_step(markers, dr: float) -> list:
+    """The consecutive pairs of ``markers`` (m) a Collins march of step
+    ``dr`` reaches in one range step, the first marker excluded.
+
+    The march calls ``updat`` once per step, at ``r = dr, 2·dr, …``
+    (``ramgeo1.5.f:78-84``, ``r=dr`` in ``setup``), and each call takes at
+    most one marker of each stream: the next profile section
+    (``if(r.ge.rp)``, ``ramgeo1.5.f:359``, ``ramsurf1.5.f:364``,
+    ``rams0.5.f:332``), the next bathymetry node (``ramgeo1.5.f:348``,
+    ``ramsurf1.5.f:345``, ``rams0.5.f:328``) and ramsurf's next altimetry
+    node (``ramsurf1.5.f:346``). The first marker of each stream is read
+    before the march (the initial profile, the first node). A marker is
+    reached at the first step ``k`` whose range ``r_k >= m``; two reached at
+    the same step leave the stream one marker behind for the rest of the
+    march. ``r_k`` is the binary's own running sum ``r = r + dr`` of the
+    deck's ``%.12g`` values in 8-byte reals (``-fdefault-real-8``), summed
+    here in the same order, so a marker on a step boundary lands where the
+    march puts it.
+    """
+    dr = float(f"{float(dr):.12g}")
+    ms = np.array(sorted(float(f"{float(m):.12g}") for m in markers)[1:])
+    steps = np.empty(ms.size, dtype=np.int64)
+    first, done, last = 0, 0, 0.0
+    chunk = 1 << 20
+    while done < ms.size:
+        # r_{first+1} .. r_{first+chunk}, continuing the running sum.
+        r = np.cumsum(np.concatenate(([last], np.full(chunk, dr))))[1:]
+        n = int(np.searchsorted(ms[done:], r[-1], side='right'))
+        steps[done:done + n] = first + 1 + np.searchsorted(
+            r, ms[done:done + n], side='left')
+        done += n
+        first += chunk
+        last = float(r[-1])
+    return [(float(a), float(b)) for a, b, ka, kb
+            in zip(ms, ms[1:], steps, steps[1:]) if ka == kb]
 
 
 def collins_deck_base(env: Environment, kind: str,
@@ -1632,11 +1742,17 @@ def collins_deck_base(env: Environment, kind: str,
     seafloor_relative = is_seafloor_relative(kind)
     rho_w = float(env.water_density)
 
+    # The environment's own breakpoints, then uacpy's: the intermediate
+    # profiles that make the nearest-profile march follow the SSP's linear
+    # gradient (:func:`_domain.ssp_range_axis`) and the re-anchoring
+    # sections below.
     breaks = {0.0}
     if b.is_range_dependent:
         breaks.update(float(r) for r in b.ranges)
+    added = set()
     if env.ssp.is_range_dependent:
-        breaks.update(float(r) for r in ssp_range_axis(env))
+        breaks.update(float(r) for r in env.ssp.ranges)
+        added.update(float(r) for r in ssp_range_axis(env))
     # rams0.5 reads the bottom arrays at absolute depth indices
     # (``rams0.5.f:490-516``, ``do 6 i=iz+1,ib+2`` reading ``lamb(i)``),
     # so a layered elastic column stays where the first section put it
@@ -1646,8 +1762,7 @@ def collins_deck_base(env: Environment, kind: str,
     # immune either way — both of its breakpoints carry the same value.
     if (not seafloor_relative and b.is_layered
             and env.bathymetry.varies_with_range):
-        breaks.update(bathy_anchor_ranges(env, b))
-    ranges = sorted(breaks)
+        added.update(bathy_anchor_ranges(env, b))
 
     # Where Bottom.at switches columns: midway between two of its
     # breakpoints.
@@ -1656,29 +1771,23 @@ def collins_deck_base(env: Environment, kind: str,
         b_ranges = sorted(float(r) for r in b.ranges)
         switches = [0.5 * (a + c) for a, c in zip(b_ranges, b_ranges[1:])]
 
-    # Each union breakpoint owns the cell between the midpoints around
-    # it; a bottom switch strictly inside a cell splits it into
-    # sections, all on the cell's seafloor and SSP. A section that holds
-    # its breakpoint samples the bottom there, as an unsplit cell does;
-    # any other — or one whose breakpoint is itself a switch, where
-    # ``Bottom.at`` ties — at its own middle (just past its start when it
-    # runs to the end of the track), so each carries the column nearest
-    # to every range it covers.
-    sections = []
-    for i, rng in enumerate(ranges):
-        # Section 0 is the initial profile; write_ramin ignores its range.
-        start = rng if i == 0 else 0.5 * (ranges[i - 1] + rng)
-        end = (0.5 * (rng + ranges[i + 1]) if i + 1 < len(ranges)
-               else float('inf'))
-        cuts = [start] + [x for x in switches if start < x < end] + [end]
-        for lo, hi in zip(cuts, cuts[1:]):
-            if lo <= rng < hi and rng not in switches:
-                at = rng
-            elif np.isfinite(hi):
-                at = 0.5 * (lo + hi)
-            else:
-                at = lo + 1.0
-            sections.append((lo, rng, at))
+    # A pinned dr is marched as given, so uacpy's own sections are kept
+    # only where they add no region the march cannot take at that step
+    # (:func:`regions_the_march_cannot_take`).
+    ranges = sorted(breaks)
+    if knobs.dr is not None:
+        clashes = len(regions_the_march_cannot_take(
+            [lo for lo, _, _ in section_cells(ranges, switches)],
+            float(knobs.dr)))
+        for r in sorted(added - breaks):
+            trial = sorted(set(ranges) | {r})
+            if len(regions_the_march_cannot_take(
+                    [lo for lo, _, _ in section_cells(trial, switches)],
+                    float(knobs.dr))) <= clashes:
+                ranges = trial
+    else:
+        ranges = sorted(breaks | added)
+    sections = section_cells(ranges, switches)
 
     segments, ramps = [], []
     for marker, rng, bottom_at in sections:
@@ -1732,7 +1841,7 @@ def collins_deck_base(env: Environment, kind: str,
 def ramp_range_segments(env: Environment, base: dict,
                          freq: float, *, kind: str, zmax: float,
                          dz: Optional[float] = None,
-                         water: bool = True, knobs, speed_bounds) -> list:
+                         water: bool = True, knobs) -> list:
     """Finish a :func:`collins_deck_base` payload at one frequency.
 
     The ramp is recomputed per frequency rather than rescaled because the
@@ -1766,8 +1875,7 @@ def ramp_range_segments(env: Environment, base: dict,
             f"the deck describes a different domain.",
             f"Rebuild the base with collins_deck_base(env, {kind!r}, "
             f"{float(zmax)!r}) for the grid the deck is written for.")
-    absorbing_width = absorbing_layer_thickness(env, freq, knobs=knobs,
-                                                speed_bounds=speed_bounds)
+    absorbing_width = absorbing_layer_thickness(env, freq, knobs=knobs)
     water_attn = water and water_attenuation_active(env)
     out = []
     seafloor_relative = is_seafloor_relative(kind)
@@ -2009,7 +2117,7 @@ def collins_output_stride(dr: float, max_range: float, rcv_ranges,
     one march). Both caps yield to the ceiling on the number of output
     ranges.
     """
-    ndr = max(1, int((max_range / dr) / 1000.0))
+    ndr = max(1, int((max_range / dr) / _COLLINS_OUTPUT_RANGES_TARGET))
     rr = np.atleast_1d(np.asarray(rcv_ranges, dtype=float))
     near = rr[rr > 0.0]
     if near.size:

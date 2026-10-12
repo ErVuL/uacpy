@@ -40,6 +40,7 @@ from uacpy.models.ram import (
 )
 from uacpy.tests.conftest import recorded_warnings
 from uacpy.tests.conftest import make_pekeris
+from uacpy.models._checks import speed_bounds
 
 #: Every propagation loss these guides reach stays below this; a TL above it
 #: is a zero-field floor, not a level to compare. The RAM binary's ``outpt``
@@ -131,8 +132,7 @@ def _collins_launch_grid(model, env, src, rcv, run_mode=RunMode.COHERENT_TL,
         deck = model._write_input(inputs)
         model._launch(inputs, deck)
         return ram_collins.read_collins_grid(inputs,
-                                             knobs=model._knob_record(),
-                                             speed_bounds=model._speed_bounds)
+                                             knobs=model._knob_record())
     finally:
         fm.finish()
 
@@ -156,8 +156,7 @@ class TestCollinsDepthReference:
         env = _env(bottom=_fluid_layered_bottom())     # 100 m water, 15 m layer
         model = RAM(verbose=False, earth_curvature=False)
         return ram_collins.collins_range_segments(
-            env, kind, zmax=400.0, freq=250.0, knobs=model._knob_record(),
-            speed_bounds=model._speed_bounds)
+            env, kind, zmax=400.0, freq=250.0, knobs=model._knob_record())
 
     @pytest.mark.parametrize('kind', ['ramgeo', 'ramsurf'])
     def test_relative_for_ramgeo_ramsurf(self, kind):
@@ -194,6 +193,11 @@ class TestBackendScopedKnobWarnings:
         ('ramgeo', dict(n_stability=5, stability_range_m=1234.0), None),
         ('mpirams', dict(rams_rotation_angle=60.0), 'rams_rotation_angle'),
         ('ramsurf', dict(rams_rotation=False), 'rams_rotation'),
+        # A pin equal to the derived value is still a pin the run discards.
+        ('rams', dict(n_stability=1), 'n_stability'),
+        ('ramgeo', dict(rams_dr_factor=5.0), 'rams_dr_factor'),
+        ('mpirams', dict(rams_dr_factor=2.0), 'rams_dr_factor'),
+        ('rams', dict(rams_dr_factor=2.0), None),
     ])
     def test_unreadable_knobs_warn(self, backend, kw, expect):
         m = RAM(verbose=False, **kw)
@@ -205,6 +209,69 @@ class TestBackendScopedKnobWarnings:
         else:
             assert any(expect in h for h in hits), \
                 f"{backend} discards {kw} without warning; got {hits}"
+
+
+@pytest.mark.requires_binary
+class TestDerivedStabilityKnobs:
+    """``n_stability`` and ``rams_dr_factor`` default to ``None``: the
+    derived value (1 stability term, ram.pdf p.3; a 5x rams step divisor,
+    uacpy guidance) when unset, a set value used exactly."""
+
+    ENV = Environment(bathymetry=100.0, ssp=1500.0, bottom=_fluid_bottom())
+    SRC = Source(depths=30.0, frequencies=100.0)
+    RCV = Receiver(depths=[30.0], ranges=[1000.0, 2000.0])
+
+    @pytest.mark.parametrize('backend', ['mpirams', 'ramgeo'])
+    @pytest.mark.parametrize('pinned, written', [(None, 1), (0, 0), (2, 2)])
+    def test_the_deck_carries_the_derived_or_pinned_stability_terms(
+            self, tmp_path, backend, pinned, written):
+        model = RAM(backend=backend, n_stability=pinned, dr=20.0, dz=0.5,
+                    verbose=False, work_dir=str(tmp_path), cleanup=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            model.run(self.ENV, self.SRC, self.RCV)
+        # The Padé order is Collins' sample deck's 8 when left at its
+        # default (ram.pdf p.12 Fig. 2).
+        assert model.n_pade == 8
+        if backend == 'mpirams':
+            line = (tmp_path / 'in.pe').read_text().splitlines()[6]
+            assert line.split()[:2] == ['8', str(written)]
+        else:
+            row5 = (tmp_path / 'ramgeo.in').read_text().splitlines()[4]
+            assert row5.split()[1:3] == ['8', str(written)]
+
+    def test_the_rams_step_divisor_is_derived_or_pinned(self):
+        from uacpy.models.ram.grid import DEFAULT_RAMS_DR_FACTOR
+        assert DEFAULT_RAMS_DR_FACTOR == 5.0
+        elastic = Environment(bathymetry=100.0, ssp=1500.0,
+                              bottom=BoundaryProperties(
+                                  sound_speed=1700.0, density=1.8,
+                                  attenuation=0.5, shear_speed=400.0))
+        steps = {}
+        for factor in (None, 5.0, 50.0):
+            m = RAM(backend='rams', rams_dr_factor=factor, verbose=False)
+            # The λ/5 cap (1500/(5·100) = 3 m) sits above 10/5 = 2 m.
+            steps[factor] = ram_grid.tighten_rams_dr(
+                elastic, 100.0, 10.0, 'rams', c0_pe=1600.0, c_min=1500.0,
+                c_min_all=1500.0, c_max_all=1700.0, max_range=2000.0,
+                knobs=m._knob_record(), log=m._log)
+        assert steps[None] == steps[5.0] == pytest.approx(10.0 / 5.0)
+        assert steps[50.0] == pytest.approx(10.0 / 50.0)
+
+    def test_a_divisor_beside_a_pinned_rams_step_is_named_unused(self):
+        notices = []
+        ram_grid.warn_if_pinned_rams_dr_factor_is_unused(
+            'rams', notices=notices,
+            knobs=RAM(backend='rams', rams_dr_factor=5.0, dr=1.0,
+                      verbose=False)._knob_record())
+        assert [n for n in notices if 'rams_dr_factor=5' in n.message
+                and 'not used' in n.message]
+        for kw in (dict(rams_dr_factor=5.0), dict(dr=1.0)):
+            quiet = []
+            ram_grid.warn_if_pinned_rams_dr_factor_is_unused(
+                'rams', notices=quiet,
+                knobs=RAM(backend='rams', verbose=False, **kw)._knob_record())
+            assert not quiet, kw
 
 
 # ─── Backend selection (no binary needed) ─────────────────────────────────
@@ -432,8 +499,7 @@ class TestCollinsProfilesStartAtTheSource:
     def test_the_ramsurf_surface_carries_the_origin_node(self):
         env = self._env(100.0, altimetry=[(500.0, -2.0), (4500.0, 0.0)])
         surface = ram_grid.ramsurf_surface_nodes(
-            env, 5000.0, knobs=RAM(backend='ramsurf',
-                                   verbose=False)._knob_record())
+            env, knobs=RAM(backend='ramsurf', verbose=False)._knob_record())
         assert surface[0] == (0.0, surface[1][1])
         assert surface[1][0] == 500.0
 
@@ -958,7 +1024,7 @@ def test_rams_elastic_field_is_physical_on_a_fast_shear_seabed():
     src = Source(depths=50.0, frequencies=100.0)
     rcv = Receiver(depths=np.linspace(10, 190, 8), ranges=np.linspace(500, 6000, 20))
     with recorded_warnings() as caught:
-        tl = np.asarray(RAM(backend='rams').compute_tl(env, src, rcv).dB)
+        tl = np.asarray(RAM(backend='rams').compute_field(env, src, rcv).dB)
     assert not [w for w in caught
                 if 'unphysically negative' in str(w.message)], \
         "the march diverged and the field was clamped"
@@ -1023,8 +1089,7 @@ class TestCollinsArrayLimits:
         with pytest.warns(UserWarning, match="fit the binary's depth arrays"):
             dr, dz, zmax = ram_collins.resolve_collins_grid(
                 self._fluid_env(), 50.0, 'ramgeo', 5000.0, None, None, None,
-                knobs=m._knob_record(), log=m._log,
-                speed_bounds=m._speed_bounds)
+                knobs=m._knob_record(), log=m._log)
         needed, mz, _ = ram_collins.collins_mz_budget('ramgeo', zmax)
         assert needed(dz) <= mz
 
@@ -1051,8 +1116,7 @@ class TestCollinsArrayLimits:
         with pytest.warns(UserWarning, match="fit the binary's depth arrays"):
             _dr, dz, zmax_out = ram_collins.resolve_collins_grid(
                 env, 1000.0, 'ramgeo', 5000.0, None, None, None,
-                knobs=m._knob_record(), log=m._log,
-                speed_bounds=m._speed_bounds)
+                knobs=m._knob_record(), log=m._log)
         assert zmax_out == zmax
         needed, mz, _ = ram_collins.collins_mz_budget(
             'ramgeo', ram_domain.deck_depth(zmax, knobs=m._knob_record()))
@@ -1086,7 +1150,7 @@ class TestCollinsArrayLimits:
         with pytest.raises(ConfigurationError, match=r"shear wavelength"):
             ram_collins.resolve_collins_grid(env, 300.0, 'rams', 3000.0,
                                     None, None, None, knobs=m._knob_record(),
-                                    log=m._log, speed_bounds=m._speed_bounds)
+                                    log=m._log)
 
     def test_the_refusal_names_the_cap_and_the_fitted_value(self):
         from uacpy.core.exceptions import ConfigurationError
@@ -1353,7 +1417,7 @@ class TestRamsRefusesAZeroShearTopLayer:
 
 
 @pytest.mark.requires_binary
-class TestTheDivergenceNoteNamesFastShearOnly:
+class TestTheNonFiniteSampleNoteNamesFastShearOnly:
     """The NaN-sample warning's rams note fires only when a shear speed
     exceeds the PE reference speed ``c0`` — the case where the rotated
     march loses accuracy fastest — and names both speeds."""
@@ -1370,9 +1434,8 @@ class TestTheDivergenceNoteNamesFastShearOnly:
                'frequency': 100.0, 'pcomplex': np.ones((1, 2), dtype=complex)}
         with recorded_warnings() as caught:
             model = RAM(verbose=False)
-            ram_collins.mark_diverged_collins_samples(
-                raw, env, 'rams', knobs=model._knob_record(),
-                speed_bounds=model._speed_bounds)
+            ram_collins.mark_non_finite_collins_samples(
+                raw, env, 'rams', knobs=model._knob_record())
         texts = [str(w.message) for w in caught if 'NaN/inf' in str(w.message)]
         assert len(texts) == 1
         return texts[0]
@@ -1384,8 +1447,7 @@ class TestTheDivergenceNoteNamesFastShearOnly:
     def test_a_shear_speed_above_c0_is_named(self):
         env = self._env(3000.0)
         model = RAM(verbose=False)
-        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record(),
-                                   speed_bounds=model._speed_bounds)
+        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record())
         assert 3000.0 > c0
         text = self._warning_for(env)
         assert 'reference speed' in text
@@ -1729,7 +1791,7 @@ def test_warnings_are_attributed_to_the_callers_frame():
     src = Source(depths=25.0, frequencies=50.0)
     rcv = Receiver(depths=np.array([50.0, 500.0]), ranges=np.array([1000.0]))
     with recorded_warnings() as caught:
-        RAM(backend='ramgeo', accuracy=1e-6, verbose=False).run(
+        RAM(backend='ramgeo', q_factor=4.0, verbose=False).run(
             env, src, rcv, run_mode=RunMode.COHERENT_TL)
     ram_warnings = [w for w in caught if str(w.message).startswith('RAM')]
     assert ram_warnings, 'expected at least one RAM warning'
@@ -1848,8 +1910,7 @@ class TestEnvelopePhaseSurvivesResampling:
         model = RAM(backend=backend, verbose=False)
         raw = _collins_launch_grid(model, env, src, rcv)
         rate = ram_stability.collins_carrier_rate(
-            env, backend, freq, raw['theta'], knobs=model._knob_record(),
-            speed_bounds=model._speed_bounds)
+            env, backend, freq, raw['theta'], knobs=model._knob_record())
         return raw, rate
 
     @staticmethod
@@ -1898,7 +1959,7 @@ class TestEnvelopePhaseSurvivesResampling:
 
 @pytest.mark.requires_binary
 class TestBroadbandDepthGridIsNonUniform:
-    """``earth_curvature=True`` (the default) makes peramx un-transform its
+    """``earth_curvature=True`` (the default is ``False``) makes peramx un-transform its
     output depth axis with ``zg/(1 + eps/2 + eps²/3)`` (peramx.f90:444-449)
     — a quadratic map, so ``ram.mpirams.assemble_broadband_field`` cannot
     bracket receiver depths with the uniform ``(z - zg[0]) / (zg[1] -
@@ -1978,11 +2039,9 @@ class TestCollinsAbsorbingLayer:
         model = RAM(backend='ramgeo', verbose=False, earth_curvature=False, **kw)
         zmax = kw.get(
             'zmax') or ram_domain.compute_zmax(
-                env, 250.0, max_range=5000.0, knobs=model._knob_record(),
-                speed_bounds=model._speed_bounds)
+                env, 250.0, max_range=5000.0, knobs=model._knob_record())
         segs = ram_collins.collins_range_segments(
-            env, 'ramgeo', zmax=zmax, freq=250.0, knobs=model._knob_record(),
-            speed_bounds=model._speed_bounds)
+            env, 'ramgeo', zmax=zmax, freq=250.0, knobs=model._knob_record())
         return segs[0]['bottom_attn'], zmax
 
     def test_attenuation_ramps_to_the_absorbing_value(self):
@@ -2045,8 +2104,7 @@ class TestMpiramsResultsCarryTheDomainDepth:
         assert field.run_settings.engine.grids[-1].zmax == pytest.approx(
             ram_mpirams.mpirams_zmax(env, self.FREQ, 0.25,
                                      max_range=5000.0, knobs=model._knob_record(),
-                                     log=model._log,
-                                     speed_bounds=model._speed_bounds))
+                                     log=model._log))
         assert field.run_settings.engine.grids[-1].zmax > env.depth
 
     def test_a_broadband_result_stamps_the_band_domain_depth(self):
@@ -2062,8 +2120,78 @@ class TestMpiramsResultsCarryTheDomainDepth:
         assert tf.run_settings.engine.grids[-1].zmax == pytest.approx(
             ram_mpirams.mpirams_zmax(env, float(np.min(band)), 0.25,
                                      max_range=5000.0, knobs=model._knob_record(),
-                                     log=model._log,
-                                     speed_bounds=model._speed_bounds))
+                                     log=model._log))
+
+
+@pytest.mark.requires_binary
+class TestMpiramsDomainSitsOnTheDzLattice:
+    """mpiramS lays its depth grid out as ``linspace(0, zmax, floor(zmax/dz
+    - 0.5) + 2)`` (``peramx.f90:391, :404``) while its operator and seafloor
+    index use ``dz`` (``ram.f90:51, :101``): the two agree only for a
+    ``zmax`` on the ``dz`` lattice. An automatic ``zmax`` is snapped onto
+    it; a pinned one is kept and the automatic ``dz`` chosen to divide it;
+    a pinned pair off the lattice is refused naming the nearest ``zmax``."""
+
+    ENV = Environment(bathymetry=100.0, ssp=1500.0,
+                      bottom=BoundaryProperties(acoustic_type='half-space',
+                                                sound_speed=1600.0,
+                                                density=1.6, attenuation=0.5))
+    SRC = Source(depths=25.0, frequencies=200.0)
+    RCV = Receiver(depths=[20.0, 60.0], ranges=[1000.0, 3000.0])
+
+    def _grid(self, **kw):
+        return RAM(backend='mpirams', verbose=False, **kw).run_settings(
+            self.ENV, self.SRC, self.RCV).engine.grids[0]
+
+    @staticmethod
+    def _cells(grid, earth_curvature=False):
+        z = (ram_domain.flat_earth_depth(grid.zmax) if earth_curvature
+             else grid.zmax)
+        return z / grid.dz
+
+    def test_an_automatic_zmax_is_snapped_onto_the_lattice(self):
+        grid = self._grid(dz=0.3)
+        assert self._cells(grid) == pytest.approx(round(self._cells(grid)),
+                                                  abs=1e-9)
+
+    # 400.01 m: the fewest cells reaching the automatic dz put the seafloor
+    # half a cell from its node, so the divisor has to move past them.
+    @pytest.mark.parametrize('zmax', [400.3, 400.01])
+    @pytest.mark.parametrize('earth_curvature', [False, True])
+    def test_a_pinned_zmax_is_kept_and_the_automatic_dz_divides_it(
+            self, earth_curvature, zmax):
+        free = self._grid(earth_curvature=earth_curvature)
+        grid = self._grid(zmax=zmax, earth_curvature=earth_curvature)
+        assert grid.zmax == zmax
+        cells = self._cells(grid, earth_curvature)
+        assert cells == pytest.approx(round(cells), abs=1e-6)
+        assert grid.dz <= free.dz
+        # The seafloor stays near the quarter cell the automatic grid uses.
+        from uacpy.models.ram.grid import (
+            SEAFLOOR_CELL_OFFSET, SEAFLOOR_QUARTER_TOLERANCE)
+        h = ram_domain.flat_earth_depth(100.0) if earth_curvature else 100.0
+        frac = (h / grid.dz) % 1.0
+        assert abs(frac - SEAFLOOR_CELL_OFFSET) <= SEAFLOOR_QUARTER_TOLERANCE
+
+    def test_a_pinned_pair_on_the_lattice_runs(self):
+        grid = self._grid(zmax=400.0, dz=0.5)
+        assert (grid.zmax, grid.dz) == (400.0, 0.5)
+
+    @pytest.mark.parametrize('earth_curvature', [False, True])
+    def test_a_pinned_pair_off_the_lattice_is_refused_naming_both(
+            self, earth_curvature):
+        with pytest.raises(ConfigurationError,
+                           match='not a whole number') as caught:
+            self._grid(zmax=400.3, dz=0.5, earth_curvature=earth_curvature)
+        text = str(caught.value)
+        assert 'pinned zmax=400.3 m' in text and 'pinned dz=0.5 m' in text
+        assert 'peramx.f90:391' in text
+        lattice = re.search(r'are ([0-9.]+) m and ([0-9.]+) m', text)
+        for z in map(float, lattice.groups()):
+            mapped = ram_domain.flat_earth_depth(z) if earth_curvature else z
+            assert mapped / 0.5 == pytest.approx(round(mapped / 0.5),
+                                                 abs=1e-6)
+        assert float(lattice.group(1)) < 400.3 < float(lattice.group(2))
 
 
 # ─── Regression: a sub-bin bandwidth marches ONE mpiramS frequency ────────
@@ -2105,14 +2233,16 @@ class TestNarrowbandMarchesOneMpiramsFrequency:
 
 
 @pytest.mark.requires_binary
-class TestMpiramsFieldMemoryIsEstimatedBeforeTheDeckIsWritten:
+class TestMpiramsMemoryIsEstimatedBeforeTheDeckIsWritten:
     """mpiramS allocates ``psif(nzo, nf, nr)`` complex(8) with no estimate of
     its own (``peramx.f90:399``), and the wrapper then holds about four more
     copies, so a many-range broadband run at high ``Q`` dies of a MemoryError
-    or an OOM kill after the march. The deck writer estimates the field
-    first, from the binary's own ``nzo`` arithmetic, and warns above 80 % of
-    the memory available — a stage-3 notice, so ``run_settings`` says it
-    before anything is written."""
+    or an OOM kill after the march; each marching thread also holds its
+    depth arrays, which a pinned ``accuracy`` lets grow with no depth-point
+    cap. The deck writer estimates both first, from the binary's own
+    arithmetic, and announces them above half the memory available and
+    refuses them past it — stage-3 work, so ``run_settings`` says it before
+    anything is written."""
 
     ENV = _env(bottom=_fluid_bottom())
     SRC = Source(depths=20.0, frequencies=100.0)
@@ -2169,13 +2299,18 @@ class TestMpiramsFieldMemoryIsEstimatedBeforeTheDeckIsWritten:
         nzo, nf, nr = ram_mpirams.mpirams_field_shape(
             ram_mpirams.mpirams_zmax(self.ENV, 100.0, 0.5,
                                      max_range=5000.0, knobs=model._knob_record(),
-                                     log=model._log,
-                                     speed_bounds=model._speed_bounds), 0.5,
+                                     log=model._log), 0.5,
                                      100.0, 1e6, 1.0,
             self.RCV.ranges.size, knobs=model._knob_record())
         assert (nzo, nf, nr) == (nzo, 1, 2)
+        zmax = ram_mpirams.mpirams_zmax(
+            self.ENV, 100.0, 0.5, max_range=5000.0,
+            knobs=model._knob_record(), log=model._log)
         total = (_MPIRAMS_FIELD_COPIES * _MPIRAMS_FIELD_BYTES_PER_SAMPLE
-                 * nzo * nf * nr)
+                 * nzo * nf * nr
+                 + ram_mpirams.mpirams_march_bytes(
+                     zmax, 0.5, nr, ram_mpirams.mpirams_threads(nf),
+                     knobs=model._knob_record()))
         return total / HEADROOM_FRACTION
 
     def test_warns_when_the_copies_exceed_the_fraction_available(
@@ -2210,6 +2345,33 @@ class TestMpiramsFieldMemoryIsEstimatedBeforeTheDeckIsWritten:
     def _fraction():
         from uacpy.models._budget import HEADROOM_FRACTION
         return HEADROOM_FRACTION
+
+    def test_the_march_arrays_alone_can_refuse_a_run(self, monkeypatch):
+        """A narrowband run to two ranges holds a small field, but a pinned
+        accuracy's fine depth grid (no depth-point cap) makes the marching
+        arrays the peak: weighed and refused naming what shrinks them."""
+        model = RAM(backend='mpirams', verbose=False, accuracy=1e-3)
+        settings = model.run_settings(self.ENV, self.SRC, self.RCV)
+        grid = settings.engine.grids[0]
+        march = ram_mpirams.mpirams_march_bytes(
+            grid.zmax, grid.dz, self.RCV.ranges.size,
+            ram_mpirams.mpirams_threads(1), knobs=model._knob_record())
+        from uacpy.models import _budget
+        monkeypatch.setattr(_budget, 'available_memory_bytes',
+                            lambda: int(march * 0.9))
+        with pytest.raises(ConfigurationError,
+                           match='marching thread') as caught:
+            model.run_settings(self.ENV, self.SRC, self.RCV)
+        assert 'coarser dz' in str(caught.value.remediation)
+
+    def test_the_march_holds_its_arrays_per_depth_row_and_thread(self):
+        model = RAM(backend='mpirams', verbose=False, n_pade=6)
+        one = ram_mpirams.mpirams_march_bytes(100.0, 1.0, 2, 1,
+                                              knobs=model._knob_record())
+        # 101 rows (floor(100 - 0.5) + 2), 6 x 6 + 6 + 2 complex and 10 real.
+        assert one == 101 * (16 * (36 + 6 + 2) + 8 * 10)
+        assert ram_mpirams.mpirams_march_bytes(
+            100.0, 1.0, 2, 4, knobs=model._knob_record()) == 4 * one
 
 
 # ─── Regression: the PE domain holds the whole sediment stack ─────────────
@@ -2255,12 +2417,11 @@ class TestTheAutomaticDomainHoldsTheSedimentStack:
         env = self._env()
         model = RAM(backend='ramgeo', verbose=False, earth_curvature=False)
         zmax = ram_domain.compute_zmax(env, self.FREQ,
-                                       max_range=5000.0, knobs=model._knob_record(),
-                                       speed_bounds=model._speed_bounds)
+                                       max_range=5000.0,
+                                       knobs=model._knob_record())
         segs = ram_collins.collins_range_segments(env, 'ramgeo', zmax=zmax,
                                              freq=self.FREQ,
-                                             knobs=model._knob_record(),
-                                             speed_bounds=model._speed_bounds)
+                                             knobs=model._knob_record())
         attn = segs[0]['bottom_attn']
         assert attn[-1][0] == pytest.approx(zmax - env.depth)
         assert attn[-1][1] == pytest.approx(model.absorber_attenuation)
@@ -2277,15 +2438,12 @@ class TestTheAutomaticDomainHoldsTheSedimentStack:
         env = self._env()
         model = RAM(backend='mpirams', verbose=False)
         _, dz = ram_mpirams.resolve_mpirams_grid(
-            env, self.FREQ, 2000.0, knobs=model._knob_record(), log=model._log,
-            speed_bounds=model._speed_bounds)
+            env, self.FREQ, 2000.0, knobs=model._knob_record(), log=model._log)
         zmax_pe = ram_mpirams.mpirams_zmax(env, self.FREQ, dz,
                                            max_range=5000.0, knobs=model._knob_record(),
-                                           log=model._log,
-                                           speed_bounds=model._speed_bounds)
+                                           log=model._log)
         span = ram_domain.absorber_span(env, self.FREQ, zmax_pe,
-                                        knobs=model._knob_record(),
-                                        speed_bounds=model._speed_bounds)
+                                        knobs=model._knob_record())
         sedlayer, nzs = ram_mpirams.prepare_bottom_properties(
             env, tmp_path, span, zmax_pe, dz=dz, knobs=model._knob_record(),
             log=model._log)[:2]
@@ -2401,11 +2559,9 @@ class TestMpiramsSedimentControlPointsResolveTheDepthCell:
                     dr=10.0)
         zmax_pe = ram_mpirams.mpirams_zmax(env, self.FREQ, self.DZ,
                                            max_range=5000.0, knobs=model._knob_record(),
-                                           log=model._log,
-                                           speed_bounds=model._speed_bounds)
+                                           log=model._log)
         span = ram_domain.absorber_span(env, self.FREQ, zmax_pe,
-                                        knobs=model._knob_record(),
-                                        speed_bounds=model._speed_bounds)
+                                        knobs=model._knob_record())
         sedlayer, nzs = ram_mpirams.prepare_bottom_properties(
             env, tmp_path, span, zmax_pe, dz=self.DZ,
             knobs=model._knob_record(), log=model._log)[:2]
@@ -2426,23 +2582,23 @@ class TestMpiramsSedimentControlPointsResolveTheDepthCell:
         deep, _ = self._interval(700.0, tmp_path)
         assert deep == pytest.approx(shallow, rel=0.05)
 
-    def test_a_raised_point_count_is_honoured_as_the_lower_bound(self, tmp_path):
-        # ``n_sediment_points`` is a caller-facing knob: raising it must still
-        # raise the count, and the interval rule may only add points.
+    @pytest.mark.parametrize('points', [4000, 50])
+    def test_a_pinned_point_count_is_written_as_given(self, points, tmp_path):
+        # ``n_sediment_points`` is a caller-facing knob: a pinned count is
+        # the deck's, above or below the one-cell interval the unset
+        # default holds.
         env = _env(bottom=_stacked_bottom())
         model = RAM(backend='mpirams', verbose=False, zmax=400.0, dz=self.DZ,
-                    dr=10.0, n_sediment_points=4000)
+                    dr=10.0, n_sediment_points=points)
         zmax_pe = ram_mpirams.mpirams_zmax(env, self.FREQ, self.DZ,
                                            max_range=5000.0, knobs=model._knob_record(),
-                                           log=model._log,
-                                           speed_bounds=model._speed_bounds)
+                                           log=model._log)
         span = ram_domain.absorber_span(env, self.FREQ, zmax_pe,
-                                        knobs=model._knob_record(),
-                                        speed_bounds=model._speed_bounds)
+                                        knobs=model._knob_record())
         nzs = ram_mpirams.prepare_bottom_properties(
             env, tmp_path, span, zmax_pe, dz=self.DZ,
             knobs=model._knob_record(), log=model._log)[1]
-        assert nzs == 4000
+        assert nzs == points
 
     def test_a_deeper_domain_agrees_with_a_shallower_converged_one(self):
         # The TL consequence, on the same environment the interval is
@@ -2477,11 +2633,9 @@ def _bottom_props(model, env, work_dir, freq=100.0):
     the deck writer derives, so tests see the same profile mpiramS is given."""
     dz = 0.5
     zmax = ram_mpirams.mpirams_zmax(env, freq, dz, max_range=5000.0, knobs=model._knob_record(),
-                                    log=model._log,
-                                    speed_bounds=model._speed_bounds)
+                                    log=model._log)
     span = ram_domain.absorber_span(env, freq, zmax,
-                                    knobs=model._knob_record(),
-                                    speed_bounds=model._speed_bounds)
+                                    knobs=model._knob_record())
     return ram_mpirams.prepare_bottom_properties(env, work_dir, span, zmax,
                                                  dz=dz,
                                                  knobs=model._knob_record(),
@@ -2542,8 +2696,7 @@ class TestSedimentSpeedFollowsTheLocalSeafloor:
         dz = 0.5
         zmax = ram_mpirams.mpirams_zmax(env, freq, dz,
                                         max_range=5000.0, knobs=model._knob_record(),
-                                        log=model._log,
-                                        speed_bounds=model._speed_bounds)
+                                        log=model._log)
         sedlayer, nzs, _cs, _rho, _attn, isedrd, sed_name = _bottom_props(
             model, env, tmp_path, freq)
         assert isedrd == 1 and sed_name
@@ -2659,8 +2812,7 @@ class TestRamStampsCMax:
         """A water-only c_max would anchor the window behind the
         bottom-refracted first arrival."""
         env, _, _ = self._rig()
-        ram = RAM(verbose=False)
-        assert ram._speed_bounds(env)[1] == pytest.approx(self.EXPECTED)
+        assert speed_bounds(env)[1] == pytest.approx(self.EXPECTED)
         assert float(np.max(env.ssp.sound_speed)) < self.EXPECTED
 
     def test_time_series_does_not_warn_about_an_estimated_window(self):
@@ -2714,9 +2866,8 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         return Environment(name='relax', **self.ENV)
 
     def _relax(self, backend='ramgeo', **model_kwargs):
-        """The ε-only relaxation is a warning only when ``accuracy`` was
-        pinned (the floor's own policy), so the default here pins it."""
-        model_kwargs.setdefault('accuracy', 1e-3)
+        """The default chooser's relaxation (``accuracy`` unset): its
+        message, a log line or a warning."""
         model = RAM(backend=backend, verbose=False, **model_kwargs)
         env = self._env()
         logged = []
@@ -2724,8 +2875,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         with recorded_warnings() as caught:
             dr, dz = ram_grid.compute_grid_lytaev(
                 env, self.FREQ, max_range=self.RMAX, kind=backend,
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         texts = [str(w.message) for w in caught
                  if 'Lytaev relaxed' in str(w.message)]
         texts += [m for m in logged if 'Lytaev relaxed' in m]
@@ -2736,10 +2886,9 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
     def test_the_warning_reports_the_returned_grids_own_error(self):
         from uacpy.models.pe_grid import grid_error
         model, env, dr, dz, text, _ = self._relax()
-        c_min_all, c_max_all = model._speed_bounds(env)
+        c_min_all, c_max_all = speed_bounds(env)
         c_min, c_max = ram_domain.water_speed_bounds(env)
-        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record(),
-                                   speed_bounds=model._speed_bounds)
+        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record())
         c_min, c_max = min(c_min, c0), max(c_max, c0)   # the scored band
         # angle_max is whichever relaxation rung succeeded, so score the
         # returned grid at each rung and require the warning to name one.
@@ -2775,9 +2924,8 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         from uacpy.models.pe_grid import dz_ladder_end, optimize_grid
         model, env, dr, dz, text, _ = self._relax(backend='mpirams')
         eps_used = float(re.search(r'ε=[0-9e+-]+→([0-9e+-]+)', text).group(1))
-        c_min_all, c_max_all = model._speed_bounds(env)
-        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record(),
-                                   speed_bounds=model._speed_bounds)
+        c_min_all, c_max_all = speed_bounds(env)
+        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record())
         c_min, c_max = ram_domain.water_speed_bounds(env)
         c_min, c_max = min(c_min, c0), max(c_max, c0)   # the scored band
         res = optimize_grid(frequency=self.FREQ, c_min=c_min, c_max=c_max,
@@ -2810,16 +2958,22 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         assert err >= 1.0
         assert 'not resolved by the model' in text
 
-    def test_an_epsilon_only_relaxation_warns_only_when_accuracy_is_pinned(
+    def test_an_epsilon_only_relaxation_is_a_log_line_and_a_pinned_accuracy_is_not_relaxed(
             self):
         """The ε rung is forced on essentially every run at and above
         ~500 Hz by the ladder's own 0.01 m end, and the marched dz is then
         the floor anyway, so at the default accuracy it is a log line — the
-        same policy as the floor's own message."""
-        _, _, _, _, text, warned = self._relax(accuracy=None)
+        same policy as the floor's own message. A pinned accuracy is never
+        relaxed: the same case is refused naming it."""
+        _, _, _, _, text, warned = self._relax()
         assert not warned
         assert 'Lytaev relaxed' in text
-        assert self._relax()[5]
+        model = RAM(backend='ramgeo', accuracy=1e-3, verbose=False)
+        with pytest.raises(ConfigurationError,
+                           match='pinned accuracy=0.001'):
+            ram_grid.compute_grid_lytaev(
+                self._env(), self.FREQ, max_range=self.RMAX, kind='ramgeo',
+                knobs=model._knob_record(), log=model._log)
 
     @pytest.mark.parametrize('eps_used,warns', [(0.243, False), (0.729, True)])
     def test_a_rung_past_the_routine_range_warns_at_the_default_accuracy(
@@ -2838,8 +2992,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
             ram_grid.compute_grid_lytaev(self._env(), 100.0,
                                        max_range=self.RMAX, kind='ramgeo',
                                        knobs=model._knob_record(),
-                                       log=model._log,
-                                       speed_bounds=model._speed_bounds)
+                                       log=model._log)
         relaxed = [str(w.message) for w in caught
                    if 'Lytaev relaxed' in str(w.message)]
         assert bool(relaxed) is warns
@@ -2860,8 +3013,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
             ram_grid.compute_grid_lytaev(self._env(), 100.0,
                                        max_range=self.RMAX, kind='ramgeo',
                                        knobs=model._knob_record(),
-                                       log=model._log,
-                                       speed_bounds=model._speed_bounds)
+                                       log=model._log)
         texts = [str(w.message) for w in record
                  if 'Lytaev relaxed' in str(w.message)]
         assert 'θ_max=30°→20°' in texts[0]
@@ -2892,8 +3044,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
             ram_grid.compute_grid_lytaev(self._env(), 10000.0,
                                        max_range=self.RMAX, kind='ramgeo',
                                        knobs=model._knob_record(),
-                                       log=model._log,
-                                       speed_bounds=model._speed_bounds)
+                                       log=model._log)
         text = str(excinfo.value)
         assert 'f=10000.0 Hz' in text
         assert f'x_max={self.RMAX:.0f} m' in text
@@ -2945,8 +3096,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
             model = RAM(backend='ramgeo', verbose=False)
             ram_grid.compute_grid_lytaev(
                 self._env(), 10000.0, max_range=self.RMAX, kind='ramgeo',
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         text = str(excinfo.value)
         assert f'ε={eps_last:.3g}' in text
         assert 'ε=1 ' not in text
@@ -2962,8 +3112,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
             model = RAM(backend='ramgeo', verbose=False)
             ram_grid.compute_grid_lytaev(
                 self._env(), 10000.0, max_range=self.RMAX, kind='ramgeo',
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         text = str(excinfo.value)
         assert 'halve dz' in text and 'halve dr' in text
         assert 'unscored' in text
@@ -2978,10 +3127,9 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
         from uacpy.models.pe_grid import optimal_c0, optimize_grid
         model = RAM(backend='mpirams', verbose=False)
         env = self._env()
-        c_min_all, c_max_all = model._speed_bounds(env)
+        c_min_all, c_max_all = speed_bounds(env)
         c_min, c_max = ram_domain.water_speed_bounds(env)
-        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record(),
-                                   speed_bounds=model._speed_bounds)
+        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record())
         assert c0 == pytest.approx(optimal_c0(c_min, c_max, 30.0,
                                               c_max_all=c_max_all))
         assert c0 > c_max, "c0 inside the water band would make this blind"
@@ -2989,8 +3137,7 @@ class TestTheRelaxationWarningDescribesTheGridThatRuns:
             warnings.simplefilter('ignore')
             dr, _dz = ram_grid.compute_grid_lytaev(
                 env, 200.0, max_range=5000.0, kind='mpirams',
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         kw = dict(frequency=200.0, x_max=5000.0, c0=c0, angle_max=30.0, eps=1e-3,
                   p=int(model.n_pade), alpha=0.0,
                   c_min_all=c_min_all, c_max_all=c_max_all)
@@ -3069,32 +3216,33 @@ class TestRamAppliesTheStabilityFloor:
             model = RAM(backend='rams', verbose=False)
             dr, dz = ram_grid.compute_grid_lytaev(
                 env, freq=freq, max_range=5000.0, kind='rams',
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         assert dz <= cap * (1.0 + 1e-9), f"dz={dz} coarser than the cap {cap}"
         assert dr > 0
 
-    def test_raising_an_automatic_dz_warns_only_for_a_pinned_accuracy(self, capsys):
+    def test_raising_an_automatic_dz_is_a_log_line_and_a_pinned_accuracy_is_not_raised(
+            self, capsys):
         """The floor is the package's own policy for an automatic grid and
         binds on nearly every run, so on the default accuracy target it is
-        status, an info log line. An accuracy the caller pinned and did not
-        get is still a warning (the rule test_ram pins)."""
+        status, an info log line. A pinned accuracy is met as given: no
+        floor raises its dz, which the shear cap still bounds."""
+        from uacpy.models.pe_grid import rams_dz_shear_cap
         env = self._elastic_env(shear_speed=1200.0)
         kw = dict(env=env, freq=30.0, max_range=5000.0, kind='rams')
-        for accuracy, warns in ((None, False), (1e-3, True)):
+        dzs = {}
+        for accuracy in (None, 1e-3):
             extra = {} if accuracy is None else {'accuracy': accuracy}
             model = RAM(backend='rams', verbose='info', **extra)
             capsys.readouterr()
             with recorded_warnings() as caught:
-                ram_grid.compute_grid_lytaev(**kw, knobs=model._knob_record(),
-                                             log=model._log,
-                                             speed_bounds=model._speed_bounds)
-            warned = [w for w in caught
-                      if 'shear-wavelength resolution' in str(w.message)]
-            assert bool(warned) is warns, (accuracy, warned)
-            if not warns:
-                assert ('shear-wavelength resolution'
-                        in capsys.readouterr().out)
+                _, dzs[accuracy] = ram_grid.compute_grid_lytaev(
+                    **kw, knobs=model._knob_record(), log=model._log)
+            assert not [w for w in caught
+                        if 'shear-wavelength resolution' in str(w.message)]
+            raised = 'shear-wavelength resolution' in capsys.readouterr().out
+            assert raised is (accuracy is None), accuracy
+        assert dzs[1e-3] <= rams_dz_shear_cap(1200.0, 30.0) * (1 + 1e-9)
+        assert dzs[1e-3] < dzs[None]
 
     @pytest.mark.parametrize('kind', ['mpirams', 'ramgeo'])
     def test_a_pinned_dz_finer_than_the_floor_is_marched_as_given(self, kind):
@@ -3105,8 +3253,7 @@ class TestRamAppliesTheStabilityFloor:
         from uacpy.models.ram.mpirams import resolve_mpirams_grid
         env = _env(bottom=_fluid_bottom())
         model = RAM(backend=kind, dz=0.1, verbose=False)
-        kw = dict(knobs=model._knob_record(), log=model._log,
-                  speed_bounds=model._speed_bounds)
+        kw = dict(knobs=model._knob_record(), log=model._log)
         with recorded_warnings() as caught:
             if kind == 'mpirams':
                 _dr, dz = resolve_mpirams_grid(env, 100.0, 5000.0, **kw)
@@ -3127,8 +3274,7 @@ class TestRamAppliesTheStabilityFloor:
             model = RAM(verbose=False)
             _dr, dz, *_ = ram_grid.compute_grid_lytaev(
                 env, freq=freq, max_range=5000.0, kind='mpirams',
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         assert dz >= 1500.0 / (LAMBDA_PER_DZ_FLOOR * freq) * (1.0 - 1e-9)
 
     def test_an_explicit_dz_is_not_overridden_by_the_floor(self):
@@ -3264,9 +3410,8 @@ class TestMpiramsLayeredSubBottomIsNotSmeared:
         # already carries the half-space.
         span = ram_domain.absorber_span(
             env, 100.0, ram_mpirams.mpirams_zmax(
-                env, 100.0, 0.5, max_range=5000.0, knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds), knobs=model._knob_record(),
-                speed_bounds=model._speed_bounds)
+                env, 100.0, 0.5, max_range=5000.0, knobs=model._knob_record(),
+                log=model._log), knobs=model._knob_record())
         assert sedlayer == pytest.approx(span)
         # stack + the seabed pad (the deeper of two bottom wavelengths and the
         # continuous spectrum's reach), snapped onto the 0.5 m grid
@@ -3357,12 +3502,10 @@ class TestMpiramsAbsorbingLayerHasTheRequestedWidth:
         sedlayer, *_ = ram_mpirams.prepare_bottom_properties(
             env, Path(
                 '.'), ram_domain.absorber_span(
-                    env, freq, zmax, knobs=model._knob_record(),
-                    speed_bounds=model._speed_bounds), zmax,
+                    env, freq, zmax, knobs=model._knob_record()), zmax,
             dz=float(model.dz) if model.dz is not None else 0.5,
             knobs=model._knob_record(), log=model._log)
-        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record(),
-                                   speed_bounds=model._speed_bounds)
+        c0 = ram_domain.resolve_c0(env, knobs=model._knob_record())
         requested = model.absorber_width_wavelengths * c0 / freq
         return zmax - float(env.depth) - sedlayer, requested
 
@@ -3404,8 +3547,7 @@ class TestMpiramsAbsorbingLayerHasTheRequestedWidth:
         sedlayer, *_ = ram_mpirams.prepare_bottom_properties(
             env, Path(
                 '.'), ram_domain.absorber_span(
-                    env, 100.0, 400.0, knobs=model._knob_record(),
-                    speed_bounds=model._speed_bounds), 400.0,
+                    env, 100.0, 400.0, knobs=model._knob_record()), 400.0,
             dz=0.25, knobs=model._knob_record(), log=model._log)
         assert sedlayer >= 180.0
 
@@ -3462,7 +3604,7 @@ class TestRangeSegmentMarkersAreMidpoints:
         model = RAM(verbose=False)
         segs = ram_collins.collins_range_segments(
             self._env([0.0, 2500.0, 6000.0]), 'ramgeo', zmax=300.0, freq=150.0,
-            knobs=model._knob_record(), speed_bounds=model._speed_bounds)
+            knobs=model._knob_record())
         assert [s['range'] for s in segs] == [0.0, 1250.0, 4250.0]
 
     @pytest.mark.requires_binary
@@ -3662,20 +3804,16 @@ class TestThetaMaxIncludesTheBottomSlope:
         flat = _env(bottom=_fluid_bottom())
         steep = self._sloped(200.0, 400.0)
         assert ram_domain.resolve_c0(
-            steep, knobs=model._knob_record(),
-            speed_bounds=model._speed_bounds) > ram_domain.resolve_c0(
-                flat, knobs=model._knob_record(),
-                speed_bounds=model._speed_bounds)
+            steep, knobs=model._knob_record()) > ram_domain.resolve_c0(
+                flat, knobs=model._knob_record())
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             dr_flat, _ = ram_grid.compute_grid_lytaev(
                 flat, 100.0, max_range=5000.0, kind='mpirams',
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
             dr_steep, _ = ram_grid.compute_grid_lytaev(
                 steep, 100.0, max_range=5000.0, kind='mpirams',
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         assert dr_steep < dr_flat
 
 
@@ -3705,8 +3843,7 @@ class TestSubBottomIsIndependentOfSspTabulationDepth:
         ram_mpirams.prepare_ssp(env, tmp_path,
                            ram_mpirams.mpirams_zmax(
                                env, 100.0, 0.25, max_range=5000.0, knobs=model._knob_record(),
-                               log=model._log,
-                               speed_bounds=model._speed_bounds), 0.25,
+                               log=model._log), 0.25,
                                log=model._log)
         ssp = np.loadtxt(tmp_path / 'ssp.dat', skiprows=1)
         below = ssp[ssp[:, 0] > 100.0]
@@ -3722,13 +3859,11 @@ class TestSubBottomIsIndependentOfSspTabulationDepth:
         model = RAM(backend='mpirams', verbose=False, dz=0.25, zmax=400.0)
         zmax = ram_mpirams.mpirams_zmax(env, 100.0, 0.25,
                                         max_range=5000.0, knobs=model._knob_record(),
-                                        log=model._log,
-                                        speed_bounds=model._speed_bounds)
+                                        log=model._log)
         sedlayer, nzs, cs, _rho, _attn, isedrd, _sed = \
             ram_mpirams.prepare_bottom_properties(
                 env, tmp_path, ram_domain.absorber_span(
-                    env, 100.0, zmax, knobs=model._knob_record(),
-                    speed_bounds=model._speed_bounds), zmax,
+                    env, 100.0, zmax, knobs=model._knob_record()), zmax,
                 dz=0.25, knobs=model._knob_record(), log=model._log)
         assert isedrd == 0
         z_ctrl = ram_mpirams.control_point_depths(100.0, sedlayer, nzs, zmax)
@@ -3897,8 +4032,8 @@ class TestRamsElasticGridAgreesWithWavenumberIntegration:
         assert _RAM().select_backend(env) == 'rams'
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            ref = np.asarray(OAST().compute_tl(env, src, rcv).dB).ravel()
-            tl = np.asarray(_RAM().compute_tl(env, src, rcv).dB).ravel()
+            ref = np.asarray(OAST().compute_field(env, src, rcv).dB).ravel()
+            tl = np.asarray(_RAM().compute_field(env, src, rcv).dB).ravel()
         # Padé-PE against exact wavenumber integration on a high-contrast
         # elastic half-space; a diverged march reads 100+ dB out here.
         assert np.max(np.abs(tl - ref)) < 8.0
@@ -3913,8 +4048,7 @@ class TestRamsElasticGridAgreesWithWavenumberIntegration:
             model = _RAM(backend='rams', verbose=False)
             _dr, dz = ram_grid.compute_grid_lytaev(
                 env, freq=25.0, max_range=8000.0, kind='rams',
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         assert dz <= rams_dz_shear_cap(800.0, 25.0) * (1.0 + 1e-9)
 
 
@@ -3983,17 +4117,17 @@ class TestCollinsHankelPhase:
         psi = np.ones((2, 3), dtype=complex)
         ranges = np.array([100.0, 200.0, 300.0])
         k0 = 0.7
-        hankel = np.exp(-1j * np.pi / 4.0)
+        point_source_phase = np.exp(-1j * np.pi / 4.0)
         rs = psi_to_travelling_wave(
             psi, convention='ramsurf', ranges_m=ranges, range_axis=1,
             k0=k0, apply_radial=False)
         # Dividing the explicit carrier back out must leave exactly the
-        # Hankel phase.
-        assert np.allclose(rs * np.exp(1j * k0 * ranges), hankel)
+        # point source's far-field phase.
+        assert np.allclose(rs * np.exp(1j * k0 * ranges), point_source_phase)
         rams = psi_to_travelling_wave(
             psi, convention='rams', ranges_m=ranges, range_axis=1,
             apply_radial=False)
-        assert np.allclose(rams, hankel)
+        assert np.allclose(rams, point_source_phase)
         mp = psi_to_travelling_wave(
             psi, convention='mpirams', ranges_m=ranges, range_axis=1,
             apply_radial=False)
@@ -4248,10 +4382,10 @@ class TestMpiramsBroadbandGridSpansTheBand:
             warnings.simplefilter('ignore')
             dr_top, _ = ram_mpirams.resolve_mpirams_grid(
                 env, self.F_MAX, 2000.0, knobs=ram._knob_record(),
-                log=ram._log, speed_bounds=ram._speed_bounds)
+                log=ram._log)
             dr_bottom, _ = ram_mpirams.resolve_mpirams_grid(
                 env, self.F_MIN, 2000.0, knobs=ram._knob_record(),
-                log=ram._log, speed_bounds=ram._speed_bounds)
+                log=ram._log)
         assert deltar == pytest.approx(dr_top)
         assert deltar < dr_bottom
 
@@ -4284,7 +4418,7 @@ class TestDiscardedDepthStepDoesNotWarn:
     one of the two ``ram.grid.compute_grid_lytaev`` calls keeps only ``dr``.
     Its depth-step messages describe a ``dz`` that is thrown away a line
     later — here the ``MAX_DEPTH_POINTS`` cap, which 5000 m of water at
-    2000 Hz trips — and firing them trains callers to ignore uacpy warnings.
+    2200 Hz trips — and firing them trains callers to ignore uacpy warnings.
     ``warn_dz=False`` demotes them to log lines; nothing else about the call
     changes."""
 
@@ -4298,10 +4432,9 @@ class TestDiscardedDepthStepDoesNotWarn:
         with recorded_warnings() as caught:
             model = RAM(verbose=False)
             grid = ram_grid.compute_grid_lytaev(
-                TestDiscardedDepthStepDoesNotWarn._env(), 2000.0,
+                TestDiscardedDepthStepDoesNotWarn._env(), 2200.0,
                 max_range=5000.0, kind='mpirams', warn_dz=warn_dz,
-                knobs=model._knob_record(), log=model._log,
-                speed_bounds=model._speed_bounds)
+                knobs=model._knob_record(), log=model._log)
         return grid, [str(w.message) for w in caught
                       if 'to keep the depth grid under' in str(w.message)]
 
@@ -4750,7 +4883,9 @@ class TestTlDoesNotDependOnTheOutputGrid:
     Padé legs disagree most on the steepest content. With the source at
     26.5 cells it reads 4e-5 dB max; a quarter cell off, 8e-3; on a node,
     3e-2 — at either of two nearby ``dz``. ``dz`` is pinned so the 100 m
-    source sits at 26.5 cells whatever the automatic placement does.
+    source sits at 26.5 cells whatever the automatic placement does, and the
+    Padé order at 6, where these figures were measured (order 8 reads
+    0.028 dB max on the same pair).
     """
 
     DEPTH, FREQ, ZS, ZR = 200.0, 25.0, 100.0, 30.0
@@ -4769,8 +4904,8 @@ class TestTlDoesNotDependOnTheOutputGrid:
                 density=1e-4, attenuation=0.0))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            res = RAM(backend='mpirams', dr=40.0, dz=self.DZ, verbose=False,
-                      timeout=300).compute_tl(
+            res = RAM(backend='mpirams', dr=40.0, dz=self.DZ, n_pade=6,
+                      verbose=False, timeout=300).compute_field(
                 env, Source(depths=self.ZS, frequencies=self.FREQ),
                 Receiver(depths=[self.ZR], ranges=ranges))
         return np.asarray(res.dB, dtype=float).ravel()
@@ -5103,7 +5238,7 @@ def test_rams_level_follows_the_fluid_codes_in_a_sound_speed_gradient():
             attenuation=0.5, shear_speed=shear))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            tl = np.asarray(RAM(backend=backend).compute_tl(env, src, rcv).tl)
+            tl = np.asarray(RAM(backend=backend).compute_field(env, src, rcv).tl)
         level[backend] = 10.0 * np.log10(np.nanmean(10.0 ** (-tl / 10.0),
                                                     axis=1))
     assert np.max(np.abs(level['rams'] - level['ramgeo'])) < 0.2

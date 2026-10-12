@@ -467,6 +467,27 @@ class TestModelConfiguration:
                         mean_field=uacpy.OASP(options='N J s'))
         assert m._build_mean_field().options == 'N J s'
 
+    @pytest.mark.parametrize('options', ['N J', 'N J s'])
+    def test_a_supplied_mean_field_keeps_its_verbose_and_timeout(
+            self, options):
+        """The user's producer runs with its own verbose and timeout; its
+        cleanup is OASSP's, whose directory holds the .rhs oassp2 reads."""
+        m = uacpy.OASSP(correlation_length=5.0, verbose=False, timeout=456.0,
+                        cleanup=False,
+                        mean_field=uacpy.OASP(options=options, verbose=True,
+                                              timeout=123.0, cleanup=True))
+        producer = m._build_mean_field()
+        assert (producer.verbose, producer.timeout) == (True, 123.0)
+        assert producer.cleanup is False
+
+    def test_the_default_mean_field_takes_the_hosts_verbose_and_timeout(
+            self):
+        m = uacpy.OASSP(correlation_length=5.0, verbose=True, timeout=456.0,
+                        cleanup=False)
+        producer = m._build_mean_field()
+        assert (producer.verbose, producer.timeout) == (True, 456.0)
+        assert producer.cleanup is False
+
     def test_the_bare_spectrum_keyword_is_not_accepted(self):
         with pytest.raises(TypeError, match='spectrum'):
             uacpy.OASSP(correlation_length=5.0, spectrum='gaussian')
@@ -477,13 +498,9 @@ class TestModelConfiguration:
 
     def test_collapse_defaults(self):
         # A single spectral solve over one stack, as for OASP.
-        # test_collapse_policy's table constructs every model with no
-        # arguments, which OASSP's required correlation_length rules out, so
-        # the per-model row lives here.
         from uacpy.models._projection import DEFAULT_COLLAPSE
         m = uacpy.OASSP(correlation_length=5.0, verbose=False)
-        expected = dict(DEFAULT_COLLAPSE,
-                        **{'ssp': 'mean', 'bottom_range': 'median'})
+        expected = dict(DEFAULT_COLLAPSE, ssp='mean')
         assert {k: m._collapse[k] for k in expected} == expected
 
 
@@ -668,12 +685,47 @@ class TestChain:
         assert not np.array_equal(result.data, mean.data)
         assert result.run_settings.engine.interface == _SEABED_LAYER
         # Stamped as the enum member, like every other wrapper's result:
-        # PropagationModel._result_kwargs coerces, so ``str()`` renders
+        # models._extract.result_kwargs coerces, so ``str()`` renders
         # 'PhaseReference.TRAVELLING_WAVE' and the value still compares equal
         # to the plain string.
         from uacpy.core.results import PhaseReference
         assert result.phase_reference is PhaseReference.TRAVELLING_WAVE
         assert result.phase_reference == 'travelling_wave'
+
+    def test_a_two_depth_mean_field_carries_the_whole_stacks_record(self):
+        """Each source depth runs its own mean-field sub-run; joined on the
+        source_depth axis, the component's record is the multi-depth one
+        (both depths, depth_loop 'per_depth'), not the first depth's, and
+        is that depth's own one-depth record otherwise."""
+        m = uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
+                        n_time_samples=256, freq_min=400.0, freq_max=600.0)
+        source = uacpy.Source(depths=[80.0, 100.0], frequencies=500.0)
+        result = m.run(_env(), source, _receiver(n_depths=2))
+        mean = result.components['mean_field']
+        np.testing.assert_array_equal(mean.coords['source_depth'],
+                                      [80.0, 100.0])
+        np.testing.assert_array_equal(mean.run_settings.source_depths,
+                                      result.source_depths)
+        assert mean.run_settings.depth_loop == 'per_depth'
+        alone = m.run(_env(), uacpy.Source(depths=100.0, frequencies=500.0),
+                      _receiver(n_depths=2)).components['mean_field']
+        assert mean.run_settings == alone.run_settings._replace(
+            source_depths=np.array([80.0, 100.0]), depth_loop='per_depth')
+
+    def test_a_weighted_two_depth_mean_field_sums_with_the_runs_weights(self):
+        """The mean field of a weighted two-depth run carries the Source
+        weights its outer field carries, so its superpose() is the weighted
+        sum of its planes."""
+        m = uacpy.OASSP(correlation_length=5.0, spectral_exponent=2.5,
+                        n_time_samples=256, freq_min=400.0, freq_max=600.0)
+        source = uacpy.Source(depths=[80.0, 100.0], frequencies=500.0,
+                              weights=[1.0, 0.5])
+        result = m.run(_env(), source, _receiver(n_depths=2))
+        mean = result.components['mean_field']
+        np.testing.assert_array_equal(mean.source_weights,
+                                      result.source_weights)
+        np.testing.assert_allclose(mean.superpose().data,
+                                   mean.data[0] + 0.5 * mean.data[1])
 
     def test_the_binary_reports_no_frequency_sampling_mismatch(self, tmp_path):
         # unoassp30.f:182-188 warns on NT/DT only; a band mismatch is silent.
@@ -897,9 +949,9 @@ class TestScatteringSpectralExponent:
 
     @pytest.mark.requires_oases
     @pytest.mark.parametrize('model_cls', [OASS, OASSP])
-    def test_the_default_exponent_is_accepted(self, model_cls):
+    def test_the_default_exponent_is_unset(self, model_cls):
         assert model_cls(correlation_length=10.0,
-                         verbose=False).spectral_exponent == 2.0
+                         verbose=False).spectral_exponent is None
 
 
 @pytest.mark.requires_oases
@@ -1221,3 +1273,76 @@ def test_oassps_mean_field_records_paths_only_when_the_directory_survives(
         'mean_field']
     paths = [v for k, v in kept.metadata.items() if k.endswith('_file')]
     assert paths and all(os.path.exists(p) for p in paths)
+
+
+@pytest.mark.requires_oases
+class TestThePinnedSweepEdgesFollowTheCallsBand:
+    """The mean field runs one sweep (FR1 FR2, unoasp22.f:176): pinned edges
+    beside ``run(frequencies=)`` contradict it and are refused, naming both;
+    beside the band a TIME_SERIES waveform derives they are not used, and the
+    run says so; with no band in the call they set the sweep."""
+
+    @staticmethod
+    def _model(**kw):
+        return uacpy.OASSP(correlation_length=5.0, n_time_samples=256, **kw)
+
+    def test_edges_beside_frequencies_are_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match='contradict each other') as exc:
+            self._model(freq_min=400.0, freq_max=600.0).run_settings(
+                _env(), _source(), _receiver(n_depths=2),
+                run_mode=RunMode.BROADBAND,
+                frequencies=np.linspace(450.0, 550.0, 5))
+        assert 'OASSP(freq_min=400, freq_max=600)' in str(exc.value)
+
+    def test_edges_beside_a_pulse_band_are_said_unused(self):
+        fs = 4000.0
+        t = np.arange(80) / fs
+        pulse = np.hanning(80) * np.sin(2 * np.pi * 500.0 * t)
+        with recorded_warnings() as caught:
+            self._model(freq_min=400.0).run_settings(
+                _env(), _source(), _receiver(n_depths=2),
+                run_mode=RunMode.TIME_SERIES, source_waveform=pulse,
+                sample_rate=fs, output_duration=0.064)
+        said = [str(w.message) for w in caught
+                if 'OASSP(freq_min=400) is not used' in str(w.message)]
+        assert len(said) == 1, said
+
+    def test_edges_without_a_band_set_the_mean_fields_sweep(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            mean = self._model(freq_min=400.0, freq_max=600.0).run_settings(
+                _env(), _source(), _receiver(n_depths=2),
+                run_mode=RunMode.BROADBAND).engine.mean_field.engine
+        assert mean.freq_min == 400.0
+
+
+@pytest.mark.requires_oases
+class TestTheSpectralExponentResolvesFromNone:
+    """``None`` is OASES' own Goff-Jordan exponent 2.5 (oaseun31.f:103-104);
+    a pinned exponent under the Gaussian spectrum, which reads only the
+    correlation length (oaseun31.f:3689-3692), is said to be unused."""
+
+    @staticmethod
+    def _engine(**kw):
+        with recorded_warnings() as caught:
+            engine = uacpy.OASSP(correlation_length=5.0, n_time_samples=256,
+                                 **kw).run_settings(
+                _env(), _source(), _receiver(n_depths=2),
+                run_mode=RunMode.BROADBAND).engine
+        return engine, [str(w.message) for w in caught
+                        if 'spectral_exponent' in str(w.message)]
+
+    def test_unset_is_oases_own_exponent(self):
+        assert OASSP.__init__.__kwdefaults__['spectral_exponent'] is None
+        engine, said = self._engine()
+        assert engine.spectral_exponent == 2.5 and said == []
+
+    @pytest.mark.parametrize('spectrum, said', [('gaussian', True),
+                                                ('goff-jordan', False)])
+    def test_a_pin_is_said_unused_only_under_the_gaussian_spectrum(
+            self, spectrum, said):
+        engine, messages = self._engine(spectral_exponent=2.0,
+                                        roughness_spectrum=spectrum)
+        assert engine.spectral_exponent == 2.0
+        assert bool(messages) is said, messages

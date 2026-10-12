@@ -63,6 +63,8 @@ from uacpy.core._repr import FieldsRepr
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
 from uacpy.core.exceptions import ConfigurationError, IOWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core._validate import (require_below_nyquist,
+                                  require_positive_finite_scalar)
 from uacpy.comms.constellations import _require_binary_bits
 
 JANUS_VERSION = 3
@@ -118,6 +120,12 @@ _CFAR_WINDOW_CORRECTION = 0.1538   # window_correction leading factor
 # the window and the round trip fails with crc_ok=False.
 _CFAR_CHANNEL_SPREAD = 116         # chips past first detection (x oversampling in C)
 _CFAR_MOV_AVG_TIME = 0.150         # s training-window length floor
+
+#: Frame samples one block of the chips-alignment frame matrix holds, so the
+#: Goertzel bank runs over a long recording in bounded memory: the frames
+#: overlap (a window every quarter chip), and gathering them all at once
+#: copied about three times the recording.
+_ALIGN_BLOCK_SAMPLES = 1 << 22
 
 
 # Frequency-hop generator (CMRE reference: primitives table entry for 13 slots).
@@ -220,10 +228,20 @@ class JanusPacket(FieldsRepr, CarrierExport):
         if not 0 <= self.app_type < 64:
             raise ConfigurationError(
                 f"JanusPacket: app_type must be 0..63; got {self.app_type!r}.")
-        adb = np.asarray(self.app_data, dtype=int).ravel()
+        for name in ("mobility", "schedule", "tx_rx", "forward"):
+            if getattr(self, name) not in (0, 1):
+                raise ConfigurationError(
+                    f"JanusPacket: {name} is a one-bit flag, 0 or 1; got "
+                    f"{getattr(self, name)!r}.")
+        adb = np.asarray(self.app_data).ravel()
         if adb.size != 34:
             raise ConfigurationError(
                 f"JanusPacket: app_data must be 34 bits; got {adb.size}.")
+        if not np.all((adb == 0) | (adb == 1)):
+            raise ConfigurationError(
+                f"JanusPacket: app_data must hold bits, 0 or 1; got values "
+                f"{sorted(set(adb.tolist()) - {0, 1})[:5]}.")
+        adb = adb.astype(int)
         bits = np.concatenate([
             _int_bits(JANUS_VERSION, 4),
             [self.mobility & 1, self.schedule & 1, self.tx_rx & 1, self.forward & 1],
@@ -431,6 +449,16 @@ def janus_modulate(bits64, *, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_I
         raise ConfigurationError(
             f"janus_modulate: window must be 'tukey' (5 % tapered-cosine "
             f"chips) or None (rectangular chips); got {window!r}.")
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "janus_modulate", "sample_rate", " Hz")
+    if wakeup:
+        # The top wake-up tone sits ON the band edge, so the band-edge rule
+        # below admits it at exactly Nyquist, where it is sampled twice a
+        # cycle and carries no phase.
+        require_below_nyquist(fc + bandwidth / 2, sample_rate,
+                              "janus_modulate",
+                              "the top wake-up tone fc + bandwidth/2",
+                              "the tone is degenerate (two samples a cycle)")
     if sample_rate < 2 * (fc + bandwidth / 2):
         raise ConfigurationError(
             f"janus_modulate: the band edge fc + bw/2 = {fc + bandwidth / 2:g} Hz "
@@ -512,8 +540,34 @@ def _resample(x, scale):
     """
     if scale == 1.0:
         return x
-    n_new = max(1, int(round(x.size * scale)))
+    n_new = _resampled_size(x.size, scale)
     return np.interp(np.linspace(0.0, x.size - 1, n_new), np.arange(x.size), x)
+
+
+def _resampled_size(n, scale):
+    """Samples :func:`_resample` turns ``n`` samples into at ``scale``."""
+    return n if scale == 1.0 else max(1, int(round(n * scale)))
+
+
+def _resample_stretch(x, scale, lo, hi):
+    """Samples ``lo:hi`` of ``_resample(x, scale)``, equal to them bit for
+    bit, interpolated from only the part of ``x`` they fall between — so a
+    decoder resamples the stretch of a long recording it reads, not the
+    whole recording."""
+    if scale == 1.0:
+        return x[lo:hi]
+    n_new = _resampled_size(x.size, scale)
+    lo, hi = max(0, lo), min(n_new, hi)
+    if hi <= lo:
+        return x[:0]
+    # The positions np.linspace(0, x.size - 1, n_new) holds: k * step, and
+    # the last one exactly x.size - 1.
+    pos = np.arange(lo, hi) * ((x.size - 1) / max(n_new - 1, 1))
+    if hi == n_new and n_new > 1:
+        pos[-1] = x.size - 1
+    first = int(pos[0])
+    end = min(x.size, int(pos[-1]) + 2)
+    return np.interp(pos, np.arange(first, end), x[first:end])
 
 
 def _chips_alignment(x, sample_rate, freq_min, fsw, fh, chip_duration, max_speed):
@@ -551,7 +605,12 @@ def _chips_alignment(x, sample_rate, freq_min, fsw, fh, chip_duration, max_speed
     # Per-column normalisation applied before the max filter and the sum, as in
     # external:chips_alignment.c:276, so ``stat`` is the mean per-chip tone
     # magnitude.
-    mag = np.abs(sliding_window_view(x, gf)[::hstep] @ ref) / _PREAMBLE_CHIPS
+    frames = sliding_window_view(x, gf)[::hstep]
+    mag = np.empty((frames.shape[0], tones.size))
+    block = max(1, _ALIGN_BLOCK_SAMPLES // gf)
+    for a in range(0, frames.shape[0], block):
+        mag[a:a + block] = np.abs(frames[a:a + block] @ ref)
+    mag /= _PREAMBLE_CHIPS
     mag = np.maximum(mag[:-1], mag[1:])                       # 2-point max filter
     nstat = mag.shape[0] - _CHIP_OVERSAMPLING * (_PREAMBLE_CHIPS - 1)
     if nstat <= 0:
@@ -645,6 +704,33 @@ def _detect(x, sample_rate, freq_min, fsw, fh, chip_duration, max_speed):
     return start, stat, crossed
 
 
+def _near_bounds(guess, n, sample_rate, chip_duration):
+    """``(lo, hi)``: the stretch of an ``n``-sample record that holds what
+    the detector reads about a preamble starting near sample ``guess``.
+
+    That is the GO-CFAR training and guard windows either side
+    (:func:`_go_cfar`), the 32-chip preamble, the channel spread past a first
+    crossing over which the peak is taken, and a chip of margin for the
+    start refinement."""
+    chip = chip_duration * sample_rate
+    mov_avg = max(_CFAR_MOV_AVG_TIME, 2 * _N_SLOTS * chip_duration)
+    side = int(np.ceil(mov_avg * sample_rate + 2 * chip))
+    ahead = int(np.ceil(max(_PREAMBLE_CHIPS, _CFAR_CHANNEL_SPREAD) * chip))
+    return max(0, int(guess) - side), min(n, int(guess) + ahead + side)
+
+
+def _detect_near(x, guess, sample_rate, freq_min, fsw, fh, chip_duration,
+                 max_speed):
+    """:func:`_detect` on the stretch of ``x`` around sample ``guess`` that
+    :func:`_near_bounds` gives, returning the start in ``x``'s own samples
+    (``None`` when not found) — so a long recording is not scanned a second
+    time."""
+    lo, hi = _near_bounds(guess, x.size, sample_rate, chip_duration)
+    start = _detect(x[lo:hi], sample_rate, freq_min, fsw, fh, chip_duration,
+                    max_speed)[0]
+    return None if start is None else lo + start
+
+
 def janus_detect(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_INITIAL,
                  chip_duration=None, hop_sequence=None, doppler_max_speed=DEFAULT_DOPPLER_MAX_SPEED):
     """Locate the 32-chip preamble (CMRE GO-CFAR). Returns ``(start, statistic)``.
@@ -683,6 +769,8 @@ def janus_detect(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_INIT
         detector's Goertzel window as well as bounding the Doppler estimate;
         0 disables the Doppler compensation. Default 5.
     """
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "janus_detect", "sample_rate", " Hz")
     freq_min, fsw = _band_params(fc, bandwidth)
     chip_duration = 1.0 / fsw if chip_duration is None else float(chip_duration)
     fh = (FH_SEQUENCE if hop_sequence is None else
@@ -882,6 +970,8 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
         Sound speed (m/s) converting the speed range to a Doppler scale.
         Default :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
     """
+    sample_rate = require_positive_finite_scalar(
+        sample_rate, "janus_demodulate", "sample_rate", " Hz")
     if sample_rate < 2 * (fc + bandwidth / 2):
         raise ConfigurationError(
             f"janus_demodulate: the band edge fc + bw/2 = {fc + bandwidth / 2:g} Hz "
@@ -902,6 +992,9 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
     fs = fs_c
 
     detected, statistic, a, found_at = None, None, 0.0, None
+    # Where ``x`` starts in the (resampled) recording, and how long that
+    # recording is: the Doppler stage below keeps only a stretch of it.
+    offset, record_size = 0, x.size
     if start is None:
         start, statistic, detected = _detect(x, fs, freq_min, fsw, fh, chip_duration,
                                              doppler_max_speed)
@@ -916,8 +1009,19 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
         if doppler_max_speed > 0:
             a = _estimate_doppler(x, start, freq_min, fsw, fh, chip_duration, fs,
                                   doppler_max_speed, sound_speed)
-            x = _resample(x, 1.0 + a)
-            start = _detect(x, fs, freq_min, fsw, fh, chip_duration, doppler_max_speed)[0]
+            # The preamble moved with the record; re-detect where it went.
+            # Only the stretch the re-detection and the frame read is
+            # resampled: the detector's window around the moved start
+            # (_near_bounds), extended by one frame past its far end, which
+            # is as far as a frame starting inside the window reaches.
+            guess = round(start * (1.0 + a))
+            record_size = _resampled_size(x.size, 1.0 + a)
+            offset, hi = _near_bounds(guess, record_size, fs, chip_duration)
+            frame = int(_chip_bounds(_N_TOTAL_CHIPS, chip_duration, fs)[-1])
+            x = _resample_stretch(x, 1.0 + a, offset,
+                                  min(record_size, hi + frame))
+            start = _detect_near(x, guess - offset, fs, freq_min, fsw, fh,
+                                 chip_duration, doppler_max_speed)
             if start is None:
                 # The preamble cleared the detector before resampling and not
                 # after, so the Doppler stage is what lost it -- say which
@@ -943,8 +1047,9 @@ def janus_demodulate(waveform, sample_rate=48000.0, fc=FC_INITIAL, bandwidth=BW_
     past = int(np.count_nonzero(held < np.diff(data) / 2.0))
     if past:
         raise ConfigurationError(
-            f"janus_demodulate: the frame found at {start / fs:.3f} s runs "
-            f"past the end of the {x.size / fs:.3f} s recording: {past} of "
+            f"janus_demodulate: the frame found at {(offset + start) / fs:.3f} s "
+            f"runs past the end of the {record_size / fs:.3f} s recording: "
+            f"{past} of "
             f"its {_N_CODED} data chips hold less than half their samples, "
             f"so it is not decoded. Record the whole packet "
             f"({_N_TOTAL_CHIPS} chips of "

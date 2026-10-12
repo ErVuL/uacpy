@@ -9,7 +9,8 @@ import warnings
 import numpy as np
 
 from uacpy.comms.channel import _channel_array
-from uacpy.comms.equalize import regularizer
+from uacpy.comms.equalize import _regularizer
+from uacpy.core._validate import require_generator
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 
@@ -17,7 +18,7 @@ from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 # Smallest fraction of the peak pilot magnitude a subcarrier can carry and
 # still define a channel estimate. Relative because |pilot| carries whatever
 # amplitude scale the caller's constellation is in: an absolute floor silently
-# makes the result a function of those units. `receive._ZF_REL_FLOOR`
+# makes the result a function of those units. `comms.equalize._ZF_REL_FLOOR`
 # is the same rule for |H|^2 and `acoustic_signal.frf._etfe_divide` for a
 # transfer function.
 _PILOT_REL_FLOOR = 1e-12
@@ -258,7 +259,7 @@ def subcarrier_response(channel, n_subcarriers):
 def equalize_subcarriers(spectra, H, snr_linear=None):
     """One-tap-per-subcarrier equalisation of block spectra ``spectra``
     (``(..., n_subcarriers)``) by the channel response ``H``: the
-    ``conj(H)/(|H|^2 + eps)`` form with ``eps`` from :func:`regularizer` —
+    ``conj(H)/(|H|^2 + eps)`` form with ``eps`` from :func:`~uacpy.comms.equalize._regularizer` —
     zero-forcing with a floor, or the MMSE weight when ``snr_linear`` is
     given. A channel with no power anywhere returns zeros: every subcarrier
     is unrecoverable, which is what the epsilon form tends to. ``eps`` scales
@@ -277,7 +278,7 @@ def equalize_subcarriers(spectra, H, snr_linear=None):
         zero-forcing.
     """
     h2 = np.abs(H) ** 2
-    eps = regularizer(h2, snr_linear)
+    eps = _regularizer(h2, snr_linear)
     if eps <= 0.0:
         return np.zeros_like(spectra)
     return spectra * (np.conj(H) / (h2 + eps))
@@ -302,7 +303,13 @@ def ofdm_symbol(subcarrier_values, n_subcarriers, cp_len):
     return np.concatenate([t[nsc - cp:], t])
 
 
-def schmidl_cox_preamble(n_subcarriers, cp_len, seed=0x5C0FFEE):
+#: The integer the default Schmidl-Cox PN sequence is drawn from: a
+#: transmitter and a receiver that both leave ``rng`` unset build the same
+#: preamble.
+_PREAMBLE_PN_SEED = 0x5C0FFEE
+
+
+def schmidl_cox_preamble(n_subcarriers, cp_len, *, rng=None):
     """Schmidl & Cox training symbol — two identical time-domain halves.
 
     Even subcarriers carry a PN-QPSK sequence, odd subcarriers are null, so the
@@ -315,8 +322,11 @@ def schmidl_cox_preamble(n_subcarriers, cp_len, seed=0x5C0FFEE):
         Subcarriers per OFDM block (the FFT length), even.
     cp_len : int
         Cyclic-prefix length in samples.
-    seed : int, optional
-        Seed of the PN-QPSK sequence; the receiver needs the same one.
+    rng : numpy.random.Generator, optional
+        The generator the PN-QPSK sequence is drawn from; the receiver needs
+        a generator in the same state. ``None`` (default) draws the fixed
+        sequence of ``np.random.default_rng(0x5C0FFEE)``, so two calls that
+        leave it unset return the same preamble.
     """
     nsc = _require_subcarrier_count(n_subcarriers, "schmidl_cox_preamble")
     cp_len = _require_cp_len(cp_len, nsc, "schmidl_cox_preamble")
@@ -326,7 +336,8 @@ def schmidl_cox_preamble(n_subcarriers, cp_len, seed=0x5C0FFEE):
         # metric never reaches its plateau and the preamble is undetectable.
         raise ConfigurationError(
             f"schmidl_cox_preamble: n_subcarriers must be even; got {nsc}.")
-    rng = np.random.default_rng(seed)
+    rng = (np.random.default_rng(_PREAMBLE_PN_SEED) if rng is None
+           else require_generator(rng, "schmidl_cox_preamble"))
     freq = np.zeros(nsc, dtype=complex)
     even = np.arange(0, nsc, 2)
     # Schmidl & Cox 1997 sec. III-A: "the frequency components of this training

@@ -78,20 +78,19 @@ def test_every_field_kind_round_trips_under_each_backend(tmp_path, kind,
 
 
 @pytest.mark.parametrize('write,read', PAIRS)
-def test_a_stack_of_fields_with_boolean_attrs_round_trips(tmp_path, write,
-                                                          read):
-    """The single-object writer (ResultStack.to_netcdf, every carrier's)
-    stores the booleans as Result.to_netcdf does."""
-    from uacpy.core.results import ResultStack
+def test_a_field_over_source_depths_with_boolean_attrs_round_trips(
+        tmp_path, write, read):
+    """A multi-depth field stores its booleans as every Field does."""
+    from uacpy.core.results import stack_fields
     slabs = [_field('bool attrs'), _field('bool attrs')]
     for slab, depth in zip(slabs, (5.0, 15.0)):
         slab.source_depths = np.array([depth])
-    stack = ResultStack(slabs, [5.0, 15.0], coordinate_name='source_depth')
-    stack.to_netcdf(tmp_path / 's.nc', engine=write)
+    pair = stack_fields(slabs, [5.0, 15.0])
+    pair.to_netcdf(tmp_path / 's.nc', engine=write)
     with xr.open_dataarray(tmp_path / 's.nc', engine=read) as da:
-        back = ResultStack.from_xarray(da.load())
-    assert all(s.coherent is True for s in back.slabs)
-    np.testing.assert_array_equal(back.slabs[1].data, stack.slabs[1].data)
+        back = Field.from_xarray(da.load())
+    assert back.coherent is True
+    np.testing.assert_array_equal(back.data[1], pair.data[1])
 
 
 @pytest.mark.parametrize('engine', ENGINES)
@@ -214,21 +213,20 @@ def _backends(monkeypatch, *, h5netcdf, netcdf4_version):
 
 
 @pytest.mark.skipif('netcdf4' not in ENGINES, reason='netCDF4 not installed')
-@pytest.mark.parametrize('make', ['field', 'stack'])
+@pytest.mark.parametrize('make', ['field', 'over source depths'])
 def test_a_complex_write_needs_no_backend_that_stores_complex_values(
         tmp_path, monkeypatch, make):
     """Neither h5netcdf nor netCDF4 1.7.1+: a complex result still writes
     (as real and imaginary parts) and reads back as written."""
-    from uacpy.core.results import ResultStack
+    from uacpy.core.results import stack_fields
     field = _field('complex')
-    obj = field if make == 'field' else ResultStack(
-        [field], [5.0], coordinate_name='source_depth')
+    obj = field if make == 'field' else stack_fields(
+        [field], [5.0])
     _backends(monkeypatch, h5netcdf=False, netcdf4_version='1.6.5')
     obj.to_netcdf(tmp_path / 'f.nc')
     with xr.open_dataarray(tmp_path / 'f.nc') as da:
-        back = (Field.from_xarray(da.load()) if make == 'field'
-                else ResultStack.from_xarray(da.load()).slabs[0])
-    np.testing.assert_array_equal(back.data, field.data)
+        back = Field.from_xarray(da.load())
+    np.testing.assert_array_equal(back.data, obj.data)
 
 
 @pytest.mark.skipif('netcdf4' not in ENGINES, reason='netCDF4 not installed')

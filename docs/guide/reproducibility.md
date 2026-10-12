@@ -50,7 +50,7 @@ Three properties hold that up.
 
 **No library function draws from a global random state.** Not Python's
 `random` module, not NumPy's legacy process-global `RandomState`. Randomness
-enters uacpy through an explicit `rng` or `seed` argument and nowhere else, so
+enters uacpy through an explicit `rng` argument and nowhere else, so
 there is no hidden stream a caller cannot see or seed. This is gated in the
 suite by a source scan, not by a sampling test —
 `uacpy/tests/test_determinism.py` walks every shipped module, example and
@@ -67,22 +67,24 @@ are the ones a reproducible run has to pin:
 | `uacpy.comms` | `awgn`, `fading_taps`, `simulate_link`, `ber_sweep` | `rng=` | unseeded |
 | `uacpy` | `generate_sea_surface` | `rng=` | unseeded |
 | `uacpy.data` | `fetch_sea_surface` | `rng=` | unseeded |
-| `uacpy.comms` | `schmidl_cox_preamble` | `seed=` | **fixed seed** |
+| `uacpy.comms` | `schmidl_cox_preamble` | `rng=` | **fixed sequence** |
 
-`schmidl_cox_preamble` is the exception: its `seed=` defaults to a
-fixed integer, not `None`, so two unseeded calls return the same preamble and it
+`schmidl_cox_preamble` is the exception: its `rng=None` draws one fixed
+sequence, `np.random.default_rng(0x5C0FFEE)`, so two calls that leave it unset
+return the same preamble — a transmitter and a receiver both rebuild it — and it
 needs no action from you. It is listed because the point of this table is that
 it is exhaustive — a drawing function absent from it is a stream you cannot know
 to look for.
 
 `generate_sea_surface` builds a Pierson-Moskowitz surface realisation from the
-generator it is given, like every function above but `schmidl_cox_preamble`.
+generator it is given, like every function above; `Altimetry.from_sea_state`
+is the same draw returned as the carrier, and takes the same `rng=`.
 The data layer reaches it through
 `fetch_sea_surface(rng=…)` and `fetch_environment(altimetry_rng=…)`, both
 defaulting to `None`; a plain `fetch_environment` call draws nothing, because
 its `altimetry_sources` defaults to `None` too.
 
-Each of the nine returns identical output for a given seed or seeded generator,
+Each of the nine returns identical output for a given seeded generator,
 and the eight unseeded ones a fresh draw when the seeding argument is omitted —
 the right default for a
 Monte-Carlo sweep, and the wrong one for a figure you intend to publish:
@@ -193,7 +195,7 @@ export OMP_NUM_THREADS=1
    unseeded-by-default functions in
    [§2](#2-the-analysis-layer-is-deterministic) — `altimetry_rng=` when you
    reach the sea surface through `fetch_environment` — and record the seed
-   next to the result. `schmidl_cox_preamble` already carries a fixed seed.
+   next to the result. `schmidl_cox_preamble` already draws a fixed sequence.
 2. **Pin the Bellhop backend** — `Bellhop(backend='fortran')` — if a Bellhop
    field is in the chain. Check `result.backend` to confirm what ran.
 3. **Pin `realization=`** on OASSP.
@@ -206,7 +208,7 @@ export OMP_NUM_THREADS=1
    across either.
 8. **Keep the result, not only the script.** `result.run_settings` records
    every knob and every value the run derived, and it travels with
-   `save` / `to_netcdf`; `Model.from_run_settings(result.run_settings)` builds
+   `to_dict` / `to_netcdf`; `Model.from_run_settings(result.run_settings)` builds
    the engine that repeats the run with all of them pinned
    (`RAM.from_run_settings(Field.from_netcdf(path).run_settings)`).
 

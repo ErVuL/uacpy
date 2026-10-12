@@ -8,6 +8,7 @@ the values drawn.
 """
 
 import inspect
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -90,6 +91,30 @@ def test_plot_taup():
     fig, ax = plot_taup(p, taus, tp, sound_speed=1500.0)
     assert ax.images
     plt.close(fig)
+
+
+def test_the_slowness_label_stays_inside_the_axes():
+    """Example 30's geometry: the 1500 m/s line sits at 0.67 of a 0.83 s/km
+    half-axis in a narrow panel, where a label written outward ran past the
+    right edge. It is written on the line's p = 0 side."""
+    d = np.zeros((512, 48))
+    d[100, :] = 1.0
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')          # the aliasing notice
+        p, taus, tp = taup_transform(d, 1000.0, 10.0, n_slowness=301,
+                                     p_max=1 / 1200.0)
+    fig, axes = plt.subplots(3, 2, figsize=(12, 14), constrained_layout=True)
+    try:
+        _, ax = plot_taup(p, taus, tp, ax=axes[0, 1], sound_speed=1500.0)
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        box = ax.get_window_extent(renderer=renderer)
+        (text,) = ax.texts
+        drawn = text.get_window_extent(renderer=renderer)
+        assert text.get_text().strip() == '1500 m/s'
+        assert box.x0 <= drawn.x0 and drawn.x1 <= box.x1
+    finally:
+        plt.close(fig)
 
 
 _FREQS3 = np.array([10.0, 100.0, 1000.0])
@@ -221,3 +246,37 @@ class TestFixedYWindowsAreEscapable:
             plt.close(fig)
             fig, ax = plot_coherence(self._F, np.full(3, 0.98))
             plt.close(fig)
+
+
+def test_an_angular_spectrum_null_is_drawn_on_its_floor_without_a_warning():
+    """A zero-power look direction is drawn at the floor below the peak,
+    not dropped with numpy's divide-by-zero warning."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        fig, ax = plot_angular_spectrum(np.linspace(-90.0, 90.0, 7),
+                                        [0, 1, 2, 4, 2, 1, 0])
+    drawn = ax.lines[0].get_ydata()
+    assert drawn[0] == drawn[-1] == pytest.approx(-120.0)
+    plt.close(fig)
+
+
+def test_a_transfer_function_null_is_drawn_on_its_floor():
+    fig, (ax_mag, _) = plot_frf(np.array([10.0, 100.0, 1000.0]),
+                                np.array([1.0 + 0j, 0.0, 0.5]),
+                                dynamic_range_dB=80.0)
+    assert ax_mag.lines[0].get_ydata()[1] == pytest.approx(-80.0)
+    plt.close(fig)
+
+
+def test_an_undefined_transfer_function_bin_stays_blank_and_sets_no_floor():
+    """A NaN bin (no input energy there) is drawn blank; the floor of the
+    other bins still follows their own peak."""
+    fig, (ax_mag, _) = plot_frf(np.array([10.0, 100.0, 1000.0, 2000.0]),
+                                np.array([1.0 + 0j, np.nan, 0.0, 0.1]),
+                                dynamic_range_dB=60.0)
+    drawn = ax_mag.lines[0].get_ydata()
+    assert np.isnan(drawn[1])
+    np.testing.assert_allclose(drawn[[0, 2, 3]], [0.0, -60.0, -20.0],
+                               atol=1e-12)
+    plt.close(fig)

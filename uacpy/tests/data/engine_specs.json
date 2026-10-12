@@ -1,0 +1,997 @@
+{
+ "bellhop": {
+  "class": "Bellhop",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "r0",
+    "surface": "r0"
+   },
+   "default_run_mode": "COHERENT_TL",
+   "features": {
+    "altimetry": true,
+    "elastic_media": true,
+    "layered_bottom": false,
+    "multi_source_depth": true,
+    "range_dependent_bathymetry": true,
+    "range_dependent_bottom": true,
+    "range_dependent_ssp": true,
+    "rough_bottom": false,
+    "rough_surface": false,
+    "source_beam_pattern": true,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "field",
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supported_modes": [
+    "COHERENT_TL",
+    "INCOHERENT_TL",
+    "SEMICOHERENT_TL",
+    "RAYS",
+    "EIGENRAYS",
+    "ARRIVALS",
+    "BROADBAND",
+    "TIME_SERIES"
+   ]
+  },
+  "spec": {
+   "collapse": {},
+   "modes": [
+    "COHERENT_TL",
+    "INCOHERENT_TL",
+    "SEMICOHERENT_TL",
+    "RAYS",
+    "EIGENRAYS",
+    "ARRIVALS",
+    "BROADBAND",
+    "TIME_SERIES"
+   ],
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supports": [
+    "altimetry",
+    "elastic_media",
+    "range_dependent_bathymetry",
+    "range_dependent_bottom",
+    "source_beam_pattern"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": true,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "INCOHERENT_TL",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [
+     "EIGENRAYS"
+    ],
+    "receivers_reach_sediment": false,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": "synthesises p(t) by delay-and-sum from a single arrivals run at fc"
+   }
+  }
+ },
+ "bounce": {
+  "class": "Bounce",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "r0",
+    "surface": "r0"
+   },
+   "default_run_mode": "REFLECTION",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": false,
+    "rough_surface": false,
+    "source_beam_pattern": false,
+    "volume_attenuation": false
+   },
+   "multi_depth_source_in_default_mode": "ignored",
+   "source_types": [
+    "line",
+    "point",
+    "scaled"
+   ],
+   "supported_modes": [
+    "REFLECTION"
+   ]
+  },
+  "spec": {
+   "collapse": {},
+   "modes": [
+    "REFLECTION"
+   ],
+   "source_types": [
+    "line",
+    "point",
+    "scaled"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND",
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": false,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": false,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [
+     "REFLECTION"
+    ],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": false,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "REFLECTION",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "kraken": {
+  "class": "Kraken",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "r0",
+    "surface": "r0"
+   },
+   "default_run_mode": "COHERENT_TL",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": true,
+    "range_dependent_bathymetry": true,
+    "range_dependent_bottom": true,
+    "range_dependent_ssp": true,
+    "rough_bottom": true,
+    "rough_surface": true,
+    "source_beam_pattern": true,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "field",
+   "source_types": [
+    "line",
+    "point",
+    "scaled"
+   ],
+   "supported_modes": [
+    "MODES",
+    "COHERENT_TL",
+    "INCOHERENT_TL",
+    "BROADBAND",
+    "TIME_SERIES"
+   ]
+  },
+  "spec": {
+   "collapse": {},
+   "modes": [
+    "MODES",
+    "COHERENT_TL",
+    "INCOHERENT_TL",
+    "BROADBAND",
+    "TIME_SERIES"
+   ],
+   "source_types": [
+    "line",
+    "point",
+    "scaled"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom",
+    "range_dependent_bathymetry",
+    "range_dependent_bottom",
+    "range_dependent_ssp",
+    "rough_bottom",
+    "rough_surface",
+    "source_beam_pattern"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND",
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [
+     "No modes for given phase speed interval"
+    ],
+    "consumes_run_t_start": true,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [
+     "COHERENT_TL",
+     "INCOHERENT_TL",
+     "MODES"
+    ],
+    "none_receiver_modes": [
+     "MODES"
+    ],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "oasn": {
+  "class": "OASN",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "mean",
+    "surface": "r0"
+   },
+   "default_run_mode": "COVARIANCE",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": true,
+    "rough_surface": true,
+    "source_beam_pattern": false,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "refused",
+   "source_types": [
+    "point"
+   ],
+   "supported_modes": [
+    "COVARIANCE",
+    "REPLICA"
+   ]
+  },
+  "spec": {
+   "collapse": {
+    "ssp": "mean"
+   },
+   "modes": [
+    "COVARIANCE",
+    "REPLICA"
+   ],
+   "source_types": [
+    "point"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom",
+    "rough_bottom",
+    "rough_surface"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND",
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": false,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "oasp": {
+  "class": "OASP",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "mean",
+    "surface": "r0"
+   },
+   "default_run_mode": "COHERENT_TL",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": true,
+    "rough_surface": true,
+    "source_beam_pattern": false,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "field",
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supported_modes": [
+    "COHERENT_TL",
+    "BROADBAND",
+    "TIME_SERIES"
+   ]
+  },
+  "spec": {
+   "collapse": {
+    "ssp": "mean"
+   },
+   "modes": [
+    "COHERENT_TL",
+    "BROADBAND",
+    "TIME_SERIES"
+   ],
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom",
+    "rough_bottom",
+    "rough_surface"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": true,
+    "consumes_single_mode_frequencies": true,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "oasr": {
+  "class": "OASR",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "r0",
+    "surface": "r0"
+   },
+   "default_run_mode": "REFLECTION",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": true,
+    "rough_surface": false,
+    "source_beam_pattern": false,
+    "volume_attenuation": false
+   },
+   "multi_depth_source_in_default_mode": "refused",
+   "source_types": [
+    "line",
+    "point",
+    "scaled"
+   ],
+   "supported_modes": [
+    "REFLECTION"
+   ]
+  },
+  "spec": {
+   "collapse": {},
+   "modes": [
+    "REFLECTION"
+   ],
+   "source_types": [
+    "line",
+    "point",
+    "scaled"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom",
+    "rough_bottom"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND",
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": false,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": false,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "oass": {
+  "class": "OASS",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "mean",
+    "surface": "r0"
+   },
+   "default_run_mode": "REVERBERATION",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": true,
+    "rough_surface": true,
+    "source_beam_pattern": false,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "refused",
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supported_modes": [
+    "REVERBERATION",
+    "COVARIANCE"
+   ]
+  },
+  "spec": {
+   "collapse": {
+    "ssp": "mean"
+   },
+   "modes": [
+    "REVERBERATION",
+    "COVARIANCE"
+   ],
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom",
+    "rough_bottom",
+    "rough_surface"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND",
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": false,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "oassp": {
+  "class": "OASSP",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "mean",
+    "surface": "r0"
+   },
+   "default_run_mode": "BROADBAND",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": true,
+    "rough_surface": true,
+    "source_beam_pattern": false,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "field",
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supported_modes": [
+    "BROADBAND",
+    "TIME_SERIES"
+   ]
+  },
+  "spec": {
+   "collapse": {
+    "ssp": "mean"
+   },
+   "modes": [
+    "BROADBAND",
+    "TIME_SERIES"
+   ],
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom",
+    "rough_bottom",
+    "rough_surface"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": true,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "oast": {
+  "class": "OAST",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "mean",
+    "surface": "r0"
+   },
+   "default_run_mode": "COHERENT_TL",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": true,
+    "rough_surface": true,
+    "source_beam_pattern": false,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "field",
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supported_modes": [
+    "COHERENT_TL"
+   ]
+  },
+  "spec": {
+   "collapse": {
+    "ssp": "mean"
+   },
+   "modes": [
+    "COHERENT_TL"
+   ],
+   "source_types": [
+    "line",
+    "point"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom",
+    "rough_bottom",
+    "rough_surface"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND",
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": false,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "ram": {
+  "class": "RAM",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "r0",
+    "surface": "r0"
+   },
+   "default_run_mode": "COHERENT_TL",
+   "features": {
+    "altimetry": true,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": true,
+    "range_dependent_bottom": true,
+    "range_dependent_ssp": true,
+    "rough_bottom": false,
+    "rough_surface": false,
+    "source_beam_pattern": false,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "field",
+   "source_types": [
+    "point"
+   ],
+   "supported_modes": [
+    "COHERENT_TL",
+    "BROADBAND",
+    "TIME_SERIES"
+   ]
+  },
+  "spec": {
+   "collapse": {},
+   "modes": [
+    "COHERENT_TL",
+    "BROADBAND",
+    "TIME_SERIES"
+   ],
+   "source_types": [
+    "point"
+   ],
+   "supports": [
+    "altimetry",
+    "elastic_media",
+    "layered_bottom",
+    "range_dependent_bathymetry",
+    "range_dependent_bottom",
+    "range_dependent_ssp"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND",
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": true,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": false,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "scooter": {
+  "class": "Scooter",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "mean",
+    "surface": "r0"
+   },
+   "default_run_mode": "COHERENT_TL",
+   "features": {
+    "altimetry": false,
+    "elastic_media": true,
+    "layered_bottom": true,
+    "multi_source_depth": true,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": false,
+    "rough_surface": true,
+    "source_beam_pattern": false,
+    "volume_attenuation": true
+   },
+   "multi_depth_source_in_default_mode": "field",
+   "source_types": [
+    "line",
+    "point",
+    "scaled"
+   ],
+   "supported_modes": [
+    "COHERENT_TL",
+    "BROADBAND",
+    "TIME_SERIES"
+   ]
+  },
+  "spec": {
+   "collapse": {
+    "ssp": "mean"
+   },
+   "modes": [
+    "COHERENT_TL",
+    "BROADBAND",
+    "TIME_SERIES"
+   ],
+   "source_types": [
+    "line",
+    "point",
+    "scaled"
+   ],
+   "supports": [
+    "elastic_media",
+    "layered_bottom",
+    "rough_surface"
+   ],
+   "traits": {
+    "announced_band_modes": [
+     "BROADBAND",
+     "TIME_SERIES"
+    ],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": true,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": true,
+    "native_multi_depth_modes": [
+     "COHERENT_TL"
+    ],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": true,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ },
+ "sparc": {
+  "class": "SPARC",
+  "instance": {
+   "collapse": {
+    "altimetry": "drop",
+    "bathymetry": "max",
+    "bottom_layers": "halfspace",
+    "bottom_range": "median",
+    "elastic": "fluid",
+    "ssp": "mean",
+    "surface": "r0"
+   },
+   "default_run_mode": "TIME_SERIES",
+   "features": {
+    "altimetry": false,
+    "elastic_media": false,
+    "layered_bottom": true,
+    "multi_source_depth": false,
+    "range_dependent_bathymetry": false,
+    "range_dependent_bottom": false,
+    "range_dependent_ssp": false,
+    "rough_bottom": false,
+    "rough_surface": false,
+    "source_beam_pattern": false,
+    "volume_attenuation": false
+   },
+   "multi_depth_source_in_default_mode": "field",
+   "source_types": [
+    "point"
+   ],
+   "supported_modes": [
+    "TIME_SERIES"
+   ]
+  },
+  "spec": {
+   "collapse": {
+    "ssp": "mean"
+   },
+   "modes": [
+    "TIME_SERIES"
+   ],
+   "source_types": [
+    "point"
+   ],
+   "supports": [
+    "layered_bottom"
+   ],
+   "traits": {
+    "announced_band_modes": [],
+    "benign_fortran_fatals": [],
+    "consumes_run_t_start": false,
+    "consumes_single_mode_frequencies": false,
+    "consumes_volume_absorption": false,
+    "native_multi_depth_modes": [],
+    "none_receiver_modes": [],
+    "pads_pulse_to_output_duration": false,
+    "python_stacked_modes": [],
+    "receivers_reach_sediment": true,
+    "single_frequency_modes": [
+     "ARRIVALS",
+     "COHERENT_TL",
+     "EIGENRAYS",
+     "INCOHERENT_TL",
+     "MODES",
+     "RAYS",
+     "SEMICOHERENT_TL"
+    ],
+    "time_series_ignores_frequencies": null
+   }
+  }
+ }
+}

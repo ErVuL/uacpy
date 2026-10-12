@@ -37,7 +37,7 @@ OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
 OUT.mkdir(parents=True, exist_ok=True)
 
 # ── The two models over the full band, at standard conditions ───────────────
-frequencies = np.logspace(1, 6, 500)                 # 10 Hz - 1 MHz
+frequencies = np.logspace(1, 6, 501)     # 10 Hz - 1 MHz, every decade a sample
 TEMPERATURE, SALINITY, PH, DEPTH = 10.0, 35.0, 8.0, 100.0
 a_thorp = uacpy.Thorp().table(frequencies)
 # The band runs below the 200 Hz Francois & Garrison fitted down to, on
@@ -61,25 +61,26 @@ for probe in (100, 1000, 10000, 100000):
 
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 # A carrier draws itself on log-log axes; a second .plot() with the same ax=
-# overlays the other model.
-a_thorp.plot(ax=axes[0], label='Thorp (1967)',
-             title='Attenuation vs frequency (full range)',
-             color='b', linewidth=2.5, alpha=0.8)
+# overlays the other model. Each call sets the axes title (its default when
+# title= is not given), so the title goes on the last one.
+a_thorp.plot(ax=axes[0], label='Thorp (1967)', color='b', linewidth=2.5,
+             alpha=0.8)
 a_francois.plot(ax=axes[0], label='Francois-Garrison (1982)', color='r',
-                linewidth=2.5, alpha=0.8)
+                linewidth=2.5, alpha=0.8,
+                title='Attenuation vs frequency (full range)')
 axes[0].set_xlim([frequencies[0], frequencies[-1]])
 
 low_band = frequencies[frequencies <= 10000]
 uacpy.Thorp().table(low_band).plot(
-    ax=axes[1], label='Thorp', title='Low frequency (10 Hz - 10 kHz)',
-    color='b', linewidth=2.5, alpha=0.8)
+    ax=axes[1], label='Thorp', color='b', linewidth=2.5, alpha=0.8)
 with warnings.catch_warnings():          # the same sub-200 Hz notice
     warnings.simplefilter('ignore', uacpy.ValidityWarning)
     low_francois = uacpy.FrancoisGarrison(
         temperature=TEMPERATURE, salinity=SALINITY,
         pH=PH).table(low_band, depths=DEPTH)
 low_francois.plot(ax=axes[1], label='Francois-Garrison', color='r',
-                  linewidth=2.5, alpha=0.8)
+                  linewidth=2.5, alpha=0.8,
+                  title='Low frequency (10 Hz - 10 kHz)')
 axes[1].set_yscale('linear')
 
 axes[2].semilogx(frequencies / 1000, francois - thorp, 'g-', linewidth=2.5)
@@ -174,7 +175,8 @@ fig, ax = plt.subplots(figsize=(8, 5))
 ax.plot(ranges_km, per_km * ranges_km, 'b-', linewidth=2.5)
 ax.set_xlabel('Range (km)', fontweight='bold')
 ax.set_ylabel('Total attenuation loss (dB)', fontweight='bold')
-ax.set_title(f'Cumulative attenuation vs range ({PROBE_HZ / 1000:.0f} kHz)',
+ax.set_title(f'Cumulative Thorp attenuation vs range '
+             f'({PROBE_HZ / 1000:.0f} kHz)',
              fontweight='bold', fontsize='large')
 ax.grid(True, alpha=0.3)
 fig.tight_layout()

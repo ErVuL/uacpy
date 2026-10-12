@@ -3,6 +3,8 @@
 parallel run returns what a direct run returns, are held for every registered
 engine by ``test_engine_conformance.py``."""
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -33,29 +35,77 @@ def _tiny_field(value):
     )
 
 
-def test_parallelresult_collect_and_stack():
+def test_parallelresult_collect_and_stack_fields_into_one_field():
     f0, f2 = _tiny_field(1.0), _tiny_field(2.0)
     sr = ParallelResult(
         results=[f0, None, f2],
         errors={1: ValueError('boom')},
         labels=[10.0, 20.0, 30.0],
-        coordinate_name='depth',
+        coordinate_name='sweep',
     )
     assert not sr.ok
     assert len(sr) == 3
     assert sr[1] is None and isinstance(sr.errors[1], ValueError)
     assert [r for r in sr].count(None) == 1
 
-    stack = sr.stack()                       # skips the failed case
-    assert len(stack) == 2
-    assert np.array_equal(stack.coordinate, np.array([10.0, 30.0]))  # labels
+    joined = sr.stack()                      # skips the failed case
+    assert isinstance(joined, uacpy.Field)
+    assert list(joined.coords) == ['sweep', 'depth', 'range']
+    np.testing.assert_array_equal(joined.coords['sweep'], [10.0, 30.0])
+    np.testing.assert_array_equal(joined.isel(sweep=0).data, f0.data)
+    np.testing.assert_array_equal(joined.at(sweep=30.0).data, f2.data)
 
+
+def test_parallelresult_stacks_sparse_results_into_a_result_stack():
+    rays = [uacpy.Rays(rays=[], model='T', frequencies=100.0,
+                       source_depths=[5.0]) for _ in range(3)]
+    sr = ParallelResult(results=[rays[0], None, rays[2]],
+                        errors={1: ValueError('boom')},
+                        labels=[10.0, 20.0, 30.0], coordinate_name='sweep')
+    stack = sr.stack()
+    assert isinstance(stack, uacpy.ResultStack) and len(stack) == 2
+    np.testing.assert_array_equal(stack.coordinate, [10.0, 30.0])
     # isel: positional slab selection, parity with stack[i] and at().
-    assert stack.isel(depth=0) is stack[0]
-    assert stack.isel(depth=1) is stack.at(depth=30.0)   # label 30 → index 1
+    assert stack.isel(sweep=0) is stack[0]
+    assert stack.isel(sweep=1) is stack.at(sweep=30.0)   # label 30 → index 1
     with pytest.raises(uacpy.ConfigurationError,
                        match='pass exactly the stacking-axis keyword'):
         stack.isel(range=0)                              # wrong (non-stacking) axis
+
+
+def test_a_sweep_named_after_an_axis_of_the_fields_is_refused():
+    sr = ParallelResult(results=[_tiny_field(1.0), _tiny_field(2.0)],
+                        errors={}, labels=[10.0, 20.0],
+                        coordinate_name='depth')
+    with pytest.raises(uacpy.ConfigurationError,
+                       match="already carry a 'depth' axis"):
+        sr.stack()
+
+
+@pytest.mark.parametrize('labels', [[True, False], ['1', '2'],
+                                    [1.0 + 0j, 2.0 + 0j],
+                                    [np.array(True), np.array(False)],
+                                    [10.0, 'baseline'], [True, 100.0]])
+def test_labels_that_are_not_real_numbers_stack_on_the_job_index(labels):
+    """A label is a coordinate only when it is a real number: read as one, a
+    bool would be 1 or 0, text what it spells, a complex value its real
+    part. Such labels give the job index, with the warning that says so."""
+    sr = ParallelResult(results=[_tiny_field(1.0), _tiny_field(2.0)],
+                        errors={}, labels=labels, coordinate_name='case')
+    with pytest.warns(uacpy.core.exceptions.FallbackWarning,
+                      match='not all real numbers'):
+        stacked = sr.stack()
+    np.testing.assert_array_equal(stacked.coords['case'], [0.0, 1.0])
+
+
+def test_real_labels_are_the_stack_coordinate():
+    sr = ParallelResult(results=[_tiny_field(1.0), _tiny_field(2.0)],
+                        errors={}, labels=[np.int64(3), np.array(7.5)],
+                        coordinate_name='case')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', uacpy.core.exceptions.FallbackWarning)
+        stacked = sr.stack()
+    np.testing.assert_array_equal(stacked.coords['case'], [3.0, 7.5])
 
 
 def test_parallelresult_stack_all_failed_raises():
@@ -344,9 +394,17 @@ def test_run_parallel_knob_sweep(pekeris_env):
     batch = run_parallel(jobs, n_workers=3, coordinate_name='n_beams')
     assert batch.ok and len(batch) == 3
     assert all(np.isfinite(np.nanmax(r.dB)) for r in batch)
-    stack = batch.stack()
-    assert len(stack) == 3
-    assert np.array_equal(stack.coordinate, np.array([200.0, 400.0, 800.0]))
+    joined = batch.stack()
+    assert list(joined.coords)[0] == 'n_beams'
+    np.testing.assert_array_equal(joined.coords['n_beams'],
+                                  [200.0, 400.0, 800.0])
+    # The planes ran under different settings, so the joined field carries
+    # no one record; each job's stays on its result, and the waveguide
+    # speeds every record stated stay on the joined field.
+    assert joined.run_settings is None
+    assert [r.run_settings.engine.n_beams for r in batch] == [200, 400, 800]
+    assert joined.speeds == batch.results[0].speeds
+    assert joined.speeds.waveguide_max is not None
 
     for job, par in zip(jobs, batch):
         ser = job.model.run(job.env, job.source, job.receiver,
@@ -375,6 +433,11 @@ def test_run_parallel_scenario_sweep(pekeris_env):
     assert batch.ok and len(batch) == 3
     maxes = [float(np.nanmax(r.dB)) for r in batch]
     assert len(set(np.round(maxes, 3))) > 1
+    # One-depth runs differing only in their source depth join into the
+    # record of the multi-depth run they make up.
+    joined = batch.stack()
+    np.testing.assert_array_equal(joined.run_settings.source_depths, depths)
+    assert joined.run_settings.depth_loop == 'per_depth'
 
 
 @pytest.mark.requires_binary
@@ -708,6 +771,42 @@ def test_a_workers_warnings_reach_the_caller_and_the_result():
                             1: [(UserWarning, 'cells of b are NaN')]}
 
 
+class _UnderResolvedModel:
+    """A picklable stand-in model whose run warns a NumericsWarning, then a
+    FallbackWarning, and returns its label."""
+
+    def run(self, env, source, receiver, run_mode=None, **kw):
+        import warnings
+        warnings.warn(f"grid of {env} is coarse", uacpy.NumericsWarning)
+        warnings.warn(f"{env} collapsed", uacpy.FallbackWarning)
+        return env
+
+
+def test_a_warning_the_caller_makes_an_error_fails_its_job_and_drops_it():
+    """Workers do not inherit the caller's filters, so a warning made an
+    error raises when it is re-emitted: that job fails, keeps no result
+    (so ``stack`` cannot include it) and still lists every warning it
+    recorded; without the filter the same jobs succeed."""
+    import warnings
+    jobs = [Job(model=_UnderResolvedModel(), env=name, source=None,
+                receiver=None) for name in ('a', 'b')]
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', uacpy.NumericsWarning)
+        warnings.simplefilter('ignore', uacpy.FallbackWarning)
+        out = run_parallel(jobs, n_workers=1, raise_on_error=False)
+    assert out.results == [None, None]
+    assert sorted(out.errors) == [0, 1]
+    assert all(isinstance(e, uacpy.NumericsWarning)
+               for e in out.errors.values())
+    assert out.warnings[0] == [(uacpy.NumericsWarning, 'grid of a is coarse'),
+                               (uacpy.FallbackWarning, 'a collapsed')]
+    assert not out.ok
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        clean = run_parallel(jobs, n_workers=1, raise_on_error=False)
+    assert clean.results == ['a', 'b'] and clean.ok
+
+
 def test_a_worker_launches_its_engines_single_threaded(monkeypatch):
     """RA-CONTRACT-6: the pool supplies the parallelism, so the worker
     initializer makes every engine launch single-threaded (bellhopcxx
@@ -756,10 +855,23 @@ def test_bellhopcxx_in_a_worker_runs_one_thread_and_reads_merged_arrivals(
 
 
 def test_stacking_jobs_that_returned_stacks_is_refused():
-    """RA-CONTRACT-17: a multi-depth job returns a ResultStack, and a stack
-    of stacks neither superposes nor plots; ``stack()`` says so."""
-    from uacpy.core.results import Field, ResultStack
-    f = Field(data=np.ones((1, 1)), coords={'depth': [1.0], 'range': [1.0]})
-    inner = ResultStack([f, f], [10.0, 20.0], coordinate_name='source_depth')
+    """A multi-depth ray or arrival job returns a ResultStack, and a stack
+    of stacks is not one result; ``stack()`` says so."""
+    from uacpy.core.results import Rays, ResultStack
+    rays = Rays(rays=[], model='T', frequencies=100.0)
+    inner = ResultStack([rays, rays], [10.0, 20.0],
+                        coordinate_name='source_depth')
     with pytest.raises(uacpy.ConfigurationError, match='ResultStack'):
         ParallelResult([inner, inner], {}, [1, 2]).stack()
+
+
+def test_jobs_that_returned_a_field_over_source_depths_join_on_a_new_axis():
+    """A multi-depth job's Field already carries ``source_depth``; the
+    sweep adds its own axis in front of it."""
+    from uacpy.core.results import stack_fields
+    pair = stack_fields([_tiny_field(1.0),
+                         _tiny_field(2.0).replace(source_depths=[15.0])],
+                        [5.0, 15.0])
+    joined = ParallelResult([pair, pair], {}, [1.0, 2.0],
+                            coordinate_name='case').stack()
+    assert list(joined.coords) == ['case', 'source_depth', 'depth', 'range']

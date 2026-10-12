@@ -6,8 +6,10 @@ The point is that uacpy's surface convention (env.altimetry, positive up from
 sea level) hands both models the same physical scenario, and that the two then
 agree to a few dB.
 
-A flipped altimetry sign would push the RMSE past 25 dB, which is what the
-regression test `altimetry-consistency-bellhop-vs-ramsurf` guards on every run.
+A flipped altimetry sign hands ramsurf a surface above sea level, which it
+clamps back to flat; the regression test
+`altimetry-consistency-bellhop-vs-ramsurf` (tests/test_cross_model_agreement.py)
+catches that by holding this pair to an RMSE of 4.5 dB over 1-5 km.
 
 Uses: env altimetry through two different solvers · Field.backend ·
 metrics.tl_rmse / tl_max_error / tl_bias(range_window=) · Field.at() ·
@@ -71,13 +73,10 @@ uacpy.plot.compare([bellhop.at(depth=50.0), ram.at(depth=50.0)],
                          f'{tl_rmse(ram, bellhop, range_window=window):.2f} dB')
 
 ax_diff.axhline(0, color='k', lw=0.5)
+# Ray and PE diverge past ~3 km as surface multipaths accumulate; the single
+# large spikes are interference nulls the two place a little apart.
 ax_diff.plot(receiver.ranges / 1000, ram.dB[0] - bellhop.dB[0], 'b-', lw=1.0,
              label='RAM − Bellhop')
-# 8 dB is the empirical bar the cross-model test holds this pair to over 1-5 km
-# (tolerance_dB=8.0): ray and PE diverge past ~3 km as surface multipaths
-# accumulate, while a flipped altimetry sign would push the RMSE past 25 dB.
-ax_diff.fill_between(receiver.ranges / 1000, -8, 8, color='green', alpha=0.15,
-                     label='±8 dB regression band')
 ax_diff.set_xlabel('Range (km)')
 ax_diff.set_ylabel('Δ TL (dB)')
 ax_diff.set_ylim(-25, 25)

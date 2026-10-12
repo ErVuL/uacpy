@@ -93,6 +93,16 @@ class TestAltimetryLongFormat:
         assert np.allclose(ati.density, [0.9, 0.91, 0.92])
         assert np.allclose(ati.shear_attenuation, [0.2, 0.21, 0.22])
 
+    def test_the_repr_states_no_unit_for_the_attenuations(self, tmp_path):
+        """The attenuations are in whatever unit the env deck's TopOpt(3)
+        names, which the file does not record: the repr labels the speeds
+        and the density, never the attenuations as dB/λ."""
+        from uacpy.io.bathy_io import read_altimetry
+        p = tmp_path / 'ice.ati'
+        p.write_text(self.LONG_ATI)
+        text = repr(read_altimetry(p))
+        assert 'm/s' in text and 'dB/λ' not in text
+
     def test_short_format_yields_two_rows(self, tmp_path):
         from uacpy.io.bathy_io import read_altimetry, write_ati_file
         pairs = np.array([[0.0, 0.0], [2500.0, 2.0], [5000.0, 0.0]])

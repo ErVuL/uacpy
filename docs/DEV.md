@@ -28,7 +28,7 @@ plumbing, start here; the table below says which section to read.
 | Results (`Field`, `Arrivals`, ...) | `uacpy/core/results/` (§5) |
 | Save / load / xarray / NetCDF | the export protocol, `uacpy/core/_export.py` (§5.1) |
 | A file format | `uacpy/io/` (§4) |
-| Plotters | `uacpy/visualization/plots/`, the `_PLOTTERS` table (§7) |
+| Plotters | `uacpy/visualization/plots/`; each drawable class names its plotter in `_plotter` (§7) |
 | Errors and warning classes | `uacpy/core/exceptions.py` (§6.5) |
 | How an object prints (`repr`) | `uacpy/core/_repr.py` (§5.2) |
 | What a metadata key means | `_DOCUMENTED_METADATA` in `uacpy/core/results/_base.py` |
@@ -79,6 +79,11 @@ uacpy/
     ├── metrics.py           tl_rmse / tl_max_error / tl_bias (core.metrics shim)
     ├── _log.py              Single log channel + warning formatter
     ├── _stack.py            Child-only RLIMIT_STACK raise for model binaries
+    ├── __main__.py          `python -m uacpy`: version, engine_status table, verdict
+    ├── acoustics.py, plot.py, materials.py, units.py
+    │                        the public facades over core / visualization (§7)
+    ├── analytic.py          closed-form reference fields (free field, Lloyd
+    │                        mirror, ideal and Pekeris waveguides)
     └── _version.py          `__version__`; pyproject reads it via `dynamic`
 ```
 
@@ -109,14 +114,21 @@ helpers in `_common.py`, `_sampling.py` and `_mean_field.py`.
 `_spec.py` (`ModelSpec`, `EngineTraits`, the capability-flag vocabulary),
 `_registry.py` (`ENGINES`), `_knobs.py` (knob validators, §2.3),
 `_replay.py` (`from_run_settings`), `_projection.py` (collapse policy),
-`_checks.py` (carrier and geometry checks of stages 1-2), `_band.py` (the
-frequency grid of a BROADBAND / TIME_SERIES run), `_window.py` (the
+`_checks.py` (the checks of stages 1-2: the signature of a model's own
+`run`, the run keywords a mode does not read, the carrier and geometry
+checks, the TIME_SERIES pulse pair), `_band.py` (the frequency grid and the
+time request of a BROADBAND / TIME_SERIES run), `_window.py` (the
 Acoustics-Toolbox phase-speed window), `_budget.py` (the memory a run will
-hold), `_workspace.py` (`FileManager`, §6.1), `_launch.py` (§6.4),
-`_stacking.py` (the source-depth loop), `_extract.py` (stages 5-6),
+hold), `_workspace.py` (`FileManager`, §6.1, and the per-depth scratch
+redirect), `_launch.py` (§6.4),
+`_stacking.py` (the source-depth loop), `_status.py` (`engine_status`, the
+`EngineStatus` table of the binaries an install holds, which `python -m uacpy`
+prints), `_extract.py` (stages 5-6, and the synthesis that ends every
+IFFT-based broadband route),
 `_notices.py` (once-per-run notices), `_conventions.py` (cross-model level
 conventions), `_defaults.py` (what an unset knob resolves to),
 `_introspect.py` (constructor introspection behind `copy()` and `__repr__`),
+`_host.py` (the host options every constructor repeats, §2.3),
 and the public `pe_grid.py` (PE grid optimiser) and `provenance.py`.
 
 ---
@@ -139,7 +151,7 @@ The signature is **fixed and minimal** — no `**kwargs` anywhere, so an
 unknown keyword raises Python's standard `TypeError` at the call site. Every
 engine takes exactly these parameters; a keyword a run mode does not read is
 refused or warned about by the base, not silently dropped. The one sanctioned
-extension is the keyword-only `c_low`/`c_high`/`rmax` of
+extension is the keyword-only `c_low`/`c_high`/`rmax_m` of
 `Bellhop.run_with_bounce` — a *different method*, which tabulates the BOUNCE
 reflection table a single call consumes.
 
@@ -152,34 +164,77 @@ with `uacpy.run_parallel` over self-contained `Job`s (a process pool;
 `uacpy/parallel.py`).
 
 `run()` returns one `core.results.Result` subclass (`Field`, `Arrivals`,
-`Rays`, `Modes`, `Covariance`, `Replicas`, `ReflectionCoefficient`), or a
-`ResultStack` for a multi-depth source the engine runs one depth at a time.
+`Rays`, `Modes`, `Covariance`, `Replicas`, `ReflectionCoefficient`,
+`ResultStack`). A multi-depth source gives one `Field` over a leading
+`source_depth` axis in the field modes, and a `ResultStack` of rays or
+arrivals (one slab per depth) in Bellhop's sparse modes; the per-depth fields
+are joined, split and summed in `core/results/_superposition.py`.
 
-### 2.2 The six stages
+### 2.2 The six stages and the engine hooks
 
-`PropagationModel.run` is a template method. It runs these stages in order;
-the names in *italics* are the hooks an engine overrides.
+`PropagationModel.run` is a template method. It runs these stages in order:
 
-| Stage | What happens | Engine hooks |
-|---|---|---|
-| 1 normalise | argument and keyword checks; the environment projected onto what the engine reads (`spec.collapse`, §2.6) | *`_normalise_env`*, *`_project_environment`*, *`_check_time_series_request`* |
-| 2 validate | carrier types, geometry, source type against `spec.source_types`; the knobs re-checked (an attribute may have been reassigned) | *`_check_knobs`*, *`_validate_engine`* |
-| 3 resolve | one `RunSettings`: run mode, frequency grid, source-depth loop, time grid, output declaration; the engine's own record; each `Notice` of that record warned once | *`_requested_frequencies`*, *`_resolve_engine_settings`*, *`_marched_frequencies`* |
-| 4 execute | per source depth, per launch: write the deck, launch the binary, read its output | *`_n_launches`*, *`_prepare_launches`*, **`_write_input`**, **`_launch`**, **`_read_output`** |
-| 5 extract | the result built, then checked against `outputs[run_mode]` | **`_to_result`** |
-| 6 stamp | `run_mode` and the `RunSettings` recorded on the result | — |
+| Stage | What happens |
+|---|---|
+| 1 normalise | argument and keyword checks, the run mode resolved; the environment projected onto what the engine reads (`spec.collapse`, §2.6) |
+| 2 validate | the TIME_SERIES pulse pair, carrier types, geometry, source type against `spec.source_types`; the knobs re-checked (an attribute may have been reassigned) |
+| 3 resolve | one `RunSettings`: run mode, frequency grid, source-depth loop, time grid, output declaration; the engine's own record; each `Notice` of that record warned once |
+| 4 execute | per source depth, per launch: write the deck, launch the binary, read its output |
+| 5 extract | the result built, then checked against `outputs[run_mode]` |
+| 6 stamp | `run_mode` and the `RunSettings` recorded on the result |
+
+An engine supplies what is its own by overriding a hook. The table below is
+every member of `PropagationModel` an engine may override (`_ENGINE_HOOKS` in
+`models/base.py`), the stage that reads it, what the base does, and the
+engines that override it; `test_dev_lists_every_engine_hook` holds it to the
+code (a hook added, removed or newly overridden fails it).
+
+| Hook | Stage | Base default | Overridden by |
+|---|---|---|---|
+| `provenance` | identity | the `MODEL_PROVENANCE` entry of `provenance_id` | Bellhop |
+| `_check_knobs` | construction, 2 | nothing to refuse | every engine |
+| `_default_backend` | identity | the first `_BINARIES` key (`None` without one) | Bellhop |
+| `_repr_backend` | identity | `None`: `__repr__` names no backend for `backend=None` | Bellhop |
+| `_per_launch_knob_values` | rebuilt model (§2.3) | `{}`: no knob is derived per launch | Kraken, RAM |
+| `_default_run_mode` | 1 | the first of `spec.modes` | Kraken |
+| `_default_run_mode_for` | 1 | `_default_run_mode()`, whatever `frequencies=` holds | Kraken |
+| `_refuse_run_mode` | 1 | nothing: the generic `UnsupportedFeatureError` follows | SPARC |
+| `_normalise_env` | 1 | the environment as given | Kraken |
+| `_project_environment` | 1 | the collapse projection, one `FallbackWarning` per dropped feature (an override calls `super()`) | Bellhop, Kraken, RAM, Scooter |
+| `_check_time_series_request` | 2 | refuses a missing or unusable pulse pair (`_checks.require_timeseries_signal`) | SPARC |
+| `_multi_frequency_refusal` | 2 | a `ConfigurationError` pointing at `BROADBAND` / `TIME_SERIES` | Bounce, OAST |
+| `_validate_geometry` | 2 | beam pattern, multi-depth source, source depths, receiver grid | Bellhop, Bounce |
+| `_check_source_depths` | 2 | refuses a source below `_max_receiver_depth` | RAM |
+| `_max_receiver_depth` | 2 | the seafloor, or the deepest interface with `spec.traits.receivers_reach_sediment` | RAM |
+| `_source_below_domain_note` | 2 | `None`: no paragraph added to the source-depth refusal | — |
+| `_receiver_grid_is_paired` | 2 | `False`: the deck spans the depth-by-range product | Bellhop |
+| `_validate_engine` | 2 | nothing to refuse | Bellhop, Bounce, Kraken, OASP, OASS, OASSP, OAST, RAM, SPARC, Scooter |
+| `_broadband_band_knobs` | 3 | `(None, None)`: the package's band defaults | Bellhop |
+| `_requested_frequencies` | 3 | `_band.resolve_band` with the band knobs | OASP, OASSP, RAM, SPARC |
+| `_resolve_engine_settings` | 3 | `None`: no settings of its own | every engine |
+| `_announce_engine_settings` | 3 | one warning per notice of `settings.engine.notices` | OASS, OASSP |
+| `_marched_frequencies` | 3 | `settings.frequencies` | OASP, OASSP, SPARC |
+| `_n_launches` | 4 | 1 | Bellhop, Kraken, OASS, OASSP, RAM, SPARC |
+| `_prepare_launches` | 4 | `None`: nothing built once for every launch | Bellhop, Kraken, OASS, OASSP, RAM |
+| **`_write_input`** | 4 | abstract | every engine |
+| **`_launch`** | 4 | abstract | every engine |
+| **`_read_output`** | 4 | abstract | every engine |
+| **`_to_result`** | 5 | abstract | every engine |
 
 The four **bold** hooks are abstract: an engine class that lacks one cannot be
 instantiated. Stages 1-3 never launch anything, so two public methods stop
 there: `run_settings()` returns the `RunSettings` a `run()` with the same
 arguments would use (and emits the same warnings), and `validate_inputs()`
-runs the same refusals and announces nothing. A refusal therefore reads the
-same from all three entry points.
+runs the same refusals and gives none of the stage-3 notices (the resolved
+settings', the band's); the warnings of stages 1-2 — an environment collapsed
+to what the engine can run, a geometry warning — fire as in `run()`. A
+refusal therefore reads the same from all three entry points.
 
 An engine that another engine runs first (BOUNCE for Bellhop's seabed, the
-OASES mean field for OASS / OASSP) is reached through the producer hooks
-`_producer_settings`, `_write_producer_deck` and `_launch_producer`, so the
-producer runs the same projection and checks as a direct run.
+OASES mean field for OASS / OASSP) is reached through the producer's
+`_producer_settings`, `_write_producer_deck`, `_launch_producer` and
+`_run_producer_launch`, so the producer runs the same projection and checks
+as a direct run.
 
 ### 2.3 Knobs and the run record
 
@@ -194,6 +249,22 @@ Each engine validates its knobs in `_check_knobs`, which runs at construction
 and again in stage 2, using the shared validators in `models/_knobs.py`
 (`positive_finite`, `whole_count`), which raise `ConfigurationError` naming
 the knob and the value.
+
+The **host options** — `use_tmpfs`, `verbose`, `work_dir`, `cleanup`,
+`timeout` and the `collapse` policy (§2.6) — are declared once, as the
+keyword parameters of `PropagationModel.__init__` (`_HOST_OPTIONS` in
+`models/base.py`), and validated and stored once, by
+`models/_host.py`'s `set_host_options`. Every engine constructor repeats them
+as explicit keyword-only parameters with the base's defaults and
+annotations, so `help()` and `inspect.signature` list every knob and a
+misspelt one is a `TypeError`; a copy that differs, or a `**kwargs` sink, is
+a `TypeError` naming the class and the parameter when the class is defined
+(`check_host_parameters`, called by `__init_subclass__`;
+`test_a_constructor_whose_host_options_differ_is_refused`). The constructor
+forwards them with one call as its first statement,
+`super().__init__(**_host_options(locals()))`: the host options among the
+constructor's own parameters, named nowhere else, so a new host option is
+the base's parameter plus one parameter in each engine's signature.
 
 Stage 3 records the knobs. `RunSettings.engine` is the engine's
 `<Engine>Settings` record (an `EngineSettings` subclass): its `knobs` field
@@ -212,7 +283,7 @@ an explicit knob. Two kinds of value are not pinned:
 - values derived once per launch (per range segment for Kraken, per
   frequency for RAM), declared by `_per_launch_knob_values`. When they differ
   between launches, the rebuilt model keeps the recorded values, and its first
-  run warns (`ProvenanceWarning`) for each one it now derives differently.
+  run warns (`ProvenanceWarning`) for each one it derives differently.
 
 `EngineSettings.to_dataframe()` tabulates the per-launch records of an engine
 that has them.
@@ -247,6 +318,10 @@ coherent=)`. Stage 5 compares the built result with it and raises
 drift.
 
 ### 2.5 The engine declaration: `ModelSpec`
+
+`ModelSpec` is a model-author type: `from uacpy.models import ModelSpec`. A
+user never builds one (an engine's own is `Bellhop.spec`), so the top-level
+`uacpy` namespace does not offer it.
 
 Each engine declares, in class attributes checked when the class is defined
 (`PropagationModel.__init_subclass__`, so a malformed declaration fails on
@@ -322,7 +397,8 @@ Bellhop.spec.supports                 # the declaration; says nothing about inte
 The two can differ on purpose: an engine may resolve a flag from its own
 constructor arguments in `__init__` (Bellhop turns `range_dependent_ssp` off
 when `interp_ssp` cannot carry a 2-D profile). `supports_feature` raises
-`ValueError` on a name that is not a flag, so a typo does not answer "no".
+`ConfigurationError` on a name that is not a flag, so a typo does not answer
+"no".
 
 ### 2.6 Collapse policy
 
@@ -332,25 +408,31 @@ to a default reduction method:
 ```
 'bathymetry'        : 'max'
 'ssp'               : 'r0'
-'bottom_range'      : 'r0'
+'bottom_range'      : 'median'
 'bottom_layers'     : 'halfspace'
-'altimetry'         : 'drop'
+'altimetry'         : 'drop'    # engines that cannot read it; Bellhop and RAM's ramsurf read it natively
 'surface'           : 'r0'      # r0 / rmax / mean / median (single boundary type)
 'elastic'           : 'fluid'
 ```
 
 `VALID_COLLAPSE_METHODS` enumerates the allowed values per key and is
-asserted at module import. Engine defaults go in `spec.collapse`, and user
+asserted at module import. Engine defaults go in `spec.collapse` (the one
+engine default is `ssp: 'mean'`, on Scooter, SPARC and every OASES model but
+OASR), and user
 overrides via `Model(collapse={'bathymetry': 'min', ...})` win over both.
 
 ### 2.7 Building the result
 
 Stages 5-6 live in `models/_extract.py`. An engine's `_to_result` builds the
-result with `result_kwargs(...)`, which fills the cross-model identification
-block every `Result` carries as attributes (`model`, `backend`,
-`source_depths`, `frequencies`, `phase_reference`), and attaches the files it
-wrote through `attach_output_paths(...)` (`'shd_file'`, `'arr_file'`, ... in
-`result.metadata`). Engine-specific extras go in `result.metadata`, and every
+result with `result_kwargs(self.model_name, self.provenance, source, ...)`,
+which fills the cross-model identification block every `Result` carries as
+attributes (`model`, `backend`, `source_depths`, `frequencies`,
+`phase_reference`), and attaches the files it wrote through
+`attach_output_paths(result, work_dir, base_name, cleanup=self.cleanup)`
+(`'shd_file'`, `'arr_file'`, ... in `result.metadata`). The engines call
+these and the other helpers of `models/_extract.py`, `models/_checks.py` and
+`models/_launch.py` as module functions, passing the engine's name, provenance
+or `cleanup` themselves; no method of the base wraps them. Engine-specific extras go in `result.metadata`, and every
 key is registered in `_DOCUMENTED_METADATA` (§3, step 8). Package code never
 reads a metadata key back: metadata is provenance for the user, not an input.
 
@@ -371,9 +453,13 @@ Every step names the test that fails when it is skipped.
    stage hooks, `_check_knobs` (required:
    `test_every_engine_re_checks_its_knobs_in_stage_2`), and as needed
    `_validate_engine` and `_resolve_engine_settings`, which returns the
-   engine's `<Engine>Settings` from `_settings.py`.
+   engine's `<Engine>Settings` from `_settings.py`; §2.2 lists every other
+   hook with its default.
 3. **The knobs.** Keyword-only, stored as `self.<name>`, each documented in the
-   engine's one Parameters section (§13.1).
+   engine's one Parameters section (§13.1). The constructor also takes the
+   host options (§2.3) and forwards them first:
+   `super().__init__(**_host_options(locals()))`
+   (`test_every_constructor_repeats_the_host_options_as_declared`).
 4. **The registry row.** Add an `EngineEntry` to `ENGINES` in
    `uacpy/models/_registry.py`: the module and class name, the constructor
    keywords a small example run needs (`example_kwargs`), the seabed it runs
@@ -386,18 +472,20 @@ Every step names the test that fails when it is skipped.
    the `TYPE_CHECKING` blocks of `uacpy/__init__.py` and
    `uacpy/models/__init__.py`, which type checkers read instead of the lazy
    tables (`tests/test_lazy_imports.py`).
-5. **The per-engine test tables.** Each of these is keyed by engine name and
-   fails, naming this step, until it has the engine's row: `_EXPECTED` in
-   `tests/test_supported_modes.py`; `_EXPECTED`, `_EXPECTED_SOURCE_TYPES`,
-   `_EXPECTED_ROUGH_SURFACE`, `_EXPECTED_MULTI_SOURCE_DEPTH`,
-   `_EXPECTED_ROUGH_BOTTOM`, `_VOLUME_ATTENUATION` and
-   `_MULTI_DEPTH_IN_DEFAULT_MODE` in `tests/test_capability_flags.py`;
-   `_PER_MODEL_DEFAULTS` in `tests/test_collapse_policy.py`; `_drift_cases()`
-   in `tests/test_metadata_file_paths.py`. The engine also needs a saved
-   run-settings record, the form a result saved to disk carries:
-   `python -m uacpy.tests._save_run_settings <key>` writes it into
-   `tests/data/run_settings_by_engine.json` once
-   (`test_a_saved_run_settings_loads_from_the_class_path_it_names`).
+5. **The saved records.** Two records, written by a command, fail naming
+   this step until they hold the engine:
+   `python -m uacpy.tests._save_engine_specs <key>` writes what the engine
+   declares (`spec`) and what a default instance resolves from it (run
+   modes, capability flags, source geometries, collapse policy, default run
+   mode, what a multi-depth source meets) into `tests/data/engine_specs.json`,
+   which `tests/test_capability_flags.py` compares field by field with the
+   live engine; `python -m uacpy.tests._save_run_settings <key>` writes the
+   run-settings record a result saved to disk carries into
+   `tests/data/run_settings_by_engine.json`, and
+   `test_the_run_settings_record_keeps_its_saved_form` compares the fields of
+   what the engine writes with it. A deliberate change to either is recorded
+   by running the command again. The engine also needs a case in
+   `_drift_cases()` in `tests/test_metadata_file_paths.py`.
 6. **The deck writer and reader.** Through `uacpy/io/` (§4, §13.4), never a
    format rolled inline. A new writer's parameters spell each knob as the
    engine does, and the writer gets a row in `_WRITER_ENGINES` in
@@ -417,8 +505,10 @@ Every step names the test that fails when it is skipped.
    named in `_PAGE_CLASSES` in `tests/test_documentation.py` with the
    classes it documents. `tests/test_documentation.py` holds all three
    against the code, and fails while a page or an engine is missing from
-   `_PAGE_CLASSES`. Update `docs/models/README.md`'s feature matrix (range
-   dependence, layered and elastic seabeds) too: no test reads it.
+   `_PAGE_CLASSES`. `docs/models/README.md`'s capability matrix needs the
+   engine too (its column, or its share of the OASES column):
+   `test_readme_capability_matrix_matches_the_engine_records` holds each cell
+   to the engine's saved record (step 5).
 8. **The metadata keys.** Declare every key the engine writes into
    `result.metadata` as a `('<ModelName>', '<key>')` row of
    `_DOCUMENTED_METADATA` in `uacpy/core/results/_base.py`
@@ -463,8 +553,8 @@ refl_io.py                          .brc / .trc / .irc reflection-
                                     coefficient and .sbp beam-pattern files
 bathy_io.py                         .bty / .ati bathymetry / altimetry
 audio_io.py                         write_wav / read_wav /
-                                    read_wav_metadata — WAV export and
-                                    import of signals
+                                    read_wav_info / read_wav_metadata —
+                                    WAV export and import of signals
 _parsers.py                         the raw output parsers the engines
                                     read (a user reads the public record
                                     built from the same file)
@@ -483,7 +573,7 @@ writer imports them from there at its file boundary.
 ### 4.2 Rules for I/O code
 
 - **Units at boundaries.** Public API is metres everywhere except
-  attributes carrying an explicit suffix (`_km`). OASES /
+  names carrying another unit's suffix (`_km`). OASES /
   Acoustics-Toolbox formats want km on disk — every writer that hits
   a km-using format converts via `m_to_km(...)` from `core/units.py`.
   Same for radians vs degrees.
@@ -532,25 +622,32 @@ These are the physics-agnostic primitives every model consumes:
   holds their `FrozenRecord` base.
 - `results/` — `Result` base (`_base.py`) + `Field`, `Arrivals`, `Rays`, `Modes`,
   `GreensFunction`, `Covariance`, `Replicas`, `ReflectionCoefficient`, plus
-  `ResultStack`. Defines `PhaseReference` enum (`'travelling_wave'` /
+  `ResultStack` (sparse results over a coordinate) and `_superposition.py`
+  (the field of several sources). Defines `PhaseReference` enum (`'travelling_wave'` /
   `'time_domain_native'`).
 - `absorption.py` — `Thorp`, `FrancoisGarrison` (one water row, or a T/S
-  profile, each property a number, an array on `depths=` or `(depth, value)`
-  pairs on its own axis; no depth of its own — every evaluation takes the
-  depth evaluated), `Biological`, `ConstantAbsorption`. **One object
+  profile, each property a number or `(depth, value)` pairs on its own depths; no
+  depth of its own — every evaluation takes the depth evaluated), `Biological`, `ConstantAbsorption`. **One object
   per absorption model: the law.** It is what a user builds, an
   `Environment` holds, a file saves and loads; `law.table(frequencies,
   depths=, units=)` evaluates it into an `AbsorptionCoefficient` (α with its
   axes, `.model`, `.parameters`) to look at, plot or export, and there is no
   second, function-form spelling of a law. The base class validates the
   frequency once for every model and dispatches to `_alpha_dB_per_m(f, z)`,
-  the method a new subclass overrides; the plain-array formulas
+  the method a new subclass overrides: it takes 1-D frequency and depth axes
+  and returns the `(n_depths, n_frequencies)` grid, so `table` evaluates a
+  whole grid in one call; the plain-array formulas
   (`absorption_<model>`, dB/km, `core/acoustics/attenuation.py`) are the computation it
   calls. Formulas compute numbers; objects are what models take, plot, save and cite; the object calls the formula. `Environment(absorption=...)` takes a law, or a measured
   `AbsorptionCoefficient` with no law behind it (`model=None`), which
   becomes the private `_TabulatedAbsorption`; a table a law computed is
   refused (pass the law) — no second public type, and no second path to a
-  law.
+  law. `warn_if_band_absorption_frozen` (with its `BAND_ABSORPTION_*`
+  thresholds and `minimax_anchor_frequency`'s `MINIMAX_ANCHOR_GRID`) is
+  engine-facing: the one check every engine that freezes the law at one
+  frequency runs, taking that engine's own mechanism and remediation
+  sentences. It is public because the Bellhop and OASES models and the AT
+  deck writers import it across layers.
   The engines read a law through generic methods, never
   its type: `alpha_dB_per_m`, `alpha_dB_per_wavelength(f, z, c)` (what an AT
   `alphaI` row and a RAM water block carry), and the private hooks
@@ -619,10 +716,11 @@ These are the physics-agnostic primitives every model consumes:
 - `constants.py` — the physics reference every layer reads: the reference
   sea water (`REFERENCE_*`, `DEFAULT_SOUND_SPEED`,
   `DEFAULT_WATER_DENSITY_G_CM3`), `PRESSURE_FLOOR`/`NO_ENERGY_DB`, the dB
-  reference pressures, `NEPER_TO_DB` and `EARTH_RADIUS_M`. A constant lives
+  reference pressures and `NEPER_TO_DB`. A constant lives
   with its owner: the Acoustics-Toolbox deck limits the carriers enforce in
-  `core/deck_limits.py`, `BoundaryType` in `core/boundary.py`, model defaults in
-  `models/_defaults.py` (`DEFAULT_C_MIN`, `DEFAULT_BROADBAND_N_FREQS`,
+  `core/deck_limits.py`, `EARTH_RADIUS_M` beside the great-circle helpers in
+  `core/geo.py`, `BoundaryType` in `core/boundary.py`, model defaults in
+  `models/_defaults.py` (`DEFAULT_C_MIN`, `DEFAULT_BROADBAND_N_FREQUENCIES`,
   `DEFAULT_BROADBAND_BANDWIDTH_FACTOR`), the phase-speed search factors
   (`C_LOW_FACTOR`, `C_HIGH_FACTOR`, `DEFAULT_C_MAX_UNBOUNDED`) beside their
   one resolver in `models/_window.py`, and the AT deck letters
@@ -688,6 +786,11 @@ the plain-type form, which is also the `.npz` route:
 `cls.from_dict(dict(np.load(path, allow_pickle=True)))`. A carrier's
 `to_dict` stores every constructor field under its public class path, and
 `from_dict` rebuilds it through the constructor, so the checks run on load.
+`allow_pickle=True` unpickles, which runs whatever code the file carries: the
+npz route is for files the user wrote, and a file from elsewhere goes through
+`to_netcdf` / `from_netcdf` (JSON attributes, class paths checked by
+`_resolve_class`). The `_export` module docstring states this once; every
+`allow_pickle=True` sentence points at it.
 xarray and pandas are an optional extra (`uacpy[xarray]`), imported where they
 are used, never at module level.
 
@@ -710,15 +813,18 @@ helpers in `core/_repr.py` rather than by hand:
   `Environment`, the ocean values of an `AbsorptionCoefficient`.
 - A model or a configured tool shows only the constructor arguments that
   differ from their defaults (`Bellhop(beam_type='B')`); a record leaves
-  out a field that is `None` or at its default.
+  out a field that is `None` or at its default. A `backend=` left `None`
+  shows the build the model resolved at construction
+  (`Bellhop(backend='cuda')`); Kraken and RAM choose theirs per
+  environment at run, so theirs stays unshown.
 - Aim for at most about 120 characters.
 
 `axis`, `qty`, `extent` and `build` format the pieces; a dataclass record
 inherits `FieldsRepr` and names its shown fields and their units in
 `_REPR_FIELDS` / `_REPR_UNITS` (`FrozenRecord`, `ExportRecord` and every
 `ResultTuple` already do); a tool inherits `SettingsRepr`. The run records
-are the exception: `RunSettings` and an engine's `EngineSettings` print an
-aligned multi-line block. `tests/test_reprs.py` pins the exact strings and
+and the engine status table are the exception: `RunSettings`, an engine's
+`EngineSettings` and `EngineStatus` print an aligned multi-line block. `tests/test_reprs.py` pins the exact strings and
 holds every public class to one line with no nested constructor.
 
 ---
@@ -800,13 +906,16 @@ the binary kept running under init; the parent-death signal ends it with its
 launcher. The signal fires when the forking *thread* exits, and that thread
 waits in `communicate` for the binary, so it cannot fire early. Where setpriv
 is missing or too old (macOS, busybox, util-linux < 2.33) the prefix is empty
-and the launch is exactly as before. Pinned by
+and the binary launches without a parent-death signal. Pinned by
 `test_a_binary_dies_with_the_python_process_that_launched_it`.
 
 ### 6.4 Launching a binary — `uacpy/models/_launch.py`
 
-Every engine binary runs as a `Launch` record through `run_launch`
-(`PropagationModel._launch_binary`). The record names the command line, the work
+Every engine binary runs as a `Launch` record through
+`run_launch(self._launch_context(), launch)`. The `LaunchContext` the base
+builds carries the engine's name, its `_run_subprocess` (the one seam every
+launch passes, where a test or a timeout stops a run), the debug log and the
+ERROUT messages its traits call benign. The record names the command line, the work
 directory, the child environment, the stale outputs removed before the launch,
 the `.prt` the binary writes (removed first, its tail attached to a failure),
 an optional `tolerate_exit` for a failure that is read anyway (Kraken's
@@ -814,9 +923,11 @@ field.exe teardown), and the checks run in order on the completed process: the
 engine's fatal scans and warning passes over its marker tables
 (`_STDOUT_FATAL_MARKERS` for OASES, `_COLLINS_STOP_MARKERS` for RAM's Collins
 codes, `_FIELD_COMPLETION_MARKER` / `_FIELD_FATAL_MARKER` for field.exe) and
-the outputs the run must leave. `_prt_launch` builds the record of a binary
-that writes `<base>.prt` (the Acoustics Toolbox, OASES). `_run_subprocess` is
-reached only through the runner (`TestEveryLaunchPassesOneRunner`).
+the outputs the run must leave. `prt_launch` builds the record of a binary
+that writes `<base>.prt` (the Acoustics Toolbox, OASES), and
+`run_prt_binary(context, cmd, work_dir, base_name, stale_outputs=...)` runs
+it. `_run_subprocess` is reached only through the runner
+(`TestEveryLaunchPassesOneRunner`).
 
 Threads follow one rule, `_launch_single_threaded()`: in a `run_parallel`
 worker Bellhop's C++ port gets `-1` and an OpenMP binary (RAM's mpiramS)
@@ -924,12 +1035,16 @@ plotting lives in `uacpy.visualization.plots`**, reached as `uacpy.plot`
   source level from a measured pass-by, a different quantity from the
   shipping *ambient* term above; `marine_mammal.py` — Southall et al. 2019
   auditory weighting.
-- `visualization/plots/` — every result/carrier plots via `.plot()`,
-  which dispatches through one table (`_PLOTTERS`): `plot_result(result,
-  env=…)` for a result, to the private per-type renderers (`_plot_rays`,
-  `_plot_arrivals`, `_plot_mode_functions`, …), and `plot_carrier(carrier)`
-  for a carrier, to the public `plot_environment`, `plot_ssp`,
-  `plot_range_profile` and `plot_absorption`. Public free functions remain
+- `visualization/plots/` — every result/carrier plots via `.plot()`, with
+  the plotter its class names in `_plotter` (`_draws_env` says whether that
+  view takes `env=`; `Field._plotter_name()` picks among a field's views by
+  what it holds: one panel per source depth, the track plan view, the sonar
+  maps, the ambiguity surface): `plot_result(result, env=…)` for a result, to
+  the private per-type renderers (`_plot_rays`, `_plot_arrivals`,
+  `_plot_mode_functions`, …), and `plot_carrier(carrier)` for a carrier, to
+  the public `plot_environment`, `plot_ssp`, `plot_range_profile` and
+  `plot_absorption`; a signal result's `.plot()` calls its plotter
+  directly. Public free functions remain
   for the grid/flexible renderers (`plot_field`, `plot_transfer_function`,
   `plot_impulse_response`), alternate views
   (`plot_bottom_properties`, `plot_bottom_loss`, `plot_mode_wavenumbers`,
@@ -1001,26 +1116,34 @@ downloaded by `install.sh --data`, `*_live.py` calls a web service:
   wraps failures in `DataFetchError`. No third-party HTTP dep.
 - `_cache.py`, `_geo.py`, `_netcdf.py` — cache dir resolution,
   great-circle / transect geometry, netCDF read helpers, date normalisation.
-- `bathymetry.py` — GEBCO via OpenTopoData (`fetch_bathy`, `fetch_bathy_transect`).
+- `bathymetry.py` — the bathymetry chain (`fetch_bathy`, `fetch_bathy_transect`,
+  `fetch_bathy_grid`): the installed GEBCO grid first, else GEBCO via
+  OpenTopoData; GMRT and the EMODnet DTM live.
 - `sound_speed.py` — WOA23 (`fetch_ssp`, `fetch_ssp_transect`, `fetch_ts_profile`)
   + the shared `assemble_range_dependent(columns, ranges)` helper.
 - `copernicus.py` — Copernicus Marine operational SSP (`copernicusmarine` is an
   optional extra, `pip install -e ".[copernicus]"`, lazy-imported; needs a free
   Copernicus account + `copernicusmarine login`).
 - `sediment.py` — pure ϕ→geoacoustic conversion + `range_dependent_bottom_along`.
-- `seabed.py` — EMODnet (CC-BY) and Diesing (CC-BY) seabed substrate.
+- `seabed.py` — EMODnet (CC-BY) seabed substrate, live (the Diesing
+  lithology is `diesing_local.py`).
 - `sources.py` — the **data-source catalogue** (`SOURCES`, licences, citations).
 - `environment.py` — `fetch_environment(...)`, the orchestrator + dispatch.
 - `_provenance_notice.py` — `one_provenance_notice`, the decorator that folds
   every provenance notice one fetch gives into one `ProvenanceWarning`; on
   `fetch_environment` and every transect fetcher that samples a point
-  fetcher per waypoint.
+  fetcher per waypoint. A fetcher gives such a notice through
+  `provenance_notice` / `provenance_fallback`, which append it to the summary
+  of the decorated fetch in the caller's context (a `ContextVar`) and warn at
+  once outside one; no `warnings.catch_warnings` window, which is
+  process-global, is opened.
 - Per-dataset modules — bathymetry `gebco_local`, `gmrt_live`,
   `emodnet_bathy_live`; seabed `emodnet_local`, `diesing_local`,
   `globsed_local`, `crust1_local`, `graw_local`, `mars`, `pelagic`,
   `sediment_db`; water column `woa23_local`, `argo`, `glodap_local`;
   surface `sea_surface`, `seaice_local`, `wind_local`, `wind_live`,
-  `waves`, `ww3_live`; plus `absorption.py` (site Francois–Garrison).
+  `waves`, `ww3_live`. The site Francois–Garrison absorption is built in
+  `environment.py` (`with_absorption=True`).
 
 Conventions: a fetcher takes `base_url` where its endpoint is configurable,
 `timeout` / `verbose` where it can reach the network, and none of them when it
@@ -1079,7 +1202,7 @@ carriers (`_aggregate_data_sources`, dedup by `r.source.id`) into
 un-stamped layer's bare catalogue id in `DataProvenance(source=…)` so the tuple
 stays uniform. `uacpy.data.citations(env)` (or a carrier, id, `DataSource`, or
 `DataProvenance`) renders the licence/attribution/citation plus the fetched
-date/coords. Non-commercial / unlicensed sources (currently CRUST1.0) emit a
+date/coords. Non-commercial / unlicensed sources (CRUST1.0) emit a
 runtime `ProvenanceWarning` whenever fetched, so they are never returned silently.
 
 ---
@@ -1211,19 +1334,19 @@ names what to change; the table says where to look first.
 | Gate | Fails when | Fix |
 |---|---|---|
 | `test_engine_conformance.py` | a registered engine breaks the run contract: a positional knob, a knob not stored as `self.<name>`, no stage-2 `_check_knobs`, a refusal that differs between `validate_inputs` / `run_settings` / `run`, a result unlike its `outputs` declaration (`OutputContractError`), a knob missing from the record | follow §2 and §3; the test name says which rule |
-| `test_supported_modes.py`, `test_capability_flags.py` | an engine's modes or flags differ from the expected tables, or a table misses a registered engine | change the `spec`, or the table when the change is intended (§3, step 5) |
-| `test_collapse_policy.py`, `test_engine_conformance.py` (saved records) | a per-engine collapse row or a saved run-settings record is missing; a record saved before a new Settings field no longer loads | §3, step 5; §13.1, step 3 |
+| `test_capability_flags.py` (saved engine records) | an engine's spec or a default instance's modes, flags, source geometries or collapse policy differ from `tests/data/engine_specs.json` (the message names the engine and the field), or a registered engine has no record | change the `spec`, or rewrite the record when the change is intended (`python -m uacpy.tests._save_engine_specs <key>`, §3, step 5) |
+| `test_engine_conformance.py` (saved records) | a saved run-settings record is missing; the record an engine writes changes form (a field added, renamed or removed) | §3, step 5; §13.1, step 3 |
 | `test_exceptions.py` | a public reader in neither absent-file list; a warning class missing from `CAUSES` or from the §6.5 table | §13.4, step 3; §13.5 |
 | `test_metadata_file_paths.py` | a metadata key nothing documents, or a documented key nothing writes | add or drop the `_DOCUMENTED_METADATA` row |
 | `test_lazy_imports.py` | `import uacpy` loads scipy / matplotlib; a lazy table entry fails to resolve; a `TYPE_CHECKING` block differs from its lazy table; `core` imports `visualization` outside a function body | restate the name in both tables; keep heavy imports inside functions (§7) |
 | `test_architecture.py::test_layering` | an import points up the layer order, a new import cycle, a private name crossing layers | §12 |
 | `test_architecture.py::test_every_warning_names_its_cause` | a `warnings.warn` passes `UserWarning`, `UACPYWarning` or no category | pass the cause class (§6.5) |
 | `test_warning_attribution.py` | a warn site with neither `skip_file_prefixes=USER_FRAME_SKIP` nor `stacklevel`, or with both | §6.2 |
-| `test_architecture.py`, plotter tables | a result class with no row, or two rows, in `_PLOTTERS`; a plotter that branches on a model name | add the row (§13.3) |
+| `test_architecture.py`, plotter declarations | a drawable class whose `_plotter` (or a name its `_plotter_name()` returns) is not a plotter of `uacpy.visualization.plots`; `_draws_env` disagreeing with the plotter's `env` parameter; a plotter that branches on a model name | declare `_plotter` / `_draws_env` on the class (§13.3) |
 | `test_architecture.py::test_every_refusal_pin_names_its_refusal` | a `pytest.raises` with no `match=` | match the load-bearing fragment (§8) |
 | `test_architecture.py::test_every_deck_writer_names_a_knob_as_its_model_does` | a writer parameter spelled as the deck spells it rather than as the knob | rename the parameter to the knob name |
 | `test_harmonisation_gates.py` | API spelling: `max_range` instead of `range_max`, two keywords for one argument, a dB reference not called `ref`, a writer default the model resolves, a refusal without a full stop, a user error that is not a `UACPYError`, package code reading a metadata key | rename or reword as the message says |
-| `test_packaging.py` | an unexpected or missing package (`_EXPECTED_PACKAGES`), the CI lint, a comment pinning a line number in a uacpy file, a vendored citation that no longer resolves, a private module or name crossing a package boundary undeclared, a name stating history (`still`, `previously`, ...) or a kind of code (`utils`, `helpers`, ...), a test file named after a session | §10; the message names the list to update |
+| `test_packaging.py` | an unexpected or missing package (`_EXPECTED_PACKAGES`), the CI lint, a comment pinning a line number in a uacpy file, a vendored citation that does not resolve, a private module or name crossing a package boundary undeclared, a name stating history (`still`, `previously`, ...) or a kind of code (`utils`, `helpers`, ...), a test file named after a session | §10; the message names the list to update |
 | `test_documentation.py` | a dead link or anchor, a sample that does not parse or names something the package lacks, a capability matrix or a documented default that differs from the code, sections out of order | fix the page; the code is the reference |
 | `test_export_protocol.py` | a result that does not round-trip, a record with an array field outside `_ARRAY_FIELDS` | §5.1, §13.3 |
 | `test_methods_delegate_to_array_level_computation.py` | a method that computes something generic inline instead of wrapping an exported array-level function | move the arithmetic into a function and call it |
@@ -1321,8 +1444,9 @@ Worth knowing:
 
 ## 10. Coding conventions
 
-- Public API uses metres / Hz / m/s / g/cm³ / dB/wavelength. Suffix
-  the attribute name (`_km`) when not metres.
+- Public API uses metres / Hz / m/s / g/cm³ / dB/wavelength. A name may
+  carry its unit as a suffix (`_m`, `_km`, `_s`, `_deg`, `_rad`, `_kn`,
+  `_dbar`, `_dB`; DOCUMENTATION §15); a length that is not metres must.
 - Constructor-only model configuration — no `set_params()`.
 - Use the typed exception hierarchy (`core/exceptions.py`), not bare
   `ValueError`.
@@ -1383,7 +1507,16 @@ Worth knowing:
   (`uacpy.io.oalib_reader`). `tests/test_architecture.py` gates the
   subpackages it names.
 - No backwards-compatibility shims. Change code directly; uacpy is
-  pre-1.0 and explicitly LLM-bootstrapped per the README roadmap.
+  pre-1.0 and explicitly LLM-bootstrapped per the README roadmap. A renamed
+  or removed name is a hard break: no alias, no deprecation warning. Files
+  are no exception: uacpy reads only files written by the current version.
+  No reader maps an earlier spelling of a settings field or knob, a result
+  field or a metadata key, and none drops a field the class does not take;
+  a file of an earlier format is refused or fails to load, and the remedy is
+  to re-run the computation. A saved signal result that lacks a field is
+  refused naming it (`TestASavedResultNamesWhatItLacks`). Fixtures under
+  `tests/data` hold the current format and are rewritten by their writer
+  when it changes (`python -m uacpy.tests._save_run_settings`, §3 step 5).
 - One PR = one logical change. Mention which physics regime / file
   format the change targets in the title.
 
@@ -1482,14 +1615,12 @@ step is skipped.
    change a result (scratch, logging) belongs in `_HOST_KNOBS`
    (`test_the_record_states_every_knob_as_given`).
 
-   A new Settings field takes a **default**, and the default is the value
-   that reproduces what the run computed before the field existed: a record
-   saved before then has no such key, and loads with the field at its
-   default. A field with no default makes every earlier saved record fail to
-   load, which `test_a_saved_run_settings_loads_from_the_class_path_it_names`
-   catches on the saved records in `tests/data/run_settings_by_engine.json`.
-   Never rewrite a saved record to make that test pass: it stands for the
-   files users saved.
+   A new Settings field changes the form of the record a result carries:
+   `test_the_run_settings_record_keeps_its_saved_form` reports it against
+   the saved records in `tests/data/run_settings_by_engine.json`, and
+   `python -m uacpy.tests._save_run_settings <key>` rewrites the record once
+   the change is meant. uacpy reads only records this version writes, so no
+   default is needed for a record saved before the field existed.
 4. Spell it by the house rules: `<quantity>_max` / `_min`, `dB` never `db`,
    `_mps` for m/s and `_s` for seconds, a default equal to a package constant
    written as that constant (`tests/test_harmonisation_gates.py`,
@@ -1499,20 +1630,19 @@ step is skipped.
 ### 13.2 A new run mode for an existing engine
 
 Add the mode to `spec.modes` and an `OutputSpec` to `outputs`, handle it in
-the stage hooks, and update the engine's row in `_EXPECTED`
-(`tests/test_supported_modes.py`) and the two capability matrices (§3,
-step 7). Then check the per-mode facts the base reads: whether the mode
-stacks source depths in one launch (`traits.native_multi_depth_modes`, and
-`_EXPECTED_MULTI_SOURCE_DEPTH`), whether TIME_SERIES reads the frequency
+the stage hooks, rewrite the engine's saved record
+(`python -m uacpy.tests._save_engine_specs <key>`, §3, step 5) and update
+the two run-mode matrices (§3, step 7). Then check the per-mode facts the
+base reads: whether the mode stacks source depths in one launch
+(`traits.native_multi_depth_modes`), whether TIME_SERIES reads the frequency
 argument, and whether the mode returns a field (`_FIELD_MODES` in
 `models/base.py`, which decides whether a multi-depth source is looped or
 refused). The `compute_*` method for that mode suggests the engine from the
-registry with no further edit; `compute_tl` asks for `COHERENT_TL`, so an
+registry with no further edit; `compute_field` asks for `COHERENT_TL`, so an
 engine that adds only `INCOHERENT_TL` is not offered there. Making the new
 mode the engine's default (the first entry of `spec.modes`) changes the
-record a default run saves, so the engine's saved record (§3, step 5) no
-longer matches it: that is a change to what users' saved files mean, and
-needs its own decision.
+record a default run saves: rewrite the engine's saved record (§3, step 5),
+and take the change of default as its own decision.
 
 ### 13.3 A new result class
 
@@ -1527,14 +1657,14 @@ needs its own decision.
    file's `TYPE_CHECKING` block (`__all__` derives from `_EXPORTS`). `uacpy`
    picks it up from `uacpy.core.__all__`, and its own `TYPE_CHECKING` block
    restates it (`tests/test_lazy_imports.py`).
-3. Give it one row in `_PLOTTERS` (`visualization/plots/__init__.py`):
-   `(ResultClass, plotter, draws_env)` (`TestEveryResultTypeHasExactlyOnePlotterRow`).
-   The plotter is a function in the `visualization/plots/` module of its
-   subject, `_plot_<name>(result, ax=None, *, figsize=..., title=None)`
-   returning `(fig, ax)`, imported into `plots/__init__.py` with the result
-   class. `draws_env` is `True` only when the plotter takes `env=` and draws
-   the environment under the result; `.plot(env=...)` on any other type is
-   refused.
+3. Name its plotter on the class: `_plotter = '_plot_<name>'`, and
+   `_draws_env = True` only when the plotter takes `env=` and draws the
+   environment under the result; `.plot(env=...)` on any other type is
+   refused (`TestEveryDrawableTypeNamesItsPlotter`). The plotter is a
+   function in the `visualization/plots/` module of its subject,
+   `_plot_<name>(result, ax=None, *, figsize=..., title=None)` returning
+   `(fig, ax)`, imported into `plots/__init__.py`. A type whose view depends
+   on what it holds picks it in `_plotter_name()`, as `Field` does by kind.
 4. Add a maker to `MAKERS` in `tests/test_export_protocol.py`. Nothing fails
    if this step is skipped: the round-trip test covers only the classes that
    table names.

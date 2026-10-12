@@ -46,7 +46,7 @@ wavefield = (
     + 0.8 * np.cos(2 * np.pi * (f0 * t_fk[:, None]
                                 + (f0 / 2500.0) * x_fk[None, :])))
 wavefield *= np.hanning(n_times)[:, None] * np.hanning(n_channels)[None, :]
-# normalize=True makes the panel a density (x² per Hz·rad/m) whose sum over
+# scaling='density' makes the panel a density (x² per Hz·rad/m) whose sum over
 # Δf·Δk is the gather's mean square; plot_fk reads that scaling off the result.
 fk = fk_transform(wavefield, fs, dx, scaling='density')
 
@@ -74,7 +74,7 @@ t = np.arange(1024) / fs
 transient = (
     np.sin(2 * np.pi * 150 * t) * np.exp(-0.5 * ((t - 0.20) / 0.03) ** 2)
     + np.sin(2 * np.pi * 500 * t) * np.exp(-0.5 * ((t - 0.40) / 0.03) ** 2))
-scalogram = cwt(transient, fs, wavelet='morlet', n_freqs=140)
+scalogram = cwt(transient, fs, wavelet='morlet', n_frequencies=140)
 wv_f, wv_t, wigner = wigner_ville(transient, fs)
 
 # (E) A broadband pulse and its echo, for the cepstrum.
@@ -112,7 +112,7 @@ print(f"  hyperbolic Radon focus "
 fig, axes = plt.subplots(3, 2, figsize=(12, 14), constrained_layout=True)
 
 # The gather is synthetic and unit-less, so the density is referred to 1
-# (unit²·m/(Hz·rad)); the colour window is the 40 dB below its peak.
+# (ref=1.0); the colour window is the 40 dB below its peak.
 fk_peak_dB = 10 * np.log10(fk.power.max())
 uacpy.plot.plot_fk(fk, ax=axes[0, 0], ref=1.0, vmin=fk_peak_dB - 40,
                    vmax=fk_peak_dB, cmap='jet', sound_speed=1500,

@@ -15,7 +15,10 @@ import pytest
 from scipy.io import wavfile
 
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
-from uacpy.io import read_wav, read_wav_metadata, write_wav
+from uacpy.io import (
+    WavInfo, read_wav, read_wav_info, read_wav_metadata, write_wav,
+)
+from uacpy.io import audio_io
 
 
 FS = 48000
@@ -203,6 +206,26 @@ def test_the_rate_is_named_sample_rate(tmp_path):
     assert read_wav(tmp_path / 'named.wav')[1] == FS
     with pytest.raises(TypeError, match="unexpected keyword argument 'fs'"):
         write_wav(tmp_path / 'old.wav', _tone(), fs=FS)
+
+
+@pytest.mark.parametrize('n_samples, refused', [(482, False), (500, True),
+                                                 (501, True)])
+def test_a_file_past_the_riff_size_field_is_refused_by_name(
+        tmp_path, monkeypatch, n_samples, refused):
+    """The RIFF size field is 32-bit. With its limit lowered to 1000 bytes:
+    482 pcm16 samples make a RIFF size of exactly 1000 and are written; 500
+    pass the samples-only check (1000 bytes) and are refused on the header
+    bytes; 501 are refused before encoding."""
+    from uacpy.io import audio_io
+    monkeypatch.setattr(audio_io, '_MAX_RIFF_SIZE', 1000)
+    path = tmp_path / 'limit.wav'
+    if refused:
+        with pytest.raises(ConfigurationError, match='^write_wav: .*RIFF size'):
+            write_wav(path, _tone(n=n_samples), FS)
+        assert not path.exists()
+    else:
+        write_wav(path, _tone(n=n_samples), FS)
+        assert struct.unpack('<I', path.read_bytes()[4:8])[0] == 1000
 
 
 def test_the_written_file_is_byte_even(tmp_path):
@@ -400,6 +423,44 @@ def test_a_data_chunk_cut_short_warns_and_keeps_the_whole_frames(tmp_path):
     assert np.allclose(samples * (2.0 ** 15 - 1.0), [1, 2])
 
 
+def _unfinalised(riff_size, samples):
+    """A wav whose header was written before its samples and never
+    updated: data size 0, the RIFF size ``riff_size``, samples after it."""
+    head = (b'WAVE' + b'fmt ' + struct.pack('<I', len(_PCM16_MONO_FMT))
+            + _PCM16_MONO_FMT + b'data' + struct.pack('<I', 0))
+    return b'RIFF' + struct.pack('<I', riff_size) + head + samples
+
+
+@pytest.mark.parametrize('riff_size', [36, 0, 0xFFFFFFFF])
+def test_a_header_never_finalised_reads_the_samples_after_it_and_warns(
+        tmp_path, riff_size):
+    """Data size 0 with samples past the declared RIFF size: the samples
+    are read to the end of the file (whole frames), with an IOWarning."""
+    path = tmp_path / 'unfinalised.wav'
+    path.write_bytes(_unfinalised(riff_size,
+                                  struct.pack('<4h', 1, 2, 3, 4) + b'\x07'))
+    with pytest.warns(UserWarning, match='declares 0 bytes but 9 follow it'):
+        samples, rate = read_wav(path)
+    assert rate == 8000.0
+    assert np.allclose(samples * (2.0 ** 15 - 1.0), [1, 2, 3, 4])
+
+
+@pytest.mark.parametrize('after', [b'', b'LIST' + struct.pack('<I', 4)
+                                   + b'INFO'])
+def test_an_empty_data_chunk_inside_the_riff_size_reads_empty_silently(
+        tmp_path, after):
+    """A genuinely empty recording: data size 0 and nothing after it but
+    chunks the RIFF size covers."""
+    head = (b'WAVE' + b'fmt ' + struct.pack('<I', len(_PCM16_MONO_FMT))
+            + _PCM16_MONO_FMT + b'data' + struct.pack('<I', 0) + after)
+    path = tmp_path / 'empty.wav'
+    path.write_bytes(b'RIFF' + struct.pack('<I', len(head)) + head)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        samples, _rate = read_wav(path)
+    assert samples.size == 0
+
+
 def test_a_complete_data_chunk_reads_without_a_warning(tmp_path):
     (tmp_path / 'whole.wav').write_bytes(
         _riff(_PCM16_MONO_FMT, struct.pack('<4h', 1, 2, 3, 4)))
@@ -407,3 +468,167 @@ def test_a_complete_data_chunk_reads_without_a_warning(tmp_path):
         warnings.simplefilter('error')
         samples, _rate = read_wav(tmp_path / 'whole.wav')
     assert samples.size == 4
+
+
+# ── reading a span of frames ────────────────────────────────────────────────
+
+
+def _three_channels(n=1000):
+    """Three distinct channels, so a frame or channel misplaced by the
+    excerpt arithmetic shows as a wrong value."""
+    t = np.arange(n) / FS
+    return np.stack([0.5 * np.sin(2 * np.pi * 700 * t),
+                     0.4 * np.cos(2 * np.pi * 1300 * t),
+                     np.linspace(-0.9, 0.9, n)], axis=1)
+
+
+@pytest.mark.parametrize('encoding', sorted(audio_io._ENCODINGS))
+def test_an_excerpt_is_those_frames_of_the_whole_read(tmp_path, encoding):
+    path = tmp_path / f'{encoding}.wav'
+    write_wav(path, _three_channels(), FS, encoding=encoding,
+              normalize=False)
+    whole, rate = read_wav(path)
+
+    part, part_rate = read_wav(path, start=123, frames=456)
+    assert part_rate == rate == FS
+    assert np.array_equal(part, whole[123:579])
+    assert np.array_equal(read_wav(path, start=900)[0], whole[900:])
+
+
+@pytest.mark.parametrize('encoding', ['pcm24', 'pcm16', 'float32'])
+@pytest.mark.parametrize('block_samples', [1, 5, 7, 3000])
+def test_an_excerpt_decodes_the_same_across_block_edges(
+        tmp_path, monkeypatch, encoding, block_samples):
+    """The samples are decoded block by block; a block of one frame, blocks
+    that do not divide the excerpt, and one block larger than it all give
+    the frames a single-block read gives."""
+    path = tmp_path / 'blocks.wav'
+    write_wav(path, _three_channels(), FS, encoding=encoding,
+              normalize=False)
+    reference = read_wav(path, start=10, frames=101)[0]
+    monkeypatch.setattr(audio_io, '_BLOCK_SAMPLES', block_samples)
+    assert np.array_equal(read_wav(path, start=10, frames=101)[0], reference)
+
+
+def test_an_empty_excerpt_keeps_the_channel_axis(tmp_path):
+    path = tmp_path / 'stereo.wav'
+    write_wav(path, _three_channels()[:, :2], FS)
+    assert read_wav(path, start=1000, frames=0)[0].shape == (0, 2)
+    assert read_wav(path, start=1000)[0].shape == (0, 2)
+
+
+@pytest.mark.parametrize('kwargs', [
+    dict(start=1000),                 # the end: nothing left, legal
+    dict(start=400, frames=600),      # exactly to the end
+    dict(start=0, frames=1000),
+    dict(start=4.0e2, frames=6.0e2),  # integral floats (a rate times a time)
+])
+def test_a_span_inside_the_file_reads(tmp_path, kwargs):
+    path = tmp_path / 'mono.wav'
+    write_wav(path, _tone(n=1000), FS)
+    signal, _ = read_wav(path, **kwargs)
+    assert signal.size == 1000 - int(kwargs['start'])
+
+
+@pytest.mark.parametrize('kwargs,match', [
+    (dict(start=1001), r"start=1001 is not a whole number of frames in "
+                       r"\[0, 1000\]"),
+    (dict(start=400, frames=601), r"frames=601 .* \[0, 600\]; 600 frame"),
+    (dict(start=-1), r"start=-1"),
+    (dict(frames=-1), r"frames=-1"),
+    (dict(start=0.5), r"start=0\.5"),
+    (dict(start='10'), r"start='10'"),
+    (dict(frames=float('nan')), r"frames=nan"),
+])
+def test_a_span_outside_the_file_is_refused_by_name(tmp_path, kwargs, match):
+    path = tmp_path / 'mono.wav'
+    write_wav(path, _tone(n=1000), FS)
+    with pytest.raises(ConfigurationError, match=match) as raised:
+        read_wav(path, **kwargs)
+    assert str(raised.value).startswith('read_wav: ')
+    assert 'read_wav_info(path).n_frames' in raised.value.remediation
+
+
+def test_an_excerpt_reads_only_its_own_frames(tmp_path):
+    """The memory a read takes follows the frames it returns, not the file:
+    1000 frames of a 200 000-frame 24-bit file peak near their own 8 kB of
+    float64, and a whole read at its 1.6 MB output plus one decode block
+    (7 bytes per sample: the packed bytes and the widened int32 word)."""
+    import tracemalloc
+    n = 200_000
+    path = tmp_path / 'long.wav'
+    write_wav(path, np.linspace(-0.9, 0.9, n), FS, encoding='pcm24')
+
+    def peak(**kwargs):
+        tracemalloc.start()
+        try:
+            read_wav(path, **kwargs)
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    assert peak(start=150_000, frames=1000) < 64 * 1024
+    assert 8 * n <= peak() < 8 * n + 7 * audio_io._BLOCK_SAMPLES + 64 * 1024
+
+
+# ── the encoding, from the headers ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize('encoding,bits', [
+    ('pcm16', 16), ('pcm24', 24), ('pcm32', 32),
+    ('float32', 32), ('float64', 64),
+])
+def test_read_wav_info_reports_what_write_wav_wrote(tmp_path, encoding,
+                                                    bits):
+    path = tmp_path / f'{encoding}.wav'
+    write_wav(path, _three_channels(n=777), 44100, encoding=encoding)
+    info = read_wav_info(path)
+    assert isinstance(info, WavInfo)
+    assert (info.encoding, info.bits, info.n_channels, info.sample_rate,
+            info.n_frames) == (encoding, bits, 3, 44100.0, 777)
+    assert info.n_frames == read_wav(path)[0].shape[0]
+    assert WavInfo.from_dict(info.to_dict()).to_dict() == info.to_dict()
+
+
+def test_read_wav_info_reads_an_extensible_header_through_its_subformat(
+        tmp_path):
+    (tmp_path / 'ext.wav').write_bytes(
+        _riff(_extensible_fmt(2, 8000, 24, 1), b'\x00' * 12))
+    info = read_wav_info(tmp_path / 'ext.wav')
+    assert (info.encoding, info.n_channels, info.n_frames) == ('pcm24', 2, 2)
+
+
+def test_read_wav_info_counts_the_whole_frames_of_a_file_cut_short(tmp_path):
+    whole = _riff(_PCM16_MONO_FMT, struct.pack('<4h', 1, 2, 3, 4))
+    (tmp_path / 'cut.wav').write_bytes(whole[:-3])
+    with pytest.warns(UserWarning, match=r'^read_wav_info: the data chunk '
+                                         r'declares 8 bytes'):
+        info = read_wav_info(tmp_path / 'cut.wav')
+    assert info.n_frames == 2
+
+
+def test_read_wav_info_refuses_what_read_wav_refuses(tmp_path):
+    (tmp_path / 'not.wav').write_bytes(b'ID3\x04\x00\x00\x00\x00\x00\x00junk')
+    with pytest.raises(FileFormatError, match='^read_wav_info: not a RIFF'):
+        read_wav_info(tmp_path / 'not.wav')
+    with pytest.raises(ConfigurationError, match='^read_wav_info: no file'):
+        read_wav_info(tmp_path / 'absent.wav')
+
+
+def test_the_bit_depth_recovers_the_adc_counts_for_volt_params(tmp_path):
+    """The route read_wav_info's docstring gives: read_wav's fractions of
+    2**(bits-1) - 1 times that full scale are the integer codes written, and
+    ``pressure_from_recording(volt_params=(bits, v_ref))`` divides those
+    by 2**(bits-1)."""
+    from uacpy.acoustics import pressure_from_recording
+    codes = np.array([0, 16384, -16384, 32767, -32768])
+    fmt = struct.pack('<HHIIHH', 1, 1, 8000, 16000, 2, 16)
+    (tmp_path / 'codes.wav').write_bytes(
+        _riff(fmt, struct.pack(f'<{codes.size}h', *codes)))
+    info = read_wav_info(tmp_path / 'codes.wav')
+    x, _ = read_wav(tmp_path / 'codes.wav')
+    counts = x * (2 ** (info.bits - 1) - 1)
+    assert np.allclose(counts, codes, rtol=0, atol=1e-9)
+    p = pressure_from_recording(counts, sensitivity=0, gain=0,
+                                volt_params=(info.bits, 2.0))
+    assert np.allclose(p, 1e-6 * 2.0 * codes / 2 ** 15)

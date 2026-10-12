@@ -1,5 +1,7 @@
-"""The engine knob defaults keep their values now that one constant
-states each, and the writers resolve None to the same value."""
+"""The engine knob defaults: each constructor states its default once, as
+the named constant of ``uacpy.core.engine_defaults`` or as ``None`` where the
+model derives the value (ruling 26), and every writer defaults to ``None``
+and resolves it to the constant, the value the engine's deck takes."""
 import inspect
 
 import pytest
@@ -7,18 +9,24 @@ import pytest
 import uacpy
 import uacpy.io as io
 
-#: (engine, knob, value) as the constructors stated them before the move.
+#: (engine, knob, value) of each constructor default.
 DEFAULTS = [
     ('Bellhop', 'beam_type', 'G'), ('Bellhop', 'n_beams', 0),
-    ('Bellhop', 'launch_angles', (-80, 80)), ('Bellhop', 'ray_step', 0.0),
+    ('Bellhop', 'launch_angles', (-80, 80)), ('Bellhop', 'ray_step', None),
     ('Bellhop', 'grid_type', 'R'), ('Bellhop', 'interp_bathymetry', 'linear'),
     ('Bellhop', 'interp_altimetry', 'linear'), ('Bellhop', 'beam_shift', False),
-    ('Kraken', 'n_mesh', 0), ('Scooter', 'n_mesh', 0), ('SPARC', 'n_mesh', 0),
+    ('Kraken', 'n_mesh', None), ('Kraken', 'mode_coupling', None),
+    ('Scooter', 'n_mesh', 0), ('SPARC', 'n_mesh', None),
     ('SPARC', 'output_mode', 'R'), ('OAST', 'integration_offset', 0.0),
     ('OAST', 'vrec', 0.0), ('OASN', 'integration_offset', 0.0),
-    ('OASP', 'integration_offset', 0.0), ('OASP', 'freq_min', 0.0),
-    ('OASR', 'angle_type', 'grazing'), ('OASSP', 'spectral_exponent', 2.0),
+    ('OASP', 'integration_offset', 0.0), ('OASP', 'freq_min', None),
+    ('OASR', 'angle_type', 'grazing'), ('OASSP', 'spectral_exponent', None),
+    ('OASS', 'spectral_exponent', None),
     ('OASSP', 'realization', 0), ('OASSP', 'integration_offset', 0.0),
+    ('Bellhop', 'beam_width_type', None), ('Bellhop', 'beam_curvature', None),
+    ('Bellhop', 'eps_multiplier', None), ('Bellhop', 'r_loop', None),
+    ('Bellhop', 'n_image', None), ('Bellhop', 'ib_win', None),
+    ('Bellhop', 'n_frequencies', None), ('Bellhop', 'bandwidth_factor', None),
 ]
 
 

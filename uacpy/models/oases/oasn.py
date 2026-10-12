@@ -10,31 +10,37 @@ import numpy as np
 
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
+from uacpy.models._knobs import whole_count
 from uacpy.models._spec import ModelSpec
+from uacpy.models._window import check_pinned_window, refuse_inverted_window
 from uacpy.core.run_settings import EngineSettings, OutputSpec, RunMode
 from uacpy.core.results import PhaseReference
 from uacpy.core.exceptions import (
     ConfigurationError, FallbackWarning, NumericsWarning, ValidityWarning,
 )
 from uacpy.io.oases_writer import (
-    OASN_LEVEL_DEAD_BAND_DB, OasnNoise, OasnReplicaGrid, write_oasn_input,
+    OASN_LEVEL_DEAD_BAND_DB, OasnNoise, OasnReplicaGrid,
+    oases_wavenumber_bounds, write_oasn_input,
     _check_oasn_discrete_sources,
     _check_oasn_noise_level, _check_oasn_replica_counts, _resolve_freq_sweep,
     water_ac_anchor_frequency,
 )
 from uacpy.io.oases_reader import read_oasn_covariance, read_oasn_replicas
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S
+from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, _host_options
 from uacpy.models.oases._common import (
-    _OASES_TRAITS, _oases_find_executable, _option_letters,
+    _OASES_TRAITS, _oases_binary, _option_letters,
     _check_n_wavenumbers_knob, _warn_if_water_ac_extrapolates, _warn_offset_ignored_under_auto_sampling,
 )
 from uacpy.models.oases._base import OASES
 from uacpy.models._notices import message_notice
 from uacpy.core.engine_defaults import OASN_INTEGRATION_OFFSET
+from uacpy.models._extract import attach_output_paths
+from uacpy.models._launch import require_output
 
 
 #: File root of every deck and output one OASN run writes.
 _OASN_BASE_NAME = 'oasn_run'
+
 
 
 @dataclass(frozen=True, eq=False)
@@ -55,7 +61,9 @@ class OASNSettings(EngineSettings):
     integration_offset : float
         The contour offset (dB/wavelength) on the frequency line.
     n_wavenumbers : int or None
-        The wavenumber count; ``None`` is OASES' automatic sampling.
+        The wavenumber count; ``None`` is OASES' automatic sampling for the
+        replica and discrete-source blocks and each noise block's default
+        counts (see :class:`OASN`).
     surface_noise_level, deep_noise_level : float
         Block VI source levels (dB re 1 µPa²/Hz).
     white_noise_level : float or None
@@ -311,8 +319,9 @@ class OASN(OASES):
     executable : Path, optional
         Path to OASN binary. Auto-detected if ``None``.
     options : str, optional
-        Custom OASES options string; ``None`` derives it from the run
-        mode (``N`` for COVARIANCE, ``R`` for REPLICA).
+        Custom OASES options string; ``None`` writes ``'J'`` (the complex
+        integration contour of the manual's worked OASN deck, oasn.tex:434)
+        and the run mode's letter (``N`` for COVARIANCE, ``R`` for REPLICA).
     surface_noise_level : float
         Surface-generated noise spectral level (dB re 1 µPa²/Hz),
         Block VI. OASES disables the source when ``abs(level) < 0.01``
@@ -329,7 +338,8 @@ class OASN(OASES):
         literal 0 dB re 1 µPa²/Hz — 1e-12 Pa²/Hz on the returned
         diagonal — per sensor. ``None`` (the
         default) writes -200 dB, whose 1e-20 linear power is
-        numerically nil against any noise field.
+        numerically nil against any noise field (uacpy guidance: the manual
+        gives no level; its worked deck writes 50 dB, oasn.tex:475).
     deep_noise_level : float
         Deep broad-area source spectral level (dB re 1 µPa²/Hz). OASES
         uses two thresholds that disagree at exactly 0.01: the source
@@ -337,33 +347,62 @@ class OASN(OASES):
         ``.LE.0.01``) while Block VIII is read for ``level >= 0.01``
         (``oasnun22.f:324``). Unlike the surface level, a negative value
         simply disables it — the deep source has no spectrum-file form.
+
+        OASES computes the sheet as written, with two defects in its deep
+        loop that uacpy keeps. The plane-geometry flag ``ICDR = 1`` is set
+        only for surface noise (``oasnun22.f:509-511``), yet the deep loop
+        divides by ``SQRT(FREQ/V)`` as for plane geometry (``:705``;
+        PINIT2 multiplies by it only under ``ICDR = 1``,
+        ``oaseun31.f:1701-1709``): with ``surface_noise_level`` off, the
+        level reads ``10·log10(c/f)`` dB high, c the sound speed at the
+        sheet (11.8 dB at 100 Hz in 1500 m/s water). And the deep loop sets
+        ``ICUT1``/``ICUT2`` but not the taper window ``ICW1``/``ICW2``
+        (``:713-714``; the surface loop sets both, ``:591-594``), so
+        CALIN3 tapers each deep band's kernel from a stale index
+        (``oaseun31.f:2157-2158``): 3.5-5.3 dB at a receiver 30 m above a
+        mid-depth sheet, moving with ``c_low``. Against the same sheet
+        computed without both (a 0.02 dB surface block, run first with an
+        evanescent count above the deep counts, sets the flag and the
+        window), whose depth shape then matches a normal-mode
+        sum to 0.04 dB, a deep-only run reads -12 to +10 dB on a 100 m and
+        a 2000 m column at 25-400 Hz. A third difference costs only
+        samples: the deep block's discrete band spans ``1/CMX`` to
+        ``1/CMX`` (``oasnun22.f:349``; the surface block's ends at
+        ``1/CMN``, ``:299``), so its samples are weighted by zero.
     deep_source_depth : float, optional
         Depth (m) of the deep broad-area noise source sheet; ``None``
-        → half the water depth. Only written when ``deep_noise_level``
-        is non-zero.
+        → half the water depth, uacpy guidance (the manual names DPSD only
+        as "the depth of the deep noise source sheet", oasn.tex:334-335).
+        Only written when ``deep_noise_level`` is non-zero.
     discrete_sources : list of dict, optional
         Point sources; each dict may carry ``'depth'`` (m), ``'x'``
         (m), ``'y'`` (m) and ``'level'`` (dB, non-negative) — the four
         fields OASES reads (``oasnun22.f:380``). Any other key raises
         ``ConfigurationError``; OASES has no per-source phase.
     replica_xmin, replica_xmax : float, optional
-        Replica candidate-grid x bounds (m); ``None`` → OASES defaults
-        (100 / 10000).
+        Replica candidate-grid x bounds (m); ``None`` → 100 / 10000,
+        uacpy guidance: OASN reads the whole replica grid from the deck
+        and has no default of its own (unoasn22.f:184-186).
     replica_nx : int
-        Number of replica grid points in x. Default 50.
+        Number of replica grid points in x, a whole number >= 1. Default 50,
+        uacpy guidance (OASN reads the grid from the deck,
+        unoasn22.f:184-186, and has no default).
     replica_ymin, replica_ymax : float, optional
         Replica candidate-grid y bounds (m); ``None`` → 0 / 0.
     replica_ny : int
-        Number of replica grid points in y. Default 1.
+        Number of replica grid points in y, a whole number >= 1. Default 1,
+        one y-range, as the manual's worked deck (oasn.tex:491).
     replica_zmin, replica_zmax : float, optional
         Replica candidate-grid depth bounds (m); ``None`` → 10 /
-        ``env.depth - 10``.
+        ``env.depth - 10``, uacpy guidance as for x.
     replica_nz : int
-        Number of replica grid points in depth. Default 20.
+        Number of replica grid points in depth, a whole number >= 1.
+        Default 20, uacpy guidance as for x.
     c_low, c_high : float, optional
         Phase-speed bounds (m/s) for the wavenumber integrations,
         applied to both the noise and replica blocks; ``None`` →
-        ``0.95 · min(c_water)`` and ``1e8``.
+        ``C_LOW_FACTOR · min(c_water)`` (0.9,
+        :data:`~uacpy.core.engine_defaults.C_LOW_FACTOR`) and ``1e8``.
     integration_offset : float
         Wavenumber-integration contour offset (dB/wavelength). Default 0, which
         under the 'J' option of the default option line is not "no offset":
@@ -371,16 +410,31 @@ class OASN(OASES):
         60*c*(1/c_min - 1/c_max)/N_k dB/wavelength (unoasn22.f:283-293). A
         value above 1e-10 is used as given.
     n_wavenumbers : int, optional
-        Number of wavenumber samples; ``None`` lets OASES choose (AUTSMN, which
-        samples the propagating band at a step set by the replica grid's far
-        edge). The automatic grid reads the replica levels low toward that
-        edge — measured against Scooter on a 100 m Pekeris guide at 150 Hz,
-        -0.57 dB at 4.1 km and -3.32 dB at the 10 km edge of the default
-        grid. A pinned count integrates the whole wavenumber window and
-        converges as it grows (-8.45, -1.95, -0.49, -0.14 dB at that edge
-        for NW = 2048, 4096, 8192, 16384), so pin a count large enough for
-        the grid when replica or covariance *levels* matter; Bartlett and
-        MVDR normalise each replica and are unaffected.
+        Number of wavenumber samples; ``None`` lets OASES choose for the
+        replica and discrete-source blocks (AUTSMN, which samples the
+        propagating band at a step set by the replica grid's far edge and
+        tapers the kernel at the phase-speed bounds,
+        ``doc/oasn.tex:356-362``). A pinned count is placed equidistantly over
+        the whole window between the wavenumbers of ``c_high`` and ``c_low``
+        and integrated in full (``doc/oast.tex:522-526``); the manual leaves
+        such a sampling to the usual convergence test
+        (``doc/oast.tex:543-546``): increase it until the replica and
+        covariance levels stop changing.
+
+        The surface- and deep-noise blocks have no automatic sampling: each
+        reads three counts, for its continuous, discrete and evanescent
+        bands. ``None`` writes 1600 / 63836 / 100 for surface noise — uacpy
+        guidance, measured: OASES's artificial attenuation on the discrete
+        band lowers the level as 1/count, and these counts fill its
+        65536-sample limit. The level then reads 0.05-0.47 dB below the
+        integral without that attenuation on a 100 m column (400 / 400 /
+        100: 2.9-5.4 dB) and 1.2-3.5 dB below on a 2000 m sound channel
+        (8.4-10.2 dB), whose lossless channel modes keep that integral from
+        converging within the limit; 0.1-1.5 s per frequency. Deep noise
+        keeps the manual's worked-deck 400 / 400 / 100 (``oasn.tex:480``).
+        A pinned ``n`` writes ``n``, ``max(n, 10)`` and ``max(1, n // 4)``
+        to those three bands of either block; in the deep block the middle band has zero width (see
+        ``deep_noise_level``), so its trapped modes take the ``n // 4``.
     use_tmpfs, verbose, work_dir, cleanup, timeout, collapse : optional
         Standard plumbing (see :class:`PropagationModel`).
 
@@ -420,8 +474,7 @@ class OASN(OASES):
     ``result.run_settings.engine``.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    Per-model: ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the
-    layer stack is kept).
+    Per-model: ``'ssp': 'mean'`` (the layer stack is kept).
 
     Examples
     --------
@@ -438,12 +491,18 @@ class OASN(OASES):
     # honoured. Single spectral solve per frequency → mean SSP / median column.
     spec = ModelSpec(
         modes=(RunMode.COVARIANCE, RunMode.REPLICA),
+        # A rough interface is column 7 (RG) of the layer record
+        # (oaseun31.f:54).
         supports={'layered_bottom', 'elastic_media',
                   'rough_surface', 'rough_bottom'},
-        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+        # Point sources only: OASN has no line-source geometry, its 'P'
+        # option selects noise-intensity plots (unoasn22.f:655).
+        source_types=frozenset({'point'}),
+        collapse={'ssp': 'mean'},
         traits=_OASES_TRAITS,
     )
     provenance_id = 'oases'
+    _BINARIES = MappingProxyType({'oasn': _oases_binary('oasn2_bin')})
     # The replicas are pressure in the travelling-wave convention once
     # _to_result negates OASN's normal stress; a covariance has no phase.
     outputs = MappingProxyType({
@@ -470,8 +529,8 @@ class OASN(OASES):
         discrete_sources: Optional[list] = None,
         # Replica candidate-position grid (Block X). x/y/z in metres on
         # the public API, converted to km at write time. ``None`` lets
-        # the writer apply OASES defaults (10 / depth-10 in z, 100 /
-        # 10000 in x, 0 / 0 in y).
+        # the writer apply uacpy's defaults (10 / depth-10 in z, 100 /
+        # 10000 in x, 0 / 0 in y); OASN itself has none.
         replica_xmin: Optional[float] = None,
         replica_xmax: Optional[float] = None,
         replica_nx: int = OasnReplicaGrid.x[2],
@@ -484,7 +543,7 @@ class OASN(OASES):
         # Phase-speed bounds for the wavenumber integrations (m/s).
         # Applied identically to OASN Block VIII (noise / discrete
         # sources) and Block X (replica generator). ``None`` → writer
-        # derives c_water_min * 0.95 (c_low) and 1e8 (c_high).
+        # derives c_water_min * C_LOW_FACTOR (c_low) and 1e8 (c_high).
         c_low: Optional[float] = None,
         c_high: Optional[float] = None,
         # Wavenumber-axis sampling & TL plot axes.
@@ -497,10 +556,7 @@ class OASN(OASES):
         timeout: float = DEFAULT_RUN_TIMEOUT_S,
         collapse: Optional[Dict[str, str]] = None,
     ):
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse,
-        )
+        super().__init__(**_host_options(locals()))
         self.options = options
         self.surface_noise_level = float(surface_noise_level)
         # None means "no white noise": the writer maps it to the -200 dB
@@ -514,6 +570,12 @@ class OASN(OASES):
             float(deep_source_depth) if deep_source_depth is not None else None
         )
         self.discrete_sources = list(discrete_sources) if discrete_sources else None
+        # OASN reads the replica grid's counts NSRCZ / NSRCX / NSRCY as
+        # INTEGER point counts (unoasn22.f:184-186), so each is a whole
+        # number >= 1.
+        for axis, count in (('x', replica_nx), ('y', replica_ny),
+                            ('z', replica_nz)):
+            whole_count(f'OASN: replica_n{axis}', count, 1)
         self.replica_xmin = replica_xmin
         self.replica_xmax = replica_xmax
         self.replica_nx = int(replica_nx)
@@ -535,25 +597,22 @@ class OASN(OASES):
             # propagating band [2*pi*f/C2, 2*pi*f/C1] with 10% margins
             # (:1701-1712); the deck writer emits ``NW 1 NW`` for a pinned
             # count, and :438-440 takes ICUT1=1, ICUT2=NW verbatim, so the
-            # pinned deck integrates the whole window. Measured against
-            # Scooter (an independent engine) on a 100 m Pekeris guide at
-            # 150 Hz, array at 20-80 m, replica grid 0.1-10 km, the replicas'
-            # array energy at the grid's far edge is -8.45, -1.95, -0.49 and
-            # -0.14 dB at NW = 2048, 4096, 8192, 16384: a pinned count
-            # converges onto Scooter as it grows, and one too small for the
-            # grid reads low. The automatic default reads -3.32 dB there
-            # (-0.57 dB at 4.1 km), low by an amount that follows the grid's
-            # own far edge. Bartlett and MVDR normalise each replica, so
-            # localisation is unaffected; the levels are not.
+            # pinned deck integrates the whole window, its NW samples placed
+            # equidistantly between the wavenumbers of CMAX and CMIN
+            # (doc/oast.tex:522-526). The manual offers automatic sampling as
+            # the way to a correct answer "without the usual convergence
+            # testing" (doc/oast.tex:543-546), so a pinned count needs that
+            # test.
             warnings.warn(
                 f"OASN(n_wavenumbers={self.n_wavenumbers}): a pinned wavenumber "
-                f"count integrates the whole wavenumber window (ICUT1=1, "
-                f"ICUT2=NW) rather than the propagating band automatic "
-                f"sampling selects, and replica and covariance levels "
-                f"converge as NW grows: against Scooter on a 10 km replica "
-                f"grid at 150 Hz, the far edge reads -8.45 dB at NW=2048, "
-                f"-0.49 dB at 8192 and -0.14 dB at 16384. Double n_wavenumbers "
-                f"until the levels stop changing.",
+                f"count spreads its samples equidistantly over the whole "
+                f"wavenumber window set by c_low and c_high and integrates "
+                f"all of it (ICUT1=1, ICUT2=NW), where automatic sampling "
+                f"(n_wavenumbers=None) sets the step from the replica grid's "
+                f"far edge and tapers at the phase-speed bounds. The OASES "
+                f"manual leaves a manual sampling to the usual convergence "
+                f"test: double n_wavenumbers until the replica and covariance "
+                f"levels stop changing.",
                 NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP,
             )
         # OASN's deck has no range-axis or receiver-velocity field: it emits
@@ -579,15 +638,18 @@ class OASN(OASES):
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
         self._exe = self._resolve_executable(
-            executable, lambda: _oases_find_executable(self, 'oasn2_bin'),
+            executable, lambda: self._find_binary('oasn'),
         )
 
     def _check_knobs(self) -> None:
         """Refuse a raw option line carrying the Doppler letter
-        (:func:`_reject_doppler_letter`), and a noise or replica-grid knob the
+        (:func:`_reject_doppler_letter`), a pinned phase-speed window that is
+        not positive or not ordered
+        (:func:`~uacpy.models._window.check_pinned_window`), and a noise or
+        replica-grid knob the
         deck's records cannot carry, by the knob's own name: a negative
-        ``surface_noise_level`` (read as a spectrum-file unit number, after
-        the deck's one-decimal rounding and dead band,
+        ``surface_noise_level`` (read as a spectrum-file unit number, past
+        the dead band OASN tests at single precision,
         :meth:`OasnNoise.deck_levels`), a ``discrete_sources`` list OASN
         cannot read, and a ``replica_nz``/``replica_nx``/``replica_ny``
         past NSMAX — the writer's
@@ -598,6 +660,7 @@ class OASN(OASES):
         in between."""
         _reject_doppler_letter(self.options)
         _check_n_wavenumbers_knob(self.n_wavenumbers)
+        check_pinned_window('OASN', c_low=self.c_low, c_high=self.c_high)
         _check_oasn_noise_level(
             'surface_noise_level',
             OasnNoise(surface_level=self.surface_noise_level).deck_levels()[0],
@@ -609,7 +672,18 @@ class OASN(OASES):
 
     def _resolve_engine_settings(self, env, source, receiver, settings, *,
                                  given_env, request=None) -> 'OASNSettings':
-        """Stage 3: :func:`_oasn_settings` for this model's knobs."""
+        """Stage 3: :func:`_oasn_settings` for this model's knobs, after
+        the refusal of a pinned bound on the wrong side of the derived one
+        (the window the noise and replica blocks carry)."""
+        # The window the OASN writer derives an unpinned noise / replica
+        # bound with (C_LOW_FACTOR × min(SSP), and OASES' 1e8 "no upper
+        # limit"), which a pinned bound is held to.
+        cl, ch = oases_wavenumber_bounds(
+            env.ssp.extend_to(env.depth).to_pairs())
+        refuse_inverted_window(
+            'OASN', cl if self.c_low is None else float(self.c_low),
+            ch if self.c_high is None else float(self.c_high),
+            c_low=self.c_low, c_high=self.c_high)
         return _oasn_settings(
             settings.mode, options=self.options,
             integration_offset=self.integration_offset,
@@ -641,13 +715,14 @@ class OASN(OASES):
         under its own name."""
         proc = self._execute(deck.stem, inputs.work_dir)
         if inputs.settings.mode == RunMode.COVARIANCE:
-            self._require_output(
-                [inputs.work_dir / f'{deck.stem}.xsm'],
+            require_output(
+                self.model_name, [inputs.work_dir / f'{deck.stem}.xsm'],
                 what='a covariance file', process=proc,
             )
             return
-        self._require_output(
-            [inputs.work_dir / f'{deck.stem}.rpo'], what='a replica file',
+        require_output(
+            self.model_name, [inputs.work_dir / f'{deck.stem}.rpo'],
+            what='a replica file',
             process=proc,
             hint=('Set the replica grid via OASN(replica_xmin=…, replica_xmax=…, replica_nx=…, '
                   'replica_zmin=…, replica_zmax=…, replica_nz=…) on the constructor.'),
@@ -706,8 +781,8 @@ class OASN(OASES):
             result.phase_reference = PhaseReference(
                 settings.output.phase_reference)
             primary = (('rpo_file', '.rpo'),)
-        self._attach_output_paths(result, inputs.work_dir, deck.stem,
-                                  primary_files=primary)
+        attach_output_paths(result, inputs.work_dir, deck.stem,
+                            primary_files=primary, cleanup=self.cleanup)
         return result
 
     # ``compute_covariance`` / ``compute_replicas`` come from the base class

@@ -9,7 +9,12 @@ from typing import Dict, Optional, Union
 import numpy as np
 
 from uacpy.models._band import frequencies_text
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, PropagationModel
+from uacpy.models._launch import (
+    BinarySearch, attach_prt_tail, require_output, run_prt_binary,
+)
+from uacpy.models.base import (
+    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+)
 from uacpy.core.source import VALID_SOURCE_TYPES
 from uacpy.models._spec import (
     _SINGLE_FREQUENCY_MODES, EngineTraits, ModelSpec,
@@ -34,6 +39,7 @@ from uacpy.models.bounce._plan import (
     resolve_rmax_m, tabulated_angle_count,
 )
 from uacpy.models.bounce._settings import BounceSettings
+from uacpy.models._extract import attach_output_paths, result_kwargs
 
 # BOUNCE always writes both tables, so both are cleared before a launch — but a
 # tabulated seabed makes one of them an *input* too: write_bottom_section stages
@@ -81,17 +87,16 @@ class Bounce(PropagationModel):
       ``cleanup=True`` ⇒ files are removed when ``run()`` returns;
       ``result.metadata`` does not carry the (now stale) file paths.
 
-    **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).**
-    BOUNCE produces ONE BRC consumed across the whole receiver-range
-    axis; the median sample is the most representative single profile.
-    Per-model: ``'bottom_range': 'median'`` (the layer stack is kept since
-    BOUNCE consumes layered seabed columns natively).
+    **Collapse defaults.** The global :data:`DEFAULT_COLLAPSE`: BOUNCE
+    produces ONE BRC consumed across the whole receiver-range axis, from
+    the median seabed column (the layer stack is kept since BOUNCE consumes
+    layered seabed columns natively).
 
     Model characteristics:
 
     - BOUNCE uses the same environmental file format as KRAKEN
     - The reflection coefficient depends on impedance contrast
-    - Supports acoustic, elastic, and poro-elastic layers
+    - Supports acoustic and elastic layers
     - Tabulated reflection coefficients cover angles from phase velocities [c_low, c_high]
     - Both tables go through the standard AT reflection-coefficient path:
       ``.brc`` via ``acoustic_type='file'``, ``.irc`` via
@@ -160,7 +165,7 @@ class Bounce(PropagationModel):
     ...     )
     ...     env_with_rc = Environment(name="test", bathymetry=100,
     ...                               bottom=bottom_with_rc)
-    ...     tl = Scooter().compute_tl(env_with_rc, source, receiver)
+    ...     field = Scooter().compute_field(env_with_rc, source, receiver)
 
     References
     ----------
@@ -190,7 +195,6 @@ class Bounce(PropagationModel):
         # Reflection coefficients are independent of source geometry, so
         # rejecting one would break reusing a Source across models.
         source_types=VALID_SOURCE_TYPES,
-        collapse={'bottom_range': 'median'},
         traits=EngineTraits(
             none_receiver_modes=frozenset({RunMode.REFLECTION}),
             # BOUNCE writes one frequency into the ``.env`` and returns one
@@ -202,6 +206,11 @@ class Bounce(PropagationModel):
         ),
     )
     provenance_id = 'acoustics_toolbox'
+
+    _BINARIES = MappingProxyType({
+        'bounce': BinarySearch(('bounce',), ('oalib',),
+                               'Acoustics-Toolbox/Kraken'),
+    })
 
     #: The settings' ``n_angles`` is the count the deck tabulates, which
     #: follows from the recorded ``rmax_m``; as a knob it would re-derive
@@ -249,33 +258,28 @@ class Bounce(PropagationModel):
             table starts at ``atan2(sqrt(k0**2 - kMax**2), kMax)`` rather
             than 0 deg and the grazing wedge is unrecoverable. ``run()``
             raises rather than emit such a table.
-        c_low, c_high : float, optional
-            Phase-velocity bounds for tabulation (m/s). ``c_low`` must be
-            strictly positive (BOUNCE rejects ``c_low <= 0``); ``None``
-            (default) derives it from the environment at ``run()`` time as
-            ``min(DEFAULT_C_MIN, min(env.ssp))``. ``c_high``: ``None``
-            (default) resolves at ``run()`` time to ``DEFAULT_C_MAX_UNBOUNDED``.
         c_high : float, optional
-            Maximum phase velocity (m/s) for tabulation. Default: 1e9, which
+            Maximum phase velocity (m/s) for tabulation. ``None`` (default)
+            resolves at ``run()`` time to ``DEFAULT_C_MAX_UNBOUNDED``, 1e9, which
             trips ``bounce.f90:47``'s ``IF ( cHigh > 1.0E6 ) kMin = 0.0`` and
             so tabulates the full 0–90° grazing span. A finite ``c_high``
             stops the table at ``acos(c0 / c_high)`` and every consumer
             silently returns ``R = 0, phi = 0`` above the last tabulated
             angle (``misc/RefCoef.f90:144-149``, both of whose warning WRITEs
             are commented out). Must be strictly greater than c_low.
-            ``None`` stands for the default.
         rmax_m : float, optional
             Maximum range (m) for angular sampling. ``None`` (default)
             auto-derives from ``receiver.range_max`` at ``run()`` time,
             falling back to 10000 m when no receiver range is available.
-            Ignored when ``n_angles`` is provided. (Internally converted to
-            km because BOUNCE's input format is in km.)
+            Refused beside ``n_angles``, which sets it. (Internally
+            converted to km because BOUNCE's input format is in km.)
         n_angles : int, optional
-            Explicit override for the number of angular samples (``NkTab``
-            in AT's bounce). If None (default), bounce computes NkTab
-            internally from ``rmax_m``. When provided, uacpy sets ``rmax_m``
-            such that bounce's internal formula yields approximately
-            ``n_angles`` samples. A whole number, at least 2.
+            The number of angular samples (``NkTab`` in AT's bounce). If
+            None (default), bounce computes NkTab internally from
+            ``rmax_m``. When provided, uacpy sets ``rmax_m`` such that
+            bounce's internal formula (``bounce.f90:49``) yields exactly
+            ``n_angles`` samples, and refuses a count the deck's RMax cannot
+            give, naming the one it gives. A whole number, at least 2.
         interp_ssp : str, optional
             Sample-connection scheme written into ``TopOpt(1)``. A BOUNCE deck
             carries only the seabed stack — its media are 2-point linear slabs —
@@ -290,12 +294,10 @@ class Bounce(PropagationModel):
         ConfigurationError
             For a knob no run could use: a value that is not a number, a
             non-positive speed or range, ``c_high <= c_low``, an
-            ``n_angles`` that is not a whole number of at least 2.
+            ``n_angles`` that is not a whole number of at least 2, or
+            ``n_angles`` and ``rmax_m`` both pinned.
         """
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse,
-        )
+        super().__init__(**_host_options(locals()))
         # BOUNCE meshes only the seabed stack — write_bounce_input_file emits
         # no water column and no .ssp — so the range-dependent 'quad' scheme
         # has no file to read and ERROUTs at NMedia.
@@ -323,11 +325,7 @@ class Bounce(PropagationModel):
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
         self._exe = self._resolve_executable(
-            executable,
-            lambda: self._find_executable_in_paths(
-                'bounce', bin_subdirs='oalib',
-                dev_subdir='Acoustics-Toolbox/Kraken',
-            ),
+            executable, lambda: self._find_binary('bounce'),
         )
 
     def _validate_geometry(self, env, source, receiver, run_mode=None) -> None:
@@ -457,8 +455,9 @@ class Bounce(PropagationModel):
         self._log("Running...")
         base_name = deck.stem
         staged = inputs.settings.engine.staged_table_suffix
-        self._run_and_attach_prt(
-            [str(self._exe), base_name], inputs.work_dir, base_name,
+        run_prt_binary(
+            self._launch_context(), [str(self._exe), base_name],
+            inputs.work_dir, base_name,
             stale_outputs=tuple(s for s in _BOUNCE_OUTPUTS if s != staged))
 
     def _read_output(self, inputs, deck: Path) -> ReflectionCoefficient:
@@ -469,8 +468,8 @@ class Bounce(PropagationModel):
         work_dir = inputs.work_dir
         # A missing or empty .brc means the binary died silently; the
         # raised error carries the .prt tail with the actual cause.
-        brc_file = self._require_output(
-            [work_dir / f'{base_name}.brc'],
+        brc_file = require_output(
+            self.model_name, [work_dir / f'{base_name}.brc'],
             what='a reflection-coefficient table (.brc)',
             prt_base=base_name, work_dir=work_dir,
         )
@@ -507,7 +506,7 @@ class Bounce(PropagationModel):
                     f"{engine.rmax_m:g} m, from {engine.rmax_origin})."
                 ),
             )
-            self._attach_prt_tail(exc, work_dir, base_name)
+            attach_prt_tail(exc, work_dir, base_name)
             raise exc
         return table
 
@@ -526,19 +525,20 @@ class Bounce(PropagationModel):
             angles=raw.angles,
             magnitude=raw.magnitude,
             phase=raw.phase,
-            **self._result_kwargs(
-                inputs.source,
+            **result_kwargs(
+                self.model_name, self.provenance, inputs.source,
                 frequencies=float(settings.frequencies[0]),
                 phase_reference=settings.output.phase_reference,
                 n_points=raw.n_angles,
             ),
         )
-        self._attach_output_paths(
+        attach_output_paths(
             table, inputs.work_dir, deck.stem,
             primary_files=(
                 ('brc_file', '.brc'),
                 ('irc_file', '.irc'),
             ),
+            cleanup=self.cleanup,
         )
         self._log("Simulation complete")
         return table

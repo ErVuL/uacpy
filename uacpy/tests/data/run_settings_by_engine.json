@@ -5,31 +5,60 @@
    "__class__": "uacpy.models.bellhop.BellhopSettings",
    "backend": "cuda",
    "band_origin": null,
-   "beam_type": "B",
+   "beam_type": "G",
    "bounce": null,
    "bounce_c_high": null,
    "bounce_c_low": null,
    "bounce_origin": null,
    "bounce_rmax_m": null,
-   "center_frequency": 100.0,
    "deck_ranges": null,
    "executable": "/home/theo/claudecode/uacpy_workspace (Copy)/uacpy/uacpy/bin/bellhopcuda/bellhopcuda",
+   "fc": 100.0,
    "interp_ssp": null,
+   "knobs": {
+    "auto_bounce": true,
+    "backend": null,
+    "bandwidth_factor": 0.5,
+    "beam_curvature": "D",
+    "beam_shift": false,
+    "beam_type": "G",
+    "beam_width_type": "F",
+    "collapse": null,
+    "component": "P",
+    "dimensionality": "2D",
+    "eps_multiplier": 1.0,
+    "grid_type": "R",
+    "ib_win": 4,
+    "interp_altimetry": "linear",
+    "interp_bathymetry": "linear",
+    "interp_ssp": null,
+    "launch_angles": [
+     -80,
+     80
+    ],
+    "n_beams": 0,
+    "n_frequencies": 128,
+    "n_image": 1,
+    "r_box": null,
+    "r_loop": 1000.0,
+    "ray_step": 0.0,
+    "z_box": null
+   },
+   "launch_angles": [
+    -80.0,
+    80.0
+   ],
    "n_beams": 0,
    "notices": [],
    "pulse_samples": null,
    "r_box": 480.0,
    "r_box_origin": "1.2 x receiver.range_max",
    "range_trim": null,
+   "ray_step": 2.0,
+   "ray_step_origin": "env.depth / 50",
    "run_type": "C",
    "z_box": 120.0,
-   "z_box_origin": "1.2 x env.depth",
-   "launch_angles": [
-    -80.0,
-    80.0
-   ],
-   "ray_step": 2.0,
-   "ray_step_origin": "env.depth / 50"
+   "z_box_origin": "1.2 x env.depth"
   },
   "frequencies": [
    100.0
@@ -62,15 +91,23 @@
   "engine": {
    "__class__": "uacpy.models.bounce.BounceSettings",
    "c_high": 1000000000.0,
+   "c_high_origin": "DEFAULT_C_MAX_UNBOUNDED: the full 0\u201390\u00b0 grazing span",
    "c_low": 1400.0,
    "c_low_origin": "min(1400, min(env.ssp))",
+   "knobs": {
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "interp_ssp": null,
+    "n_angles": null,
+    "rmax_m": null
+   },
    "n_angles": 28,
    "n_mesh": [],
    "notices": [],
    "rmax_m": 400.0,
    "rmax_origin": "receiver.range_max",
-   "staged_table_suffix": null,
-   "c_high_origin": "DEFAULT_C_MAX_UNBOUNDED: the full 0\u201390\u00b0 grazing span"
+   "staged_table_suffix": null
   },
   "frequencies": [
    100.0
@@ -107,18 +144,34 @@
    "c_high_origin": "1.05 \u00d7 max(env.ssp, half-space sound speed)",
    "c_low_origin": "0.0: KRAKEN computes cLow (a fluid problem)",
    "evaluated_depths": null,
+   "knobs": {
+    "backend": null,
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "interp_ssp": null,
+    "leaky_modes": false,
+    "mode_coupling": null,
+    "mode_depths": null,
+    "mode_points_per_meter": null,
+    "n_mesh": null,
+    "n_modes": null,
+    "n_segments": null,
+    "rmax_m": null,
+    "top_reflection_file": null
+   },
    "launches": [
     {
      "c_high": [
       1785.0
      ],
      "c_low": 0.0,
-     "check_n_mesh": null,
      "deck_frequency": 100.0,
-     "field_option": "RC C",
+     "field_option": "RA C",
+     "marched_frequencies": null,
      "n_mesh": 0,
      "profile_ranges_m": null,
-     "rmax_m": 420.0,
+     "rmax_m": 400.0,
      "tabulation_depths": [
       0.0,
       0.6711409395973155,
@@ -272,8 +325,7 @@
       98.65771812080537,
       99.32885906040269,
       100.0
-     ],
-     "marched_frequencies": null
+     ]
     }
    ],
    "mode_coupling": "none",
@@ -281,7 +333,7 @@
    "n_modes": null,
    "notices": [],
    "receiver_keep": null,
-   "rmax_origin": "1.05 \u00d7 the farthest receiver range",
+   "rmax_origin": "the farthest receiver range (doc/kraken.htm (8))",
    "route": "field"
   },
   "frequencies": [
@@ -325,8 +377,41 @@
     1
    ],
    "integration_offset": 0.0,
-   "notices": [],
+   "knobs": {
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "deep_noise_level": 0.0,
+    "deep_source_depth": null,
+    "discrete_sources": null,
+    "integration_offset": 0.0,
+    "n_wavenumbers": null,
+    "options": null,
+    "replica_nx": 50,
+    "replica_ny": 1,
+    "replica_nz": 20,
+    "replica_xmax": null,
+    "replica_xmin": null,
+    "replica_ymax": null,
+    "replica_ymin": null,
+    "replica_zmax": null,
+    "replica_zmin": null,
+    "surface_noise_level": 0.0,
+    "white_noise_level": null
+   },
    "n_wavenumbers": null,
+   "notices": [
+    {
+     "category": "FallbackWarning",
+     "message": "OASN: receiver.ranges is ignored \u2014 OASN models a vertical array at x = y = 0 (depths only). Use the replica grid (replica_xmin/replica_xmax/...) for horizontal apertures.",
+     "note": null
+    },
+    {
+     "category": "ValidityWarning",
+     "message": "OASN: no noise source is configured, so the covariance matrix is only the white-noise floor \u2014 a diagonal of 1e-20 (the -200 dB default) with zero cross terms. Configure a noise field on the constructor: surface_noise_level=, deep_noise_level=, discrete_sources=, or an explicit white_noise_level=.",
+     "note": null
+    }
+   ],
    "options": "J N",
    "replica_nx": 50,
    "replica_ny": 1,
@@ -371,29 +456,43 @@
   "engine": {
    "__class__": "uacpy.models.oases.OASPSettings",
    "c_high": 1000000000.0,
+   "c_high_origin": "oases_wavenumber_bounds(water column)",
    "c_low": 1350.0,
-   "center_frequency": 100.0,
-   "center_frequency_origin": "centre of the requested band",
+   "c_low_origin": "oases_wavenumber_bounds(water column)",
    "dip_angle": null,
+   "fc": 100.0,
+   "fc_origin": "centre of the requested band",
    "freq_max": 200.0,
    "freq_max_origin": "top of the requested band, the Nyquist lifted by NX/(NX - 2)",
    "freq_min": 100.0,
    "integrand_plot_step": null,
+   "integration_offset": 0.0,
+   "knobs": {
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "dip_angle": null,
+    "fc": null,
+    "freq_max": null,
+    "freq_min": 0.0,
+    "integrand_plot_step": null,
+    "integration_offset": 0.0,
+    "n_time_samples": null,
+    "n_wavenumbers": null,
+    "options": null
+   },
    "marched_frequencies": [
     100.00000223517424
    ],
-   "integration_offset": 0.0,
    "n_time_samples": 4,
    "n_time_samples_origin": "the power of two reaching the requested spacing 100 Hz",
-   "notices": [],
    "n_wavenumbers": null,
+   "notices": [],
    "options": "N J",
    "requested_frequencies": [
     100.0
    ],
-   "time_step": 0.0025,
-   "c_low_origin": "oases_wavenumber_bounds(water column)",
-   "c_high_origin": "oases_wavenumber_bounds(water column)"
+   "time_step": 0.0025
   },
   "frequencies": [
    100.00000223517424
@@ -425,7 +524,6 @@
   "depth_loop": "single",
   "engine": {
    "__class__": "uacpy.models.oases.OASRSettings",
-   "plot_angle_step": null,
    "angle_type": "grazing",
    "angles_deg": [
     0.0,
@@ -610,17 +708,28 @@
     89.5,
     90.0
    ],
-   "plot_frequency_step": null,
-   "interface_roughness": null,
-   "log_swept": false,
-   "notices": [],
-   "options": "N T",
-   "reflection_type": "P-P",
    "frequency_sweep": [
     100.0,
     100.0,
     1
-   ]
+   ],
+   "interface_roughness": null,
+   "knobs": {
+    "angle_type": "grazing",
+    "angles": null,
+    "collapse": null,
+    "interface_roughness": null,
+    "options": null,
+    "plot_angle_step": null,
+    "plot_frequency_step": null,
+    "reflection_type": null
+   },
+   "log_swept": false,
+   "notices": [],
+   "options": "N T",
+   "plot_angle_step": null,
+   "plot_frequency_step": null,
+   "reflection_type": "P-P"
   },
   "frequencies": [
    100.0
@@ -658,12 +767,28 @@
    "correlation_length": 10.0,
    "frequency": 100.0,
    "interface": 3,
+   "knobs": {
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "correlation_length": 10.0,
+    "interface": null,
+    "mean_field": null,
+    "multiple_scattering": false,
+    "options": null,
+    "receiver_gains": null,
+    "rms_roughness": null,
+    "roughness_spectrum": "gaussian",
+    "spectral_exponent": 2.0
+   },
    "mean_field": {
     "depth_loop": "single",
     "engine": {
      "__class__": "uacpy.models.oases.OASTSettings",
      "c_high": 100000000.0,
+     "c_high_origin": "oases_wavenumber_bounds(water column)",
      "c_low": 1350.0,
+     "c_low_origin": "oases_wavenumber_bounds(water column)",
      "dip_angle": null,
      "frequency_sweep": [
       100.0,
@@ -671,14 +796,27 @@
       1
      ],
      "integration_offset": 0.0,
-     "notices": [],
+     "knobs": {
+      "c_high": null,
+      "c_low": null,
+      "collapse": null,
+      "complex_contour": null,
+      "compute_contour": null,
+      "compute_depth_average": null,
+      "dip_angle": null,
+      "integration_offset": 0.0,
+      "n_wavenumbers": null,
+      "options": "N J T s",
+      "range_max": null,
+      "range_min": null,
+      "vrec": 0.0
+     },
      "n_wavenumbers": null,
+     "notices": [],
      "options": "N J T s",
      "range_max_m": 400.0,
      "range_min_m": 0.0,
-     "vrec": 0.0,
-     "c_low_origin": "oases_wavenumber_bounds(water column)",
-     "c_high_origin": "oases_wavenumber_bounds(water column)"
+     "vrec": 0.0
     },
     "frequencies": [
      100.0
@@ -748,19 +886,56 @@
    "correlation_length": 5.0,
    "integration_offset": 0.0,
    "interface": 4,
+   "knobs": {
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "correlation_length": 5.0,
+    "fc": null,
+    "freq_max": null,
+    "freq_min": null,
+    "integration_offset": 0.0,
+    "interface": null,
+    "mean_field": null,
+    "n_time_samples": 256,
+    "n_wavenumbers": null,
+    "options": null,
+    "realization": 0,
+    "rms_roughness": null,
+    "roughness_spectrum": "gaussian",
+    "scattered_only": true,
+    "spectral_exponent": 2.0
+   },
    "mean_field": {
     "depth_loop": "single",
     "engine": {
      "__class__": "uacpy.models.oases.OASPSettings",
      "c_high": 1000000000.0,
+     "c_high_origin": "oases_wavenumber_bounds(water column)",
      "c_low": 1350.0,
-     "center_frequency": 100.0,
-     "center_frequency_origin": "source.frequencies",
+     "c_low_origin": "oases_wavenumber_bounds(water column)",
      "dip_angle": null,
+     "fc": 100.0,
+     "fc_origin": "source.frequencies",
      "freq_max": 250.0,
      "freq_max_origin": "2.5 x centre frequency",
      "freq_min": 0.0,
      "integrand_plot_step": null,
+     "integration_offset": 0.0,
+     "knobs": {
+      "c_high": null,
+      "c_low": null,
+      "collapse": null,
+      "dip_angle": null,
+      "fc": null,
+      "freq_max": null,
+      "freq_min": 0.0,
+      "integrand_plot_step": null,
+      "integration_offset": 0.0,
+      "n_time_samples": 256,
+      "n_wavenumbers": null,
+      "options": "N J s"
+     },
      "marched_frequencies": [
       1.9531249072315449,
       3.9062498144630897,
@@ -890,16 +1065,13 @@
       246.09373831117466,
       248.0468632184062
      ],
-     "integration_offset": 0.0,
      "n_time_samples": 256,
      "n_time_samples_origin": "OASP(n_time_samples=\u2026)",
-     "notices": [],
      "n_wavenumbers": null,
+     "notices": [],
      "options": "N J s",
      "requested_frequencies": null,
-     "time_step": 0.002,
-     "c_low_origin": "oases_wavenumber_bounds(water column)",
-     "c_high_origin": "oases_wavenumber_bounds(water column)"
+     "time_step": 0.002
     },
     "frequencies": [
      1.9531249072315449,
@@ -1062,14 +1234,14 @@
    "n_integrated_wavenumbers": [
     749
    ],
+   "n_wavenumbers": null,
    "notices": [
     {
-     "note": null,
+     "category": "ValidityWarning",
      "message": "OASSP: the Rayleigh parameter P = 2*k*sigma*sin(theta) passes 1 above 72.7 deg grazing, where small-roughness perturbation theory stops applying (JKPS Sect. 1.7; Abraham Sect. 3.2.7.6: the facet reflections \"span more than one cycle\" once P exceeds about one). Shallower angles remain inside the theory, so a long-range multipath answer can be sound while steep backscatter from the same run is not. uacpy.sonar.rayleigh_parameter and perturbative_grazing_limit compute these directly.",
-     "category": "ValidityWarning"
+     "note": null
     }
    ],
-   "n_wavenumbers": null,
    "options": "N J s",
    "realization": 0,
    "rms_roughness": null,
@@ -1232,7 +1404,9 @@
   "engine": {
    "__class__": "uacpy.models.oases.OASTSettings",
    "c_high": 100000000.0,
+   "c_high_origin": "oases_wavenumber_bounds(water column)",
    "c_low": 1350.0,
+   "c_low_origin": "oases_wavenumber_bounds(water column)",
    "dip_angle": null,
    "frequency_sweep": [
     100.0,
@@ -1240,14 +1414,27 @@
     1
    ],
    "integration_offset": 0.0,
-   "notices": [],
+   "knobs": {
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "complex_contour": null,
+    "compute_contour": null,
+    "compute_depth_average": null,
+    "dip_angle": null,
+    "integration_offset": 0.0,
+    "n_wavenumbers": null,
+    "options": null,
+    "range_max": null,
+    "range_min": null,
+    "vrec": 0.0
+   },
    "n_wavenumbers": null,
+   "notices": [],
    "options": "N T J",
    "range_max_m": 400.0,
    "range_min_m": 0.0,
-   "vrec": 0.0,
-   "c_low_origin": "oases_wavenumber_bounds(water column)",
-   "c_high_origin": "oases_wavenumber_bounds(water column)"
+   "vrec": 0.0
   },
   "frequencies": [
    100.0
@@ -1278,8 +1465,6 @@
  "ram": {
   "depth_loop": "single",
   "engine": {
-   "q_factor": 1000000.0,
-   "record_duration": 1.0,
    "__class__": "uacpy.models.ram.RamSettings",
    "backend": "mpirams",
    "backend_origin": "select_backend: a fluid seabed under a flat surface",
@@ -1293,19 +1478,44 @@
      "dr": 50.96917519810113,
      "dz": 0.9411764705882353,
      "frequency": 100.0,
-     "n_depth_points": 481,
+     "n_depth_points": 528,
      "ndr": null,
      "rmax_march": null,
      "theta": null,
-     "zmax": 451.7647058823529,
+     "zmax": 496.0,
      "zmplt": null,
      "zr_line": null
     }
    ],
+   "knobs": {
+    "absorber_attenuation": 10.0,
+    "absorber_width_wavelengths": 20.0,
+    "accuracy": null,
+    "angle_max": 30.0,
+    "backend": null,
+    "c0": null,
+    "collapse": null,
+    "depth_decimation": 1,
+    "dr": null,
+    "dz": null,
+    "earth_curvature": false,
+    "n_pade": 6,
+    "n_sediment_points": 1000,
+    "n_stability": 1,
+    "q_factor": null,
+    "rams_dr_factor": 5.0,
+    "rams_rotation": true,
+    "rams_rotation_angle": null,
+    "record_duration": null,
+    "stability_range_m": null,
+    "zmax": null
+   },
    "marched_frequencies": [
     100.0
    ],
    "notices": [],
+   "q_factor": 1000000.0,
+   "record_duration": 1.0,
    "requested_frequencies": null,
    "stability_range_m": 400.0,
    "zmax_frequency": 100.0
@@ -1345,14 +1555,25 @@
    "c_low": 1425.0,
    "c_low_origin": "0.95 \u00d7 min(env.ssp)",
    "deck_max_frequency": 100.0,
+   "knobs": {
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "interp_ssp": null,
+    "n_mesh": 0,
+    "rmax_factor": null,
+    "stabilizing_attenuation_off": false,
+    "taper": 0.0,
+    "wavenumber_spectrum": "positive"
+   },
    "mesh_reference_frequency": 100.0,
    "n_mesh": 0,
    "n_wavenumbers": 45,
    "notices": [],
    "peak_memory_bytes": 3600,
-   "rmax_m": 800.0,
    "rmax_factor": 2.0,
    "rmax_factor_origin": "the COHERENT_TL default",
+   "rmax_m": 800.0,
    "taper": 0.0
   },
   "frequencies": [
@@ -1386,8 +1607,33 @@
   "engine": {
    "__class__": "uacpy.models.sparc.SparcSettings",
    "c_high": 1000000000.0,
+   "c_high_origin": "DEFAULT_C_MAX_UNBOUNDED: the seabed has no half-space speed (vacuum, rigid, 'file' or 'precalc')",
    "c_low": 1425.0,
+   "c_low_origin": "0.95 \u00d7 min(env.ssp)",
+   "courant_factor": 0.999,
    "deck_frequency": 100.0,
+   "freq_max": 200.0,
+   "freq_max_origin": "one octave around source.frequencies[0], the canned pulse's frequency",
+   "freq_min": 50.0,
+   "freq_min_origin": "one octave around source.frequencies[0], the canned pulse's frequency",
+   "knobs": {
+    "c_high": null,
+    "c_low": null,
+    "collapse": null,
+    "courant_factor": 0.999,
+    "freq_max": null,
+    "freq_min": null,
+    "interp_ssp": null,
+    "march_start": -0.1,
+    "max_launches": 20,
+    "n_mesh": 0,
+    "n_time_samples": 512,
+    "output_mode": "R",
+    "pulse_type": null,
+    "rmax_factor": null,
+    "time_max": null,
+    "window_sound_speed": null
+   },
    "march_start": -0.1,
    "n_mesh": [
     266
@@ -1396,11 +1642,11 @@
    "n_wavenumbers": 224,
    "notices": [],
    "output_mode": "R",
-   "pulse_type_origin": "the canned wavelet (the run was handed no source_waveform)",
    "pulse_type": "PN+B",
-   "rmax_m": 1600.0,
+   "pulse_type_origin": "the canned wavelet (the run was handed no source_waveform)",
    "rmax_factor": 4.0,
    "rmax_factor_origin": "the default, which clears the range alias from the auto window",
+   "rmax_m": 1600.0,
    "run_bases": [
     "model_d0",
     "model_d1"
@@ -1408,12 +1654,7 @@
    "sts_rows": 0,
    "sts_samples": 0,
    "time_max": 0.6666666666666666,
-   "time_max_origin": "2.5 \u00d7 the direct travel time to the farthest receiver at the slowest SSP speed",
-   "courant_factor": 0.999,
-   "freq_min": 50.0,
-   "freq_max": 200.0,
-   "freq_min_origin": "one octave around source.frequencies[0], the canned pulse's frequency",
-   "freq_max_origin": "one octave around source.frequencies[0], the canned pulse's frequency"
+   "time_max_origin": "2.5 \u00d7 the direct travel time to the farthest receiver at the slowest SSP speed"
   },
   "frequencies": [
    100.0

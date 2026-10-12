@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 from uacpy.core.absorption import Biological, BiologicalLayer, FrancoisGarrison
+from uacpy.core._water import WaterProfile
 from uacpy.core.acoustics.attenuation import (
     ph_to_nbs, convert_attenuation_units, absorption_francois_garrison,
 )
@@ -48,16 +49,16 @@ from uacpy.tests.conftest import (
 
 def test_builds_the_whole_column_as_a_profile_by_default():
     """Every sample of the column is kept, so every depth is evaluated with
-    its own water."""
+    its own water: each array becomes the profile the law stores (the
+    WaterProfile record it hands back)."""
     fg = FrancoisGarrison.from_temperature_salinity([0.0, 50.0, 100.0], [18.0, 16.0, 13.0],
                                  [36.0, 36.1, 36.2])
     assert isinstance(fg, FrancoisGarrison)
     assert fg.is_profile
     np.testing.assert_array_equal(fg.profile_depths, [0.0, 50.0, 100.0])
-    np.testing.assert_array_equal(fg.temperature, [[0.0, 18.0], [50.0, 16.0],
-                                                   [100.0, 13.0]])
-    np.testing.assert_array_equal(fg.salinity[:, 1], [36.0, 36.1, 36.2])
-    assert fg.depths is None              # consumed into each property
+    assert fg.temperature == WaterProfile([0.0, 50.0, 100.0],
+                                          [18.0, 16.0, 13.0])
+    assert fg.salinity == WaterProfile([0.0, 50.0, 100.0], [36.0, 36.1, 36.2])
     assert fg.pH == 8.0                   # the reference-water default
 
 
@@ -71,13 +72,39 @@ def test_collapse_to_depth_keeps_the_nearest_row():
     assert fg.pH == 7.9
 
 
-def test_mismatched_or_empty_raises():
-    with pytest.raises(ConfigurationError,
-                       match='must be non-empty and equal length'):
+def test_an_empty_or_mismatched_column_is_refused():
+    with pytest.raises(ConfigurationError, match='non-empty 1-D array'):
         FrancoisGarrison.from_temperature_salinity([], [], [])
+    with pytest.raises(ConfigurationError, match='non-empty 1-D array'):
+        FrancoisGarrison.from_temperature_salinity([[0.0, 10.0]], 18.0, 36.0)
     with pytest.raises(ConfigurationError,
-                       match='must be non-empty and equal length'):
+                       match=r'temperature has shape \(1,\), and the depth it '
+                             r'is evaluated at has shape \(2,\)'):
         FrancoisGarrison.from_temperature_salinity([0.0, 10.0], [18.0], [36.0])
+
+
+def test_from_temperature_salinity_drops_missing_samples_and_repeated_depths():
+    """A depth where any array of values holds a missing value is dropped
+    from every such array, a repeated depth keeps its first sample, and
+    pairs and single values are stored as given."""
+    fg = FrancoisGarrison.from_temperature_salinity(
+        [0.0, 50.0, 50.0, 100.0, np.nan, 200.0],
+        [18.0, 16.0, 15.0, np.nan, 11.0, 10.0], [(0.0, 35.5), (300.0, 34.6)],
+        pH=[8.1, 8.0, 8.0, 7.9, 7.9, np.nan])
+    assert fg.temperature == WaterProfile([0.0, 50.0], [18.0, 16.0])
+    assert fg.pH == WaterProfile([0.0, 50.0], [8.1, 8.0])
+    assert fg.salinity == WaterProfile([0.0, 300.0], [35.5, 34.6])
+    with pytest.raises(ConfigurationError,
+                       match=r'no depth with a finite value of every array '
+                             r'given \(temperature\)'):
+        FrancoisGarrison.from_temperature_salinity([0.0, 10.0],
+                                                   [np.nan, np.nan], 35.0)
+
+
+def test_from_temperature_salinity_of_single_values_is_one_water_row():
+    fg = FrancoisGarrison.from_temperature_salinity([0.0, 100.0], 12.0, 35.0)
+    assert not fg.is_profile
+    assert fg == FrancoisGarrison(12.0, 35.0, 8.0)
 
 
 def test_a_uniform_profile_is_the_one_row_law_exactly():
@@ -85,9 +112,9 @@ def test_a_uniform_profile_is_the_one_row_law_exactly():
     bit for bit, at its rows, between them and beyond them: both evaluate
     the formula's depth term at the depth asked."""
     row = FrancoisGarrison(temperature=6.5, salinity=34.2, pH=7.95)
-    profile = FrancoisGarrison(temperature=[6.5, 6.5, 6.5],
-                               salinity=[34.2, 34.2, 34.2], pH=7.95,
-                               depths=[0.0, 300.0, 1200.0])
+    profile = FrancoisGarrison(
+        temperature=[(0.0, 6.5), (300.0, 6.5), (1200.0, 6.5)],
+        salinity=[(0.0, 34.2), (300.0, 34.2), (1200.0, 34.2)], pH=7.95)
     z = np.array([0.0, 150.0, 300.0, 777.0, 1200.0, 3000.0])
     for f in (300.0, 3e3, 3e4):
         np.testing.assert_array_equal(profile.alpha_dB_per_m(f, z),
@@ -100,11 +127,23 @@ _T_PAIRS = [(0.0, 22.0), (30.0, 21.0), (60.0, 12.0), (200.0, 10.0)]
 _S_PAIRS = [(0.0, 35.0), (150.0, 34.6)]
 
 
+def test_the_water_property_annotations_state_the_public_forms():
+    """A value or (depth, value) pairs is what a caller passes; the record a
+    profile is stored as is private and is not named in the signature."""
+    import typing
+    from uacpy.core.absorption import FrancoisGarrison
+    hints = typing.get_type_hints(FrancoisGarrison)
+    for name in ('temperature', 'salinity', 'pH'):
+        assert hints[name] == typing.Union[float, np.ndarray], (name,
+                                                                hints[name])
+        assert 'WaterProfile' not in str(hints[name])
+
+
 class TestEachWaterPropertyHasItsOwnDepths:
-    """``temperature``, ``salinity`` and ``pH`` each take a number, a 1-D
-    array on the shared ``depths=``, or ``(depth, value)`` pairs on depths of
-    their own; each is interpolated on its own axis at the depth
-    evaluated."""
+    """``temperature``, ``salinity`` and ``pH`` each take a number or
+    ``(depth, value)`` pairs on depths of their own; each is interpolated on
+    its own axis at the depth evaluated. The law has no evaluation depth, so
+    any other array is refused."""
 
     def test_each_property_is_interpolated_on_its_own_axis(self):
         law = FrancoisGarrison(temperature=_T_PAIRS, salinity=_S_PAIRS,
@@ -118,27 +157,80 @@ class TestEachWaterPropertyHasItsOwnDepths:
         np.testing.assert_array_equal(law.profile_depths,
                                       [0.0, 30.0, 60.0, 150.0, 200.0])
 
-    def test_the_three_forms_mix_and_agree(self):
-        # A 1-D array on depths= is the same pairs on those depths.
+    def test_pairs_are_stored_as_the_record_the_law_hands_back(self):
+        """The record a law hands back is its pairs, and every
+        water-property input takes it again: the law rebuilt from it, and a
+        formula given it, read the same water."""
+        law = FrancoisGarrison(temperature=_T_PAIRS, salinity=_S_PAIRS,
+                               pH=8.0)
+        assert law.temperature == WaterProfile(*np.array(_T_PAIRS).T)
+        assert FrancoisGarrison(law.temperature, law.salinity, 8.0) == law
+        z = np.array([0.0, 45.0, 400.0])
+        np.testing.assert_array_equal(
+            absorption_francois_garrison(1e4, law.temperature, _S_PAIRS,
+                                         8.0, z),
+            absorption_francois_garrison(1e4, _T_PAIRS, _S_PAIRS, 8.0, z))
+
+    def test_the_table_parameters_rebuild_the_law(self):
+        law = FrancoisGarrison(temperature=_T_PAIRS, salinity=_S_PAIRS,
+                               pH=8.0)
+        parameters = law.table([1e3]).parameters
+        assert parameters['temperature'] is law.temperature
+        assert FrancoisGarrison(**parameters) == law
+
+    def test_arrays_on_one_depth_axis_are_the_law_of_their_pairs(self):
         z = [0.0, 30.0, 60.0, 200.0]
-        mixed = FrancoisGarrison(temperature=[22.0, 21.0, 12.0, 10.0],
-                                 salinity=_S_PAIRS, pH=8.0, depths=z)
-        pairs = FrancoisGarrison(temperature=_T_PAIRS, salinity=_S_PAIRS,
-                                 pH=8.0)
-        assert mixed == pairs and mixed.depths is None
-        assert FrancoisGarrison(**pairs.table([1e3]).parameters) == pairs
+        built = FrancoisGarrison.from_temperature_salinity(
+            z, [22.0, 21.0, 12.0, 10.0], _S_PAIRS)
+        assert built == FrancoisGarrison(temperature=_T_PAIRS,
+                                         salinity=_S_PAIRS, pH=8.0)
+
+    @pytest.mark.parametrize('value', [
+        10.0, np.float64(10.0), np.array(10.0), _T_PAIRS, np.array(_T_PAIRS),
+        [(5.0, 10.0)]],
+        ids=['float', 'numpy scalar', '0-d array', 'pairs', 'pairs array',
+             'one pair'])
+    def test_a_single_value_or_pairs_are_accepted(self, value):
+        law = FrancoisGarrison(temperature=value)
+        if np.ndim(value):
+            assert law.temperature == WaterProfile(*np.array(value).T)
+        else:
+            assert law.temperature == 10.0
 
     @pytest.mark.parametrize('kwargs, match', [
-        (dict(temperature=[10.0, 9.0]), 'needs the depths='),
-        (dict(depths=[0.0, 10.0]), 'none is'),
-        (dict(temperature=[(0.0, 10.0), (0.0, 9.0)]), 'strictly increasing'),
-        (dict(salinity=[(10.0, 35.0), (-1.0, 35.0)]), 'strictly increasing'),
-        (dict(pH=np.ones((2, 3))), r'shape \(N, 2\)'),
-        (dict(temperature=[10.0, 9.0], depths=[0.0, 5.0, 9.0]),
-         '2 values for 3 depths')])
-    def test_a_malformed_property_is_refused(self, kwargs, match):
-        with pytest.raises(ConfigurationError, match=match):
+        (dict(temperature=[10.0]), r'temperature has shape \(1,\)'),
+        (dict(temperature=[10.0, 9.0]), r'temperature has shape \(2,\)'),
+        (dict(salinity=[[35.0, 34.0, 34.0]]), r'salinity has shape \(1, 3\)'),
+        (dict(pH=np.ones((2, 3))), r'pH has shape \(2, 3\)')])
+    def test_any_other_array_is_refused_naming_the_two_forms(self, kwargs,
+                                                             match):
+        with pytest.raises(ConfigurationError, match=match) as e:
             FrancoisGarrison(**kwargs)
+        text = str(e.value)
+        assert 'no evaluation depth' in text
+        assert '(depth, value) pairs of shape (M, 2)' in text
+        assert 'single value' in text
+
+    @pytest.mark.parametrize('pairs, match', [
+        ([(-1.0, 35.0), (10.0, 35.0)], 'non-negative'),
+        ([(0.0, 35.0), (0.0, 34.0)], 'strictly increasing'),
+        ([(10.0, 35.0), (-1.0, 35.0)], 'non-negative'),
+        ([(0.0, 35.0), (10.0, np.nan)], 'finite')])
+    def test_malformed_pairs_are_refused(self, pairs, match):
+        with pytest.raises(ConfigurationError,
+                           match=r'FrancoisGarrison: .*salinity'
+                                 r'(.|\n)*' + match):
+            FrancoisGarrison(salinity=pairs)
+
+    def test_a_handed_back_profile_above_the_surface_is_refused(self):
+        with pytest.raises(ConfigurationError, match='non-negative'):
+            FrancoisGarrison(salinity=WaterProfile([-1.0, 10.0],
+                                                   [35.0, 35.0]))
+
+    def test_depths_is_not_a_parameter(self):
+        with pytest.raises(TypeError, match='depths'):
+            FrancoisGarrison(temperature=10.0, depths=[0.0])
+
 
     def test_the_envelope_warns_once_for_the_law(self):
         with recorded_warnings() as rec:
@@ -157,14 +249,28 @@ class TestEachWaterPropertyHasItsOwnDepths:
                              'S 34.6–35 psu (2 depths), pH 8)')
 
     def test_from_temperature_salinity_takes_ph_pairs(self):
-        ph = np.array([(0.0, 8.1), (500.0, 8.0)])
+        ph = [(0.0, 8.1), (500.0, 8.0)]
         law = FrancoisGarrison.from_temperature_salinity(
             [0.0, 100.0], [12.0, 8.0], [35.0, 35.0], pH=ph, ph_scale='total')
-        np.testing.assert_array_equal(law.pH, ph)
+        assert law.pH == WaterProfile([0.0, 500.0], [8.1, 8.0])
         row = FrancoisGarrison.from_temperature_salinity(
             [0.0, 100.0], [12.0, 8.0], [35.0, 35.0], pH=ph,
             collapse_to_depth=100.0)
         assert row.pH == pytest.approx(8.08) and row.temperature == 8.0
+
+    def test_from_temperature_salinity_reads_values_or_pairs_by_shape(self):
+        """An array of ``depths``' shape is values; an (M, 2) array off that
+        shape is pairs; any other array is refused."""
+        z = [0.0, 100.0]
+        law = FrancoisGarrison.from_temperature_salinity(
+            z, [12.0, 8.0], [(0.0, 35.0), (100.0, 34.0)], pH=[8.1, 8.0])
+        assert law.pH == WaterProfile(z, [8.1, 8.0])
+        assert law.salinity == WaterProfile(z, [35.0, 34.0])
+        with pytest.raises(ConfigurationError,
+                           match=r'pH has shape \(3,\), and the depth it is '
+                                 r'evaluated at has shape \(2,\)'):
+            FrancoisGarrison.from_temperature_salinity(
+                z, [12.0, 8.0], [35.0, 35.0], pH=[8.1, 8.0, 7.9])
 
 
 class TestTheColumnIsKeptWhole:
@@ -618,6 +724,33 @@ class TestAlphaIsEvaluatedOnBothAxesFromOneEvaluator:
         a = Thorp().table(self.F)
         assert a.data.shape == (3,)
 
+    @pytest.mark.parametrize('law', [
+        Thorp(),
+        FrancoisGarrison(temperature=[(0.0, 15.0), (200.0, 5.0)]),
+        Biological(layers=[(10.0, 60.0, 1000.0, 5.0, 0.5)]),
+        ConstantAbsorption(0.2)], ids=lambda law: type(law).__name__)
+    def test_table_evaluates_the_law_once_for_the_whole_grid(self, law,
+                                                             monkeypatch):
+        """``table`` asks the law's kernel for the whole (depth, frequency)
+        grid in one call, so its cost does not grow with a Python loop over
+        the frequency axis; the grid equals the per-frequency values."""
+        kind = type(law)
+        kernel = kind._alpha_dB_per_m_at_sound_speed
+        calls = []
+
+        def counted(self, *args):
+            calls.append(args)
+            return kernel(self, *args)
+
+        monkeypatch.setattr(kind, '_alpha_dB_per_m_at_sound_speed', counted)
+        f = np.geomspace(300.0, 3.0e4, 64)
+        z = np.array([0.0, 30.0, 150.0])
+        grid = law.table(f, depths=z, units='dB/m').data
+        assert len(calls) == 1
+        for j in (0, 31, 63):
+            np.testing.assert_allclose(grid[:, j], law.alpha_dB_per_m(f[j], z),
+                                       rtol=1e-12)
+
     def test_both_axes_together_give_a_depth_by_frequency_grid(self):
         """Depth-first, the shape convention the package uses everywhere."""
         z = np.array([0.0, 50.0, 100.0, 200.0])
@@ -896,6 +1029,25 @@ class TestBiologicalLayerValidation:
             BiologicalLayer(**kwargs)
 
 
+class TestABiologicalLayerTupleNeedsItsFiveValues:
+    """A layer given as a tuple is ``(z_top, z_bottom, f0, Q, a0)``; any
+    other length is refused naming the index and the order, and the five
+    values build the layer."""
+
+    @pytest.mark.parametrize('entry', [(0, 50, 1000, 5), (0, 50, 1000, 5, 0.5,
+                                                          1.0), 7.0])
+    def test_a_wrong_length_is_refused_naming_the_order(self, entry):
+        with pytest.raises(ConfigurationError,
+                           match=r'^Biological: layers\[1\] .*\(z_top, '
+                                 r'z_bottom, f0, Q, a0\)'):
+            Biological([(0, 10, 500, 3, 0.1), entry])
+
+    def test_five_values_build_the_layer(self):
+        (layer,) = Biological([(0, 50, 1000, 5, 0.5)]).layers
+        assert (layer.z_top_m, layer.z_bottom_m, layer.f0_hz, layer.Q,
+                layer.a0) == (0.0, 50.0, 1000.0, 5.0, 0.5)
+
+
 class TestBiologicalBoundaryContributions:
     """Each layer is tested independently over its inclusive
     ``[z_top, z_bottom]`` span and the contributions summed, matching the
@@ -1108,6 +1260,54 @@ class TestConvertAttenuationUnitsNeedsAFrequency:
     def test_the_message_names_the_unit_that_needed_it(self):
         with pytest.raises(ConfigurationError, match='dB/wavelength'):
             convert_attenuation_units(1.0, 0.0, 'dB/wavelength', 'dB/km')
+
+
+class TestConvertAttenuationUnitsBroadcasts:
+    """``alpha``, ``frequency`` and ``sound_speed`` broadcast together, so a
+    spectrum alpha(f) or a column alpha(z) at c(z) converts in one call, to
+    the value the scalar call gives at each element; the positive-finite
+    guards hold for every element."""
+
+    F = np.array([100.0, 1.0e3, 1.0e4])
+    ALPHA = np.array([0.003, 0.06, 1.0])
+    C = np.array([1480.0, 1500.0, 1530.0])
+
+    @pytest.mark.parametrize('to_unit', ['dB/wavelength', 'Q', 'L'])
+    def test_a_spectrum_converts_as_it_does_one_frequency_at_a_time(
+            self, to_unit):
+        got = convert_attenuation_units(self.ALPHA, self.F, 'dB/km', to_unit)
+        want = [float(convert_attenuation_units(a, f, 'dB/km', to_unit))
+                for a, f in zip(self.ALPHA, self.F)]
+        np.testing.assert_allclose(got, want, rtol=1e-15)
+
+    def test_a_column_converts_at_each_nodes_sound_speed(self):
+        got = convert_attenuation_units(self.ALPHA, 1.0e3, 'dB/km',
+                                        'dB/wavelength', sound_speed=self.C)
+        want = [float(convert_attenuation_units(a, 1.0e3, 'dB/km',
+                                                'dB/wavelength', sound_speed=c))
+                for a, c in zip(self.ALPHA, self.C)]
+        np.testing.assert_allclose(got, want, rtol=1e-15)
+
+    def test_a_depth_by_frequency_grid_takes_its_frequency_row(self):
+        grid = np.vstack([self.ALPHA, 2.0 * self.ALPHA])
+        got = convert_attenuation_units(grid, self.F, 'dB/km',
+                                        'dB/wavelength')
+        assert got.shape == grid.shape
+        np.testing.assert_allclose(got[1], 2.0 * got[0], rtol=1e-15)
+
+    @pytest.mark.parametrize('bad', [0.0, -1.0, float('nan')])
+    def test_one_bad_frequency_in_an_array_is_refused_by_value(self, bad):
+        with pytest.raises(ConfigurationError,
+                           match=r'got frequency=.* \(one of 3 values\)'):
+            convert_attenuation_units(self.ALPHA, np.array([1.0e3, bad, 2.0]),
+                                      'dB/km', 'dB/wavelength')
+
+    def test_one_bad_sound_speed_in_an_array_is_refused_by_value(self):
+        with pytest.raises(ConfigurationError,
+                           match=r'got sound_speed=0\.0 \(one of 3 values\)'):
+            convert_attenuation_units(self.ALPHA, 1.0e3, 'dB/km',
+                                      'dB/wavelength',
+                                      sound_speed=np.array([1500.0, 0.0, 1.0]))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1446,6 +1646,19 @@ class TestBiologicalLorentzian:
         with pytest.raises(ConfigurationError, match="frequency must be > 0"):
             self._bio().alpha_dB_per_m(0.0, np.array([30.0]))
 
+    def test_the_formula_at_zero_hertz_returns_its_limit_without_a_warning(
+            self):
+        """The plain formula answers a DC bin with 0 dB/km, the exact limit
+        of ``a0 / ((1 - f0²/f²)² + 1/Q²)``, and emits no numpy
+        RuntimeWarning on the way; the next bin is positive."""
+        from uacpy.core.acoustics.attenuation import absorption_biological
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            got = absorption_biological(np.array([0.0, 1.0]), 1000.0, 5.0,
+                                        0.5)
+        assert got[0] == 0.0
+        assert got[1] > 0.0
+
     def test_zero_resonance_frequency_rejected(self):
         from uacpy.core.absorption import BiologicalLayer
         with pytest.raises(ConfigurationError, match="f0_hz must be positive"):
@@ -1589,6 +1802,27 @@ class TestArrivalAbsorptionExponent:
         np.testing.assert_allclose(
             got, np.outer(self.IMAG, 2.0 * np.pi * 40000.0 * ratio),
             rtol=1e-12, atol=0.0)
+
+    def test_a_zero_hertz_bin_gets_the_linear_forms_zero(self):
+        """An rfft grid starts at 0 Hz: the law is evaluated on the positive
+        bins and the DC column is 0, as without a law; the positive bins
+        are unchanged by the DC bin's presence."""
+        from uacpy.core.absorption import arrival_absorption_exponent
+        grid = np.fft.rfftfreq(8, 1.0 / 800.0)
+        got = arrival_absorption_exponent(
+            self.IMAG, grid, trace_frequency=100.0, absorption=Thorp())
+        alone = arrival_absorption_exponent(
+            self.IMAG, grid[1:], trace_frequency=100.0, absorption=Thorp())
+        assert np.array_equal(got[:, 0], np.zeros(self.IMAG.size))
+        np.testing.assert_array_equal(got[:, 1:], alone)
+
+    def test_a_negative_frequency_is_refused_in_this_functions_name(self):
+        from uacpy.core.absorption import arrival_absorption_exponent
+        with pytest.raises(ConfigurationError,
+                           match=r'^arrival_absorption_exponent: .*-100 Hz'):
+            arrival_absorption_exponent(
+                self.IMAG, [-100.0, 0.0, 100.0], trace_frequency=100.0,
+                absorption=Thorp())
 
     def test_at_the_trace_frequency_the_law_is_not_consulted(self):
         """Francois-Garrison is fitted from 200 Hz: a 100 Hz trace read back
@@ -1796,8 +2030,9 @@ _CAPTURED = [
      [1.866831858607032e-05, 9.144975249397685e-05, 0.00015189729324640726,
       0.0003646513241696668]),
     ('fg_profile', lambda: FrancoisGarrison(
-        temperature=[20.0, 20.0, 8.0, 8.0], salinity=[35.0, 35.0, 34.0, 34.0],
-        depths=[0.0, 40.0, 60.0, 100.0]).table(
+        temperature=[(0.0, 20.0), (40.0, 20.0), (60.0, 8.0), (100.0, 8.0)],
+        salinity=[(0.0, 35.0), (40.0, 35.0), (60.0, 34.0),
+                  (100.0, 34.0)]).table(
             [1000.0, 10000.0], depths=[0.0, 40.0, 60.0, 100.0]), 'dB/km',
      [[0.05170849527344906, 0.7369468868638465],
       [0.05165478151664996, 0.733543368095234],
@@ -1920,7 +2155,7 @@ class TestReferenceWaterReplacingTheEnvironmentsOwn:
     @staticmethod
     def _replace(t, s):
         env = Environment(bathymetry=100.0, absorption=FrancoisGarrison(
-            [t, t], [s, s], 8.0, depths=[0.0, 100.0]))
+            [(0.0, t), (100.0, t)], [(0.0, s), (100.0, s)], 8.0))
         with recorded_warnings() as rec:
             env.absorption = FrancoisGarrison(10.0, 35.0, 8.0)
         return [str(w.message) for w in rec
@@ -1930,7 +2165,7 @@ class TestReferenceWaterReplacingTheEnvironmentsOwn:
         assert self._replace(12.0, 35.0) == []
         (msg,) = self._replace(12.01, 35.0)
         assert 'reference water' in msg and 'T 12' in msg
-        assert 'FrancoisGarrison(temperature=T' in msg
+        assert 'FrancoisGarrison.from_temperature_salinity(z, T, S)' in msg
 
     def test_it_warns_past_one_psu(self):
         assert self._replace(10.0, 34.0) == []
@@ -1958,7 +2193,9 @@ class TestAProfileOutsideTheEnvelopeWarnsOnce:
 
     def _validity(self, **profile):
         with recorded_warnings() as rec:
-            FrancoisGarrison(depths=self.DEPTHS, **profile)
+            FrancoisGarrison.from_temperature_salinity(
+                self.DEPTHS, profile.pop('temperature', 10.0),
+                profile.pop('salinity', 35.0), **profile)
         return [str(w.message) for w in rec
                 if issubclass(w.category, ValidityWarning)]
 

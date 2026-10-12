@@ -47,7 +47,7 @@ LAMBERT_MU_DB = -27.0
 _LAMBERT_MU_CEILING_DB = 10.0 * np.log10(1.0 / np.pi)
 
 #: Grazing angle past which Lambert's law stops matching the data. Etter
-#: Sect. 9.2: the relationship "appears to provide a good approximation to the
+#: Sect. 9.3.3: the relationship "appears to provide a good approximation to the
 #: observed data for many deep-water bottoms at grazing angles below about
 #: 45 deg". JKPS Sect. 1.7.2 gives the same law without an angular bound, so
 #: Etter is the source for this one.
@@ -240,19 +240,6 @@ def perturbative_grazing_limit(frequency, rms_roughness, sound_speed=DEFAULT_SOU
         sin_theta = np.where(2.0 * k * sigma > 0.0,
                              1.0 / (2.0 * k * sigma), np.inf)
     return np.degrees(np.arcsin(np.clip(sin_theta, 0.0, 1.0)))
-
-
-def warn_if_roughness_is_not_perturbative(who: str, frequency,
-                                          rms_roughness, sound_speed=DEFAULT_SOUND_SPEED,
-                                          grazing_deg=None) -> None:
-    """Warn where a perturbation treatment of roughness is being over-driven:
-    :func:`non_perturbative_roughness_notice`, said as a ValidityWarning."""
-    notice = non_perturbative_roughness_notice(
-        who, frequency, rms_roughness, sound_speed=sound_speed,
-        grazing_deg=grazing_deg)
-    if notice is not None:
-        warnings.warn(notice, ValidityWarning,
-                      skip_file_prefixes=USER_FRAME_SKIP)
 
 
 def non_perturbative_roughness_notice(who: str, frequency, rms_roughness,

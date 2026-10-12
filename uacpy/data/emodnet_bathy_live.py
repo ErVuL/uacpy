@@ -22,7 +22,7 @@ import numpy as np
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
 from uacpy.core.geo import as_coordinate, normalize_lon
 from uacpy.data._geo import depth_from_elevation, nearest_indices
-from uacpy.data._http import erddap_last_value, http_get
+from uacpy.data._http import erddap_point, http_get
 
 __all__ = ['point_depth', 'depths_along', 'region_grid', 'ERDDAP_URL',
            'DATASETS']
@@ -53,7 +53,7 @@ def _elevation(lat, lon, dataset, *, timeout, verbose):
     url = _griddap_url(dataset, f"[({lat})][({normalize_lon(lon)})]")
     body = http_get(url, timeout=timeout, verbose=verbose, source='bathymetry',
                     user_agent=_USER_AGENT).decode('utf-8', 'replace')
-    return erddap_last_value(body)
+    return erddap_point(body).value
 
 
 def _elevation_any(lat, lon, *, timeout, verbose):

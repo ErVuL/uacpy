@@ -20,10 +20,10 @@ from uacpy.core.deck_limits import DECK_RANGE_RESOLUTION_M
 from uacpy.core._repr import axis, build, qty
 from uacpy.core.sediment import DEFAULT_GRAIN_SIZE_MODEL
 from uacpy.core._grid import (
-    _as_finite_scalar_label, nearest_index_on_axis,
+    finite_scalar_label, nearest_index_on_axis,
 )
 from uacpy.core._validate import (
-    require_strictly_increasing, require_non_negative, reject_complex,
+    require_strictly_increasing, require_non_negative, require_real_array,
     scalar_or_none,
 )
 from uacpy.core.collapse import (
@@ -205,7 +205,7 @@ class SeabedColumn(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         depth : float
             Sub-bottom depth (m).
         """
-        z = _as_finite_scalar_label(depth, 'depth')
+        z = finite_scalar_label(depth, 'depth', who="SeabedColumn.layer_at")
         cumulative = 0.0
         for layer in self.layers:
             cumulative += layer.thickness
@@ -471,10 +471,8 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                     "Bottom: range-independent bottom (ranges=None) needs "
                     f"exactly one column; got {len(self.columns)}.")
         else:
-            # Ahead of the float64 cast below, which discards an imaginary
-            # part — see _reject_complex for the two ways it does it.
-            reject_complex(self.ranges, "Bottom.ranges")
-            self.ranges = np.array(self.ranges, dtype=float).ravel()
+            self.ranges = require_real_array(
+                self.ranges, "Bottom.ranges", hint="metres").ravel()
             require_non_negative(self.ranges, "Bottom.ranges", hint="metres")
             require_strictly_increasing(
                 self.ranges, "Bottom.ranges", min_step=DECK_RANGE_RESOLUTION_M)
@@ -549,8 +547,10 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 f"{'layered' if self.is_layered else 'half-space'}")
 
     # ── slicing ─────────────────────────────────────────────────────────────
-    def _nearest_index(self, range: float) -> int:
-        return nearest_index_on_axis(self.ranges, range)
+    def _nearest_index(self, range: float, who: str) -> int:
+        return nearest_index_on_axis(self.ranges, range, who=who,
+                                     several=", or index positions with "
+                                             "isel()")
 
     def at(self, *, range: float) -> SeabedColumn:
         """Copy of the nearest :class:`SeabedColumn` to ``range`` (m).
@@ -569,7 +569,8 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         range : float
             Range (m), a finite scalar.
         """
-        return _copy.deepcopy(self.columns[self._nearest_index(range)])
+        return _copy.deepcopy(
+            self.columns[self._nearest_index(range, "Bottom.at")])
 
     def column_index_at(self, *, range: float) -> int:
         """Index into :attr:`columns` of the column nearest ``range`` (m) — the
@@ -595,7 +596,7 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         range : float
             Range (m), a finite scalar.
         """
-        return self._nearest_index(range)
+        return self._nearest_index(range, "Bottom.column_index_at")
 
     def isel(self, *, range: int) -> SeabedColumn:
         """Copy of the :class:`SeabedColumn` at integer position ``range`` —
@@ -644,7 +645,8 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # never reaches that helper: ``np.interp`` would carry a NaN range into
         # every blended property, and the error then names the stored density
         # rather than the label the caller passed.
-        label = _as_finite_scalar_label(range, 'range')
+        label = finite_scalar_label(range, 'range', who="Bottom.halfspace_at",
+                                    coords=self.ranges)
         # Blending is well-defined only when every column is a genuine
         # 'half-space' carrying real acoustic numbers: a vacuum/rigid/file
         # column holds construction-time placeholders, and interpolating
@@ -654,7 +656,8 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             c.halfspace.acoustic_type == 'half-space' for c in self.columns))
         if self.ranges is None or interp in (None, 'nearest'):
             return _copy.deepcopy(
-                self.columns[self._nearest_index(range)].halfspace)
+                self.columns[self._nearest_index(
+                    range, "Bottom.halfspace_at")].halfspace)
         if not blendable:
             types = sorted({c.halfspace.acoustic_type for c in self.columns})
             raise ConfigurationError(
@@ -720,7 +723,9 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         ``'mean'`` / ``'median'`` numerically average the half-spaces over
         the columns, each column weighing the same whatever its range
         spacing — only meaningful when no column is layered. For a layered bottom ``'median'``
-        falls back to picking the middle column (layers can't be averaged) and
+        falls back to picking the middle column (layers can't be averaged;
+        the upper-middle one for an even count) and says so with a
+        :class:`~uacpy.core.exceptions.FallbackWarning` naming it, and
         ``'mean'`` is rejected. Uniform ``'file'`` / ``'precalc'`` columns
         carry no real numbers to average: they collapse to their shared
         reflection file (reducing only the roughness), and differing files
@@ -745,7 +750,7 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         if not self.is_range_dependent:
             # Nothing to reduce: one column in, one column out. A single-node
             # ``ranges`` is a coordinate at that range (``from_halfspaces``
-            # keeps it, and ``env.max_range`` reads it), so it travels with
+            # keeps it, and ``env.range_max`` reads it), so it travels with
             # the column instead of being dropped here.
             return Bottom(columns=[_copy.deepcopy(self.columns[0])],
                           ranges=self.ranges)
@@ -757,9 +762,18 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                           ranges=None)
         if self.is_layered:
             if method == 'median':
+                middle = len(self.columns) // 2
+                warnings.warn(
+                    f"Bottom.collapse_range('median'): layer stacks cannot "
+                    f"be averaged, so the middle column — index {middle} of "
+                    f"{len(self.columns)}, at {float(self.ranges[middle]):g} "
+                    f"m — stands for the whole transect. Pick an end with "
+                    f"'r0' or 'rmax', or flatten the layers first "
+                    f"(bottom.collapse(layers=...).collapse_range('median')) "
+                    f"for a property-wise median.",
+                    FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
                 return Bottom(
-                    columns=[_copy.deepcopy(
-                        self.columns[len(self.columns) // 2])],
+                    columns=[_copy.deepcopy(self.columns[middle])],
                     ranges=None)
             raise ConfigurationError(
                 "Bottom.collapse_range('mean') is undefined for a layered "
@@ -795,7 +809,7 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                         for c in b.columns]
             # One flattened column per input column, so the range axis is
             # untouched — including a single-node ``ranges``, which is a
-            # coordinate ``env.max_range`` reads rather than an empty axis.
+            # coordinate ``env.range_max`` reads rather than an empty axis.
             b = Bottom(columns=new_cols, ranges=b.ranges)
         return b
 
@@ -1000,7 +1014,7 @@ class Bottom(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             for i in range(n)
         ]
         # The caller's ranges are kept even for a single break: ranges=[r]
-        # is a coordinate at range r (it feeds env.max_range), while
+        # is a coordinate at range r (it feeds env.range_max), while
         # ``is_range_dependent`` — a >1-node test — stays False for it.
         return cls(columns=columns, ranges=ranges)
 

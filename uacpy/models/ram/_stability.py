@@ -22,6 +22,21 @@ from uacpy.models.ram._domain import (
 from uacpy.core.exceptions import FallbackWarning, NumericsWarning
 
 
+#: Stability terms an unset ``n_stability`` writes to the fluid decks:
+#: Collins' guide, "We have found that ns = 1 or 2 is effective for most
+#: problems" (ram.pdf p.3), and his sample deck's ``ns = 1`` (ram.pdf p.12
+#: Fig. 2). rams0.5 takes ``ns = 1`` in its own ``epade`` call
+#: (``rams0.5.f:176``).
+DEFAULT_N_STABILITY = 1
+
+
+def stability_terms(knobs) -> int:
+    """The ``ns`` a fluid deck carries: the pinned ``n_stability``, else
+    :data:`DEFAULT_N_STABILITY`."""
+    return (DEFAULT_N_STABILITY if knobs.n_stability is None
+            else int(knobs.n_stability))
+
+
 # The rotation angle a rams march takes when ``rams_rotation_angle`` is left ``None``
 # and the stability rule does not ask for less (see ``resolve_rams_rotation_angle``).
 RAMS_DEFAULT_THETA_DEG = 45.0
@@ -44,8 +59,8 @@ def theta_for_freq(freq: float, *, knobs) -> float:
     return float(t)
 
 
-def resolve_rams_rotation_angle(env: Environment, freq: float, *, knobs,
-                       speed_bounds) -> float:
+def resolve_rams_rotation_angle(env: Environment, freq: float, *,
+                                knobs) -> float:
     """The rotation angle a rams march at ``freq`` on ``env`` uses.
 
     A pinned ``rams_rotation_angle`` (float or callable) is returned as is. Left
@@ -53,18 +68,20 @@ def resolve_rams_rotation_angle(env: Environment, freq: float, *, knobs,
     own growth above the seabed's leak, in which case the widest stable
     angle on the ladder replaces it (Milinazzo, Zala & Brooke 1997: the
     wider the angle, the better the evanescent spectrum is handled, so
-    the widest that holds is the one to take); stage 3 says so
+    the widest that holds is the one to take — though the same paper notes
+    that wider angles need more Padé terms, and NRL's RAMS guide raises
+    theta only "to the point that you don't see NaN",
+    ``ramsurf/readme.orig``); stage 3 says so
     (:func:`resolve_collins_thetas`). When no angle on the ladder is
     stable the default is returned and the grid chooser refuses the run.
     """
-    lowering = rams_rotation_angle_lowering(env, freq, knobs=knobs,
-                                   speed_bounds=speed_bounds)
+    lowering = rams_rotation_angle_lowering(env, freq, knobs=knobs)
     if lowering is None:
         return theta_for_freq(freq, knobs=knobs)
     return lowering['theta']
 
 
-def rams_rotation_angle_lowering(env: Environment, freq: float, *, knobs, speed_bounds):
+def rams_rotation_angle_lowering(env: Environment, freq: float, *, knobs):
     """``{'requested', 'theta', 'margin'}`` when the stability rule
     lowers the default rotation angle at ``freq`` — the default, the
     widest stable angle on the ladder, and the default's growth margin —
@@ -73,8 +90,7 @@ def rams_rotation_angle_lowering(env: Environment, freq: float, *, knobs, speed_
     requested = theta_for_freq(freq, knobs=knobs)
     if knobs.rams_rotation_angle is not None:
         return None
-    stab = rams_stability(env, freq, theta=requested, knobs=knobs,
-                          speed_bounds=speed_bounds)
+    stab = rams_stability(env, freq, theta=requested, knobs=knobs)
     if stab is None or stab['margin']['floor_excess'] <= 0.0:
         return None
     if stab['theta'] is None:
@@ -97,8 +113,7 @@ def rams_rot0(theta: float, *, knobs) -> complex:
 
 
 def rams_stability_params(env: Environment, freq: float,
-                           theta: Optional[float] = None, *, knobs,
-                           speed_bounds):
+                           theta: Optional[float] = None, *, knobs):
     """Inputs of the rams0.5 stability rule (``pe_grid.
     rams_growth_margin``), one dict per seabed column, or ``None`` when
     the rule does not apply: ``rams_rotation=False`` marches real Padé
@@ -119,7 +134,7 @@ def rams_stability_params(env: Environment, freq: float,
         return None
     theta_deg = (float(theta) if theta is not None
                  else theta_for_freq(freq, knobs=knobs))
-    c0 = resolve_c0(env, knobs=knobs, speed_bounds=speed_bounds)
+    c0 = resolve_c0(env, knobs=knobs)
     _, water_c = water_speed_bounds(env)
     depth = float(env.bathymetry.depth)
     params = []
@@ -144,15 +159,14 @@ def rams_stability_params(env: Environment, freq: float,
 
 def rams_stability(env: Environment, freq: float,
                     dr: Optional[float] = None, dr_max: float = 1e3,
-                    theta: Optional[float] = None, *, knobs, speed_bounds):
+                    theta: Optional[float] = None, *, knobs):
     """The rams0.5 march's stability on ``env`` at ``freq``: the worst
     column's :func:`rams_growth_margin` at ``dr`` (``None`` for the
     rotation floor alone), the largest stable ``dr`` (``None`` when the
     rotation itself is unstable), and the largest stable rotation angle
     (``None`` when no angle on the ladder is). ``None`` when the rule
     does not apply (:func:`rams_stability_params`)."""
-    params = rams_stability_params(env, freq, theta=theta, knobs=knobs,
-                                   speed_bounds=speed_bounds)
+    params = rams_stability_params(env, freq, theta=theta, knobs=knobs)
     if params is None:
         return None
     margins = [rams_growth_margin(dr, **p) for p in params]
@@ -219,17 +233,15 @@ def warn_rams_rotation_angle_lowered(lowered, n_frequencies: int, *,
     )
 
 
-def warn_if_rams_step_unstable(env, fc, dr, *, notices=None, knobs,
-                               speed_bounds):
+def warn_if_rams_step_unstable(env, fc, dr, *, notices=None, knobs):
     """A pinned ``dr`` is the caller's, so it is marched as given — but
     a step the stability rule predicts will diverge is said so *before*
-    the minutes it takes to march into NaN, with the step (or the
+    the minutes it takes to march into a blow-up, with the step (or the
     rotation angle) that would hold."""
     stab = rams_stability(env, fc, dr=dr,
-                          theta=resolve_rams_rotation_angle(env, fc, knobs=knobs,
-                                                   speed_bounds=speed_bounds),
-                                                   knobs=knobs,
-                                                   speed_bounds=speed_bounds)
+                          theta=resolve_rams_rotation_angle(env, fc,
+                                                            knobs=knobs),
+                                                   knobs=knobs)
     if stab is None or stab['margin']['excess'] <= 0.0:
         return
     m = stab['margin']
@@ -341,8 +353,7 @@ def warn_stability_range_inert_on_a_multi_range_grid(receiver, *,
 
 
 def collins_carrier_rate(env: Environment, kind: str,
-                          freq: float, theta: float, *, knobs,
-                          speed_bounds) -> float:
+                          freq: float, theta: float, *, knobs) -> float:
     """Phase rate (rad/m) carried by a Collins backend's stored envelope.
 
     Two terms, both fast enough to alias across a ``dr·ndr`` output step:
@@ -364,7 +375,7 @@ def collins_carrier_rate(env: Environment, kind: str,
     :func:`interp_envelope_to_receiver_grid` divides this out before
     interpolating and restores it afterwards.
     """
-    c0 = resolve_c0(env, knobs=knobs, speed_bounds=speed_bounds)
+    c0 = resolve_c0(env, knobs=knobs)
     k0 = 2.0 * np.pi * float(freq) / c0
     speeds = np.asarray(env.ssp.sound_speed, dtype=float)
     speeds = speeds[np.isfinite(speeds)]
@@ -376,7 +387,7 @@ def collins_carrier_rate(env: Environment, kind: str,
 
 
 def resolve_collins_thetas(env, kind: str, frequencies, *,
-                            notices=None, knobs, speed_bounds) -> list:
+                            notices=None, knobs) -> list:
     """The rotation angle each Collins launch's deck carries: rams0.5's
     (:func:`resolve_rams_rotation_angle`), with one warning for every bin whose
     default angle the stability rule lowered; the fluid codes'
@@ -385,8 +396,7 @@ def resolve_collins_thetas(env, kind: str, frequencies, *,
         return [theta_for_freq(float(f), knobs=knobs) for f in frequencies]
     thetas, lowered = [], []
     for f in frequencies:
-        lowering = rams_rotation_angle_lowering(env, float(f), knobs=knobs,
-                                       speed_bounds=speed_bounds)
+        lowering = rams_rotation_angle_lowering(env, float(f), knobs=knobs)
         if lowering is None:
             thetas.append(theta_for_freq(float(f), knobs=knobs))
         else:

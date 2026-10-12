@@ -195,3 +195,12 @@ def test_the_coastline_downloader_takes_a_mirror_like_its_siblings():
         assert url.kind is inspect.Parameter.KEYWORD_ONLY, func.__name__
         assert url.default is None, func.__name__
     assert '{resolution}' in basemap.NATURAL_EARTH_URL
+
+
+def test_one_resolution_may_be_named_as_a_string(tmp_path, monkeypatch):
+    """``resolutions='50m'`` is one scale, not the characters '5', '0', 'm'."""
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    monkeypatch.setattr(basemap, 'http_get',
+                        lambda url, **kw: json.dumps(_LAND).encode())
+    out = basemap.download_coastline(resolutions='50m')
+    assert [p.name for p in out] == ['ne_50m_land.geojson']

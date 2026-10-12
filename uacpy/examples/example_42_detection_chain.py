@@ -87,7 +87,7 @@ Coupled modes throughout, and neither mode option is the reference here.
 Against RAM on this section (the mid-array element at 122 m, 200 Hz,
 receivers 5-115 m over 1-20 km; printed below), the adiabatic field's power
 averaged over each km stays within 0.8 dB of RAM while the coupled one runs
-0.1-1.6 dB low; point by point the coupled field is the closer one, 1.6 dB
+0.1-1.5 dB low; point by point the coupled field is the closer one, 1.5 dB
 median |dTL| against 1.9 dB. `field.exe`'s coupling projects only the pressure at each segment
 edge (docs/models/kraken.md §6.6), so it is not the full coupled-mode
 answer either. Measured over the water column the two Kraken runs disagree
@@ -100,7 +100,8 @@ Kraken(mode_coupling='coupled') · beamform_field · plane_wave_array_gain ·
 matched_replica_gain · independent_beams(weights=) · shading_taper ·
 sonar.detection_threshold_energy · per_look_false_alarm ·
 passive_signal_excess_field(array_gain_dB=<grid>) ·
-ResultStack.p · transition_probability_field · detection_ranges_by_depth ·
+Field.p over source_depth · transition_probability_field ·
+detection_ranges_by_depth ·
 plot_field / plot_detection_probability with env/receiver overlays
 """
 
@@ -213,17 +214,17 @@ array_as_sources = uacpy.Source(depths=elements, frequencies=FREQ)
 # adiabatic run below.
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
-    stack = kraken.run(env, array_as_sources, plane)   # n_el slabs of (n_z, n_r)
+    sources = kraken.run(env, array_as_sources, plane)  # (n_el, n_z, n_r)
 for warning in caught:
     print(f"  noted: {str(warning.message).split(';')[0]}")
 warnings.filterwarnings('ignore', message='.*closest receiver sees',
                         category=uacpy.NumericsWarning)
 
-# Each element's depth travels with its own field; 1 mm rather than exact
+# Each element's depth labels its own plane; 1 mm rather than exact
 # because the depth round-trips through the model deck's text format.
-for i, (z_el, _) in enumerate(stack):
-    assert abs(z_el - elements[i]) < 1e-3, 'stack order'
-p_map = stack.p                                     # (n_el, n_z, n_r)
+assert np.all(np.abs(sources.coords['source_depth'] - elements) < 1e-3), \
+    'source depth order'
+p_map = sources.p                                   # (n_el, n_z, n_r)
 
 # A target cannot be inside the sediment, so the shoaling bottom takes a
 # bite out of the plane. Everything below is masked, not merely ignored:
@@ -373,8 +374,8 @@ print(f"  the {angles.size}-point scan is {n_beams_independent:.0f} "
 
 
 # The beamformer over the whole plane. Seabed cells go NaN, which the
-# sonar-equation grid carries through: _budget_array_gain summarises an AG
-# grid with nan-aware statistics for exactly this case.
+# sonar-equation grid carries through: the budget summarises an AG grid with
+# NaN-aware statistics for exactly this case.
 scan = beamform_field(p_map, elements, angles, FREQ, sound_speed=C_REF, weights=taper)
 with np.errstate(divide='ignore', invalid='ignore'):
     ag_map = np.where(in_water, scan.array_gain(), np.nan)
@@ -496,7 +497,7 @@ twin.tick_params(axis='y', labelcolor='C2')
 
 axd = axes[1, 1]
 plot_detection_probability(pd_map['realised'], ax=axd, env=env,
-                           receiver=array_at_origin, contour_levels=(0.5,),
+                           receiver=array_at_origin, contours=(0.5,),
                            title=f'4. Pd vs TARGET position, realised AG '
                                  f'(array at r=0, scan Pf={PF:g})')
 # What assuming the plane-wave AG would have promised, on the same axes.

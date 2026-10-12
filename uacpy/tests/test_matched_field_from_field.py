@@ -1,8 +1,9 @@
 """Independent, hand-written tests for the model-agnostic MFP replica adapter
 :func:`replica_bank_from_field`.
 
-The contract tests are binary-free: they build :class:`Field` / :class:`ResultStack`
-objects from known complex arrays and check the adapter reshapes them into the
+The contract tests are binary-free: they build :class:`Field` objects (one
+over a ``source_depth`` axis, as a multi-depth run returns) from known complex
+arrays and check the adapter reshapes them into the
 exact :class:`Replicas` bank (one frequency, the candidate grid, the element axis
 last) that :func:`bartlett` / :func:`mvdr` consume.
 A single ``requires_binary`` test closes the physical loop: a KRAKEN ``field.exe``
@@ -15,7 +16,7 @@ import pytest
 
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results.field import Field
-from uacpy.core.results.stack import ResultStack
+from uacpy.core.results import stack_fields
 from uacpy.core.results.array_products import Covariance, Replicas
 from uacpy.sonar.matched_field import (
     replica_bank,
@@ -41,9 +42,15 @@ def _random_bank(n_arr, n_cz, n_cr, seed=0):
     )
 
 
-# ── ResultStack path ─────────────────────────────────────────────────────
+def _over_source_depths(slabs, depths, coordinate_name="source_depth"):
+    """The ``{depth, range}`` fields of several candidate source depths as
+    one Field over ``source_depth``, as a multi-depth run returns them."""
+    return stack_fields(slabs, depths, coordinate_name=coordinate_name)
 
-def test_resultstack_reproduces_bank_exactly():
+
+# ── the field of several source depths ───────────────────────────────────
+
+def test_a_field_over_source_depths_reproduces_the_bank_exactly():
     z_arr = np.linspace(5, 95, 8)
     cand_z = np.linspace(10, 90, 6)
     cand_r = np.linspace(500, 4000, 12)
@@ -53,7 +60,7 @@ def test_resultstack_reproduces_bank_exactly():
         _pressure_field(P[:, i, :], depth=z_arr, range=cand_r)
         for i in range(cand_z.size)
     ]
-    stack = ResultStack(slabs, cand_z, coordinate_name="source_depth")
+    stack = _over_source_depths(slabs, cand_z)
 
     bank = replica_bank_from_field(stack, array_depths=z_arr)
     assert isinstance(bank, Replicas)
@@ -65,8 +72,9 @@ def test_resultstack_reproduces_bank_exactly():
     assert np.array_equal(bank.receiver_positions[:, 2], z_arr)
 
 
-def test_resultstack_rejects_mismatched_range_axis():
-    # Same length, different range vectors across slabs → silent-wrong bank.
+def test_fields_on_different_range_axes_do_not_join_into_one_bank_field():
+    # Same length, different range vectors across depths → silent-wrong bank;
+    # one Field cannot hold them.
     z_arr = np.linspace(5, 95, 4)
     cand_z = np.array([20.0, 40.0])
     slabs = [
@@ -75,13 +83,12 @@ def test_resultstack_rejects_mismatched_range_axis():
         _pressure_field(_random_bank(4, 1, 6, seed=1)[:, 0, :],
                         depth=z_arr, range=np.linspace(400, 3000, 6)),  # differs
     ]
-    stack = ResultStack(slabs, cand_z, coordinate_name="source_depth")
-    with pytest.raises(ConfigurationError, match="range"):
-        replica_bank_from_field(stack)
+    with pytest.raises(ConfigurationError, match="different grid"):
+        _over_source_depths(slabs, cand_z)
 
 
-def test_resultstack_rejects_mismatched_depth_axis():
-    # Different array geometry across slabs, array_depths not supplied.
+def test_fields_on_different_array_depths_do_not_join_into_one_bank_field():
+    # Different array geometry across depths.
     cand_z = np.array([20.0, 40.0])
     cand_r = np.linspace(500, 4000, 6)
     slabs = [
@@ -90,17 +97,16 @@ def test_resultstack_rejects_mismatched_depth_axis():
         _pressure_field(_random_bank(4, 1, 6, seed=1)[:, 0, :],
                         depth=np.linspace(10, 90, 4), range=cand_r),  # differs
     ]
-    stack = ResultStack(slabs, cand_z, coordinate_name="source_depth")
-    with pytest.raises(ConfigurationError, match="depth"):
-        replica_bank_from_field(stack)
+    with pytest.raises(ConfigurationError, match="different grid"):
+        _over_source_depths(slabs, cand_z)
 
 
-def test_single_slab_stack_is_one_candidate_depth():
+def test_a_source_depth_axis_of_one_is_one_candidate_depth():
     z_arr = np.linspace(5, 95, 5)
     cand_r = np.linspace(500, 4000, 7)
     data = _random_bank(5, 1, 7)[:, 0, :]
-    stack = ResultStack([_pressure_field(data, depth=z_arr, range=cand_r)],
-                        np.array([30.0]), coordinate_name="source_depth")
+    stack = _over_source_depths(
+        [_pressure_field(data, depth=z_arr, range=cand_r)], np.array([30.0]))
     bank = replica_bank_from_field(stack, array_depths=z_arr)
     assert bank.replicas.shape == (1, 1, 7, 5)
     assert np.array_equal(bank.replicas[0, 0], data.T)
@@ -136,16 +142,16 @@ def test_noncanonical_axis_order_depth_last():
     assert list(bank.candidates) == ['depth', 'range']
 
 
-def test_resultstack_rejects_non_source_depth_axis():
+def test_a_field_over_frequency_is_not_a_candidate_grid():
     z_arr = np.linspace(5, 95, 4)
     cand_r = np.linspace(500, 4000, 5)
     slabs = [
         _pressure_field(_random_bank(4, 1, 5, seed=k)[:, 0, :], depth=z_arr, range=cand_r)
         for k in range(3)
     ]
-    stack = ResultStack(slabs, np.array([100.0, 200.0, 300.0]),
-                        coordinate_name="frequency")
-    with pytest.raises(ConfigurationError, match="source_depth"):
+    stack = _over_source_depths(slabs, np.array([100.0, 200.0, 300.0]),
+                                coordinate_name="frequency")
+    with pytest.raises(ConfigurationError, match="'frequency'"):
         replica_bank_from_field(stack)
 
 
@@ -193,7 +199,7 @@ def test_adapter_bank_localizes_planted_source(processor):
         _pressure_field(P[:, i, :], depth=z_arr, range=cand_r)
         for i in range(cand_z.size)
     ]
-    stack = ResultStack(slabs, cand_z, coordinate_name="source_depth")
+    stack = _over_source_depths(slabs, cand_z)
     bank = replica_bank_from_field(stack, array_depths=z_arr)
 
     iz, ir = 9, 13
@@ -206,6 +212,29 @@ def test_adapter_bank_localizes_planted_source(processor):
 
 
 # ── error contracts ──────────────────────────────────────────────────────
+
+def _modes():
+    from uacpy.core.results import Modes
+    return Modes(k=np.array([0.40 + 1e-5j, 0.39 + 2e-5j]),
+                 phi=np.arange(6.0).reshape(3, 2),
+                 depths=np.array([1.0, 2.0, 3.0]),
+                 group_velocity=np.array([1490.0, 1480.0]),
+                 frequencies=100.0, model='Kraken')
+
+
+@pytest.mark.parametrize('not_a_field', [
+    lambda: __import__('uacpy').core.results.ResultStack(
+        [_modes(), _modes()], [10.0, 20.0]),
+    lambda: [_pressure_field(np.ones((2, 3), complex), depth=np.array([1.0, 2.0]),
+                             range=np.array([1.0, 2.0, 3.0]))],
+])
+def test_anything_but_a_field_is_refused_naming_what_it_takes(not_a_field):
+    with pytest.raises(ConfigurationError,
+                       match=r"^replica_bank_from_field: takes a coherent "
+                             r"pressure Field; got a (ResultStack|list)") as info:
+        replica_bank_from_field(not_a_field())
+    assert 'source_depth axis' in str(info.value)
+
 
 def test_rejects_real_tl_field():
     z_arr = np.linspace(5, 95, 5)
@@ -264,10 +293,10 @@ def _linear(field):
     """The linear surface an ambiguity Field is relative to its peak of."""
     return field.reference * 10 ** (np.asarray(field.data) / 10)
 
-def _replicas_to_stack(rep, *, freq_idx=0):
+def _replicas_to_field(rep, *, freq_idx=0):
     """Repackage an OASN ``Replicas`` (n_f, nz, nx, ny=1, N), candidates
-    ``{'depth', 'x', 'y'}``, as a ResultStack of
-    ``{depth, range}`` pressure Fields over ``source_depth`` — the adapter input.
+    ``{'depth', 'x', 'y'}``, as one Field of ``{depth, range}`` pressure over
+    ``source_depth`` — the adapter input.
     Depth-range MFP only (requires the horizontal ``y`` axis to be a singleton).
     """
     R = np.asarray(rep.replicas)
@@ -282,8 +311,7 @@ def _replicas_to_stack(rep, *, freq_idx=0):
               frequencies=rep.frequencies)
         for iz in range(R.shape[1])
     ]
-    return ResultStack(slabs, rep.candidates['depth'],
-                       coordinate_name="source_depth")
+    return _over_source_depths(slabs, rep.candidates['depth'])
 
 
 def _assert_adapter_matches_oasn_processor(rep, *, rtol=1e-9, atol=1e-12):
@@ -299,7 +327,7 @@ def _assert_adapter_matches_oasn_processor(rep, *, rtol=1e-9, atol=1e-12):
     N = R.shape[4]
 
     # 1. reshaping fidelity: our bank IS the OASN replica tensor, y dropped.
-    our_bank = replica_bank_from_field(_replicas_to_stack(rep))
+    our_bank = replica_bank_from_field(_replicas_to_field(rep))
     oasn_bank = R[0, :, :, 0, :]                               # (nz, nx, N)
     assert our_bank.replicas.shape == (1, R.shape[1], R.shape[2], N)
     assert np.array_equal(our_bank.replicas[0], oasn_bank)
@@ -412,14 +440,11 @@ def test_adapter_matches_modal_bank_and_localizes():
     kraken = Kraken(verbose=False)
     modes = kraken.compute_modes(env, uacpy.Source(depths=cand_z[0], frequencies=150.0))
 
-    # Build the bank the generic way: one field.exe run per candidate depth,
-    # receivers AT the array elements over the candidate ranges.
-    slabs = []
-    for zs in cand_z:
-        src = uacpy.Source(depths=float(zs), frequencies=150.0)
-        rcv = uacpy.Receiver(depths=z_arr, ranges=cand_r)
-        slabs.append(kraken.run(env, src, rcv))     # COHERENT_TL → {depth, range} pressure
-    stack = ResultStack(slabs, cand_z, coordinate_name="source_depth")
+    # Build the bank the generic way: one run over every candidate depth,
+    # receivers AT the array elements over the candidate ranges — COHERENT_TL
+    # → one {source_depth, depth, range} pressure Field.
+    stack = kraken.run(env, uacpy.Source(depths=cand_z, frequencies=150.0),
+                       uacpy.Receiver(depths=z_arr, ranges=cand_r))
 
     bank_field = replica_bank_from_field(stack, array_depths=z_arr)
     bank_modal = replica_bank(modes, array_depths=z_arr, candidate_depths=cand_z,

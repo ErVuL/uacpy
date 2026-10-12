@@ -385,7 +385,7 @@ class TestArrivalsFilterChain:
         a = self._two_arrivals(delays=(0.10, 0.10 + dtau),
                                amplitudes=(1.0, 1.0))
         for margin in (1.2, 8.0):
-            band = a.synthesis_band(bandwidth=bandwidth, centre=2000.0,
+            band = a.synthesis_band(bandwidth=bandwidth, fc=2000.0,
                                     margin=margin)
             per_fringe = (1.0 / dtau) / float(band[1] - band[0])
             assert per_fringe == pytest.approx(
@@ -410,7 +410,7 @@ class TestArrivalsFilterChain:
         assert _fold_notice(delays, power, 2.0, who="t", remediation="r") is None
 
     def test_synthesis_band_takes_an_explicit_centre(self):
-        band = self._arrivals().synthesis_band(bandwidth=2e3, centre=40e3)
+        band = self._arrivals().synthesis_band(bandwidth=2e3, fc=40e3)
         assert float(band[0]) == pytest.approx(39e3)
         assert float(band[-1]) == pytest.approx(41e3)
 
@@ -505,13 +505,15 @@ class TestArrivalsFilterChain:
     def test_a_stated_record_sets_the_frequency_spacing(self):
         """The window is the primitive and the spacing follows from it, so a
         caller who knows the window states it and gets 1/df back."""
-        band = self._arrivals().synthesis_band(bandwidth=100.0, record=2.0)
+        band = self._arrivals().synthesis_band(bandwidth=100.0,
+                                               output_duration=2.0)
         assert 1.0 / float(band[1] - band[0]) >= 2.0
 
     def test_a_stated_record_and_an_energy_fraction_together_are_refused(self):
         """Two answers to one question — how long the record has to be."""
         with pytest.raises(ConfigurationError, match='record'):
-            self._arrivals().synthesis_band(bandwidth=100.0, record=2.0,
+            self._arrivals().synthesis_band(bandwidth=100.0,
+                                            output_duration=2.0,
                                             energy_fraction=0.99)
 
     def test_the_derived_grid_is_sized_by_energy_not_by_the_last_arrival(self):
@@ -522,9 +524,8 @@ class TestArrivalsFilterChain:
         a = self._two_arrivals(delays=(0.10, 0.12, 5.0),
                                amplitudes=(1.0, 1.0, 1e-5))
         with pytest.warns(UserWarning, match='fold back'):
-            derived = a.synthesis_band(bandwidth=1e3, centre=2e3)
-        every = a.synthesis_band(bandwidth=1e3, centre=2e3,
-                                 energy_fraction=1.0)
+            derived = a.synthesis_band(bandwidth=1e3, fc=2e3)
+        every = a.synthesis_band(bandwidth=1e3, fc=2e3, energy_fraction=1.0)
         assert derived.size * 100 < every.size
 
     def test_a_record_that_leaves_arrivals_out_reports_what_wraps(self):
@@ -534,19 +535,21 @@ class TestArrivalsFilterChain:
         a = self._two_arrivals(delays=(0.10, 0.12, 5.0),
                                amplitudes=(1.0, 1.0, 1e-5))
         with pytest.warns(UserWarning, match=r'-103 dB'):
-            a.synthesis_band(bandwidth=1e3, centre=2e3, record=0.05)
+            a.synthesis_band(bandwidth=1e3, fc=2e3, output_duration=0.05)
 
     def test_a_record_holding_every_arrival_says_nothing(self):
         a = self._two_arrivals(delays=(0.10, 0.12), amplitudes=(1.0, 1.0))
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            a.synthesis_band(bandwidth=1e3, centre=2e3, record=1.0)
+            a.synthesis_band(bandwidth=1e3, fc=2e3, output_duration=1.0)
 
     def test_a_record_at_or_below_zero_is_refused(self):
         for bad in (0.0, -1.0):
             with pytest.raises(ConfigurationError,
-                               match='synthesis_band record must be positive'):
-                self._arrivals().synthesis_band(bandwidth=100.0, record=bad)
+                               match='synthesis_band output_duration must '
+                                     'be positive'):
+                self._arrivals().synthesis_band(bandwidth=100.0,
+                                                output_duration=bad)
 
     def test_top_n_by_amplitude(self):
         a = self._arrivals()
@@ -632,10 +635,12 @@ class TestSpawnedArrivalCellsMatchTheReadersRecord:
     def test_delayandsum_accepts_a_spawned_cell(self):
         from uacpy.acoustic_signal import delayandsum
         source = np.ones(8)
-        fresh, _ = delayandsum(dict(self.READER_CELL), source, 10000.0, 1000.0)
+        fresh, _ = delayandsum(dict(self.READER_CELL), source_waveform=source,
+                               sample_rate=10000.0, trace_frequency=1000.0)
         spawned_cell = self._arrivals().filter(
             lambda a: True).by_receiver[0][0][0]
-        rebuilt, _ = delayandsum(spawned_cell, source, 10000.0, 1000.0)
+        rebuilt, _ = delayandsum(spawned_cell, source_waveform=source,
+                                 sample_rate=10000.0, trace_frequency=1000.0)
         assert rebuilt.shape == fresh.shape
         assert np.allclose(rebuilt, fresh)
 
@@ -811,6 +816,84 @@ class TestRaysFilterAndSortHelpers:
         assert [a['amplitude'] for a in up.arrivals] == [0.2, 0.5, 1.0]
         # The original order is untouched (sorts return copies).
         assert [a['amplitude'] for a in arr.arrivals] == [0.5, 1.0, 0.2]
+
+    def test_sorting_reorders_the_table_without_a_record_per_arrival(
+            self, monkeypatch):
+        """A sort is one permutation of the columns: building the record
+        list once per arrival made it quadratic (1.6 s at 1000 arrivals,
+        hours on a gridded run)."""
+        from uacpy.core.results import Arrivals
+        from uacpy.core.results import rays as rays_module
+        n = 50
+        arr = Arrivals(
+            arrivals=[{'delay': 0.01 * i, 'amplitude': float((7 * i) % n)}
+                      for i in range(n)],
+            receiver_depths=np.array([50.0]),
+            receiver_ranges=np.array([1000.0]),
+            model='Bellhop', frequencies=100.0)
+        built = []
+        real = rays_module._records_from_columns
+
+        def counting(columns):
+            built.append(1)
+            return real(columns)
+        monkeypatch.setattr(rays_module, '_records_from_columns', counting)
+        # At most one read of the whole table per call (the received powers
+        # it ranks on), never one per arrival.
+        down = arr.sorted_by_amplitude()
+        assert len(built) <= 1
+        built.clear()
+        top = arr.top_n_by_amplitude(5)
+        assert len(built) <= 1
+        monkeypatch.setattr(rays_module, '_records_from_columns', real)
+        assert [a['amplitude'] for a in down.arrivals] == \
+            sorted((float((7 * i) % n) for i in range(n)), reverse=True)
+        assert [a['amplitude'] for a in top.arrivals] == [49.0, 48.0, 47.0,
+                                                          46.0, 45.0]
+
+
+class TestRaysKinds:
+    """``Rays.kinds`` is the multipath class of every ray by the rule
+    ``Arrivals.kinds`` and ``filter_by_bounces`` use."""
+
+    COUNTS = {'direct': (0, 0), 'surface': (1, 0), 'bottom': (0, 1),
+              'both': (2, 3)}
+
+    def _fan(self, classes):
+        from uacpy.core.results import Rays
+        return Rays(rays=[{'r': np.array([0.0, 1000.0]),
+                           'z': np.array([10.0, 50.0]),
+                           'n_top_bounces': self.COUNTS[k][0],
+                           'n_bot_bounces': self.COUNTS[k][1]}
+                          for k in classes],
+                    model='Bellhop', frequencies=100.0)
+
+    def test_each_bounce_pattern_has_its_class(self):
+        classes = ['direct', 'surface', 'bottom', 'both']
+        kinds = self._fan(classes).kinds
+        assert list(kinds) == classes
+        with pytest.raises(ValueError, match='read-only'):
+            kinds[0] = 'both'
+
+    def test_the_class_of_a_ray_is_the_class_its_filter_keeps(self):
+        rays = self._fan(['both', 'direct', 'bottom', 'surface', 'bottom'])
+        for kind in self.COUNTS:
+            kept = rays.filter_by_bounces(kind=kind)
+            assert list(kept.kinds) == [kind] * kept.n_rays
+            assert kept.n_rays == int(np.sum(rays.kinds == kind))
+
+    def test_rays_and_arrivals_classify_one_bounce_pattern_alike(self):
+        classes = ['surface', 'both', 'direct', 'bottom']
+        top = np.array([self.COUNTS[k][0] for k in classes])
+        bot = np.array([self.COUNTS[k][1] for k in classes])
+        cell = {'delays': np.arange(4.0), 'amplitudes': np.ones(4),
+                'phases': np.zeros(4), 'n_top_bounces': top,
+                'n_bot_bounces': bot}
+        arrivals = Arrivals(by_receiver=[[[cell]]],
+                            receiver_depths=np.array([50.0]),
+                            receiver_ranges=np.array([1000.0]),
+                            model='Test', frequencies=100.0)
+        assert list(self._fan(classes).kinds) == list(arrivals.kinds)
 
 
 class TestArrivalDictPhaseUnit:
@@ -1250,8 +1333,8 @@ class TestArrivalsSynthesiseEveryCell:
                 self.FREQS, cell['amplitudes'], cell['delays'],
                 delays_imag_s=cell['delays_imag'], phases_rad=cell['phases'],
                 trace_frequency=1000.0))
-        assert np.isnan(H.data[1, 0]).all()
-        assert not np.isnan(H.data[1, 1]).any()
+        assert (H.data[1, 0] == 0).all()
+        assert not np.isnan(H.data).any()
 
     def test_one_cell_is_picked_by_receiver(self):
         H = self._grid().transfer_function(self.FREQS,
@@ -1267,21 +1350,388 @@ class TestArrivalsSynthesiseEveryCell:
         np.testing.assert_array_equal(H.aux_coords['receiver_depth'][1],
                                       [20.0, 40.0])
 
+    def _paired(self):
+        return self._arrivals(
+            [[[self._cell([0.5], [1e-3]), self._cell([0.9, 0.95], [1e-3, 5e-4]),
+               self._cell([1.4], [2e-4])]]],
+            [20.0, 40.0, 60.0], [700.0, 1500.0, 2300.0])
+
+    def test_a_paired_grid_picks_each_receiver_by_its_own_depth_and_range(self):
+        arr = self._paired()
+        np.testing.assert_array_equal(arr.at_receiver((40.0, 1500.0)).delays,
+                                      [0.9, 0.95])
+        np.testing.assert_array_equal(arr.at_receiver((60.0, 2300.0)).delays,
+                                      [1.4])
+        assert arr.rms_delay_spread(receiver=(60.0, 2300.0)) == 0.0
+        assert arr.transfer_function(
+            self.FREQS, receiver=(40.0, 1500.0)).data.shape == (1, 1, 5)
+
+    def test_a_paired_grid_refuses_a_pair_that_is_not_one_of_its_receivers(
+            self):
+        with pytest.raises(ConfigurationError,
+                           match="not one of this irregular grid's 3"):
+            self._paired().at_receiver((20.0, 1500.0))
+
+    def test_the_transfer_function_states_its_first_arrival_speed(self):
+        # Fastest r/tau of a first arrival: 1500/0.7 over 700/0.5.
+        H = self._grid().transfer_function(self.FREQS)
+        assert H.speeds.water_max == pytest.approx(1500.0 / 0.7)
+        one = self._grid().transfer_function(self.FREQS,
+                                             receiver=(20.0, 700.0))
+        assert one.speeds.water_max == pytest.approx(700.0 / 0.5)
+
+    def test_a_trace_from_fast_water_peaks_at_its_first_arrival(self):
+        """Water faster than the 1500 m/s default puts the first arrival
+        before a window anchored on r/1500; anchored on the arrivals' own
+        speed, a record sized to their span holds them."""
+        r = 15000.0
+        delays = np.array([r / 1540.0, r / 1540.0 + 0.02])
+        arr = self._arrivals([[[self._cell(delays, [1.0, 0.5])]]],
+                             [50.0], [r])
+        f = arr.synthesis_band(bandwidth=400.0, fc=1000.0, margin=8.0)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter('always')
+            trace = arr.transfer_function(f).to_time_trace(window=None)
+        t = np.asarray(trace.coords['time'])
+        peak = t[np.argmax(np.abs(np.ravel(trace.data)))]
+        assert peak == pytest.approx(delays[0], abs=2.0 * (t[1] - t[0]))
+        assert not [w for w in rec if 'stamped no sound speed'
+                    in str(w.message)]
+
     def test_several_sources_are_refused_over_every_cell(self):
         one = [[self._cell([0.5], [1e-3])]]
         arr = self._arrivals([one, one], [20.0], [700.0])
         with pytest.raises(ConfigurationError, match='2 source depths'):
             arr.transfer_function(self.FREQS)
         with pytest.raises(ConfigurationError, match='2 source depths'):
-            arr.to_time_series(np.ones(16), self.FS)
+            arr.to_time_series(source_waveform=np.ones(16),
+                               sample_rate=self.FS)
 
     def test_the_time_series_is_the_grid_synthesis(self):
         from uacpy.acoustic_signal import simulate_arrival_grid
         arr = self._grid()
         pulse = np.hanning(32)
-        t, traces = arr.to_time_series(pulse, self.FS)
-        t_ref, ref = simulate_arrival_grid(pulse, arr.by_receiver[0],
-                                           self.FS, 1000.0)
-        np.testing.assert_array_equal(t, t_ref)
-        np.testing.assert_array_equal(traces, ref)
-        assert np.isnan(traces[1, 0]).all()
+        series = arr.to_time_series(source_waveform=pulse,
+                                    sample_rate=self.FS)
+        t_ref, ref = simulate_arrival_grid(arr.by_receiver[0],
+                                           source_waveform=pulse,
+                                           sample_rate=self.FS,
+                                           trace_frequency=1000.0)
+        assert series.kind == 'pressure' and series.axes == [
+            'depth', 'range', 'time']
+        np.testing.assert_array_equal(series.coords['depth'], [20.0, 40.0])
+        np.testing.assert_array_equal(series.coords['range'], [700.0, 1500.0])
+        np.testing.assert_array_equal(series.times, t_ref)
+        np.testing.assert_array_equal(series.data, ref)
+        assert (series.data[1, 0] == 0).all()
+        assert series.at(depth=20.0, range=1500.0).data.shape == t_ref.shape
+
+    def test_the_time_series_takes_its_waveform_by_keyword(self):
+        import inspect
+        params = inspect.signature(Arrivals.to_time_series).parameters
+        assert all(p.kind is inspect.Parameter.KEYWORD_ONLY
+                   for name, p in params.items() if name != 'self')
+        assert set(params) == {'self', 'source_waveform', 'sample_rate',
+                               'output_duration', 't_start'}
+
+    def test_a_paired_grid_time_series_is_on_its_receivers(self):
+        arr = Arrivals(by_receiver=[[[self._cell([0.5], [1e-3]),
+                                      self._cell([1.0], [5e-4])]]],
+                       receiver_depths=[20.0, 40.0],
+                       receiver_ranges=[700.0, 1500.0],
+                       frequencies=[1000.0])
+        series = arr.to_time_series(source_waveform=np.hanning(32),
+                                    sample_rate=self.FS)
+        assert series.axes == ['range', 'time']
+        np.testing.assert_array_equal(
+            series.aux_coords['receiver_depth'][1], [20.0, 40.0])
+
+
+class TestArrivalsImpulseResponse:
+    """``Arrivals.impulse_response(fs)``: real passband taps of the arrival
+    transfer function — the received amplitudes, phase and absorption
+    across the band, never the lossless geometric column — on each range's
+    reduced-time record, as the density Field ``Field.apply`` plays a signal
+    through."""
+
+    FS = 48000.0
+    FC = 10000.0
+
+    def _cell(self, delays, amps, phases, imag):
+        delays = np.asarray(delays, float)
+        return dict(n_arrivals=delays.size, amplitudes=np.asarray(amps, float),
+                    delays=delays, delays_imag=np.asarray(imag, float),
+                    phases=np.asarray(phases, float))
+
+    def _lossy(self):
+        from uacpy.core.absorption import Thorp
+        cells = [[self._cell([1.0, 1.013], [1e-3, 6e-4], [0.0, 2.0],
+                             [0.0, -2e-6]),
+                  self._cell([2.0, 2.02], [5e-4, 3e-4], [1.0, -1.0],
+                             [-1e-6, -3e-6])]]
+        return Arrivals(by_receiver=[cells], receiver_depths=[50.0],
+                        receiver_ranges=[1500.0, 3000.0],
+                        frequencies=[self.FC], absorption=Thorp())
+
+    def test_it_is_the_plain_arrival_response_of_each_cell(self):
+        # Each cell's h is arrival_impulse_response of its own list on the
+        # same record, times the rate (the density convention).
+        from uacpy.acoustic_signal import arrival_impulse_response
+        arr = self._lossy()
+        ir = arr.impulse_response(self.FS)
+        n = ir.times.size
+        for j, r in enumerate((1500.0, 3000.0)):
+            cell = arr.by_receiver[0][0][j]
+            start = ir.times[0] + r / ir.reduction_speed
+            _, taps = arrival_impulse_response(
+                cell['amplitudes'], cell['delays'], sample_rate=self.FS,
+                delays_imag_s=cell['delays_imag'], phases_rad=cell['phases'],
+                trace_frequency=self.FC, absorption=arr.absorption,
+                t_start=start, n_samples=n)
+            np.testing.assert_allclose(
+                ir.data[0, j], taps * self.FS,
+                atol=1e-12 * np.max(np.abs(taps)) * self.FS)
+
+    def test_it_takes_the_received_column_not_the_geometric_one(self):
+        # The second cell's paths lose exp(omega Im tau) to absorption: its
+        # response is not the one of the lossless geometric amplitudes.
+        from uacpy.acoustic_signal import arrival_impulse_response
+        arr = self._lossy()
+        ir = arr.impulse_response(self.FS, receiver=(50.0, 3000.0))
+        cell = arr.by_receiver[0][0][1]
+        _, lossless = arrival_impulse_response(
+            cell['amplitudes'], cell['delays'], sample_rate=self.FS,
+            phases_rad=cell['phases'],
+            t_start=ir.times[0] + 3000.0 / ir.reduction_speed,
+            n_samples=ir.times.size)
+        received = np.ravel(ir.data) / self.FS
+        assert np.sum(received ** 2) < 0.99 * np.sum(lossless ** 2)
+
+    def test_each_range_opens_at_its_first_arrival_speed(self):
+        arr = self._lossy()
+        ir = arr.impulse_response(self.FS)
+        assert ir.kind == 'impulse_response' and ir.unit == '1/s'
+        # c = max r / tau_first = 1500 m/s for both cells here
+        assert ir.reduction_speed == pytest.approx(1500.0)
+        assert ir.axes == ['depth', 'range', 'time']
+        first = ir.times[np.argmax(np.abs(ir.data[0]), axis=-1)]
+        np.testing.assert_allclose(first, 0.0, atol=2.0 / self.FS)
+        # margin: the delay span either side, at least 256 samples
+        assert -ir.times[0] == pytest.approx(0.02, abs=1.0 / self.FS)
+
+    def test_applied_it_is_the_exact_reception(self):
+        # Against X·H on a record 16 times longer: the band-limited pulse
+        # well inside the band, within 1e-6 (measured 1.4e-7).
+        from uacpy.acoustic_signal import arrival_transfer_function
+        arr = self._lossy()
+        n = 960
+        x = np.sin(2 * np.pi * self.FC * np.arange(n) / self.FS) * np.hanning(n)
+        cell_ir = arr.impulse_response(self.FS).at(range=1500.0)
+        rx = cell_ir.apply(source_waveform=x, sample_rate=self.FS)
+        y = np.asarray(rx.data).ravel()
+        cell = arr.by_receiver[0][0][0]
+        L = 1 << 18
+        f = np.fft.rfftfreq(L, 1.0 / self.FS)
+        H = arrival_transfer_function(
+            f, cell['amplitudes'], np.asarray(cell['delays']) - rx.times[0],
+            delays_imag_s=cell['delays_imag'], phases_rad=cell['phases'],
+            trace_frequency=self.FC, absorption=arr.absorption)
+        H[0], H[-1] = H[0].real, H[-1].real
+        exact = np.fft.irfft(np.fft.rfft(x, L) * H, L)[:y.size]
+        assert np.max(np.abs(y - exact)) < 1e-6 * np.max(np.abs(exact))
+
+    def test_a_lone_arrival_gets_256_samples_either_side(self):
+        # One arrival per cell spans no time: the record holds 256 samples
+        # before it and after it, over which the tail of a quarter-turn
+        # arrival (a band-limited Hilbert impulse, falling as 1/(pi n)) is
+        # tapered to zero at the record's ends.
+        cells = [[self._cell([1.0], [1e-3], [np.pi / 2], [0.0])]]
+        arr = Arrivals(by_receiver=[cells], receiver_depths=[50.0],
+                       receiver_ranges=[1500.0], frequencies=[self.FC])
+        ir = arr.impulse_response(self.FS)
+        h = np.abs(ir.data[0, 0])
+        assert ir.times[0] == pytest.approx(-256.0 / self.FS)
+        assert h.size == 513
+        assert h[0] == 0.0 and h[-1] == 0.0
+        assert np.argmax(h) in (255, 256, 257)
+
+    def test_a_band_keeps_the_response_there_and_nothing_far_outside(self):
+        # H is zero outside the band before the record's taper, which
+        # spreads it by about 1/margin = 50 Hz here: measured 2e-3 of the
+        # peak 100 Hz outside the band, 7e-5 at 500 Hz.
+        arr = self._lossy()
+        ir = arr.impulse_response(self.FS, band=(5000.0, 15000.0))
+        h = ir.data[0, 0]
+        spectrum = np.abs(np.fft.rfft(h))
+        f = np.fft.rfftfreq(h.size, 1.0 / self.FS)
+        near = (f < 4900.0) | (f > 15100.0)
+        far = (f < 4500.0) | (f > 15500.0)
+        assert np.max(spectrum[near]) < 3e-3 * np.max(spectrum)
+        assert np.max(spectrum[far]) < 1e-4 * np.max(spectrum)
+
+    @pytest.mark.parametrize('kw, match', [
+        (dict(band=(0.0, 30000.0)), 'band=.*How to fix'),
+        (dict(band=(1000.0, 1000.0)), 'band=.*How to fix'),
+        (dict(band='ab'), 'band=.*How to fix'),
+        (dict(band=(1.0, 2.0, 3.0)), 'band=.*How to fix'),
+        (dict(t_start='running'), "'reduced'.*How to fix"),
+        (dict(output_duration=0.0), 'output_duration.*Pass each'),
+    ])
+    def test_what_it_cannot_build_is_refused(self, kw, match):
+        with pytest.raises(ConfigurationError,
+                           match=f"(?s)Arrivals.impulse_response: .*{match}"):
+            self._lossy().impulse_response(self.FS, **kw)
+
+    @pytest.mark.parametrize('fs, duration, n', [
+        (48000.0, 1.1, 52800), (44100.0, 1.1, 48510), (22050.0, 1.1, 24255),
+        (8000.0, 1.1, 8800), (48000.0, 1.1 + 0.5 / 48000.0, 52801)])
+    def test_a_record_length_is_its_whole_samples(self, fs, duration, n):
+        # 1.1 s at 48 kHz is 52800.00000000001 samples in floating point:
+        # the record is 52800 samples, not one more; half a sample more is
+        # a sample more.
+        ir = self._lossy().impulse_response(fs, output_duration=duration)
+        assert ir.times.size == n
+
+    def test_a_record_of_one_sample_holds_the_direct_path(self):
+        # As on the plain functions: one sample's duration is one sample.
+        with pytest.warns(uacpy.core.exceptions.NumericsWarning):
+            ir = self._lossy().impulse_response(
+                self.FS, t_start=1.0, output_duration=1.0 / self.FS,
+                receiver=(50.0, 1500.0))
+        assert ir.times.size == 1
+        assert ir.data.ravel()[0] == pytest.approx(1e-3 * self.FS)
+
+    @pytest.mark.parametrize('phase', [0.0, np.pi / 2])
+    def test_a_start_close_before_the_direct_path_holds_its_samples(
+            self, phase):
+        # A record stated 1.3 samples before a direct path between samples
+        # holds the band-limited response's own samples near the paths (built
+        # on the record alone, the taps lose 0.23 of the peak at phase 0 and
+        # 0.53 at pi/2): taps within 3 samples before to 12 after the direct
+        # path against the lossless response, cos(phi) sinc(x) - sin(phi)
+        # (1 - cos(pi x))/(pi x) per path.
+        delays = 1.0 + np.array([0.3, 5.3, 10.0]) / self.FS
+        amps, phases = np.array([1.0, 0.6, 0.4]), np.array([phase, np.pi,
+                                                            1.2])
+        arr = Arrivals(by_receiver=[[[self._cell(delays, amps, phases,
+                                                 np.zeros(3))]]],
+                       receiver_depths=[50.0], receiver_ranges=[1500.0],
+                       frequencies=[self.FC])
+        ir = arr.impulse_response(self.FS,
+                                  t_start=delays[0] - 1.3 / self.FS,
+                                  receiver=(50.0, 1500.0))
+        h = ir.data.ravel() / self.FS
+        k = np.arange(h.size, dtype=float)
+        x = k[:, None] - (delays - ir.times[0])[None, :] * self.FS
+        with np.errstate(invalid='ignore', divide='ignore'):
+            hilbert = np.where(np.abs(x) < 1e-12, 0.0,
+                               (1.0 - np.cos(np.pi * x)) / (np.pi * x))
+        truth = (np.sinc(x) * amps * np.cos(phases)
+                 - hilbert * amps * np.sin(phases)).sum(axis=1)
+        near = (k >= 1.3 - 3) & (k <= 1.3 + 12)
+        assert (np.max(np.abs(h - truth)[near])
+                < 1e-2 * np.max(np.abs(truth)))
+
+    def test_a_record_holding_every_arrival_is_silent(self):
+        # From each range's start, 0.02 s before its first arrival, 0.06 s
+        # reaches both cells' last arrivals (0.033 and 0.04 s in).
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            self._lossy().impulse_response(self.FS, output_duration=0.06)
+
+    def test_a_record_too_short_leaves_the_late_arrivals_out_and_says_so(self):
+        # 0.03 s holds each cell's first arrival only: the second is left
+        # out, not folded in at its delay modulo the record.
+        from uacpy.acoustic_signal import arrival_impulse_response
+        arr = self._lossy()
+        with pytest.warns(uacpy.core.exceptions.NumericsWarning) as record:
+            ir = arr.impulse_response(self.FS, output_duration=0.03)
+        messages = [str(w.message) for w in record]
+        assert len(messages) == 1, messages
+        assert messages[0].startswith(
+            'Arrivals.impulse_response: the records (0.03 s) of 2 of 2 '
+            'cells do not hold every arrival: 2 arrival(s)')
+        assert 'output_duration=' in messages[0]
+        for j, r in enumerate((1500.0, 3000.0)):
+            cell = arr.by_receiver[0][0][j]
+            _, first_only = arrival_impulse_response(
+                cell['amplitudes'][:1], cell['delays'][:1],
+                sample_rate=self.FS, delays_imag_s=cell['delays_imag'][:1],
+                phases_rad=cell['phases'][:1], trace_frequency=self.FC,
+                absorption=arr.absorption,
+                t_start=ir.times[0] + r / ir.reduction_speed,
+                n_samples=ir.times.size)
+            np.testing.assert_allclose(ir.data[0, j], first_only * self.FS,
+                                       atol=1e-12 * self.FS)
+
+    def test_a_start_one_ulp_before_the_direct_path_keeps_it(self):
+        # The record from the first delay and from one ulp before it hold
+        # the same channel, to 1e-4 (the record one sample apart in length):
+        # the direct path, 80 % of the energy, is not tapered away at the
+        # record's first sample.
+        arr = self._lossy()
+        on = arr.impulse_response(self.FS, t_start=1.0,
+                                  receiver=(50.0, 1500.0))
+        early = arr.impulse_response(self.FS, t_start=np.nextafter(1.0, 0.0),
+                                     receiver=(50.0, 1500.0))
+        energy = [float(np.sum(np.asarray(ir.data) ** 2)) for ir in (on,
+                                                                      early)]
+        assert energy[1] == pytest.approx(energy[0], rel=1e-4)
+
+    def test_a_start_after_the_arrivals_names_the_methods_own_knob(self):
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^Arrivals\.impulse_response: t_start "
+                                 r"is after the last arrival.*\(output_"
+                                 r"duration=\)\.$") as caught:
+            self._lossy().impulse_response(self.FS, t_start=10.0)
+        assert 'n_samples' not in str(caught.value)
+
+    @pytest.mark.parametrize('t_start', [[0.0], np.array([0.5]),
+                                         np.array([0.5, 1.0]), 1j, np.nan,
+                                         True, np.array(True),
+                                         np.complex128(1.0 + 1j), b'1.0'])
+    def test_a_start_that_is_not_one_time_is_refused(self, t_start):
+        with pytest.raises(ConfigurationError,
+                           match="^Arrivals.impulse_response: t_start must "
+                                 "be 'reduced', one finite time"):
+            self._lossy().impulse_response(self.FS, t_start=t_start)
+
+    def test_a_word_other_than_reduced_is_refused_saying_what_to_pass(self):
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^Arrivals\.impulse_response: t_start "
+                                 r"must be 'reduced'.*How to fix.*None"):
+            self._lossy().impulse_response(self.FS, t_start='x')
+
+    @pytest.mark.parametrize('duration', ['x', [0.1], -1.0, 0.0, True,
+                                          np.array(True),
+                                          np.complex128(0.1 + 1j)])
+    def test_a_record_length_that_is_not_one_positive_number_is_refused(
+            self, duration):
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^Arrivals\.impulse_response: "
+                                 r"output_duration must be.*Pass each "
+                                 r"record's length"):
+            self._lossy().impulse_response(self.FS, output_duration=duration)
+
+    def test_the_reduction_speed_is_the_fastest_first_arrival_of_any_cell(self):
+        # r/tau_first is 1500 m/s at 1500 m and 3000/1.95 = 1538.5 m/s at
+        # 3000 m: the axis is reduced by the faster, so the far cell's first
+        # arrival sits at reduced time 0 and the near one's 1.0 - 1500/c.
+        cells = [[self._cell([1.0], [1e-3], [0.0], [0.0]),
+                  self._cell([1.95], [5e-4], [0.0], [0.0])]]
+        arr = Arrivals(by_receiver=[cells], receiver_depths=[50.0],
+                       receiver_ranges=[1500.0, 3000.0],
+                       frequencies=[self.FC])
+        ir = arr.impulse_response(self.FS)
+        c = 3000.0 / 1.95
+        assert ir.reduction_speed == pytest.approx(c)
+        first = ir.times[np.argmax(np.abs(ir.data[0]), axis=-1)]
+        np.testing.assert_allclose(first, [1.0 - 1500.0 / c, 0.0],
+                                   atol=1.0 / self.FS)
+
+    def test_one_shared_record_on_absolute_time(self):
+        arr = self._lossy()
+        ir = arr.impulse_response(self.FS, t_start=None)
+        assert ir.reduction_speed is None
+        assert ir.times[0] == pytest.approx(1.0 - 0.02)
+        assert ir.times[-1] >= 2.02

@@ -179,7 +179,7 @@ class TestEnvironmentWaterDensity:
                    water_density=1.02)
         model = Kraken(verbose=False)
         assert _checks.modes_single_profile(
-            env, collapse=model._collapse,
+            env, user_collapse=model._user_collapse,
             model_name=model.model_name).water_density \
             == 1.02
 
@@ -280,7 +280,7 @@ class TestCopyAndGeolocation:
     def test_result_copy_is_independent(self):
         import uacpy
         env = uacpy.Environment(bathymetry=300., ssp=1500.)
-        f = uacpy.Bellhop().compute_tl(
+        f = uacpy.Bellhop().compute_field(
             env, uacpy.Source(depths=50., frequencies=150.),
             uacpy.Receiver(depths=[100., 200.], ranges=[2000., 4000.]))
         c = f.copy()
@@ -391,6 +391,21 @@ class TestZeroDimensionalArraysCoerceLikeTheirScalars:
             Environment(bathymetry=100.0, ssp=1500.0,
                         bottom=np.array(True))
 
+    @pytest.mark.parametrize('name, value', [
+        ('ssp', np.array(1500.0 + 0j)), ('ssp', np.complex128(1500.0)),
+        ('bottom', np.array(1600.0 + 0j)), ('bottom', np.complex128(1600.0)),
+        ('bathymetry', np.array(100.0 + 0j)),
+        ('bathymetry', np.complex128(100.0))])
+    def test_a_complex_scalar_is_not_a_sound_speed_or_a_depth(self, name,
+                                                              value):
+        # Read as a scalar it would be its real part.
+        kw = dict(bathymetry=100.0, ssp=1500.0)
+        kw[name] = value
+        with pytest.raises(ConfigurationError,
+                           match=r'(?i)must be a (scalar|positive scalar|'
+                                 r'Bottom)'):
+            Environment(**kw)
+
 
 class TestBathymetryCoerceRefusesNonNumericScalars:
     """A numeric string is not a depth. ``_scalar_or_none`` returns for
@@ -415,6 +430,79 @@ class TestBathymetryCoerceRefusesNonNumericScalars:
 
     def test_a_numeric_scalar_coerces_to_a_flat_seafloor(self):
         assert Bathymetry.coerce(np.float32(100.0)).depth == 100.0
+
+
+class TestTwoColumnsAreRefusedByEveryTableCoercer:
+    """``bathymetry=``, ``altimetry=`` and ``ssp=`` take ``(N, 2)`` pairs;
+    two columns of any other length cannot be pairs and are refused naming
+    ``np.column_stack``, by the one rule the three share. A 2 x 2 input is
+    two pairs, the documented form, so a two-point table written as pairs
+    builds; both sides pinned."""
+
+    @pytest.mark.parametrize('kwargs, name', [
+        (dict(bathymetry=([0.0, 5000.0, 10000.0], [100.0, 150.0, 200.0])),
+         'bathymetry'),
+        (dict(bathymetry=[[0.0, 5000.0, 10000.0], [100.0, 150.0, 200.0]]),
+         'bathymetry'),
+        (dict(bathymetry=100.0,
+              altimetry=([0.0, 5000.0, 10000.0], [0.5, -0.5, 0.2])),
+         'altimetry'),
+        (dict(bathymetry=100.0, ssp=np.array([[0.0, 50.0, 100.0],
+                                             [1500.0, 1495.0, 1490.0]])),
+         'ssp'),
+    ])
+    def test_columns_longer_than_two_are_refused_naming_column_stack(
+            self, kwargs, name):
+        with pytest.raises(ConfigurationError,
+                           match=rf'{name}=\(.*\) is two columns') as err:
+            Environment(**kwargs)
+        assert 'np.column_stack' in str(err.value)
+
+    def test_a_two_point_table_of_pairs_builds(self):
+        env = Environment(bathymetry=[(0.0, 100.0), (10000.0, 200.0)],
+                          altimetry=[(0.0, 0.5), (10000.0, -0.5)])
+        np.testing.assert_array_equal(env.bathymetry.ranges, [0.0, 10000.0])
+        np.testing.assert_array_equal(env.bathymetry.depths, [100.0, 200.0])
+        np.testing.assert_array_equal(env.altimetry.heights, [0.5, -0.5])
+
+
+class TestAProfileHeldOverTheDeepWaterIsAnnounced:
+    """A profile ending above the seafloor is held at its deepest speed down
+    to it. The hold is announced by a FallbackWarning when pressure alone
+    (Mackenzie's 1.630e-2 m/s per m) would raise the speed by more than
+    5 m/s over it, a 306.7 m span: pinned on both sides of the span, and
+    an isovelocity profile is silent at any depth."""
+
+    @staticmethod
+    def _holds(bathymetry, ssp):
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            env = Environment(bathymetry=bathymetry, ssp=ssp)
+        return env, [w for w in caught if 'held constant' in str(w.message)]
+
+    @pytest.mark.parametrize('gap, warns', [(300.0, False), (310.0, True),
+                                            (3782.0, True)])
+    def test_a_hold_is_announced_past_five_metres_per_second(self, gap,
+                                                            warns):
+        env, caught = self._holds(1000.0 + gap,
+                                  [(0.0, 1507.0), (1000.0, 1490.0)])
+        assert len(caught) == int(warns)
+        np.testing.assert_array_equal(env.ssp.sound_speed[-1], [1490.0])
+        if warns:
+            assert issubclass(caught[0].category, uacpy.FallbackWarning)
+            assert f'bottom {gap:g} m' in str(caught[0].message)
+
+    def test_an_isovelocity_profile_held_over_a_gap_is_silent(self):
+        # Isovelocity is a statement that the speed does not change, so
+        # holding it is no extrapolation: the profile is held over 3782 m
+        # here and nothing is announced.
+        from uacpy.core.ssp import SoundSpeedProfile
+        env, caught = self._holds(
+            4782.0, SoundSpeedProfile.from_isovelocity(1000.0, 1500.0))
+        assert env.ssp.depths[-1] == pytest.approx(4782.0)
+        assert 1000.0 in env.ssp.depths
+        assert caught == []
 
 
 class TestFromStringRefusesNonStrings:
@@ -667,6 +755,104 @@ _COMPLEX_COORDINATE_FIELDS = [
 _COMPLEX_FIELD_IDS = [case[0] for case in _COMPLEX_COORDINATE_FIELDS]
 
 
+class TestEveryCoreCarrierReadsOnlyRealNumbers:
+    """Every carrier field of numbers is read by the package's one rule for
+    numbers: a bool among the numbers (NumPy reads ``[True, 2.0]`` as
+    ``[1.0, 2.0]``) and text — numeric or not — are refused by the field's
+    name, where a cast would store 1, or what the text spells; a
+    ``Fraction`` is a number."""
+
+    @pytest.mark.parametrize("first, said", [
+        (True, 'a bool'), (np.True_, 'a bool'), ('5', 'text')],
+        ids=['bool', 'numpy bool', 'text'])
+    @pytest.mark.parametrize("label,ctor,field,bad,good,siblings",
+                             _COMPLEX_COORDINATE_FIELDS,
+                             ids=_COMPLEX_FIELD_IDS)
+    def test_a_field_holding_a_non_number_is_refused_naming_it(
+            self, label, ctor, field, bad, good, siblings, first, said):
+        values = [first] + list(good[1:]) if len(good) > 1 else [first]
+        with pytest.raises(ConfigurationError,
+                           match=re.escape(f"{label} must be ")
+                           + r"(real numbers.*got " + said + r"|a number, "
+                           r"not (a bool|text))"):
+            ctor(**{field: values}, **siblings)
+
+    @pytest.mark.parametrize("label,ctor,field,bad,good,siblings",
+                             _COMPLEX_COORDINATE_FIELDS,
+                             ids=_COMPLEX_FIELD_IDS)
+    def test_fractions_are_numbers(self, label, ctor, field, bad, good,
+                                   siblings):
+        from fractions import Fraction
+        carrier = ctor(**{field: [Fraction(v).limit_denominator()
+                                  for v in good]}, **siblings)
+        np.testing.assert_allclose(np.asarray(getattr(carrier, field),
+                                              dtype=float).ravel(),
+                                   np.ravel(good))
+
+    @pytest.mark.parametrize("door", [
+        'SoundSpeedProfile.from_pairs', 'SoundSpeedProfile.from_isovelocity',
+        'SoundSpeedProfile.from_casts', 'SoundSpeedProfile.from_2d',
+        'SoundSpeedProfile.from_temperature_salinity',
+        'SoundSpeedProfile.from_munk', 'Source source_level_dB',
+        'Source beam_pattern', 'Bathymetry pairs', 'Altimetry pairs',
+        'Surface pairs', 'Environment water_density',
+        'Environment location', 'Environment transect',
+        'FrancoisGarrison temperature', 'absorption_francois_garrison pH',
+        'sound_speed_at_depth salinity'])
+    def test_every_entry_of_numbers_refuses_a_bool(self, door):
+        """The carriers' other entries of numbers read them by the same
+        rule: a bool is refused, typed, where it would be read as 1."""
+        from uacpy.core.absorption import FrancoisGarrison
+        from uacpy.core.acoustics.attenuation import (
+            absorption_francois_garrison)
+        from uacpy.core.acoustics.seawater import sound_speed_at_depth
+        from uacpy.core.boundary import BoundaryProperties
+        calls = {
+            'SoundSpeedProfile.from_pairs': lambda: SoundSpeedProfile.from_pairs(
+                [[0.0, 1500.0], [True, 1490.0]]),
+            'SoundSpeedProfile.from_isovelocity':
+                lambda: SoundSpeedProfile.from_isovelocity(True),
+            'SoundSpeedProfile.from_casts': lambda: SoundSpeedProfile.from_casts(
+                [0.0, True], [[(0.0, 1500.0)], [(0.0, 1500.0)]]),
+            'SoundSpeedProfile.from_2d': lambda: SoundSpeedProfile.from_2d(
+                [0.0, 100.0], [0.0, 1000.0],
+                [[1500.0, True], [1490.0, 1490.0]]),
+            'SoundSpeedProfile.from_temperature_salinity':
+                lambda: SoundSpeedProfile.from_temperature_salinity(
+                    temperature=True, salinity=35.0, depths=[0.0, 100.0]),
+            'SoundSpeedProfile.from_munk':
+                lambda: SoundSpeedProfile.from_munk(5000.0, n_points=True),
+            'Source source_level_dB': lambda: Source(
+                depths=50.0, frequencies=100.0, source_level_dB=True),
+            'Source beam_pattern': lambda: Source(
+                depths=50.0, frequencies=100.0,
+                beam_pattern=[[-90.0, 0.0], [90.0, True]]),
+            'Bathymetry pairs': lambda: Bathymetry.coerce(
+                [(0.0, 100.0), (1000.0, True)]),
+            'Altimetry pairs': lambda: Altimetry.coerce(
+                [(0.0, 0.5), (1000.0, True)]),
+            'Surface pairs': lambda: Surface.coerce(
+                [(True, BoundaryProperties(acoustic_type='vacuum'))]),
+            'Environment water_density': lambda: Environment(
+                bathymetry=100.0, ssp=1500.0, water_density=True),
+            'Environment location': lambda: Environment(
+                bathymetry=100.0, ssp=1500.0, location=(True, 5.0)),
+            'Environment transect': lambda: Environment(
+                bathymetry=100.0, ssp=1500.0,
+                transect=((43.0, 5.0), (43.5, True))),
+            'FrancoisGarrison temperature': lambda: FrancoisGarrison(
+                temperature=True),
+            'absorption_francois_garrison pH':
+                lambda: absorption_francois_garrison(1000.0, pH=True),
+            'sound_speed_at_depth salinity': lambda: sound_speed_at_depth(
+                10.0, '35', 100.0),
+        }
+        with pytest.raises(ConfigurationError,
+                           match=r"(?i)bool|number|numeric|coordinate pair|"
+                                 r"integer"):
+            calls[door]()
+
+
 class TestEveryCoreCarrierRejectsComplexCoordinates:
     """One typed ``ConfigurationError`` for a complex coordinate, on every
     carrier and in every container spelling.
@@ -726,7 +912,8 @@ class TestEveryCoreCarrierRejectsComplexCoordinates:
     def test_a_complex_scalar_raises_a_typed_error(self):
         # The bare-scalar spelling, which only the single-value fields take.
         with pytest.raises(ConfigurationError,
-                           match="source frequencies must be real"):
+                           match="source frequencies must be a real number, "
+                                 "not complex"):
             Source(depths=50.0, frequencies=100.0 + 5.0j)
 
     def test_the_error_names_the_first_element_carrying_an_imaginary_part(self):
@@ -1146,6 +1333,60 @@ class TestEnvironmentIO:
 
         assert len(env.ssp.to_pairs()) == 11
         assert np.allclose(env.ssp.to_pairs()[:, 0], depths)
+
+
+class TestTheEnvironmentFileIsWrittenPortably:
+    """``Environment.to_netcdf`` writes its groups the way every carrier's
+    NetCDF is written (``write_netcdf_groups``): a bool attribute, which
+    netCDF4 refuses as written, and a complex variable, which neither
+    backend stores as written, both reach the file; the round trip still
+    returns the environment."""
+
+    def test_a_bool_attribute_and_a_complex_variable_reach_the_file(
+            self, tmp_path, monkeypatch):
+        xarray = pytest.importorskip('xarray')
+        pytest.importorskip('netCDF4')
+        original = Bathymetry.to_xarray
+
+        def with_extras(self):
+            ds = original(self)
+            ds.attrs['measured'] = True
+            ds['phase'] = ('range', np.exp(1j * np.asarray(self.ranges)))
+            return ds
+
+        monkeypatch.setattr(Bathymetry, 'to_xarray', with_extras)
+        env = Environment(bathymetry=[(0.0, 100.0), (5000.0, 150.0)],
+                          ssp=1500.0, name='portable')
+        path = tmp_path / 'env.nc'
+        env.to_netcdf(path, engine='netcdf4')
+        group = xarray.open_dataset(path, group='bathymetry',
+                                    engine='netcdf4')
+        assert int(group.attrs['measured']) == 1
+        group.close()
+        back = Environment.from_netcdf(path, engine='netcdf4')
+        np.testing.assert_array_equal(back.bathymetry.depths, [100.0, 150.0])
+
+    def test_a_file_of_another_class_is_refused_naming_its_reader(
+            self, tmp_path):
+        """A result's file, or another carrier's, handed to
+        Environment.from_netcdf is refused typed, naming what it holds and
+        the call that reads it."""
+        pytest.importorskip('xarray')
+        field = Field(data=np.ones((2, 3)),
+                      coords={'depth': [1.0, 2.0], 'range': [1.0, 2.0, 3.0]},
+                      model='Test', unit='dB')
+        field.to_netcdf(tmp_path / 'field.nc')
+        SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1490.0]
+                          ).to_netcdf(tmp_path / 'ssp.nc')
+        for name, what, reader in (
+                ('field.nc', 'a Field', 'Field.from_netcdf(path)'),
+                ('ssp.nc', 'a SoundSpeedProfile',
+                 'SoundSpeedProfile.from_xarray(xarray.open_dataset(path))')):
+            with pytest.raises(ConfigurationError,
+                               match=rf"(?s)Environment\.from_netcdf: .*"
+                                     rf"holds {what}, not an Environment\..*"
+                                     rf"{re.escape(reader)}"):
+                Environment.from_netcdf(tmp_path / name)
 
 
 class TestAcousticFieldsAreAlwaysPresentOnTheirCarriers:

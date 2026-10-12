@@ -539,7 +539,7 @@ def test_a_missing_model_output_is_a_file_format_error(label, call, tmp_path):
 def _user_input_readers():
     """``(label, call)`` for every reader of a file the user writes and an
     engine reads: an absent one is a wrong argument, not a failed run."""
-    from uacpy.io.audio_io import read_wav, read_wav_metadata
+    from uacpy.io.audio_io import read_wav, read_wav_info, read_wav_metadata
     from uacpy.io.bathy_io import (read_altimetry, read_bathymetry,
                                    read_boundary_3d)
     from uacpy.io.env_reader import read_env
@@ -558,6 +558,7 @@ def _user_input_readers():
         ('read_source_beam_pattern',
          lambda p: read_source_beam_pattern(p / 'a.sbp')),
         ('read_wav', lambda p: read_wav(p / 'a.wav')),
+        ('read_wav_info', lambda p: read_wav_info(p / 'a.wav')),
         ('read_wav_metadata', lambda p: read_wav_metadata(p / 'a.wav')),
     ]
 

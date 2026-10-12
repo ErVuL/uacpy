@@ -522,8 +522,9 @@ class TestFRFComputeKeywordsApplyToOneCallOnly:
         x, y = self._signals()
         frf = FRF()
         assert frf.compute(x, y, 8000.0, method='p_etfe',
-                           nperseg=256).frequencies.size == 129
+                           period=256).frequencies.size == 129
         assert frf.params['nperseg'] == FRF().params['nperseg']
+        assert frf.period is None
         freqs, _ = frf.compute(x, y, 8000.0)
         assert freqs.size == FRF().params['nperseg'] // 2 + 1
 
@@ -565,49 +566,71 @@ class TestFRFComputeKeywordsApplyToOneCallOnly:
         assert welch.frequencies.size == 4097
 
 
-class TestTransferFunctionImpulseResponseValidatesItsSampleRate:
-    """Every sibling entry point routes ``sample_rate`` through the shared
-    positive-finite-scalar guard; this one did ``float(sample_rate)``.
+class TestThePeriodicEtfeTakesItsOwnPeriod:
+    """``FRF(method='p_etfe', period=)``: the excitation period is its own
+    keyword, required by 'p_etfe' and refused by every other method; the
+    Welch segment length ``nperseg`` plays no part in it."""
 
-    Measured before the fix, with ``frequencies`` spanning 0-500 Hz: a rate of
-    0 raised a bare ``ZeroDivisionError``, NaN a ``ValueError`` about
-    converting NaN to an integer, Inf an ``OverflowError``, a non-number a
-    ``ValueError`` from ``float()`` — and a negative rate reached the Nyquist
-    check and raised a ``ConfigurationError`` announcing "the Nyquist
-    frequency -500 Hz", a true statement about the wrong argument.
-    """
+    FS = 8000.0
 
     @staticmethod
-    def _call(rate):
-        from uacpy.acoustic_signal.channel import (
-            impulse_response_from_transfer_function,
-        )
-        f = np.arange(0.0, 501.0, 1.0)
-        return impulse_response_from_transfer_function(
-            np.ones(f.size, dtype=complex), frequencies=f, sample_rate=rate)
+    def _signals(n=16384):
+        rng = np.random.default_rng(0)
+        x = np.tile(rng.standard_normal(256), n // 256)
+        return x, np.convolve(x, np.ones(5) / 5)[:n]
 
-    @pytest.mark.parametrize('rate', [0.0, -1000.0, float('nan'),
-                                      float('inf'), -float('inf')])
-    def test_a_non_positive_or_non_finite_rate_names_sample_rate(self, rate):
-        with pytest.raises(
-                ConfigurationError,
-                match='sample_rate must be > 0 Hz and finite') as exc:
-            self._call(rate)
-        message = str(exc.value)
-        assert 'impulse_response_from_transfer_function' in message
-        assert 'sample_rate' in message and '> 0 Hz' in message
-        assert 'Nyquist' not in message, (
-            f"a bad sample_rate must not be reported as a statement about the "
-            f"frequency axis: {message}")
+    def test_the_grid_is_the_periods_whatever_nperseg_says(self):
+        x, y = self._signals()
+        got = FRF(method='p_etfe', period=256, nperseg=4096).compute(
+            x, y, self.FS)
+        want = periodic_etfe(x, y, self.FS, period=256)
+        assert got.frequencies.size == 129
+        np.testing.assert_array_equal(got.transfer_function,
+                                      want.transfer_function)
 
-    def test_a_non_numeric_rate_names_sample_rate_too(self):
-        with pytest.raises(ConfigurationError, match='sample_rate must be a '
-                                                     'scalar number'):
-            self._call('fast')
+    def test_a_per_call_period_runs_a_per_call_p_etfe(self):
+        x, y = self._signals()
+        got = FRF().compute(x, y, self.FS, method='p_etfe', period=128)
+        assert got.frequencies.size == 65
 
-    def test_a_positive_finite_rate_returns_a_finite_response(self):
-        t, h = self._call(2000.0)
-        assert t.size == h.size > 0 and np.all(np.isfinite(h))
+    def test_the_constructors_period_waits_for_its_method(self):
+        x, y = self._signals()
+        frf = FRF(method='p_etfe', period=256)
+        assert frf.compute(x, y, self.FS, method='welch').method == 'welch'
+        assert repr(frf) == "FRF(method='p_etfe', period=256)"
+
+    @pytest.mark.parametrize('make', [
+        lambda: FRF(method='p_etfe'),
+        lambda: FRF().compute(np.ones(512), np.ones(512), 8000.0,
+                              method='p_etfe'),
+    ], ids=['constructor', 'compute'])
+    def test_p_etfe_without_a_period_is_refused(self, make):
+        with pytest.raises(ConfigurationError,
+                           match=r"method='p_etfe' averages whole periods"):
+            make()
+
+    @pytest.mark.parametrize('method', ['welch', 'etfe', 'ls_fir'])
+    def test_a_period_under_another_method_is_refused(self, method):
+        with pytest.raises(ConfigurationError,
+                           match=rf"^FRF: period= .*method='{method}'"):
+            FRF(method=method, period=256)
+        with pytest.raises(ConfigurationError,
+                           match=r"^FRF.compute: period= "):
+            FRF(method=method).compute(np.ones(512), np.ones(512), 8000.0,
+                                       period=256)
+
+    @pytest.mark.parametrize('period, accepted', [
+        (1, True), (256.0, True), (np.int64(64), True),
+        (0, False), (-4, False), (2.5, False), (True, False),
+        ('256', False), (np.nan, False), (np.inf, False), (None, False),
+    ])
+    def test_a_period_is_a_whole_number_of_samples(self, period, accepted):
+        if accepted:
+            assert FRF(method='p_etfe', period=period).period == int(
+                float(period))
+        else:
+            with pytest.raises(ConfigurationError, match=r"^FRF: "):
+                FRF(method='p_etfe', period=period)
 
 
 def test_the_signal_guide_states_the_per_call_frf_contract():
@@ -660,7 +683,9 @@ class TestTheFunctionsAreTheEstimatorsFRFRuns:
     ])
     def test_one_record_pair_gives_the_functions_result(self, method, call):
         x, y = self._pair()
-        got = FRF(method=method, order=6, nperseg=1024).compute(x, y, self.FS)
+        period = {'period': 1024} if method == 'p_etfe' else {}
+        got = FRF(method=method, order=6, nperseg=1024,
+                  **period).compute(x, y, self.FS)
         want = call(x, y)
         assert isinstance(got, FRFResult) and got.method == method
         for name in got._fields + got._attrs:
@@ -722,11 +747,26 @@ class TestTheFunctionsAreTheEstimatorsFRFRuns:
         with pytest.raises(ConfigurationError, match='no samples'):
             function(x[:0], x[:0])
 
-    @pytest.mark.parametrize('period', [0, -4, 300])
-    def test_a_period_the_record_does_not_hold_once_is_refused(self, period):
+    def test_a_period_the_record_does_not_hold_once_is_refused(self):
         x = np.random.default_rng(0).standard_normal(256)
         with pytest.raises(ConfigurationError, match='at least one period'):
+            periodic_etfe(x, x, 1000.0, period=300)
+
+    @pytest.mark.parametrize('period', [0, -4, 2.5, True, '64', np.nan])
+    def test_a_period_that_is_not_a_whole_count_is_refused_by_name(
+            self, period):
+        """The plain function refuses what FRF(method='p_etfe') refuses,
+        rather than truncating 2.5 to 2, True to 1 or '64' to 64."""
+        x = np.random.default_rng(0).standard_normal(256)
+        with pytest.raises(ConfigurationError,
+                           match=r'^periodic_etfe: period=.* whole number'):
             periodic_etfe(x, x, 1000.0, period=period)
+
+    @pytest.mark.parametrize('period', [64, 64.0, np.int64(64)])
+    def test_a_whole_period_of_any_numeric_type_runs(self, period):
+        x = np.random.default_rng(0).standard_normal(256)
+        out = periodic_etfe(x, x, 1000.0, period=period)
+        assert out.frequencies.size == 33
 
 
 def test_frf_names_its_fir_order_as_lsfir_does():
@@ -754,3 +794,71 @@ def test_frf_refuses_a_keyword_that_is_not_a_welch_option(kwargs, refused):
             FRF(**kwargs)
     else:
         FRF(**kwargs)
+
+
+class TestTheFrfFamilyTakesRealRecords:
+    """Every FRF estimator works on the one-sided grid of a real record, so a
+    complex (baseband) pair is refused by name instead of answering wrong
+    (lsfir) or failing in numpy (etfe)."""
+
+    @staticmethod
+    def _pair(complex_side):
+        rng = np.random.default_rng(7)
+        x = rng.standard_normal(2048)
+        y = np.convolve(x, [1.0, 0.5, -0.25, 0.1])[:x.size]
+        if complex_side == 'x':
+            x = x * (1.0 + 0.5j)
+        elif complex_side == 'y':
+            y = y * (1.0 + 0.5j)
+        return x, y
+
+    @pytest.mark.parametrize('side', ['x', 'y'])
+    @pytest.mark.parametrize('estimate', [
+        lambda x, y: frf_welch(x, y, 1000.0, nperseg=256),
+        lambda x, y: etfe(x, y, 1000.0),
+        lambda x, y: periodic_etfe(x, y, 1000.0, period=256),
+        lambda x, y: lsfir(x, y, 1000.0, order=4),
+    ], ids=['frf_welch', 'etfe', 'periodic_etfe', 'lsfir'])
+    def test_a_complex_record_is_refused(self, estimate, side):
+        x, y = self._pair(side)
+        with pytest.raises(ConfigurationError, match='real passband records'):
+            estimate(x, y)
+
+    def test_the_real_pair_identifies_the_filter(self):
+        x, y = self._pair(None)
+        np.testing.assert_allclose(
+            lsfir(x, y, 1000.0, order=4).impulse_response,
+            [1.0, 0.5, -0.25, 0.1], atol=1e-10)
+
+
+class TestLsfirOrderAndSampleGuards:
+    """Both sides of each bound: order 0 / 1, n_samples 0 / 1 and
+    len / len + 1."""
+
+    @staticmethod
+    def _pair():
+        rng = np.random.default_rng(8)
+        x = rng.standard_normal(500)
+        return x, np.convolve(x, [1.0, 0.5])[:x.size]
+
+    @pytest.mark.parametrize('order, refused', [(0, True), (-2, True),
+                                                (1, False)])
+    def test_an_order_below_one_is_refused(self, order, refused):
+        x, y = self._pair()
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match='FIR order must be at least 1'):
+                lsfir(x, y, 1000.0, order=order)
+        else:
+            assert lsfir(x, y, 1000.0, order=order).impulse_response.size == 1
+
+    @pytest.mark.parametrize('n_samples, refused', [(0, True), (1, False),
+                                                    (500, False), (501, True)])
+    def test_n_samples_must_lie_within_the_record(self, n_samples, refused):
+        x, y = self._pair()
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match=r'n_samples \(\d+\) must be in \[1, 500\]'):
+                lsfir(x, y, 1000.0, order=1, n_samples=n_samples)
+        else:
+            lsfir(x, y, 1000.0, order=1, n_samples=n_samples)

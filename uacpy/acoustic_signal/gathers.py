@@ -14,7 +14,7 @@ from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.acoustic_signal._results import PlottedResult
 from uacpy.core._validate import (
-    require_positive_finite_scalar, require_real_signal,
+    require_finite_signal, require_positive_finite_scalar, require_real_signal,
 )
 from uacpy.acoustic_signal.windows import (_default_noverlap, _fk_tapers,
                                            _spectral_window)
@@ -336,6 +336,12 @@ def radon_transform(data, sample_rate, dx, moveout, kind="linear", x0=0.0):
             "radon_transform: hyperbolic moveout is a velocity (m/s) and the "
             "moveout curve sqrt(tau^2 + (x/v)^2) divides by it, so every "
             f"value must be > 0; got min {moveout.min()}.")
+    if kind == "linear":
+        # The linear Radon transform is the slant stack taup_transform
+        # computes, and it aliases in slowness the same way.
+        _warn_spatial_aliasing(np.fft.rfft(d, axis=0),
+                               np.fft.rfftfreq(nt, 1.0 / float(sample_rate)),
+                               dx, moveout, "radon_transform")
     taus = np.arange(nt) / float(sample_rate)
     R = np.zeros((moveout.size, nt))
     for i, m in enumerate(moveout):
@@ -680,8 +686,10 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
         Time-segment length for Welch averaging. ``None`` (default) uses the
         whole record (one segment, invertible).
     noverlap : int, optional
-        Overlap between segments (samples). Defaults to ``nperseg // 2`` when
-        ``nperseg`` is set; ``0`` otherwise. Must satisfy ``0 <= noverlap < nperseg``.
+        Overlap between segments (samples). Defaults, when ``nperseg`` is
+        set, to the window's own overlap, as on :func:`welch` (half a
+        segment for a rectangular or Hann window, 78 % for flat-top); ``0``
+        otherwise. Must satisfy ``0 <= noverlap < nperseg``.
     window, nfft, scaling
         As in the single-segment transform, applied per segment.
     """
@@ -689,7 +697,9 @@ def fk_transform(data, sample_rate, dx, *, nperseg=None, noverlap=None,
         raise ConfigurationError(
             f"fk_transform: scaling must be one of {FK_SCALINGS}; got "
             f"{scaling!r}.")
-    d = np.asarray(data)
+    # Complex gathers are accepted (the 2-D FFT takes them); a NaN or Inf
+    # would spread through every cell of the panel.
+    d = require_finite_signal(data, "fk_transform")
     if d.ndim != 2:
         raise ConfigurationError(
             "fk_transform: data must be 2-D (nt, nx)"

@@ -196,9 +196,8 @@ def test_tl_engines_return_complex_pascal_travelling_wave(engine, request):
 
 def test_no_model_bypasses_the_phase_reference_coercion():
     """The writer-side half: in ``uacpy/models/``, a literal
-    ``phase_reference=`` may only be an argument to ``_result_kwargs`` or
-    ``_stamp_result`` (or the ``_extract`` functions they call,
-    ``result_kwargs`` / ``stamp_result``), which coerce it. Passing it straight to a results
+    ``phase_reference=`` may only be an argument to ``result_kwargs`` or
+    ``stamp_result`` (``models/_extract.py``), which coerce it. Passing it straight to a results
     constructor is what produces the bare string
     ``test_engine_conformance.py::test_every_mode_returns_its_declared_output``
     catches, and it is invisible to any single-engine assertion."""
@@ -226,8 +225,7 @@ def test_no_model_bypasses_the_phase_reference_coercion():
             callee = node.func
             name = (callee.attr if isinstance(callee, ast.Attribute)
                     else getattr(callee, 'id', ''))
-            if name not in ('_result_kwargs', '_stamp_result',
-                            'result_kwargs', 'stamp_result'):
+            if name not in ('result_kwargs', 'stamp_result'):
                 offenders.append(f"{path.relative_to(models_dir)}:"
                                  f"{node.lineno} -> {name}(...)")
     assert not offenders, (

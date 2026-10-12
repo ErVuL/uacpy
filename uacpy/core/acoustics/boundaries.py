@@ -30,13 +30,16 @@ in this file.
 """
 
 
+import warnings
 from collections.abc import Mapping
 
 import numpy as np
 from typing import Union, Optional, Tuple
 
 from uacpy.core.constants import DEFAULT_SOUND_SPEED, DEFAULT_WATER_DENSITY_G_CM3
-from uacpy.core.exceptions import ConfigurationError
+from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core._validate import DENSITY_UNITS_SUSPECT_G_CM3
 
 __all__ = [
     'reflection_coeff',
@@ -122,7 +125,7 @@ def reflection_coeff(
                 f"reflection_coeff: {name} must be positive and finite; got "
                 f"{value!r}.")
     for name, value in (('density', density), ('water_density', water_density)):
-        if value > 20.0:
+        if value > DENSITY_UNITS_SUSPECT_G_CM3:
             raise ConfigurationError(
                 f"reflection_coeff: {name}={value:g} reads as kg/m³; the "
                 f"argument is g/cm³.",
@@ -200,7 +203,16 @@ def bottom_loss_curve(
 
     Wraps :func:`reflection_coeff` with the property dict from
     :mod:`uacpy.core.materials`, returning grazing-angle / loss-in-dB
-    arrays ready to plot. Shear is ignored (fluid–fluid only).
+    arrays ready to plot. Shear is ignored (fluid–fluid only): a preset
+    name is its fluid curve, and a carrier or dict whose ``shear_speed`` is
+    positive (``BoundaryProperties.from_preset(name, elastic=True)``, the
+    half-space of an elastic environment) is evaluated as that fluid with a
+    :class:`~uacpy.core.exceptions.FallbackWarning`. An elastic seabed also
+    loses energy to shear waves (Jensen et al., *Computational Ocean
+    Acoustics*, §1.6.2, Eq. 1.61), most between the shear and compressional
+    critical angles: lossless basalt (c_p 5250, c_s 2500 m/s) loses 2.7-3.4 dB
+    per bounce at 55-70° grazing where this curve gives 0 dB. BOUNCE and
+    OASR compute the elastic coefficient.
 
     Parameters
     ----------
@@ -258,12 +270,25 @@ def bottom_loss_curve(
             return grazing_angles_deg, np.zeros(grazing_angles_deg.shape)
         m = {k: getattr(material, k)
              for k in ('sound_speed', 'density', 'attenuation')}
+        m['shear_speed'] = getattr(material, 'shear_speed', 0.0)
     else:
         raise ConfigurationError(
             f"bottom_loss_curve: material must be a preset name, a dict or a "
             f"seabed carrier (BoundaryProperties / SedimentLayer) with "
             f"sound_speed, density and attenuation; got "
             f"{type(material).__name__}.")
+    shear_speed = (0.0 if isinstance(material, str)
+                   else float(m.get('shear_speed') or 0.0))
+    if shear_speed > 0.0:
+        warnings.warn(
+            f"bottom_loss_curve: the seabed's shear speed ({shear_speed:g} "
+            f"m/s) is ignored. This is the fluid-fluid Rayleigh curve; an "
+            f"elastic seabed also loses energy to shear waves (Jensen et al., "
+            f"Computational Ocean Acoustics, §1.6.2, Eq. 1.61), most between "
+            f"the shear and compressional critical angles, where this curve "
+            f"can report total reflection. BOUNCE and OASR compute the "
+            f"elastic coefficient.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     R = reflection_coeff(
         grazing_angles_deg,
         sound_speed=float(m['sound_speed']),

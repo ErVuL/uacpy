@@ -2,8 +2,9 @@
 :mod:`uacpy.core.acoustics`.
 
 ``from uacpy.acoustics import spl`` works as well as ``uacpy.acoustics.spl``.
-The subjects (seawater, boundaries, bubbles, levels, wavenumber, modal,
-attenuation) are described in :mod:`uacpy.core.acoustics`; the absorption
+The subjects (seawater, boundaries, bubbles, levels, weighting, wavenumber,
+modal, arrays, ray_geometry, attenuation) are described in
+:mod:`uacpy.core.acoustics`; the absorption
 formulas on plain arrays (``absorption_thorp``,
 ``absorption_francois_garrison``, ...) are among them. The absorption laws
 (``Thorp``, ``FrancoisGarrison``, ...) are top-level names: one object per

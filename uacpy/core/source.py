@@ -14,8 +14,8 @@ from uacpy.core.deck_limits import (
     DECK_DEPTH_RESOLUTION_M, SBP_ANGLE_RESOLUTION_DEG,
 )
 from uacpy.core._validate import (
-    reject_complex, require_positive, require_non_negative,
-    require_strictly_increasing,
+    require_positive, require_non_negative, require_real_array,
+    require_real_scalar, require_strictly_increasing,
 )
 from uacpy.core._carrier import (
     DeepCopyMixin, RevalidateOnAssignMixin, carrier,
@@ -66,10 +66,13 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         spreads cylindrically); 'scaled' is a point source with the
         cylindrical spreading factor removed. Support is per-model — see each model's
         ``spec.source_types``.
-    beam_pattern : ndarray or Path, optional
+    beam_pattern : ndarray, BeamPatternTable or Path, optional
         Source directivity: an ``(N, 2)`` array of ``[angle_deg, level_dB]``
-        with strictly increasing angles, or a path to an existing ``.sbp``
-        file. ``None`` (default) is omnidirectional. Read by Bellhop and
+        with strictly increasing angles, the
+        :class:`~uacpy.io.BeamPatternTable` that
+        :func:`~uacpy.io.read_source_beam_pattern` returns (stored as its
+        ``(N, 2)`` array), or a path to an existing ``.sbp`` file. ``None``
+        (default) is omnidirectional. Read by Bellhop and
         Kraken. The engines convert levels to linear amplitude
         (``10**(dB/20)``, ``beampattern.f90:59``) *before* interpolating
         between samples, so a coarsely sampled pattern interpolates in
@@ -86,11 +89,11 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         Complex amplitude of each source: a scalar broadcasts to every
         depth, otherwise exactly one weight per depth (a length-1 array
         on a multi-depth source is a length mismatch); ``None`` (default)
-        is unit weight everywhere. The engines never read it: every slab
-        of a multi-depth run is the unit-amplitude field of one source,
-        and the weights become the coefficients of
-        :meth:`ResultStack.superpose`, which adds the slabs' complex
-        pressure as ``Σ wᵢ·pᵢ``; a single-depth run scales its field by
+        is unit weight everywhere. The engines never read it: each plane
+        of a multi-depth run's field (its ``source_depth`` axis) is the
+        unit-amplitude field of one source, and the weights become the
+        coefficients of :meth:`Field.superpose`, which adds the sources'
+        complex pressure as ``Σ wᵢ·pᵢ``; a single-depth run scales its field by
         the one weight. ``[1, -1]`` drives two sources in antiphase;
         ``[1, 1j]`` puts them in quadrature. Every weight must be finite.
     source_level_dB : float, optional
@@ -182,14 +185,15 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         # Normalised values are stored with object.__setattr__: a plain store
         # to a set field is an assignment, which rebuilds the Source through
         # this method (_RevalidateOnAssignMixin).
-        # Ahead of the float64 casts below, which discard an imaginary part —
-        # see _reject_complex for the two ways they do it.
-        reject_complex(self.depths, "source depths")
-        reject_complex(self.frequencies, "source frequencies")
-        object.__setattr__(self, 'depths', np.atleast_1d(
-            np.array(self.depths, dtype=np.float64)))
+        # Read by the package's one rule for numbers, whose guard makes the
+        # float64 cast: a bool, complex value or text is refused, not read
+        # as 1, its real part or what it spells.
+        object.__setattr__(self, 'depths', np.atleast_1d(require_real_array(
+            self.depths, "source depths",
+            hint="metres, positive down from surface")))
         object.__setattr__(self, 'frequencies', np.atleast_1d(
-            np.array(self.frequencies, dtype=np.float64)))
+            require_real_array(self.frequencies, "source frequencies",
+                               hint="Hz")))
         for name in ('depths', 'frequencies'):
             shape = getattr(self, name).shape
             if len(shape) != 1:
@@ -236,7 +240,9 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 object.__setattr__(self, 'beam_pattern',
                                    Path(self.beam_pattern))
             else:
-                pattern = np.asarray(self.beam_pattern, dtype=np.float64)
+                pattern = require_real_array(
+                    self.beam_pattern, "Source beam_pattern",
+                    hint="[angle_deg, level_dB] rows")
                 if pattern.ndim != 2 or pattern.shape[1] != 2:
                     raise ConfigurationError(
                         "Source beam_pattern must have shape (N, 2): "
@@ -270,7 +276,9 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                            self._normalise_weights(self.weights))
 
         if self.source_level_dB is not None:
-            level = float(self.source_level_dB)
+            level = require_real_scalar(self.source_level_dB,
+                                        "Source source_level_dB",
+                                        hint="dB re 1 µPa at 1 m")
             if not np.isfinite(level):
                 raise ConfigurationError(
                     f"Source source_level_dB must be finite (dB re 1 µPa at "
@@ -328,7 +336,7 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     @property
     def has_unit_weights(self) -> bool:
         """True when every weight is exactly 1, so a superposition is a
-        plain sum of the slabs."""
+        plain sum of the sources' fields."""
         return bool(np.all(self.weights == 1.0))
 
     def at_depth(self, index: int) -> 'Source':
@@ -336,9 +344,9 @@ class Source(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         unit weight, everything else shared.
 
         The per-depth loop in :meth:`PropagationModel.run` runs one of
-        these per depth, so each slab of the returned stack is the field of
-        one unit-amplitude source; the weight is applied at
-        :meth:`ResultStack.superpose`.
+        these per depth, so each plane of the returned field's
+        ``source_depth`` axis is the field of one unit-amplitude source; the
+        weight is applied at :meth:`Field.superpose`.
 
         Parameters
         ----------

@@ -16,10 +16,10 @@ from uacpy.core.receiver import Receiver
 from uacpy.core.results import Field
 from uacpy.io.at_codes import boundary_code
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
-    ValidityWarning,
+    FallbackWarning, UnsupportedFeatureError, ValidityWarning,
 )
 from uacpy.io.oalib_writer import deck_depth, writable_layers
+from uacpy.core.boundary import BoundaryType
 
 
 #: ``acoustic_type`` values that put a tabulated reflection coefficient on a
@@ -61,10 +61,10 @@ def deck_bottom_columns(env: Environment, run_mode) -> list:
     """The seabed columns the deck(s) for ``run_mode`` will carry.
 
     The two paths differ, and both are right for what they build.
-    :func:`modes_single_profile` samples the r = 0 profile of every
-    range-dependent quantity — SSP, bathymetry, surface — so its bottom is
-    the r = 0 column too; taking any other column there would pair a
-    seabed from one range with a water column from another. Every field
+    :func:`modes_single_profile` reduces a ``MODES`` run's environment to one
+    profile before anything reads it, so its deck carries one column — of an
+    environment not yet reduced, the r = 0 one, the column the reduction
+    takes unless the caller set ``collapse['bottom_range']``. Every field
     path segments a range-dependent bottom instead: each profile block of
     the multi-profile ``.env`` is a full environment read by its own
     ``ReadEnvironment`` call (``kraken.f90:42-46``), and
@@ -88,8 +88,12 @@ def reject_acoustic_below_elastic(env: Environment,
     the bottom stack:
 
     * An elastic layer (shear_speed > 0) terminated by a **fluid
-      halfspace**: krakenc.exe spins forever in setup, so the caller
-      would wait out the whole ``timeout`` for nothing.
+      halfspace**: KRAKENC's boundary condition for a fluid half-space
+      sets only the acoustic ``f, g`` (``Kraken/BCImpedancecMod.f90:84-86``)
+      and leaves the five-component vector ``yV`` it then shoots up through
+      the elastic layers unset (``:124-127``), so the setting is not
+      handled; krakenc.exe spins in setup, and the caller would wait out
+      the whole ``timeout`` for nothing.
     * An elastic layer with a **fluid layer under it**: krakenc.exe
       aborts (SIGABRT, "double free or corruption"). ``kraken.f90:170``
       sets ``LastAcoustic`` to the *deepest* acoustic medium, so
@@ -97,9 +101,9 @@ def reject_acoustic_below_elastic(env: Environment,
       between and ``Vector``'s loops (``:560-568``, ``:632-651``) walk it
       as if it were acoustic.
 
-    An elastic layer over a rigid or vacuum floor is refused too, as
-    what it is: krakenc runs on it but the field is 0.8-1.7 dB (median)
-    off Scooter.
+    An elastic layer over a rigid or vacuum floor runs: KRAKENC sets the
+    vector ``yV`` for both floors (``BCImpedancecMod.f90:58-66``) and
+    shoots it up through the elastic layers.
 
     Elastic half-spaces and elastic-over-elastic stacks are fine, as is a
     fluid layer *above* an elastic one.
@@ -134,26 +138,15 @@ def reject_solid_over_liquid_column(col, *, model_name) -> None:
             "(solid-over-liquid interface inside the bottom stack) — "
             "kraken.f90:170 spans the elastic medium with "
             "FirstAcoustic..LastAcoustic and krakenc.exe aborts on it",
-            alternatives=['Scooter', 'OAST'],
+            alternatives=['OAST', "RAM(backend='rams')"],
         )
     if halfspace_fluid:
         raise UnsupportedFeatureError(
             model_name,
             "an elastic sediment layer over a fluid halfspace "
-            "(solid-over-liquid bottom interface) — krakenc.exe does not "
-            "converge on it",
-            alternatives=['Scooter', 'OAST'],
-        )
-    if floor in ('rigid', 'vacuum'):
-        # Measured with this refusal lifted: a 20 m layer (cp 1800,
-        # cs 400) under 100 m of water at 50 and 200 Hz ran, 0.8-1.7 dB
-        # median and 4-6 dB at the 90th percentile off Scooter, where
-        # the same layer over an elastic half-space agrees with it.
-        raise UnsupportedFeatureError(
-            model_name,
-            f"an elastic sediment layer over a {floor} floor — "
-            f"krakenc.exe runs on it but returns a field 0.8-1.7 dB "
-            f"(median) and 4-6 dB (90th percentile) off Scooter",
+            "(solid-over-liquid bottom interface) — KRAKENC's fluid "
+            "half-space condition does not set the elastic vector it shoots "
+            "up through the layer (BCImpedancecMod.f90:84-86, 124-127)",
             alternatives=['Scooter', 'OAST'],
         )
 
@@ -264,46 +257,50 @@ def reflection_table_boundaries(env, *, top_reflection_file) -> list:
     return sorted(set(labels))
 
 
-def modes_single_profile(env: Environment, *, collapse,
+def modes_single_profile(env: Environment, *, user_collapse,
                          model_name) -> Environment:
-    """Normal modes are range-independent; reduce any range-dependent env
-    to its r=0 profile (a run()-time numerical requirement — the field
-    path segments RD natively, the modes solve cannot).
+    """Normal modes are range-independent; reduce a range-dependent env to
+    one profile (a run()-time numerical requirement — the field path
+    segments RD natively, the modes solve cannot).
 
-    r = 0 is applied to every quantity here, overriding the configured
-    ``collapse`` methods rather than consulting them (see also
-    :func:`deck_bottom_columns`): the source sits in one real column, and
-    taking its SSP from one reduction while the bathymetry, bottom and
-    surface came from another would assemble a waveguide that exists at no
-    range at all. The warning names whichever configured method the
-    sampling dropped, so a setting that was asked for and not applied says
-    so instead of passing silently.
+    Each range-dependent quantity — SSP, bathymetry, bottom, surface — is
+    reduced by the ``collapse`` method the caller set for it
+    (``user_collapse``, the constructor's ``collapse=``), else taken at
+    r = 0, the source's column: with no method set, the modes are those of a
+    waveguide that exists at the source. Methods the caller set may take the
+    water column and the seabed from different ranges; that is their choice.
+    The warning names what each quantity was reduced by.
     """
     if not env.is_range_dependent:
         return env
-    overridden = [
-        f"collapse[{key!r}]={collapse[key]!r}"
-        for key, is_rd in (
-            ('ssp', env.ssp.is_range_dependent),
-            ('bathymetry', env.bathymetry.varies_with_range),
-            ('bottom_range',
-             env.bottom is not None and env.bottom.is_range_dependent),
-            ('surface', env.surface.is_range_dependent),
-        )
-        if is_rd and collapse[key] != 'r0'
-    ]
-    dropped = (f" This drops {', '.join(overridden)}: the modes solve "
-               f"applies no collapse method, taking every quantity from "
-               f"the source's own column." if overridden else '')
+    varying = [key for key, is_rd in (
+        ('ssp', env.ssp.is_range_dependent),
+        ('bathymetry', env.bathymetry.varies_with_range),
+        ('bottom_range',
+         env.bottom is not None and env.bottom.is_range_dependent),
+        ('surface', env.surface.is_range_dependent),
+    ) if is_rd]
+    chosen = [f"{key} by {user_collapse[key]!r}" for key in varying
+              if key in user_collapse]
+    at_r0 = [key for key in varying if key not in user_collapse]
+    reduction = ("sampling the r=0 profile of the range-dependent "
+                 "environment." if not chosen else
+                 f"the range-dependent environment is reduced to one "
+                 f"profile: {', '.join(chosen)} (collapse=)"
+                 + (f", {', '.join(at_r0)} at r = 0." if at_r0 else "."))
     warnings.warn(
-        f"{model_name}: normal modes are range-independent; sampling "
-        f"the r=0 profile of the range-dependent environment.{dropped}",
+        f"{model_name}: normal modes are range-independent; {reduction}",
         FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
     )
-    ssp = env.ssp.collapse_range('r0') if env.ssp.is_range_dependent else env.ssp
+    ssp = (env.ssp.collapse_range(user_collapse.get('ssp', 'r0'))
+           if env.ssp.is_range_dependent else env.ssp)
     bottom = env.bottom
     if bottom is not None and bottom.is_range_dependent:
-        bottom = bottom.collapse_range('r0')
+        bottom = bottom.collapse_range(user_collapse.get('bottom_range',
+                                                         'r0'))
+    depth = (float(env.bathymetry.collapse_range(user_collapse['bathymetry']))
+             if 'bathymetry' in user_collapse
+             else float(env.bathymetry.eval(range=0.0)))
     # Carry the full context of the original env: altimetry passes
     # through untouched so ``_project_environment`` still sees it and
     # emits its collapse disclosure, and the geolocation / date /
@@ -314,12 +311,13 @@ def modes_single_profile(env: Environment, *, collapse,
         name=env.name,
         bathymetry=Bathymetry(
             ranges=np.array([0.0]),
-            depths=np.array([float(env.bathymetry.eval(range=0.0))]),
+            depths=np.array([depth]),
             data_sources=env.bathymetry.data_sources),
         ssp=ssp,
         altimetry=env.altimetry,
         bottom=bottom,
-        surface=env.surface.collapse_range('r0'),
+        surface=env.surface.collapse_range(user_collapse.get('surface',
+                                                             'r0')),
         absorption=env.absorption,
         water_density=env.water_density,
         location=env.location,
@@ -477,87 +475,63 @@ def reinsert_nan_depths(field, receiver, keep):
     return Field.from_dict(d)
 
 
-def reject_krakenc_over_a_hard_or_free_floor(env, run_mode, *, forced_backend,
-                                             leaky_modes,
-                                             top_reflection_file) -> None:
-    """Refuse KRAKENC forced by a knob onto a rigid or vacuum seabed
-    that ``kraken.exe`` answers.
+def fluid_seabed_below_window(env, run_mode=None, *, c_high
+                              ) -> Optional[float]:
+    """The slowest compressional speed (m/s) of a fluid seabed half-space
+    the deck(s) for ``run_mode`` carry (:func:`deck_bottom_columns`) when the
+    run's phase-speed window, whose top is ``c_high`` (m/s), reaches above
+    it, else ``None``: a ``c_high`` at or below that speed, or no column
+    ending in a fluid half-space (a rigid, vacuum, tabulated or elastic
+    floor). The derived window always reaches above it: its ``c_high`` is
+    :data:`~uacpy.models._window.C_HIGH_FACTOR` × the fastest of the water
+    and the half-space (:func:`_window.phase_speed_window`).
 
-    A rigid or vacuum floor has no half-space speed to bound the mode
-    search. ``kraken.exe`` solves it with the unbounded window (0.05 dB
-    median against :func:`uacpy.analytic.ideal_waveguide` at 50 and
-    200 Hz, on either floor), but KRAKENC's complex root finder over the
-    fluid column does not, at any window: with the unbounded one it keeps
-    no mode at 50 Hz, returns an all-NaN field on the vacuum floor and a
-    field 6.6 dB (median) off on the rigid one at 200 Hz; with
-    ``c_high`` 3000, 1e4 or 1e5 m/s it runs and returns fields 0.7 to
-    9 dB (median) off with no warning. So ``backend='krakenc'`` and
-    ``leaky_modes=True`` (which forces KRAKENC, and asks for modes that
-    leak into a half-space a rigid or vacuum floor does not have) are
-    refused wherever the environment itself would run on ``kraken.exe``.
-    An environment that needs KRAKENC anyway (an elastic medium or a
-    reflection table) keeps it, with the finite window
-    :func:`_window.phase_speed_window` gives it; ``leaky_modes=True`` there,
-    under an elastic ice canopy, is refused too, since its unbounded
-    window returned the finite window's field or no field
-    (``log/fix-r2-models_scratch/k1_leaky_ice_rigid``,
-    ``k2b_leaky_ice_vacuum``).
-    """
-    if forced_backend != 'krakenc' and not leaky_modes:
-        return
-    floors = sorted({
-        str(column.halfspace.acoustic_type)
-        for column in deck_bottom_columns(env, run_mode)
-    } & {'rigid', 'vacuum'})
-    if not floors:
-        return
-    if reflection_table_boundaries(env,
-                                   top_reflection_file=top_reflection_file):
-        return
-    floor = ' / '.join(floors)
-    if leaky_modes and env.surface.is_elastic:
-        raise ConfigurationError(
-            f"Kraken(leaky_modes=True) under an elastic ice canopy over "
-            f"a {floor} seabed: the automatic krakenc route already "
-            f"solves this environment with a finite window, and the "
-            f"unbounded one leaky_modes asks for adds nothing to it — "
-            f"where it finished it returned the same field (0.011-0.012 "
-            f"dB median against Scooter, rigid and vacuum floors, 50-200 "
-            f"Hz) in 8-10 s against under 0.1 s, and it did not finish "
-            f"in 240 s (rigid, 50 Hz) or kept no mode (vacuum, 200 Hz).",
-            remediation=(
-                "Leave leaky_modes=False: the automatic route runs "
-                "krakenc with the finite window here."),
-        )
-    if env.bottom.is_elastic or env.surface.is_elastic:
-        return
-    measured = (
-        "KRAKENC over a fluid water column on a rigid or vacuum floor "
-        "keeps no mode, returns an all-NaN field, or returns a field "
-        "several dB off: against uacpy.analytic.ideal_waveguide it kept "
-        "no mode at 50 Hz and was 6.6 dB (median) off on a rigid floor "
-        "at 200 Hz, and no finite c_high repairs it (0.7-9 dB median off "
-        "at 3000-1e5 m/s, with no warning)"
-    )
-    if leaky_modes:
-        raise ConfigurationError(
-            f"Kraken(leaky_modes=True) over a {floor} seabed: a rigid or "
-            f"vacuum floor has no half-space for a mode to leak into, and "
-            f"the krakenc solve leaky_modes forces fails there — "
-            f"{measured}.",
-            remediation=(
-                "Leave leaky_modes=False: kraken.exe solves this seabed "
-                "with the unbounded window (0.05 dB median against the "
-                "analytic ideal waveguide)."),
-        )
-    raise ConfigurationError(
-        f"Kraken(backend='krakenc') over a {floor} seabed: {measured}.",
-        remediation=(
-            "Use backend='kraken' or backend=None (the automatic dispatch "
-            "picks kraken.exe here): it solves this seabed with the "
-            "unbounded window, 0.05 dB median against the analytic ideal "
-            "waveguide."),
-    )
+    Above that speed kraken.exe's real arithmetic sets the half-space's
+    vertical wavenumber to its real part, 0, the rigid seabed's condition
+    (``Kraken/BCImpedanceMod.f90:83-88``), where KRAKENC computes leaky modes
+    (``doc/kraken.htm`` (7) Phase Speed Limits). The test behind
+    :func:`kraken_exe_above_seabed_notice`."""
+    speeds = [float(column.halfspace.sound_speed)
+              for column in deck_bottom_columns(env, run_mode)
+              if BoundaryType.from_string(
+                  column.halfspace.acoustic_type).is_geoacoustic
+              and float(column.halfspace.shear_speed) <= 0.0]
+    if not speeds:
+        return None
+    slowest = min(speeds)
+    return slowest if float(c_high) > slowest else None
+
+
+def kraken_exe_above_seabed_notice(env, run_mode, *, backend, c_highs,
+                                   chosen, model_name) -> Optional[Notice]:
+    """``(note, warning)`` when the run's modes binary ``backend`` is
+    kraken.exe, the caller chose it or the window (``chosen``: they set
+    ``backend='kraken'`` or ``c_high``), and the top of the window, the
+    highest of the launches' ``c_highs`` (m/s), reaches above a fluid
+    seabed's speed (:func:`fluid_seabed_below_window`); else ``None``. A run
+    whose binary and window were both derived says nothing: kraken.exe is the
+    automatic backend for a fluid environment, and the ``backend`` docstring
+    and ``docs/models/kraken.md`` §3 state what it does there."""
+    if backend != 'kraken' or not chosen:
+        return None
+    top = max(float(c) for c in c_highs)
+    seabed = fluid_seabed_below_window(env, run_mode, c_high=top)
+    if seabed is None:
+        return None
+    window = (f"c_high = {top:g} m/s" if len(set(c_highs)) == 1
+              else f"c_high up to {top:g} m/s")
+    return Notice(
+        f"kraken.exe solves the seabed as rigid above its {seabed:g} m/s",
+        f"{model_name} on kraken.exe: {window} reaches above the fluid "
+        f"seabed's {seabed:g} m/s. "
+        f"kraken.exe works in real arithmetic, so above that speed the "
+        f"half-space's vertical wavenumber is set to its real part, 0, the "
+        f"rigid seabed's condition (Kraken/BCImpedanceMod.f90:83-88): those "
+        f"modes radiate nothing into the seabed. KRAKENC computes them as "
+        f"leaky modes (kraken.htm (7), Phase Speed Limits). Use "
+        f"backend='krakenc' for the leaky modes, or c_high at or below "
+        f"{seabed:g} m/s for the trapped modes alone, without the steep paths "
+        f"the faster modes carry.", ValidityWarning)
 
 
 def backend_origin(env, *, forced_backend, leaky_modes,
@@ -607,6 +581,7 @@ def krakenc_incoherent_sum_notice(run_mode, backend: str,
         "whose Opt(4:4)='I' branch computes SQRT(SUM(z**2)) over the "
         "per-mode contributions — the energy sum SQRT(SUM(|z|**2)) only "
         "for real mode functions, and krakenc's phi and k are complex. "
-        "Use backend='kraken' where the environment allows it, or "
-        "RunMode.COHERENT_TL.", ValidityWarning,
+        "Use RunMode.COHERENT_TL, whose sum is exact for complex modes "
+        "too; a range-dependent run's adiabatic evaluator sums the "
+        "magnitudes (EvaluateADMod.f90:110).", ValidityWarning,
     )

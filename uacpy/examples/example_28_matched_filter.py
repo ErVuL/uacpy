@@ -7,7 +7,7 @@ processing gain is 10·log10(B·T). The ambiguity function then shows what the
 waveform can and cannot separate in delay and Doppler together.
 
 Uses: acoustic_signal.lfm_chirp · simulate_reception · pulse_compression ·
-processing_gain_dB · ambiguity_function · plot_ambiguity
+processing_gain_dB · analytic_signal · ambiguity_function · plot_ambiguity
 """
 
 import os
@@ -19,9 +19,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import uacpy
-from uacpy.acoustic_signal import (ambiguity_function, lfm_chirp,
-                                   processing_gain_dB, pulse_compression,
-                                   simulate_reception)
+from uacpy.acoustic_signal import (ambiguity_function, analytic_signal,
+                                   lfm_chirp, processing_gain_dB,
+                                   pulse_compression, simulate_reception)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -36,7 +36,9 @@ bandwidth = freq_end - freq_start
 # Two echoes, the second weaker and 25 ms later. The noise is drawn from the
 # seeded generator above, so the figure is identical run to run.
 delays = [0.05, 0.075]
-t_rx, received = simulate_reception(transmitted, [1.0, 0.5], delays, fs)
+t_rx, received = simulate_reception([1.0, 0.5], delays,
+                                    source_waveform=transmitted,
+                                    sample_rate=fs)
 received = received + 0.1 * rng.standard_normal(received.size)
 
 lags, compressed = pulse_compression(received, transmitted, fs)
@@ -47,8 +49,12 @@ print(f"  B·T = {bandwidth * pulse_length:.0f} → processing gain "
 print(f"  echoes at {delays[0] * 1e3:.0f} and {delays[1] * 1e3:.0f} ms; "
       f"strongest compressed peak at {strongest_lag * 1e3:.1f} ms")
 
+# The ambiguity function takes a complex waveform. The real chirp holds its
+# sweep at both +f and -f, which would draw a second, mirrored ridge (an X);
+# its analytic signal keeps the positive-frequency sweep alone, so the surface
+# shows the up-chirp's one tilted delay-Doppler ridge.
 lag_axis, doppler_axis, ambiguity = ambiguity_function(
-    transmitted.astype(complex), fs, n_doppler=121)
+    analytic_signal(transmitted), fs, n_doppler=121)
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 9))
 axes[0, 0].plot(t_tx * 1e3, transmitted, 'b-', lw=0.7)

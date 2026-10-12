@@ -19,7 +19,7 @@ Concrete subclasses
     Frequency-only seawater absorption (Thorp 1967). No free parameters.
 :class:`FrancoisGarrison`
     Francois–Garrison (1982) frequency / T / S / pH / depth model, for one
-    water row or a T/S profile over ``depths``.
+    water row or a T/S profile (``(depth, value)`` pairs).
 :class:`Biological`
     Layered fish-bladder resonance model (multiple
     ``(Z_top, Z_bottom, f0, Q, a0)`` blocks).
@@ -52,13 +52,14 @@ from uacpy.core.deck_limits import MAX_ATTENUATION_DB_PER_WAVELENGTH
 from uacpy.core.exceptions import (
     ConfigurationError, NumericsWarning, ValidityWarning,
 )
+from uacpy.core._water import WaterProfile
 from uacpy.core.acoustics.attenuation import (
     PH_SCALES, absorption_biological, convert_attenuation_units,
     absorption_francois_garrison, ph_to_nbs, absorption_thorp,
 )
 from uacpy.core._validate import (
     require_attenuation_in_range, require_finite, require_non_negative,
-    water_property,
+    water_pairs, water_property, water_shape,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._repr import axis, build, num, qty, unit_of
@@ -86,7 +87,6 @@ _ArrayLike = Union[float, np.ndarray]
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 #: The repr unit of each ocean value an absorption formula takes, by its
 #: keyword name (:attr:`AbsorptionCoefficient.parameters`).
 _OCEAN_UNITS = {name: unit_of(name) for name in ('temperature', 'salinity')}
@@ -104,15 +104,16 @@ def _span(values) -> str:
 def _ocean_bits(parameters: Dict[str, Any]) -> List[str]:
     """The ocean values of an absorption formula in repr words:
     ``['10 °C', '35 psu', 'pH 8']`` for one water row; a property given as
-    ``(depth, value)`` pairs by its span and its depth count, ``'T 4–22 °C
-    (12 depths)'``. The pH scale is named when it is not the NBS scale the
-    formula is written on."""
+    ``(depth, value)`` pairs (the stored
+    :class:`~uacpy.core._water.WaterProfile`) by its span and
+    its depth count, ``'T 4–22 °C (12 depths)'``. The pH scale is named when
+    it is not the NBS scale the formula is written on."""
     bits = []
     for name, value in parameters.items():
-        pairs = np.ndim(value) == 2
-        shown = value[:, 1] if pairs else value
-        count = (f" ({len(value)} depth{'s' if len(value) > 1 else ''})"
-                 if pairs else '')
+        profile = isinstance(value, WaterProfile)
+        shown = value.values if profile else value
+        n = len(value.depths) if profile else 0
+        count = f" ({n} depth{'s' if n > 1 else ''})" if profile else ''
         if name == 'pH':
             scale = parameters.get('ph_scale', 'nbs')
             text = _span(shown) if np.ndim(shown) else num(shown)
@@ -136,6 +137,7 @@ def _ocean_bits(parameters: Dict[str, Any]) -> List[str]:
     return bits
 
 
+# eq=False: a dataclass __eq__ over ndarray fields raises; compare by identity.
 @dataclass(frozen=True, eq=False)
 class AbsorptionCoefficient(CarrierExport):
     """alpha over frequency, and optionally over depth, in stated units.
@@ -188,9 +190,11 @@ class AbsorptionCoefficient(CarrierExport):
     #: Biological user which depth they had just evaluated at.
     depth_m: Optional[float] = None
     #: The values the law was evaluated with, under its field names
-    #: (Francois-Garrison: ``temperature``, ``salinity``, ``pH``,
-    #: ``ph_scale``, and ``depths`` — the profile's own depth axis — when the
-    #: water is a profile; Biological: ``layers``, as ``(z_top, z_bottom, f0,
+    #: (Francois-Garrison: ``temperature``, ``salinity``, ``pH`` — each a
+    #: number or a profile, the
+    #: :class:`~uacpy.core._water.WaterProfile` the law stores
+    #: its ``(depth, value)`` pairs as — and
+    #: ``ph_scale``; Biological: ``layers``, as ``(z_top, z_bottom, f0,
     #: Q, a0)`` tuples; constant: ``value_dB_per_wavelength``), so
     #: ``FrancoisGarrison(**a.parameters)`` is the law again. ``None`` for a
     #: model that takes no values (Thorp) and for a measured table.
@@ -308,18 +312,19 @@ class AbsorptionCoefficient(CarrierExport):
         """
         if units == self.units:
             return self
-        f = np.atleast_1d(np.asarray(self.frequencies, dtype=float))
-        out = np.empty_like(np.asarray(self.data, dtype=float))
-        flat = np.atleast_2d(np.asarray(self.data, dtype=float))
-        view = np.atleast_2d(out)
-        for j, fj in enumerate(f):
-            view[:, j] = convert_attenuation_units(
-                flat[:, j], float(fj), self.units, units,
-                sound_speed=sound_speed)
+        # Frequency is the last axis of ``data`` whether or not a depth axis
+        # precedes it, so the frequencies broadcast along it.
+        out = np.asarray(convert_attenuation_units(
+            np.asarray(self.data, dtype=float),
+            np.asarray(self.frequencies, dtype=float), self.units, units,
+            sound_speed=sound_speed), dtype=float)
         return AbsorptionCoefficient(
             frequencies=self.frequencies, data=out, units=units,
             model=self.model, depths=self.depths, depth_m=self.depth_m,
             parameters=self.parameters)
+
+    #: The plotter :func:`uacpy.plot.plot_carrier` draws this table with.
+    _plotter = 'plot_absorption'
 
     def plot(self, ax=None, **kwargs):
         """Draw alpha against frequency (log-log), or as a depth-frequency
@@ -354,17 +359,18 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
     :class:`ConstantAbsorption`.
 
     Subclasses implement :meth:`_alpha_dB_per_m`, which evaluates
-    ``α(f, z)`` at the depths a model needs (used by the Kraken-class
-    modal perturbation kernel; the Acoustics-Toolbox writers read the
-    model's letter and records from :mod:`uacpy.io.at_codes` instead, or
+    ``α(f, z)`` on a frequency axis and a depth axis at once, as an
+    ``(n_depths, n_frequencies)`` grid (used by the Kraken-class modal
+    perturbation kernel; the Acoustics-Toolbox writers read the model's
+    letter and records from :mod:`uacpy.io.at_codes` instead, or
     :meth:`alpha_dB_per_wavelength` per SSP row for a law with no letter).
     The public :meth:`alpha_dB_per_m` checks the frequency and delegates to
-    it.
+    it; :meth:`table` evaluates its whole grid in one call.
     """
 
     #: ``(low, high)`` Hz the model was fitted over, or ``None`` for a model
     #: with no stated band. A frequency outside it is evaluated as given and
-    #: announced once per call by :meth:`_warn_outside_frequency_range`.
+    #: announced once per call by :meth:`_check_frequency_range`.
     _FREQUENCY_RANGE_HZ = None
     #: The source sentence the out-of-band notice quotes after the counts.
     _FREQUENCY_RANGE_NOTE = ""
@@ -376,9 +382,11 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 "FrancoisGarrison / Biological / ConstantAbsorption."
             )
 
-    def _warn_outside_frequency_range(self, frequencies) -> None:
-        """One notice per call for every frequency outside the fitted band,
-        naming how many samples and which span fall below and above it."""
+    def _check_frequency_range(self, frequencies) -> None:
+        """Check ``frequencies`` against the law's fitted band: one notice
+        per call for every frequency outside it, naming how many samples and
+        which span fall below and above it. A table, which has no law to
+        extrapolate with, refuses instead."""
         if self._FREQUENCY_RANGE_HZ is None:
             return
         low, high = self._FREQUENCY_RANGE_HZ
@@ -433,8 +441,10 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
                 f"{type(self).__name__}.alpha_dB_per_m: frequency must be "
                 f"> 0 Hz; got {frequency}."
             )
-        self._warn_outside_frequency_range(f)
-        return self._alpha_dB_per_m(f, depths)
+        self._check_frequency_range(f)
+        z = np.atleast_1d(np.asarray(depths, dtype=float))
+        return self._alpha_dB_per_m(np.array([f]), z.ravel())[:, 0].reshape(
+            z.shape)
 
     @property
     def _table_depths(self) -> _ArrayLike:
@@ -490,7 +500,7 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
             raise ConfigurationError(
                 f"{type(self).__name__}.table: every frequency must be > 0 "
                 f"Hz; got {frequencies!r}.")
-        self._warn_outside_frequency_range(f)
+        self._check_frequency_range(f)
         if depths is None:
             depths = self._table_depths
         # A scalar depth is a place to evaluate, not an axis to span: it
@@ -504,9 +514,8 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
         else:
             z_eval = z_axis
         # dB/m out of the per-model kernel, one column per frequency.
-        grid = np.stack([np.asarray(self._alpha_dB_per_m_at_sound_speed(
-                             float(fj), z_eval, float(sound_speed)),
-                                    dtype=float) for fj in f], axis=1)
+        grid = self._alpha_dB_per_m_at_sound_speed(f, z_eval,
+                                                   float(sound_speed))
         carrier = AbsorptionCoefficient(
             frequencies=f,
             data=grid if z_axis is not None else grid[0, :],
@@ -535,25 +544,27 @@ class Absorption(RevalidateOnAssignMixin, DeepCopyMixin, CarrierExport):
 
     def _alpha_dB_per_m(
         self,
-        frequency: float,
-        depths: _ArrayLike,
+        frequencies: np.ndarray,
+        depths: np.ndarray,
     ) -> np.ndarray:
-        """Model-specific ``α(f, z)`` in dB/m, reached through
-        :meth:`alpha_dB_per_m` with ``frequency`` already checked positive."""
+        """Model-specific ``α(f, z)`` in dB/m on 1-D ``frequencies`` (Hz,
+        already checked positive) and 1-D ``depths`` (m), as an
+        ``(n_depths, n_frequencies)`` grid."""
         raise NotImplementedError
 
     def _alpha_dB_per_m_at_sound_speed(
         self,
-        frequency: float,
-        depths: _ArrayLike,
+        frequencies: np.ndarray,
+        depths: np.ndarray,
         sound_speed: float,
     ) -> np.ndarray:
-        """``α(f, z)`` in dB/m in water of ``sound_speed`` — what
-        :meth:`table` evaluates, so its ``sound_speed`` reaches the kernel and
-        not only the output conversion. The same as :meth:`_alpha_dB_per_m`
-        for every model stated in dB/km; :class:`ConstantAbsorption`, stated
-        per wavelength, overrides it."""
-        return self._alpha_dB_per_m(frequency, depths)
+        """``α(f, z)`` in dB/m in water of ``sound_speed``, the
+        ``(n_depths, n_frequencies)`` grid :meth:`table` evaluates, so its
+        ``sound_speed`` reaches the kernel and not only the output conversion.
+        The same as :meth:`_alpha_dB_per_m` for every model stated in dB/km;
+        :class:`ConstantAbsorption` and a table, which may be stated per
+        wavelength, override it."""
+        return self._alpha_dB_per_m(frequencies, depths)
 
     def alpha_dB_per_wavelength(
         self,
@@ -629,11 +640,11 @@ class Thorp(Absorption):
 
     def _alpha_dB_per_m(
         self,
-        frequency: float,
-        depths: _ArrayLike,
+        frequencies: np.ndarray,
+        depths: np.ndarray,
     ) -> np.ndarray:
-        z = np.atleast_1d(np.asarray(depths, dtype=float))
-        return absorption_thorp(float(frequency), depth=z) / 1000.0
+        return absorption_thorp(frequencies[None, :],
+                                depth=depths[:, None]) / 1000.0
 
     @property
     def _scales_by_frequency_ratio(self) -> bool:
@@ -684,8 +695,8 @@ class FrancoisGarrison(Absorption):
 
     ``temperature``, ``salinity`` and ``pH`` are the water, with the names
     and the reference-water defaults (10 °C, 35 PSU, pH 8) of
-    :func:`absorption_francois_garrison`; ``depths`` is a profile's own depth
-    axis. The formula's depth (pressure) term varies down the column, so the
+    :func:`absorption_francois_garrison`. The formula's depth (pressure)
+    term varies down the column, so the
     law has no depth of its own: every evaluation takes the depth it is
     evaluated at — :meth:`alpha_dB_per_m` at the depths asked, :meth:`table`
     at the depths asked or, given none, at the surface (0 m) for one water
@@ -746,15 +757,19 @@ class FrancoisGarrison(Absorption):
     depth departs from the formula by the band rule
     (:func:`uacpy.io.oalib_writer.warn_if_francois_garrison_depth_frozen`).
 
-    **A T/S profile.** ``temperature``, ``salinity`` and ``pH`` each take,
-    mixed freely, a number, a 1-D array on the shared ``depths=`` (m,
-    increasing), or ``(depth, value)`` pairs of shape ``(N, 2)`` on their own
-    depths — the convention of :meth:`SoundSpeedProfile.from_pairs`. Each is
-    stored on its own depth axis (as pairs; ``depths`` is consumed) and
-    interpolated separately at the depth evaluated, linear between its
-    samples and held at its ends; the formula's own depth term takes the
-    depth asked. The fitted-envelope warning is checked value by value, once
-    per law. RAM samples every property's depths
+    **A T/S profile.** The law has no evaluation depth of its own, so
+    ``temperature``, ``salinity`` and ``pH`` each take, mixed freely, a
+    single value (constant water) or ``(depth, value)`` pairs, an
+    ``(M, 2)`` array — a profile on depths of its own (m, finite,
+    non-negative, strictly increasing), interpolated at each depth
+    evaluated, linear between its samples and held at its ends; the
+    formula's own depth term takes the depth asked. Any other array is
+    refused: a 1-D array of values has no depths to stand on.
+    :meth:`from_temperature_salinity` builds the law from a column of arrays
+    on one depth axis. Each profile is stored as a profile record, which the
+    law hands back (``law.temperature``) and every water-property input
+    takes again. The fitted-envelope warning is checked value by value,
+    once per law. RAM samples every property's depths
     (:attr:`profile_depths`).
 
     **pH scale.** ``pH`` is taken on ``ph_scale`` — ``'nbs'`` (default, the
@@ -771,83 +786,63 @@ class FrancoisGarrison(Absorption):
         "evaluated as given; below 200 Hz a scattering loss the equation "
         "omits can exceed the boric-acid term.")
 
+    # Each water property takes a single value (constant water) or
+    # (depth, value) pairs, an (M, 2) array; a law has no evaluation depth,
+    # so an array of values alone is refused (_profile_values).
     temperature: Union[float, np.ndarray] = REFERENCE_TEMPERATURE_C
     salinity: Union[float, np.ndarray] = REFERENCE_SALINITY_PSU
     pH: Union[float, np.ndarray] = REFERENCE_PH
     ph_scale: str = 'nbs'
-    #: The shared depths (m, increasing) of the water properties given as
-    #: 1-D arrays on it. Consumed at construction: each such property is
-    #: stored as its own ``(depth, value)`` pairs, so this reads ``None``
-    #: afterwards (:attr:`profile_depths` is the union of the properties'
-    #: depths).
-    depths: Optional[np.ndarray] = None
 
     _WATER = ('temperature', 'salinity', 'pH')
 
     def _profile_values(self) -> None:
-        """Store each water property as a number or as its own ``(N, 2)``
-        ``(depth, value)`` pairs: a number stays a number, an ``(N, 2)``
-        array is taken as pairs, and a 1-D array is paired with ``depths``.
-        Depths are finite, non-negative and strictly increasing, per
-        property; ``depths`` is consumed."""
-        shared = None
-        if self.depths is not None:
-            shared = np.atleast_1d(np.array(self.depths, dtype=float))
-            require_finite(shared, "FrancoisGarrison: depths", hint="m")
-            if shared.ndim != 1 or shared.size == 0:
-                raise ConfigurationError(
-                    f"FrancoisGarrison: depths must be a non-empty 1-D array "
-                    f"(m); got shape {shared.shape}.")
-            if not any(np.ndim(getattr(self, n)) == 1 for n in self._WATER):
-                raise ConfigurationError(
-                    "FrancoisGarrison: depths= is the axis of the water "
-                    "properties given as 1-D arrays on it, and none is.",
-                    remediation="Give temperature, salinity or pH as an "
-                                "array on depths=, or drop depths=.")
+        """Store each water property as a number, or its ``(depth, value)``
+        pairs as a :class:`~uacpy.core._water.WaterProfile`
+        (:func:`~uacpy.core._validate.water_pairs`; a WaterProfile the law
+        handed out is kept, its depths non-negative); refuse every other
+        form. The law has no evaluation depth, so an array cannot be one
+        value per point evaluated."""
         for name in self._WATER:
             value = getattr(self, name)
-            if np.ndim(value) == 0:
+            if isinstance(value, WaterProfile):
+                if np.any(value.depths < 0):
+                    raise ConfigurationError(
+                        f"FrancoisGarrison: the depths of {name} must be "
+                        f"non-negative (m, positive down); got "
+                        f"{value.depths.tolist()}.")
+                continue
+            shape = water_shape(value, name=name, who='FrancoisGarrison')
+            if len(shape) == 0:
                 setattr(self, name, float(value))
                 continue
-            arr = np.array(value, dtype=float)
-            if arr.ndim == 1:
-                if shared is None:
-                    raise ConfigurationError(
-                        f"FrancoisGarrison: {name} is a 1-D array, which is a "
-                        f"profile and needs the depths= it is given on.",
-                        remediation="Pass depths= (m, increasing), one per "
-                                    "value; or give (depth, value) pairs; or "
-                                    "a single number for one water row.")
-                if arr.shape != shared.shape:
-                    raise ConfigurationError(
-                        f"FrancoisGarrison: {name} has {arr.size} values for "
-                        f"{shared.size} depths; a profile gives one per "
-                        f"depth.")
-                arr = np.column_stack([shared, arr])
-            elif arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] == 0:
-                raise ConfigurationError(
-                    f"FrancoisGarrison: {name} must be a number, a 1-D array "
-                    f"on depths=, or (depth, value) pairs of shape (N, 2); "
-                    f"got shape {arr.shape}.")
-            z = arr[:, 0]
-            require_finite(z, f"FrancoisGarrison: {name} depths", hint="m")
-            if np.any(z < 0) or np.any(np.diff(z) <= 0):
-                raise ConfigurationError(
-                    f"FrancoisGarrison: the depths of {name} must be "
-                    f"non-negative and strictly increasing (m, positive "
-                    f"down); got {z.tolist()}.")
-            setattr(self, name, arr)
-        self.depths = None
+            if len(shape) == 2 and shape[1] == 2:
+                setattr(self, name, water_pairs(value, name=name,
+                                                who='FrancoisGarrison'))
+                continue
+            raise ConfigurationError(
+                f"FrancoisGarrison: {name} has shape {shape}, and the law "
+                f"has no evaluation depth of its own. A water property of "
+                f"the law is a single value (constant water) or (depth, "
+                f"value) pairs of shape (M, 2) (a profile on depths of its "
+                f"own, interpolated onto each depth the law is evaluated "
+                f"at); an array of values has no depths to stand on.",
+                remediation="Pass np.column_stack([depths, values]) pairs "
+                            "for a profile, or a single value for constant "
+                            "water; FrancoisGarrison.from_temperature_"
+                            "salinity(depths, T, S) builds the law from "
+                            "arrays on one depth axis.")
 
     def _values(self, name: str) -> Union[float, np.ndarray]:
-        """A water property's value: its number, or its pairs' values."""
+        """A water property's value: its number, or its profile's
+        values."""
         value = getattr(self, name)
-        return value if np.ndim(value) == 0 else value[:, 1]
+        return value.values if isinstance(value, WaterProfile) else value
 
     def _local(self, name: str, depths) -> np.ndarray:
         """A water property at ``depths`` by the shared water-property rule
         (:func:`~uacpy.core._validate.water_property`): its number, or its
-        pairs linear between their depths and held at the end values beyond
+        profile linear between its depths and held at the end values beyond
         them."""
         z = np.atleast_1d(np.asarray(depths, dtype=float))
         return np.broadcast_to(np.asarray(water_property(
@@ -865,7 +860,7 @@ class FrancoisGarrison(Absorption):
         Absorption.__post_init__(self)
         self._profile_values()
         for name in self._WATER:
-            require_finite(getattr(self, name), f"FrancoisGarrison: {name}")
+            require_finite(self._values(name), f"FrancoisGarrison: {name}")
         if self.ph_scale not in PH_SCALES:
             raise ConfigurationError(
                 f"FrancoisGarrison: ph_scale must be one of {PH_SCALES}; "
@@ -961,13 +956,22 @@ class FrancoisGarrison(Absorption):
 
         Parameters
         ----------
-        depths, temperature, salinity : array-like
-            Matching 1-D profiles (m, °C, psu). Samples with a missing value
-            are dropped and repeated depths keep their first sample.
-        pH : float or (N, 2) array, optional
-            Seawater pH: one number (default 8.0, the package's reference
-            sea water, on the formula's own NBS scale), or ``(depth, pH)``
-            pairs on their own depths, as a GLODAP column gives them.
+        depths : array-like
+            The column's depths (m), a non-empty 1-D array.
+        temperature, salinity : float or array-like
+            In-situ temperature (°C) and practical salinity (psu), each by
+            the water-property rule on ``depths``
+            (:func:`~uacpy.core._validate.water_property`): a single value,
+            an array of exactly ``depths``' shape (one value per depth), or
+            ``(depth, value)`` pairs of shape ``(M, 2)`` on depths of their
+            own. Depths where an array of values holds a missing value are
+            dropped, and repeated depths keep their first sample; each array
+            of values becomes the profile the law stores.
+        pH : float or array-like, optional
+            Seawater pH by the same rule: one number (default 8.0, the
+            package's reference sea water, on the formula's own NBS scale),
+            an array on ``depths``, or ``(depth, pH)`` pairs on their own
+            depths, as a GLODAP column gives them.
         ph_scale : {'nbs', 'total', 'seawater'}, optional
             The scale ``pH`` is on. Francois & Garrison (1982, Part II) took
             their pH from Lovett's (1980) charts of the Gorshkov (1978)
@@ -992,37 +996,46 @@ class FrancoisGarrison(Absorption):
             absorption by tens of percent against the profile at the ends of
             the column.
         """
-        z = np.asarray(depths, dtype=float).reshape(-1)
-        t = np.asarray(temperature, dtype=float).reshape(-1)
-        s = np.asarray(salinity, dtype=float).reshape(-1)
-        if z.size == 0 or not (z.size == t.size == s.size):
+        who = 'FrancoisGarrison.from_temperature_salinity'
+        z = np.asarray(depths, dtype=float)
+        if z.ndim != 1 or z.size == 0:
             raise ConfigurationError(
-                "FrancoisGarrison.from_temperature_salinity: depths, "
-                "temperature and salinity must be non-empty and equal "
-                f"length; got {z.size}, {t.size}, {s.size}.")
+                f"{who}: depths must be a non-empty 1-D array (m); got shape "
+                f"{z.shape}.")
+        given = {'temperature': temperature, 'salinity': salinity, 'pH': pH}
+        on_z = {name: np.broadcast_to(np.asarray(water_property(
+            value, z, name=name, who=who), dtype=float), z.shape)
+            for name, value in given.items()}
         if collapse_to_depth is not None:
             i = int(np.argmin(np.abs(z - float(collapse_to_depth))))
-            ph = (float(pH) if np.ndim(pH) == 0 else float(np.interp(
-                z[i], np.asarray(pH)[:, 0], np.asarray(pH)[:, 1])))
-            return cls(temperature=float(t[i]), salinity=float(s[i]), pH=ph,
+            return cls(**{name: float(v[i]) for name, v in on_z.items()},
                        ph_scale=ph_scale)
-        keep = np.isfinite(z) & np.isfinite(t) & np.isfinite(s)
+        arrays = [name for name, value in given.items()
+                  if not isinstance(value, WaterProfile)
+                  and np.ndim(value) and np.shape(value) == z.shape]
+        keep = np.isfinite(z)
+        for name in arrays:
+            keep &= np.isfinite(on_z[name])
         z_u, first = np.unique(z[keep], return_index=True)
-        if z_u.size == 0:
+        if arrays and z_u.size == 0:
             raise ConfigurationError(
-                "FrancoisGarrison.from_temperature_salinity: the column holds "
-                "no depth with a finite temperature and salinity.")
-        return cls(temperature=t[keep][first], salinity=s[keep][first],
-                   pH=pH if np.ndim(pH) else float(pH), ph_scale=ph_scale,
-                   depths=z_u)
+                f"{who}: the column holds no depth with a finite value of "
+                f"every array given ({', '.join(arrays)}).")
+
+        def stored(name):
+            value = given[name]
+            if name in arrays:
+                return WaterProfile(z_u, on_z[name][keep][first])
+            if isinstance(value, WaterProfile) or np.ndim(value) == 0:
+                return value
+            return water_pairs(value, name=name, who=who)
+        return cls(**{name: stored(name) for name in given},
+                   ph_scale=ph_scale)
 
     def __eq__(self, other):
         if type(other) is not type(self):
             return NotImplemented
-        return all(np.array_equal(getattr(self, f), getattr(other, f))
-                   if isinstance(getattr(self, f), np.ndarray)
-                   or isinstance(getattr(other, f), np.ndarray)
-                   else getattr(self, f) == getattr(other, f)
+        return all(getattr(self, f) == getattr(other, f)
                    for f in self.__dataclass_fields__)
 
     __hash__ = None
@@ -1031,14 +1044,15 @@ class FrancoisGarrison(Absorption):
     def is_profile(self) -> bool:
         """Whether any water property varies with depth rather than the
         water being one row."""
-        return any(np.ndim(getattr(self, n)) for n in self._WATER)
+        return any(isinstance(getattr(self, n), WaterProfile)
+                   for n in self._WATER)
 
     @property
     def profile_depths(self) -> Optional[np.ndarray]:
         """The union of the water properties' depths (m, increasing), or
         ``None`` for one water row."""
-        axes = [getattr(self, n)[:, 0] for n in self._WATER
-                if np.ndim(getattr(self, n))]
+        axes = [getattr(self, n).depths for n in self._WATER
+                if isinstance(getattr(self, n), WaterProfile)]
         return np.unique(np.concatenate(axes)) if axes else None
 
     @property
@@ -1069,21 +1083,23 @@ class FrancoisGarrison(Absorption):
         return 'francois_garrison'
 
     def _carrier_parameters(self) -> Dict[str, Any]:
+        # A WaterProfile is immutable, so the table holds the law's own.
         def value(v):
-            return float(v) if np.ndim(v) == 0 else np.array(v, dtype=float)
+            return v if isinstance(v, WaterProfile) else float(v)
         return {'temperature': value(self.temperature),
                 'salinity': value(self.salinity), 'pH': value(self.pH),
                 'ph_scale': self.ph_scale}
 
     def _alpha_dB_per_m(
         self,
-        frequency: float,
-        depths: _ArrayLike,
+        frequencies: np.ndarray,
+        depths: np.ndarray,
     ) -> np.ndarray:
-        z = np.atleast_1d(np.asarray(depths, dtype=float))
+        f = frequencies[None, :]
+        z = depths[:, None]
         if not self.is_profile:
             a_km = absorption_francois_garrison(
-                frequency=float(frequency),
+                frequency=f,
                 temperature=self.temperature,
                 salinity=self.salinity,
                 pH=self.ph_nbs,
@@ -1094,10 +1110,10 @@ class FrancoisGarrison(Absorption):
         # its samples and held at its ends; the formula's own depth term
         # takes the asked depth.
         a_km = absorption_francois_garrison(
-            frequency=float(frequency),
-            temperature=self._local('temperature', z),
-            salinity=self._local('salinity', z),
-            pH=self._nbs_at(z),
+            frequency=f,
+            temperature=self._local('temperature', depths)[:, None],
+            salinity=self._local('salinity', depths)[:, None],
+            pH=self._nbs_at(depths)[:, None],
             depth=z,
         )
         return a_km / 1000.0
@@ -1246,10 +1262,16 @@ class Biological(Absorption):
     def __post_init__(self):
         Absorption.__post_init__(self)
         normalized: List[BiologicalLayer] = []
-        for entry in self.layers or []:
+        for index, entry in enumerate(self.layers or []):
             if isinstance(entry, BiologicalLayer):
                 normalized.append(entry)
             else:
+                if np.ndim(entry) != 1 or len(entry) != 5:
+                    raise ConfigurationError(
+                        f"Biological: layers[{index}] is {entry!r}; a layer "
+                        f"is a BiologicalLayer or the 5 values (z_top, "
+                        f"z_bottom, f0, Q, a0) — depths in m, f0 in Hz, a0 in "
+                        f"dB/km.")
                 z_top, z_bottom, f0, Q, a0 = entry
                 normalized.append(BiologicalLayer(
                     z_top_m=float(z_top), z_bottom_m=float(z_bottom),
@@ -1280,14 +1302,13 @@ class Biological(Absorption):
 
     def _alpha_dB_per_m(
         self,
-        frequency: float,
-        depths: _ArrayLike,
+        frequencies: np.ndarray,
+        depths: np.ndarray,
     ) -> np.ndarray:
         # Sum each layer's resonance (:func:`absorption_biological`) over the
         # depths it spans.
-        f = float(frequency)
-        z = np.atleast_1d(np.asarray(depths, dtype=float))
-        a_km = np.zeros(z.shape, dtype=float)
+        z = depths
+        a_km = np.zeros((z.size, frequencies.size), dtype=float)
         # Each layer spans the closed interval [z_top, z_bottom] and is
         # tested independently, exactly as the AttenMod.f90:102-109 loop
         # tests ``z >= Z1 .AND. z <= Z2`` per layer and sums — so a depth
@@ -1295,8 +1316,8 @@ class Biological(Absorption):
         # layers' contributions.
         for layer in self.layers:
             in_layer = (z >= layer.z_top_m) & (z <= layer.z_bottom_m)
-            a_km[in_layer] += absorption_biological(f, layer.f0_hz, layer.Q,
-                                                   layer.a0)
+            a_km[in_layer, :] += absorption_biological(
+                frequencies, layer.f0_hz, layer.Q, layer.a0)
         return a_km / 1000.0
 
 
@@ -1360,33 +1381,29 @@ class ConstantAbsorption(Absorption):
 
     def _alpha_dB_per_m(
         self,
-        frequency: float,
-        depths: _ArrayLike,
+        frequencies: np.ndarray,
+        depths: np.ndarray,
     ) -> np.ndarray:
-        depths = np.atleast_1d(np.asarray(depths, dtype=float))
-        # dB/wavelength → dB/m at this frequency (flat in depth). No SSP is
+        # dB/wavelength → dB/m at each frequency (flat in depth). No SSP is
         # carried here, so the conversion uses the reference sound speed.
-        alpha = float(convert_attenuation_units(
-            self.value_dB_per_wavelength, frequency,
-            'dB/wavelength', 'dB/m',
-        ))
-        return np.full(depths.shape, alpha)
+        return self._alpha_dB_per_m_at_sound_speed(frequencies, depths,
+                                                   DEFAULT_SOUND_SPEED)
 
     def _alpha_dB_per_m_at_sound_speed(
         self,
-        frequency: float,
-        depths: _ArrayLike,
+        frequencies: np.ndarray,
+        depths: np.ndarray,
         sound_speed: float,
     ) -> np.ndarray:
         # dB/wavelength → dB/m at the caller's sound speed, so ``table(...,
         # units='dB/wavelength', sound_speed=c)`` returns the value exactly
         # at any c.
-        depths = np.atleast_1d(np.asarray(depths, dtype=float))
-        alpha = float(convert_attenuation_units(
-            self.value_dB_per_wavelength, frequency,
+        alpha = convert_attenuation_units(
+            self.value_dB_per_wavelength, frequencies,
             'dB/wavelength', 'dB/m', sound_speed=sound_speed,
-        ))
-        return np.full(depths.shape, alpha)
+        )
+        return np.broadcast_to(alpha[None, :],
+                               (depths.size, frequencies.size)).copy()
 
 
 #: Relative tolerance on a table's first and last frequency: a run frequency
@@ -1471,7 +1488,7 @@ class _TabulatedAbsorption(Absorption):
         return (np.empty(0) if self.measured.depths is None
                 else np.asarray(self.measured.depths, dtype=float))
 
-    def _warn_outside_frequency_range(self, frequencies) -> None:
+    def _check_frequency_range(self, frequencies) -> None:
         # A table has no law to extrapolate with: outside it is refused.
         f = np.atleast_1d(np.asarray(frequencies, dtype=float))
         table_f = self.measured.frequencies
@@ -1491,33 +1508,42 @@ class _TabulatedAbsorption(Absorption):
                             "FrancoisGarrison) that has a value at every "
                             "frequency.")
 
-    def _native(self, frequency: float, depths: _ArrayLike) -> np.ndarray:
-        """The table at ``frequency`` (linear in ``log f``) and ``depths``
-        (linear, held at the end rows), in the table's own units."""
+    def _native(self, frequencies: np.ndarray,
+                depths: np.ndarray) -> np.ndarray:
+        """The table at 1-D ``frequencies`` (linear in ``log f``) and 1-D
+        ``depths`` (linear, held at the end rows), in the table's own units,
+        as an ``(n_depths, n_frequencies)`` grid."""
         t = self.measured
         grid = np.atleast_2d(np.asarray(t.data, dtype=float))
         log_f = np.log(np.asarray(t.frequencies, dtype=float))
         if log_f.size == 1:
-            column = grid[:, 0]
+            columns = np.repeat(grid[:, :1], frequencies.size, axis=1)
         else:
-            x = np.log(float(frequency))
-            j = int(np.clip(np.searchsorted(log_f, x), 1, log_f.size - 1))
-            w = float(np.clip((x - log_f[j - 1]) / (log_f[j] - log_f[j - 1]),
-                              0.0, 1.0))
-            column = (1.0 - w) * grid[:, j - 1] + w * grid[:, j]
-        z = np.atleast_1d(np.asarray(depths, dtype=float))
+            x = np.log(frequencies)
+            j = np.clip(np.searchsorted(log_f, x), 1, log_f.size - 1)
+            w = np.clip((x - log_f[j - 1]) / (log_f[j] - log_f[j - 1]),
+                        0.0, 1.0)
+            columns = (1.0 - w) * grid[:, j - 1] + w * grid[:, j]
         if t.depths is None:
-            return np.full(z.shape, float(column[0]))
-        return np.interp(z, np.asarray(t.depths, dtype=float), column)
+            return np.repeat(columns[:1, :], depths.size, axis=0)
+        rows = np.asarray(t.depths, dtype=float)
+        if rows.size == 1:
+            return np.repeat(columns[:1, :], depths.size, axis=0)
+        # np.interp's rule, on every frequency at once: linear between the
+        # rows, the end row held beyond them.
+        i = np.clip(np.searchsorted(rows, depths), 1, rows.size - 1)
+        wz = np.clip((depths - rows[i - 1]) / (rows[i] - rows[i - 1]),
+                     0.0, 1.0)[:, None]
+        return (1.0 - wz) * columns[i - 1, :] + wz * columns[i, :]
 
-    def _alpha_dB_per_m(self, frequency, depths) -> np.ndarray:
-        return self._alpha_dB_per_m_at_sound_speed(frequency, depths,
+    def _alpha_dB_per_m(self, frequencies, depths) -> np.ndarray:
+        return self._alpha_dB_per_m_at_sound_speed(frequencies, depths,
                                                    DEFAULT_SOUND_SPEED)
 
-    def _alpha_dB_per_m_at_sound_speed(self, frequency, depths,
+    def _alpha_dB_per_m_at_sound_speed(self, frequencies, depths,
                                        sound_speed) -> np.ndarray:
         return np.asarray(convert_attenuation_units(
-            self._native(frequency, depths), float(frequency),
+            self._native(frequencies, depths), frequencies[None, :],
             self.measured.units, 'dB/m', sound_speed=float(sound_speed)),
             dtype=float)
 
@@ -1527,15 +1553,16 @@ class _TabulatedAbsorption(Absorption):
             raise ConfigurationError(
                 f"tabulated absorption: frequency must be > 0 Hz; got "
                 f"{frequency}.")
-        self._warn_outside_frequency_range(f)
-        native = self._native(f, depths)
+        self._check_frequency_range(f)
+        z = np.atleast_1d(np.asarray(depths, dtype=float))
+        native = self._native(np.array([f]), z.ravel())[:, 0].reshape(z.shape)
         if self.measured.units == 'dB/wavelength':
             return native
         c = np.broadcast_to(np.asarray(sound_speeds, dtype=float),
                             native.shape)
-        return np.array([float(convert_attenuation_units(
-            v, f, self.measured.units, 'dB/wavelength', sound_speed=float(ci)))
-            for v, ci in zip(native, c)])
+        return np.asarray(convert_attenuation_units(
+            native, f, self.measured.units, 'dB/wavelength', sound_speed=c),
+            dtype=float)
 
     def _water_past_rows(self, z_min: float, z_max: float) -> List[str]:
         """The sides of the water ``z_min..z_max`` (m) the table's rows do
@@ -1588,7 +1615,10 @@ def arrival_absorption_exponent(delays_imag_s, frequencies, *,
     delays_imag_s : array_like, shape (n_arrivals,)
         Imaginary travel times (s), ≤ 0 for a lossy medium.
     frequencies : array_like, shape (n_frequencies,)
-        Frequencies (Hz). Positive when a separable law is applied.
+        Frequencies (Hz). Non-negative when a separable law is applied: the
+        law is evaluated at each positive frequency, and a 0 Hz bin (the
+        first of ``np.fft.rfftfreq``) gets exponent 0, as in the linear
+        form.
     trace_frequency : float, optional
         Frequency (Hz) the arrivals were traced at.
     absorption : Absorption, optional
@@ -1609,11 +1639,27 @@ def arrival_absorption_exponent(delays_imag_s, frequencies, *,
         # At the trace frequency the exponent is Im tau's own, and the law
         # (whose fitted band may not reach f_t) is not consulted.
         return np.outer(imag, omega)
+    if np.any(freqs < 0.0):
+        raise ConfigurationError(
+            f"arrival_absorption_exponent: the {absorption._short()} law "
+            f"scales the trace by its ratio alpha(f)/alpha(f_t), which has no "
+            f"value at a negative frequency; got {freqs.min():g} Hz.",
+            remediation="Pass the non-negative half of the frequency axis "
+                        "(np.fft.rfftfreq), or no law for the linear form.")
+    # At 0 Hz the exponent is 0, the value the linear form gives: the law's
+    # constant term there (Thorp's 3.3e-3 dB/km) is leakage out of the deep
+    # sound channel, not absorption (Jensen et al., Computational Ocean
+    # Acoustics, §1.5.2, region I of Fig. 1.20; see absorption_thorp), so no
+    # loss scales to the DC bin.
+    positive = freqs > 0.0
     alpha = np.asarray(absorption.table(
-        np.concatenate([[f_t], freqs]), units='dB/m').data, dtype=float)
+        np.concatenate([[f_t], freqs[positive]]), units='dB/m').data,
+        dtype=float)
     if not alpha[0] > 0.0:
         return np.outer(imag, omega)
-    return np.outer(imag, 2.0 * np.pi * f_t * alpha[1:] / alpha[0])
+    scale = np.zeros(freqs.shape)
+    scale[positive] = 2.0 * np.pi * f_t * alpha[1:] / alpha[0]
+    return np.outer(imag, scale)
 
 
 def band_absorption_error_dB_per_km(absorption: Absorption, frequencies,
@@ -1702,11 +1748,9 @@ def minimax_anchor_frequency(absorption: Optional[Absorption],
         # table()'s own kernel in dB/km, without its out-of-band notice: the
         # trial grids are this search's, and the caller's evaluations at the
         # anchor and over the run's frequencies give the notice once.
-        f = np.atleast_1d(np.asarray(f, dtype=float))
-        return 1000.0 * np.stack(
-            [np.asarray(absorption._alpha_dB_per_m_at_sound_speed(
-                float(fj), z, DEFAULT_SOUND_SPEED), dtype=float)
-             for fj in f], axis=1).reshape(z.size, f.size)
+        f = np.atleast_1d(np.asarray(f, dtype=float)).ravel()
+        return 1000.0 * np.asarray(absorption._alpha_dB_per_m_at_sound_speed(
+            f, z, DEFAULT_SOUND_SPEED), dtype=float).reshape(z.size, f.size)
 
     truth = law(freqs)
     scale = np.nanmax(np.abs(truth)) if np.any(np.isfinite(truth)) else 0.0

@@ -8,6 +8,8 @@ any binary — the projection logic is pure Python.
 """
 
 import warnings
+from pathlib import Path
+from typing import Dict, Optional, Union
 
 import numpy as np
 import pytest
@@ -24,74 +26,27 @@ from uacpy.core.run_settings import RunMode
 from uacpy.models._projection import (
     DEFAULT_COLLAPSE, collapse_elastic_boundary,
 )
-from uacpy.tests.conftest import build_engine, engine_names, engine_params
 
 
 # ---------------------------------------------------------------------
 # Per-model defaults
 # ---------------------------------------------------------------------
 
-# (model class name, expected per-key overrides relative to DEFAULT_COLLAPSE)
-#
-# Two patterns explain the shape of this table. ``bottom_range: 'median'``
-# appears for every model except Bellhop, Kraken and RAM — the three that
-# declare ``_supports_range_dependent_bottom`` and so never collapse the range
-# axis at all. ``ssp: 'mean'`` is absent wherever ``collapse['ssp']`` cannot reach the
-# answer, so the global ``'r0'`` stands: OASR and Bounce return a reflection
-# coefficient off the bottom stack rather than a field, and Kraken declares
-# ``range_dependent_ssp``, which is exactly the condition under which
-# ``_project_environment``'s SSP-collapse branch does not run.
-_PER_MODEL_DEFAULTS = [
-    ('Bellhop',     {}),
-    ('Kraken',      {}),
-    ('Scooter',     {'ssp': 'mean', 'bottom_range': 'median'}),
-    ('SPARC',       {'ssp': 'mean', 'bottom_range': 'median'}),
-    ('OAST',        {'ssp': 'mean', 'bottom_range': 'median'}),
-    ('OASN',        {'ssp': 'mean', 'bottom_range': 'median'}),
-    ('OASR',        {'bottom_range': 'median'}),
-    ('OASP',        {'ssp': 'mean', 'bottom_range': 'median'}),
-    ('OASSP',       {'ssp': 'mean', 'bottom_range': 'median'}),
-    ('OASS',        {'ssp': 'mean', 'bottom_range': 'median'}),
-    ('Bounce',      {'bottom_range': 'median'}),
-    ('RAM',         {}),
-]
+# Each engine's collapse defaults (``spec.collapse``) and the policy a default
+# instance resolves from them are held to the saved engine records
+# (``tests/data/engine_specs.json``, ``test_capability_flags.py``).
 
-# Each model resolves (and existence-checks) its binary in __init__, so the
-# construction below carries the markers of the installs its registry entry
-# declares.
-_PER_MODEL_PARAMS = [
-    pytest.param(param.values[0],
-                 dict(_PER_MODEL_DEFAULTS).get(param.values[0]),
-                 id=param.id, marks=param.marks)
-    for param in engine_params(value='name')
-]
-
-
-def test_the_defaults_table_covers_the_registered_engines():
-    names = {name for name, _ in _PER_MODEL_DEFAULTS}
-    missing = sorted(engine_names() - names)
-    stale = sorted(names - engine_names())
-    assert not missing and not stale, (
-        f"_PER_MODEL_DEFAULTS in test_collapse_policy.py has no row for "
-        f"{missing} and stale rows for {stale}: every registered engine "
-        f"needs one (docs/DEV.md section 3, step 5)")
-
-
-@pytest.mark.parametrize('cls_name,overrides', _PER_MODEL_PARAMS)
-def test_per_model_collapse_defaults(cls_name, overrides):
-    """Each model installs its physics-aware overrides via
-    ``_set_collapse_defaults`` and inherits the rest from
-    ``DEFAULT_COLLAPSE``."""
-    if overrides is None:
-        pytest.fail(f"_PER_MODEL_DEFAULTS has no row for {cls_name} "
-                    f"(docs/DEV.md section 3, step 5)")
-    m = build_engine(cls_name, verbose=False)
-    for key, expected in DEFAULT_COLLAPSE.items():
-        want = overrides.get(key, expected)
-        assert m._collapse[key] == want, (
-            f"{cls_name}: collapse[{key!r}]={m._collapse[key]!r}, "
-            f"expected {want!r}"
-        )
+def test_every_model_reduces_a_seabed_to_its_median_column():
+    """One rule for the seabed column: the global default is 'median' and
+    no model overrides it, so one environment reduces to the same seabed
+    whichever engine runs it."""
+    from uacpy.models._registry import engine_classes
+    assert DEFAULT_COLLAPSE['bottom_range'] == 'median'
+    overriding = sorted(cls.__name__ for cls in engine_classes().values()
+                        if 'bottom_range' in cls.spec.collapse)
+    assert not overriding, (
+        f"{overriding} override collapse['bottom_range']; the seabed column "
+        f"is one rule for every engine")
 
 
 @pytest.mark.requires_binary  # constructs a concrete model
@@ -99,7 +54,7 @@ def test_user_collapse_overrides_per_model_defaults():
     """User ``collapse={...}`` always wins over model defaults."""
     from uacpy.models import Bounce
     bn = Bounce(verbose=False, collapse={'bottom_range': 'r0'})
-    assert bn._collapse['bottom_range'] == 'r0'  # not Bounce's 'median' default
+    assert bn._collapse['bottom_range'] == 'r0'  # not the global 'median'
 
 
 def test_unknown_collapse_key_raises():
@@ -135,7 +90,9 @@ def _rdlb_env():
 def _bare_model_factory(supports_layered: bool):
     """Build a minimal subclass that doesn't spawn any binary."""
     from uacpy.core.run_settings import RunMode
-    from uacpy.models.base import PropagationModel
+    from uacpy.models.base import (
+        DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+    )
     from uacpy.models._spec import ModelSpec
 
     def _never_launched(self, *args):
@@ -151,8 +108,13 @@ def _bare_model_factory(supports_layered: bool):
         spec = ModelSpec(modes=(RunMode.COHERENT_TL,))
         provenance_id = 'acoustics_toolbox'
 
-        def __init__(self, **kw):
-            super().__init__(**kw)
+        def __init__(self, *, use_tmpfs: bool = False,
+                     verbose: Union[bool, str] = False,
+                     work_dir: Optional[Path] = None,
+                     cleanup: Optional[bool] = None,
+                     timeout: float = DEFAULT_RUN_TIMEOUT_S,
+                     collapse: Optional[Dict[str, str]] = None):
+            super().__init__(**_host_options(locals()))
             self._supports_layered_bottom = supports_layered
 
         _write_input = _launch = _read_output = _to_result = _never_launched
@@ -353,6 +315,23 @@ def test_collapse_elastic_rd_bottom_zeros_shear_arrays():
         collapsed.halfspace_density, np.array([1.5, 1.6, 1.7]))
     # Original input untouched (deepcopy contract)
     assert rd.halfspace_shear_speed[1] == 400.0
+
+
+@pytest.mark.parametrize('base', ['rigid', 'vacuum'])
+def test_collapse_elastic_layers_over_a_parameter_free_half_space(base):
+    """An elastic layer over a rigid or vacuum half-space collapses to a
+    fluid layer over the same half-space: the half-space carries no shear
+    and keeps its fields, where an assignment of zero re-validated it as
+    a rigid boundary given a shear_speed and was refused."""
+    column = SeabedColumn(
+        layers=[SedimentLayer(thickness=20.0, sound_speed=1600.0,
+                              density=1.8, attenuation=0.5,
+                              shear_speed=300.0, shear_attenuation=0.5)],
+        halfspace=BoundaryProperties(acoustic_type=base))
+    collapsed = collapse_elastic_boundary(Bottom(columns=[column]), 'fluid')
+    assert not collapsed.is_elastic
+    assert collapsed.columns[0].layers[0].sound_speed == 1600.0
+    assert collapsed.columns[0].halfspace.acoustic_type == base
 
 
 # ---------------------------------------------------------------------

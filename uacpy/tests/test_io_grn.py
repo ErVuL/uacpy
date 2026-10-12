@@ -67,6 +67,64 @@ class TestGrnPhaseSpeedTaper:
         with pytest.raises(ConfigurationError, match="2 frequencies"):
             _scooter_gf([100.0, 200.0], G).to_field(np.array([1000.0]))
 
+    def test_to_field_warns_past_half_a_step_outside_the_band(self):
+        """The rule ``Field.at`` keeps: the edge slice is returned for a
+        request outside the stored band, with a warning once the request is
+        more than half the edge step past it, and silently within that."""
+        import warnings
+        from uacpy.core.exceptions import FallbackWarning
+        gf = _scooter_gf([100.0, 200.0],
+                         np.ones((2, 1, 2, 32), dtype=np.complex64))
+        ranges = np.array([1000.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', FallbackWarning)
+            assert gf.to_field(ranges, frequency=249.0).f0 == 200.0
+            assert gf.to_field(ranges, frequency=51.0).f0 == 100.0
+        with pytest.warns(FallbackWarning, match='edge slice at 200 Hz'):
+            assert gf.to_field(ranges, frequency=251.0).f0 == 200.0
+        with pytest.warns(FallbackWarning, match='edge slice at 100 Hz'):
+            assert gf.to_field(ranges, frequency=49.0).f0 == 100.0
+
+    def test_to_field_refuses_a_frequency_that_is_not_finite(self):
+        G = np.ones((2, 1, 2, 32), dtype=np.complex64)
+        with pytest.raises(ConfigurationError, match="must be finite"):
+            _scooter_gf([100.0, 200.0], G).to_field(np.array([1000.0]),
+                                                    frequency=np.nan)
+
+
+@pytest.mark.parametrize('recl_floor', [0, 4096])
+def test_the_green_rows_read_as_their_records_hold_them(tmp_path, recl_floor):
+    """A .grn is the .shd layout (scooter.f90:586-588): one gap-free run of
+    nfreq*nsd*nrd rows of nk complex REAL*4 from record 11. Read through the
+    .shd row reader, every row lands at its (frequency, source depth,
+    receiver depth), with or without record padding; a file cut inside the
+    rows is refused as truncated."""
+    from uacpy.core.exceptions import FileFormatError
+    from uacpy.io.grn_reader import read_grn_file
+    from uacpy.tests.test_reader_block_reads import (
+        _nonzero_complex64, _write_shd)
+    rng = np.random.default_rng(11)
+    nfreq, nsd, nrd, nk = 2, 2, 3, 5
+    samples = _nonzero_complex64(rng, (nfreq, 1, nsd, nrd, nk))
+    path = tmp_path / 'g.grn'
+    _write_shd(path, samples, nfreq, 1, 1, 1, nsd, nrd, nk,
+               recl_floor=recl_floor)
+    G = read_grn_file(path).data
+    assert G.shape == (nfreq, nsd, nrd, nk)
+    np.testing.assert_array_equal(G, samples[:, 0])
+    path.write_bytes(path.read_bytes()[:-(4 * max(41, recl_floor, 2 * nk))
+                                       - 8])
+    with pytest.raises(FileFormatError, match='truncated pressure data'):
+        read_grn_file(path)
+
+
+def _uniform_k_phase_speeds(c_hi, c_lo, nk, freq):
+    """Phase speeds ``c_hi`` down to ``c_lo`` whose wavenumbers at ``freq``
+    are uniform — SCOOTER's grid (``scooter.f90:77-79``), and uniform at
+    every frequency since ``k`` scales with it."""
+    omega = 2.0 * np.pi * freq
+    return omega / np.linspace(omega / c_hi, omega / c_lo, nk)
+
 
 def _scooter_gf(freqs, G, *, title="SCOOTER test", atten=0.0):
     """A frequency-domain GreensFunction on a decreasing phase-speed grid,
@@ -74,7 +132,8 @@ def _scooter_gf(freqs, G, *, title="SCOOTER test", atten=0.0):
     from uacpy.core.results import GreensFunction
     nk = G.shape[-1]
     return GreensFunction(
-        data=G, phase_speeds=np.linspace(1700.0, 1400.0, nk),
+        data=G, phase_speeds=_uniform_k_phase_speeds(1700.0, 1400.0, nk,
+                                                     100.0),
         receiver_depths=np.array([25.0, 75.0]), source_depths=[50.0],
         frequencies=freqs, stabilizing_attenuation=atten, title=title)
 
@@ -85,7 +144,8 @@ def _snapshot_gf(nt=8, nk=16, f0=50.0, dt=1e-3):
     G = (rng.standard_normal((nt, 1, 2, nk))
          + 1j * rng.standard_normal((nt, 1, 2, nk))).astype(np.complex64)
     return GreensFunction(
-        data=G, phase_speeds=np.linspace(2500.0, 1400.0, nk),
+        data=G, phase_speeds=_uniform_k_phase_speeds(2500.0, 1400.0, nk,
+                                                     f0),
         receiver_depths=np.array([25.0, 75.0]), source_depths=[50.0],
         frequencies=f0, times=np.arange(nt) * dt,
         title="SPARC-  snapshot", model='SPARC')

@@ -20,6 +20,7 @@ from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.tests.conftest import make_pekeris
 from uacpy.tests.conftest import make_halfspace
 from uacpy.tests.conftest import recorded_warnings
+from uacpy.models._checks import reject_malformed_irc_bottom
 
 pytestmark = pytest.mark.requires_binary
 
@@ -28,7 +29,7 @@ class TestScooterBasic:
     """Basic tests for Scooter model (wavenumber integration)."""
 
     @pytest.mark.requires_binary
-    def test_compute_tl_returns_finite_grid_matching_receiver_shape(self):
+    def test_compute_field_returns_finite_grid_matching_receiver_shape(self):
         """Test basic Scooter TL computation."""
         env = Environment(
             name="scooter_test",
@@ -42,7 +43,7 @@ class TestScooterBasic:
         )
 
         scooter = Scooter(verbose=False)
-        result = scooter.compute_tl(env=env, source=source, receiver=receiver)
+        result = scooter.compute_field(env=env, source=source, receiver=receiver)
 
         assert isinstance(result, Field)
         assert result.shape == (len(receiver.depths), len(receiver.ranges))
@@ -82,7 +83,7 @@ class TestScooterBroadband:
         # ``test_broadband_fc_slice_matches_the_narrowband_run``). The two runs
         # sample different wavenumber grids (rmax_factor 3.0 vs 2.0), so
         # the comparison bounds the median bias rather than pinning equality.
-        nb = Scooter(verbose=False).compute_tl(env=env, source=source,
+        nb = Scooter(verbose=False).compute_field(env=env, source=source,
                                                receiver=receiver)
         got = np.asarray(result.at(frequency=100.0).to_dB().data, dtype=float)
         ref = np.asarray(nb.dB, dtype=float)
@@ -164,8 +165,12 @@ def test_grn_transform_is_recorded_as_the_direct_dft():
     """The transform is a trapezoidal-rule DFT (``fieldsco.m:5``), not an FFT,
     and the field says so."""
     from uacpy.core.results import GreensFunction
+    # Phase speeds whose wavenumbers are uniform at 100 Hz: SCOOTER's own
+    # grid (scooter.f90:77-79), which the transform requires.
+    omega = 2.0 * np.pi * 100.0
     gf = GreensFunction(data=np.ones((1, 1, 1, 8), np.complex64),
-                        phase_speeds=np.linspace(1700.0, 1400.0, 8),
+                        phase_speeds=omega / np.linspace(
+                            omega / 1700.0, omega / 1400.0, 8),
                         receiver_depths=[10.0], source_depths=[5.0],
                         frequencies=100.0, title='SCOOTER - test')
     field = gf.to_field(np.array([100.0]))
@@ -215,7 +220,7 @@ class TestZeroReceiverRange:
                 Scooter(verbose=False).run(env, source, self._receiver()).dB)
         with pytest.warns(UserWarning, match="r = 0"):
             kraken_tl = np.asarray(
-                Kraken(verbose=False).compute_tl(
+                Kraken(verbose=False).compute_field(
                     env, source, self._receiver()).dB)
 
         assert np.all(np.isnan(scooter_tl[:, 0]))
@@ -403,8 +408,8 @@ class TestScooterDeckResolution:
     """Deck-level checks of the documented ``None`` resolutions
     (``docs/models/scooter.md`` constructor table): the spectral
     ``RMax = receiver.ranges.max() × rmax_factor`` with the multiplier
-    defaulting to 2.0 narrowband / 3.0 broadband, and
-    ``c_low = 0.95 × min(SSP)`` when only ``c_high`` is pinned. Read off
+    defaulting to 2.0 in every run mode, and
+    ``c_low = 0.9 × min(SSP)`` when only ``c_high`` is pinned. Read off
     ``run_settings(...).engine``, the settings the deck is written from,
     without launching the binary (``TestTheDeckIsWrittenFromTheResolvedSettings``
     pins that the deck carries them)."""
@@ -428,18 +433,21 @@ class TestScooterDeckResolution:
             run_mode, frequencies=frequencies).engine
 
     def test_narrowband_rmax_is_twice_the_receiver_max(self):
-        # 0.95×1500 = 1425.0, 1.05×1800 = 1890.0; RMax = 3000 m × 2.0.
+        # 0.9×1500 = 1350.0, c_high unbounded (k_min = 0); RMax = 3000 m × 2.0.
         engine = self._engine(Scooter(verbose=False))
-        assert (engine.c_low, engine.c_high) == pytest.approx((1425.0, 1890.0))
+        assert (engine.c_low, engine.c_high) == pytest.approx((1350.0, 1e9))
         assert engine.rmax_m == pytest.approx(6000.0)
-        assert engine.rmax_factor_origin == 'the COHERENT_TL default'
+        assert engine.rmax_factor_origin.startswith('the default, 2 ×')
+        assert 'tests/BroadBand/MunkS.env' in engine.rmax_factor_origin
 
-    def test_broadband_rmax_is_three_times_the_receiver_max(self):
+    def test_broadband_rmax_is_twice_the_receiver_max(self):
+        """AT's own broadband deck (tests/BroadBand/MunkS.env) writes RMax
+        = 2 × the farthest receiver, as its narrowband one does."""
         engine = self._engine(
             Scooter(verbose=False), run_mode=RunMode.BROADBAND,
             frequencies=np.linspace(80.0, 120.0, 5))
-        assert engine.rmax_m == pytest.approx(9000.0)
-        assert engine.rmax_factor == 3.0
+        assert engine.rmax_m == pytest.approx(6000.0)
+        assert engine.rmax_factor == 2.0
 
     def test_pinned_rmax_factor_wins_in_both_modes(self):
         model = Scooter(rmax_factor=5.0, verbose=False)
@@ -451,18 +459,18 @@ class TestScooterDeckResolution:
         assert broad.rmax_factor_origin == 'Scooter(rmax_factor=…)'
 
     def test_c_low_auto_derives_with_c_high_pinned(self):
-        # Only c_high pinned: c_low still resolves to 0.95 × min(SSP).
+        # Only c_high pinned: c_low still resolves to 0.9 × min(SSP).
         engine = self._engine(Scooter(c_high=1700.0, verbose=False))
-        assert (engine.c_low, engine.c_high) == pytest.approx((1425.0, 1700.0))
-        assert engine.c_low_origin == '0.95 × min(env.ssp)'
+        assert (engine.c_low, engine.c_high) == pytest.approx((1350.0, 1700.0))
+        assert engine.c_low_origin == '0.9 × min(env.ssp)'
         assert engine.c_high_origin == 'Scooter(c_high=…)'
 
     def test_documented_factors_are_the_code_factors(self):
-        # scooter.md and DOCUMENTATION.md state 0.95 / 1.05 as literals; this
-        # pins the constants so doc-vs-code drift fails a test.
-        from uacpy.models._window import C_LOW_FACTOR, C_HIGH_FACTOR
-        assert C_LOW_FACTOR == 0.95
-        assert C_HIGH_FACTOR == 1.05
+        # scooter.md and DOCUMENTATION.md state 0.9 as a literal; this
+        # pins the constant so doc-vs-code drift fails a test. 0.90 is
+        # scooter.f90:258's own factor.
+        from uacpy.models._window import C_LOW_FACTOR
+        assert C_LOW_FACTOR == 0.90
 
 
 class TestScooterSpectrumOption:
@@ -503,7 +511,7 @@ class TestNMeshSilentFloor:
             bottom=BoundaryProperties(acoustic_type='half-space',
                                       sound_speed=1800.0, density=1.8,
                                       attenuation=0.5))
-        result = Scooter(n_mesh=n_mesh, verbose=False).compute_tl(
+        result = Scooter(n_mesh=n_mesh, verbose=False).compute_field(
             env=env, source=Source(depths=50.0, frequencies=50.0),
             receiver=Receiver(depths=np.array([25.0, 75.0]),
                               ranges=np.linspace(500.0, 3000.0, 6)))
@@ -588,7 +596,7 @@ class TestPrecalcBottomIrcGuard:
             bottom=BoundaryProperties(acoustic_type='precalc',
                                       reflection_file=str(table)))
         # The guard alone: header accepted, no exception raised.
-        assert Scooter(verbose=False)._reject_malformed_irc_bottom(env) is None
+        assert reject_malformed_irc_bottom('Scooter', env) is None
 
 
 @pytest.mark.requires_binary
@@ -623,7 +631,7 @@ class TestScooterRefusesAPhaseSpeedBandInvertedByOnePinnedBound:
     """The constructor can only compare two pinned bounds. One pinned bound is
     comparable once the other is derived from the env, which happens when
     the run's settings are resolved; on the 100 m / 1500 m/s guide the auto
-    band is (1425, 1680) m/s, so ``c_low=2000`` alone writes CLOW > CHIGH.
+    band is (1350, 1e9) m/s, so ``c_low=2e9`` alone writes CLOW > CHIGH.
     ``ReadEnvironmentMod.f90:135`` then stops the binary after the deck has
     been written and the process spawned.
     """
@@ -637,8 +645,8 @@ class TestScooterRefusesAPhaseSpeedBandInvertedByOnePinnedBound:
             Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
 
     def test_a_pinned_c_low_above_the_derived_c_high_names_c_low(self, tmp_path):
-        with pytest.raises(ConfigurationError, match='pinned c_low=2000'):
-            self._run(tmp_path, c_low=2000.0)
+        with pytest.raises(ConfigurationError, match='pinned c_low=2000000000'):
+            self._run(tmp_path, c_low=2e9)
         assert not (tmp_path / 'model.env').exists()
 
     def test_a_pinned_c_high_below_the_derived_c_low_names_c_high(self, tmp_path):
@@ -731,7 +739,7 @@ class TestScooterRefusesAWavenumberGridItCannotSpace:
                             ranges=np.array([1000.0]))
         model = Scooter(verbose=False, work_dir=tmp_path, cleanup=False,
                         **self.BAND)
-        result = model.compute_tl(env=env, source=source, receiver=receiver)
+        result = model.compute_field(env=env, source=source, receiver=receiver)
         predicted = _deck_nk(2000.0, 100.0, 1500.0, 1935.0)
         assert result.run_settings.engine.n_wavenumbers == predicted
         printed = int(re.search(r'Nk =\s+(-?\d+)',
@@ -740,6 +748,15 @@ class TestScooterRefusesAWavenumberGridItCannotSpace:
             f"the binary printed Nk = {printed}: this fixture has to reach a "
             f"count the guard would allow, or it pins nothing")
         assert predicted == printed
+
+    def test_the_predicted_count_uses_the_unrounded_window(self):
+        """The deck carries c_low/c_high exactly, so the count does too:
+        over 1000 km at 1 kHz, 1400.37 and its 0.1 m/s rounding 1400.4 are
+        61 wavenumbers apart."""
+        from uacpy.models.scooter._plan import _deck_nk
+        exact = int(4.0e9 * (1.0 / 1400.37 - 1.0 / 2000.0))
+        assert _deck_nk(1.0e6, 1000.0, 1400.37, 2000.0) == exact
+        assert exact - int(4.0e9 * (1.0 / 1400.4 - 1.0 / 2000.0)) == 61
 
 
 class TestScooterKernelTaper:
@@ -798,21 +815,25 @@ class TestScooterKernelTaper:
         with pytest.raises(ConfigurationError, match='non-finite'):
             taper_bounds(grn, taper=Scooter(taper=0.02).taper)
 
-    def test_a_grid_too_small_to_taper_says_so(self):
-        """Returning (None, None) silently would make the run indistinguish-
-        able from taper=0, with nothing printed even at verbose=True."""
-        with pytest.warns(UserWarning, match='untapered'):
-            got = taper_bounds(
-                np.array([1400.0, 1500.0]),
-                taper=Scooter(taper=0.02).taper)
-        assert got == (None, None)
+    @pytest.mark.parametrize('n_speeds, refused', [(3, True), (4, False)])
+    def test_a_grid_too_small_to_taper_refuses_the_pinned_taper(
+            self, n_speeds, refused):
+        """A pinned taper is applied or refused, never dropped: a grid of
+        fewer than four speeds has no room for a roll-off at each edge."""
+        grn = np.linspace(1400.0, 1700.0, n_speeds)
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match='too few to place a roll-off') as exc:
+                taper_bounds(grn, taper=Scooter(taper=0.02).taper)
+            assert 'taper=0' in exc.value.remediation
+        else:
+            cmin, cmax = taper_bounds(grn, taper=Scooter(taper=0.02).taper)
+            assert 1400.0 < cmin < cmax < 1700.0
 
-    def test_a_single_speed_grid_says_so(self):
-        with pytest.warns(UserWarning, match='single speed'):
-            got = taper_bounds(
-                np.full(64, 1500.0),
-                taper=Scooter(taper=0.02).taper)
-        assert got == (None, None)
+    def test_a_single_speed_grid_refuses_the_pinned_taper(self):
+        with pytest.raises(ConfigurationError, match='single speed'):
+            taper_bounds(np.full(64, 1500.0),
+                         taper=Scooter(taper=0.02).taper)
 
     def test_taper_zero_is_silent_on_a_grid_that_cannot_carry_one(self):
         """Only a REQUESTED taper warns; taper=0 asked for nothing."""
@@ -953,35 +974,103 @@ class TestScooterRefusesAGreenCubeOverTheReaderBudget:
         assert settings.engine.n_wavenumbers >= 2
 
 
-class TestSteepPathsBeyondTheDefaultCutAreAnnounced:
-    """The auto-derived c_high keeps paths only to arccos(c/c_high) grazing;
-    a receiver seeing a steeper direct or surface path lost it silently —
-    23 dB at 0.2 km in a Lloyd geometry over a transparent bottom."""
+class TestAnInterfaceWaveTheDerivedCLowLeavesOutIsAnnounced:
+    """The derived c_low (0.9 x min SSP) lies above a soft seabed's Scholte
+    wave (~0.85 c_s, JKPS §5.10.5): 50 m of water over cp 1600 / cs 300 at
+    20 Hz, source 49 m and receiver 49.5 m — TL moved up to 3.8 dB with
+    c_low = 200. The run says so only when the geometry reaches within one
+    interface wavelength (0.85 c_s / f = 12.75 m) of the seafloor."""
+
+    @staticmethod
+    def _env(shear_speed=300.0):
+        from uacpy.core import BoundaryProperties
+        return Environment(
+            bathymetry=50.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1600.0, density=1.8,
+                                      attenuation=0.5,
+                                      shear_speed=shear_speed,
+                                      shear_attenuation=0.5))
+
+    @staticmethod
+    def _said(model, env, zs, zr):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            notices = model.run_settings(
+                env, Source(depths=zs, frequencies=20.0),
+                Receiver(depths=zr, ranges=[200.0, 2000.0])).engine.notices
+        return [n.message for n in notices if 'Scholte' in n.message]
+
+    @pytest.mark.parametrize('zs, zr, says', [
+        (49.0, [45.0, 49.5], True),    # 0.5 m from the seafloor
+        (25.0, [37.3], True),          # 12.7 m: inside the 12.75 m wavelength
+        (25.0, [37.2], False),         # 12.8 m: outside it
+        (25.0, [10.0, 30.0], False),
+    ])
+    def test_the_geometry_near_the_seafloor_decides(self, zs, zr, says):
+        said = self._said(Scooter(), self._env(), zs, zr)
+        assert bool(said) is says, said
+        if says:
+            assert 'c_low below 255 m/s' in said[0]
+
+    def test_a_hard_seabeds_interface_wave_inside_the_window_says_nothing(
+            self):
+        """A basalt-like seabed (cs 2500 m/s): its interface wave, ~2125
+        m/s, lies above the derived c_low, so the integral keeps it and a
+        source 1 m above the bed hears no notice."""
+        from uacpy.core import BoundaryProperties
+        env = Environment(
+            bathymetry=50.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=5250.0, density=2.7,
+                                      attenuation=0.1, shear_speed=2500.0,
+                                      shear_attenuation=0.2))
+        assert self._said(Scooter(), env, 49.0, [49.0]) == []
+
+    def test_a_pinned_c_low_and_a_fluid_seabed_say_nothing(self):
+        assert self._said(Scooter(c_low=200.0), self._env(), 49.0,
+                          [49.5]) == []
+        assert self._said(Scooter(), self._env(shear_speed=0.0), 49.0,
+                          [49.5]) == []
+
+
+class TestSteepPathsBeyondAPinnedCutAreAnnounced:
+    """A pinned c_high keeps paths only to arccos(c/c_high) grazing; a
+    receiver seeing a steeper direct or surface path loses it silently — 23
+    dB at 0.2 km in a Lloyd geometry over a transparent bottom with c_high
+    at 1.05 x the water speed. The unpinned c_high is unbounded (k_min = 0,
+    JKPS ch. 4 App. 1), keeps every path and says nothing."""
 
     @staticmethod
     def _env():
         return make_pekeris(bathymetry=400.0, sound_speed=1500.0,
                             density=1.027, attenuation=0.0)
 
-    def test_a_near_receiver_warns_and_the_remedy_is_exact(self):
+    @pytest.mark.requires_binary
+    def test_the_default_is_the_exact_image_sum_and_silent(self):
         src = Source(depths=25.0, frequencies=150.0)
         rcv = Receiver(depths=[200.0], ranges=[200.0, 500.0, 1200.0])
-        with pytest.warns(UserWarning, match="c_high=1e9"):
-            Scooter().compute_tl(self._env(), src, rcv)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            fixed = Scooter(c_high=1e9, taper=0.05).compute_tl(
-                self._env(), src, rcv)
+        with recorded_warnings() as rec:
+            field = Scooter().compute_field(self._env(), src, rcv)
+        assert not any("Leave c_high unset" in str(w.message) for w in rec)
         # Exact image solution (JKPS eq. 1.19): 43.03 / 55.75 / 61.18 dB.
-        np.testing.assert_allclose(np.asarray(fixed.dB).ravel(),
+        np.testing.assert_allclose(np.asarray(field.dB).ravel(),
                                    [43.03, 55.75, 61.18], atol=0.1)
 
-    def test_a_pinned_c_high_is_trusted(self):
+    @pytest.mark.requires_binary
+    def test_a_pinned_cut_warns_and_the_remedy_is_exact(self):
         src = Source(depths=25.0, frequencies=150.0)
-        rcv = Receiver(depths=[200.0], ranges=[200.0])
-        with recorded_warnings() as rec:
-            Scooter(c_high=1575.0).compute_tl(self._env(), src, rcv)
-        assert not any("c_high=1e9" in str(w.message) for w in rec)
+        rcv = Receiver(depths=[200.0], ranges=[200.0, 500.0, 1200.0])
+        with pytest.warns(UserWarning, match="pinned c_high = 1575.0") as rec:
+            cut = Scooter(c_high=1575.0).compute_field(self._env(), src, rcv)
+        assert any("Leave c_high unset" in str(w.message) for w in rec)
+        assert abs(float(np.asarray(cut.dB).ravel()[0]) - 43.03) > 10.0
+
+    def test_a_pinned_cut_the_geometry_clears_is_silent(self):
+        settings = Scooter(verbose=False, c_high=1575.0).run_settings(
+            self._env(), Source(depths=25.0, frequencies=150.0),
+            Receiver(depths=[200.0], ranges=[5000.0]))
+        assert settings.engine.notices == ()
 
 
 class _Launched(Exception):
@@ -999,6 +1088,63 @@ def _near_source():
 def _grid():
     return Receiver(depths=np.array([20.0, 60.0]),
                     ranges=np.array([1000.0, 3000.0]))
+
+
+class TestAFluidLayerBelowAnElasticOneIsRefused:
+    """scooter.f90:206-207 spans FirstAcoustic..LastAcoustic over every
+    acoustic medium, so an elastic layer above a fluid one is assembled with
+    the acoustic block (:139, :213-224) and BCImpedance shoots up only below
+    LastAcoustic (:374-379): measured 52.44 against OAST's 60.07 dB median on
+    example 16's seabed. Elastic layers below the last fluid one, and an
+    all-fluid stack, run (within 0.07 dB of OAST)."""
+
+    @staticmethod
+    def _env(shears, halfspace_shear=0.0):
+        from uacpy.core import BoundaryProperties
+        from uacpy.core.environment import SeabedColumn, SedimentLayer
+        hs = dict(acoustic_type='half-space', sound_speed=2000.0,
+                  density=2.2, attenuation=0.1)
+        if halfspace_shear:
+            hs.update(shear_speed=halfspace_shear, shear_attenuation=0.5)
+        layers = [SedimentLayer(thickness=t, sound_speed=c, density=1.6,
+                                attenuation=0.3, shear_speed=cs,
+                                shear_attenuation=0.5 if cs else 0.0)
+                  for t, c, cs in zip((5.0, 10.0, 20.0),
+                                      (1550.0, 1650.0, 1800.0), shears)]
+        return Environment(name='stack', bathymetry=200.0, ssp=1500.0,
+                           bottom=SeabedColumn(
+                               layers=layers,
+                               halfspace=BoundaryProperties(**hs)))
+
+    @staticmethod
+    def _settings(env):
+        return Scooter(verbose=False).run_settings(
+            env, Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=[30.0], ranges=[1000.0, 2000.0]))
+
+    @pytest.mark.parametrize('shears', [(100.0, 0.0, 0.0),
+                                        (100.0, 0.0, 200.0),
+                                        (100.0, 100.0, 0.0)])
+    def test_an_elastic_layer_above_a_fluid_one_is_refused(self, shears):
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        with pytest.raises(UnsupportedFeatureError,
+                           match='a fluid sediment layer below an elastic '
+                                 'one') as exc:
+            self._settings(self._env(shears))
+        assert 'scooter.f90:206-207' in str(exc.value)
+        assert 'OAST' in str(exc.value)
+
+    @pytest.mark.parametrize('shears, halfspace_shear', [
+        ((0.0, 0.0, 0.0), 0.0),        # all fluid
+        ((0.0, 0.0, 200.0), 0.0),      # an elastic layer over a fluid floor
+        ((100.0, 100.0, 200.0), 0.0),  # an elastic stack over a fluid floor
+        ((100.0, 100.0, 200.0), 800.0)])
+    def test_elastic_layers_below_the_last_fluid_one_run(
+            self, shears, halfspace_shear):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = self._settings(self._env(shears, halfspace_shear))
+        assert settings.engine.n_wavenumbers > 1
 
 
 class TestTheThreeEntryPointsRefuseAlike:
@@ -1023,7 +1169,7 @@ class TestTheThreeEntryPointsRefuseAlike:
         if label == "interp_ssp='quad'":
             model_kw = dict(interp_ssp='quad')
         elif label == 'c_low pinned above the derived c_high':
-            model_kw = dict(c_low=2000.0)
+            model_kw = dict(c_low=2e9)
         elif label == 'fewer than two wavenumber samples':
             model_kw = dict(c_low=1500.0, c_high=1935.0)
             rcv = Receiver(depths=np.array([50.0]), ranges=np.array([8.3]))
@@ -1092,7 +1238,8 @@ class TestTheSettingsRecordTheDeck:
             engine = Scooter(verbose=False).run_settings(
                 env, _near_source(), _grid()).engine
         assert engine.c_high == DEFAULT_C_MAX_UNBOUNDED
-        assert "'precalc'" in engine.c_high_origin
+        assert engine.c_high_origin.startswith(
+            'unbounded (1e+09 m/s): k_min = 0')
 
     def test_a_per_depth_loop_sizes_the_memory_for_one_depth(self):
         """BROADBAND launches one source depth at a time, so the cube a
@@ -1111,11 +1258,22 @@ class TestTheSettingsRecordTheDeck:
             for depths in ([25.0], [25.0, 50.0]))
         assert narrow_two > narrow_one
 
-    def test_a_half_space_caps_c_high_at_its_speed(self):
+    def test_a_half_space_leaves_c_high_unbounded(self):
+        """Ruling 28: k_min = 0 over a fluid half-space too (JKPS ch. 4
+        App. 1); the seabed speed no longer caps the window."""
+        from uacpy.models._window import DEFAULT_C_MAX_UNBOUNDED
         engine = Scooter(verbose=False).run_settings(
             _pekeris(), _near_source(), _grid()).engine
-        assert engine.c_high == pytest.approx(1.05 * 1800.0)
-        assert engine.c_high_origin.startswith('1.05 × max(')
+        assert engine.c_high == DEFAULT_C_MAX_UNBOUNDED
+        assert engine.c_high_origin.startswith(
+            'unbounded (1e+09 m/s): k_min = 0')
+        assert 'ch. 4 App. 1' in engine.c_high_origin
+
+    def test_a_pinned_c_high_is_written_as_given(self):
+        engine = Scooter(verbose=False, c_high=1890.0).run_settings(
+            _pekeris(), _near_source(), _grid()).engine
+        assert engine.c_high == 1890.0
+        assert engine.c_high_origin == 'Scooter(c_high=…)'
 
     def test_the_docstrings_state_the_window_rules(self):
         """RA-WAVE-8 / RA-WAVE-16: the unbounded c_high names every
@@ -1127,13 +1285,13 @@ class TestTheSettingsRecordTheDeck:
         # Each engine documents its constructor once (class or __init__).
         found = [(doc, start)
                  for doc, start in ((Scooter.__doc__, 'c_low, c_high :'),
-                                    (Scooter.__init__.__doc__, 'c_low :'))
+                                    (Scooter.__init__.__doc__,
+                                     'c_low, c_high :'))
                  if doc and start in doc and 'n_mesh :' in doc]
         assert found, 'no docstring documents c_low/c_high'
         for doc, start in found:
             text = entry(doc, start)
-            for seabed in ('vacuum', 'rigid', "'file'", "'precalc'"):
-                assert seabed in text, (seabed, text)
+            assert 'over every bottom' in text and 'k min = 0' in text, text
             assert 'Scholte' in text and 'shear speed' in text, text
 
 
@@ -1156,7 +1314,7 @@ class TestTheDeckIsWrittenFromTheResolvedSettings:
             result = model.run(_pekeris(), _near_source(), _grid(), mode, **kw)
         engine = result.run_settings.engine
         lines = (tmp_path / 'model.env').read_text().splitlines()
-        speeds = f'{engine.c_low:.1f} {engine.c_high:.1f}'
+        speeds = f'{engine.c_low!r} {engine.c_high!r}'
         assert speeds in lines
         assert float(lines[lines.index(speeds) + 1]) == pytest.approx(
             engine.rmax_m / 1000.0)
@@ -1166,6 +1324,23 @@ class TestTheDeckIsWrittenFromTheResolvedSettings:
             assert result.run_settings.frequencies.size == 5
             assert engine.deck_max_frequency == 120.0
 
+    def test_a_pinned_fractional_window_reaches_the_deck_unrounded(
+            self, tmp_path):
+        """A pinned c_low/c_high is written as given, and the Nk the
+        settings predict is the one the binary prints from that deck."""
+        import re
+        model = Scooter(verbose=False, work_dir=tmp_path, cleanup=False,
+                        c_low=1400.37, c_high=1987.654321)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            result = model.run(_pekeris(), _near_source(), _grid(),
+                               RunMode.COHERENT_TL)
+        lines = (tmp_path / 'model.env').read_text().splitlines()
+        assert '1400.37 1987.654321' in lines
+        prt = (tmp_path / 'model.prt').read_text()
+        assert (int(re.search(r'Nk =\s+(-?\d+)', prt).group(1))
+                == result.run_settings.engine.n_wavenumbers)
+
 
 class TestNoticesComeFromRunNotFromValidateInputs:
     """The steep-path notice states how a run will go with the resolved
@@ -1173,14 +1348,15 @@ class TestNoticesComeFromRunNotFromValidateInputs:
     and ``validate_inputs`` does not."""
 
     @staticmethod
-    def _call(entry):
-        env = TestSteepPathsBeyondTheDefaultCutAreAnnounced._env()
+    def _call(entry, **knobs):
+        env = TestSteepPathsBeyondAPinnedCutAreAnnounced._env()
+        knobs.setdefault('c_high', 1575.0)
         with recorded_warnings() as caught:
-            out = getattr(Scooter(verbose=False), entry)(
+            out = getattr(Scooter(verbose=False, **knobs), entry)(
                 env, Source(depths=25.0, frequencies=150.0),
                 Receiver(depths=[200.0], ranges=[200.0, 500.0]))
-        return out, [str(w.message) for w in caught if 'c_high=1e9' in
-                     str(w.message)]
+        return out, [str(w.message) for w in caught if 'Leave c_high unset'
+                     in str(w.message)]
 
     def test_run_settings_announces_the_steep_path_once(self):
         assert len(self._call('run_settings')[1]) == 1
@@ -1197,14 +1373,14 @@ class TestNoticesComeFromRunNotFromValidateInputs:
         """BROADBAND launches once per source depth; the notice is a fact
         of the call's settings, judged over every depth, and given once
         before the first launch."""
-        env = TestSteepPathsBeyondTheDefaultCutAreAnnounced._env()
+        env = TestSteepPathsBeyondAPinnedCutAreAnnounced._env()
         with recorded_warnings() as caught:
-            Scooter(verbose=False).run(
+            Scooter(verbose=False, c_high=1575.0).run(
                 env, Source(depths=[25.0, 30.0], frequencies=150.0),
                 Receiver(depths=[200.0], ranges=[200.0, 500.0]),
                 RunMode.BROADBAND, frequencies=[140.0, 150.0, 160.0])
         said = [str(w.message) for w in caught
-                if 'c_high=1e9' in str(w.message)]
+                if 'Leave c_high unset' in str(w.message)]
         assert len(said) == 1, said
 
     def test_the_settings_record_the_condition(self):
@@ -1214,13 +1390,9 @@ class TestNoticesComeFromRunNotFromValidateInputs:
         assert [n.message for n in settings.engine.notices] == said
         assert 'drops paths steeper than' in repr(settings)
 
-    def test_a_pinned_c_high_records_nothing(self):
-        env = TestSteepPathsBeyondTheDefaultCutAreAnnounced._env()
-        settings = Scooter(verbose=False, c_high=1575.0).run_settings(
-            env, Source(depths=25.0, frequencies=150.0),
-            Receiver(depths=[200.0], ranges=[200.0]))
-        assert settings.engine.notices == ()
-
+    def test_an_unpinned_c_high_records_nothing(self):
+        settings, said = self._call('run_settings', c_high=None)
+        assert settings.engine.notices == () and said == []
 
 
 @pytest.mark.parametrize('c_low, refused', [(1500.0, True), (1499.9, False)])
@@ -1234,6 +1406,19 @@ def test_a_pinned_pair_is_refused_at_equality(c_low, refused):
                 cls(c_low=c_low, c_high=1500.0)
         else:
             assert cls(c_low=c_low, c_high=1500.0).c_low == c_low
+
+
+@pytest.mark.parametrize('kw', [dict(c_low=0.0), dict(c_low=-5.0),
+                                dict(c_high=0.0), dict(c_high=float('inf'))])
+def test_a_pinned_bound_that_is_not_a_positive_speed_is_refused(kw):
+    """The integral runs from ``k_min = ω/c_high`` to ``k_max = ω/c_low``,
+    so each pinned bound is a positive finite speed; ``c_low=0`` reached
+    the wavenumber count as a bare ZeroDivisionError."""
+    from uacpy.models import SPARC
+    for cls in (Scooter, SPARC):
+        with pytest.raises(ConfigurationError,
+                           match='must be positive and finite'):
+            cls(**kw)
 
 
 class TestScooterRefusesAPrecalcSurface:

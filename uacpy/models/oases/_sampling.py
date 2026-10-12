@@ -3,60 +3,43 @@ a launch: the OASR/OASP frequency sweep and its resampling, OASP's FFT
 grid and frequency ladder, and the wavenumber count of OASSP's
 roughness branch."""
 
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 import numpy as np
 
-from uacpy.models._notices import give_notice
+from uacpy.models._knobs import whole_count
 from uacpy.core._validate import steps_are_uniform
-from uacpy.core.exceptions import ConfigurationError, FallbackWarning
+from uacpy.core.exceptions import ConfigurationError
 from uacpy.io.oases_writer import _OASES_MAX_WAVENUMBERS
-
-
-def _oases_resample_frequencies(
-    freqs: np.ndarray, model_name: str, log_spaced: bool = False,
-    argument: str = 'frequencies=',
-) -> tuple[float, float, int]:
-    """:func:`_oases_frequency_sweep`'s ``(freq_min, freq_max, N)``, its notice given
-    at once as a warning (OASR's sweep, resolved outside the notices of a
-    run's settings)."""
-    freq_min, freq_max, n, notice = _oases_frequency_sweep(
-        freqs, model_name, log_spaced=log_spaced, argument=argument)
-    if notice is not None:
-        give_notice(None, notice, FallbackWarning)
-    return freq_min, freq_max, n
 
 
 def _oases_frequency_sweep(
     freqs: np.ndarray, model_name: str, log_spaced: bool = False,
     argument: str = 'frequencies=',
-) -> tuple[float, float, int, Optional[str]]:
-    """Convert an arbitrary frequency vector to the ``(freq_min, freq_max, N)``
-    triple OASR/OASP write into the input file, with the notice (text, or
-    ``None``) of a vector the sweep does not reproduce.
+) -> tuple[float, float, int]:
+    """The ``(freq_min, freq_max, N)`` triple OASR/OASP write into the
+    input file for a frequency vector.
 
-    OASR's ``.dat`` and OASP's broadband kernel both express their
-    frequency axis as a min/max/count, which implies equispaced
-    sampling. A non-equispaced vector is resampled onto
-    ``np.linspace(freq_min, freq_max, N)``, and the notice says so, so the result's
-    ``Result.frequencies`` reflects what the model actually saw.
-    ``argument`` names where the vector came from in the messages:
-    ``'frequencies='`` (OASP's run keyword) or ``'source.frequencies'``
-    (OASR).
+    OASR's ``.dat`` (``FREQ1 FREQ2 NFREQ``, unoasr21.f:116) and OASP's
+    Block VIII (``NX FR1 FR2 DT``, unoasp22.f:176) carry a sweep as its
+    edges and a count, an equispaced axis (logarithmic under OASR option
+    ``'C'``), so they cannot run any other vector. ``argument`` names where
+    the vector came from in the messages: ``'frequencies='`` (OASP's run
+    keyword) or ``'source.frequencies'`` (OASR).
 
     Returns
     -------
     freq_min, freq_max : float
     n : int
-        Number of equispaced bins.
-    notice : str or None
-        What the sweep does to the vector it was given, or ``None``.
+        Number of bins.
 
     Raises
     ------
     ConfigurationError
-        When ``log_spaced`` is set and the vector's lowest frequency is not
-        strictly positive: the OASR kernel takes ``LOG(FREQ1)``.
+        For a vector that is not equispaced (not log-spaced when
+        ``log_spaced``), and when ``log_spaced`` is set and the vector's
+        lowest frequency is not strictly positive: the OASR kernel takes
+        ``LOG(FREQ1)``.
     """
     freqs = np.atleast_1d(np.asarray(freqs, dtype=float))
     freq_min = float(freqs.min())
@@ -84,35 +67,34 @@ def _oases_frequency_sweep(
         with np.errstate(divide='ignore', invalid='ignore'):
             ratios = freqs[1:] / freqs[:-1]
         target = (freq_max / freq_min) ** (1.0 / (n - 1))
-        notice = None
         if not steps_are_uniform(ratios, target):
-            grid = np.geomspace(freq_min, freq_max, n)
-            notice = (
+            raise ConfigurationError(
                 f"{model_name}: option 'C' makes the frequency sweep "
-                f"logarithmic (unoasr21.f:123-125 computes the coefficients at "
-                f"exp-spaced frequencies), but the {argument} vector is not "
-                f"log-spaced. It will be evaluated at "
-                f"np.geomspace({freq_min}, {freq_max}, {n}) — "
-                f"{np.array2string(grid, precision=4, max_line_width=200)} — "
-                f"not at the values given. Pass a log-spaced vector, or drop "
-                f"'C' for a linear sweep.")
-        return freq_min, freq_max, n, notice
-    notice = None
+                f"logarithmic (unoasr21.f:123-125 computes the coefficients "
+                f"at exp-spaced frequencies from FREQ1 FREQ2 NFREQ), but the "
+                f"{argument} vector is not log-spaced, so the deck cannot "
+                f"carry it.",
+                remediation=(
+                    f"Pass np.geomspace({freq_min:g}, {freq_max:g}, {n}), "
+                    f"or drop 'C' for a linear sweep."))
+        return freq_min, freq_max, n
     if n > 1:
         diffs = np.diff(freqs)
         # Equispaced if every diff matches the mean diff
         # (:func:`steps_are_uniform`).
         target = (freq_max - freq_min) / (n - 1)
         if not steps_are_uniform(diffs, target):
-            notice = (
-                f"{model_name}: {argument} vector is non-equispaced; "
-                f"OASES expresses the frequency axis as (freq_min, freq_max, N) "
-                f"so the vector has been resampled onto "
-                f"np.linspace({freq_min}, {freq_max}, {n}). "
-                f"Result.frequencies will be the resampled grid, not "
-                f"your input. Pass an equispaced vector, e.g. "
-                f"np.linspace(freq_min, freq_max, N), to suppress.")
-    return freq_min, freq_max, n, notice
+            raise ConfigurationError(
+                f"{model_name}: the {argument} vector is not equispaced; "
+                f"the OASES deck carries a frequency sweep as its edges and "
+                f"a count (OASR FREQ1 FREQ2 NFREQ, unoasr21.f:116; OASP "
+                f"NX FR1 FR2 DT, unoasp22.f:176), so it cannot carry these "
+                f"bins.",
+                remediation=(
+                    f"Pass an equispaced vector, e.g. "
+                    f"np.linspace({freq_min:g}, {freq_max:g}, {n}), or run "
+                    f"the bins one at a time."))
+    return freq_min, freq_max, n
 
 
 # OASES' wavenumber-array bound ``_OASES_MAX_WAVENUMBERS`` (imported from the
@@ -142,9 +124,10 @@ def _oassp_wavenumber_count(*, layer_speeds, c_low, c_high, source_depth,
                             n_time, freq_max, dt, options, n_wavenumbers):
     """NWVNO oassp2 integrates on, replicated from its own sampling logic.
 
-    A pinned ``n_wavenumbers >= 1`` is taken as written (manual branch,
-    unoassp30.f:344-349; the ``MIN0(NWVNO,NP)`` at :176 cannot bind below
-    NP). Otherwise this is the automatic branch, unoassp30.f:281-340 with
+    A pinned ``n_wavenumbers >= 1`` is written to the deck as given, and
+    oassp2 takes it through its own ``NWVNO=MIN0(NWVNO,NP)`` (unoassp30.f:176)
+    into the manual branch (:344-349). Otherwise this is the automatic
+    branch, unoassp30.f:281-340 with
     AUTSAM (:1069-1126), in the deck's own units — ``R0``/``RSPACE`` in km,
     and ``rmi = max(|RSPACE|, 0.1*cref*T)`` mixes that km step with metres
     exactly as :293 does:
@@ -169,6 +152,8 @@ def _oassp_wavenumber_count(*, layer_speeds, c_low, c_high, source_depth,
     ``c_low``/``c_high`` are the deck's CMIN/CMAX.
     """
     if n_wavenumbers is not None and int(n_wavenumbers) >= 1:
+        # The binary's own cap on the count the deck carries
+        # (unoassp30.f:176), mirrored to predict what oassp2 integrates on.
         return min(int(n_wavenumbers), _OASES_MAX_WAVENUMBERS)
 
     opts = str(options or '')
@@ -286,3 +271,19 @@ def _oasp_marched_frequencies(n_time_samples: int, freq_min: float,
     return np.array([(k - 1) / (grid.time_step * grid.n_time_samples)
                      for k in range(grid.first_bin, grid.last_bin + 1)],
                     dtype=np.float64)
+
+
+def check_power_of_two_time_samples(name: str, n_time_samples) -> None:
+    """Refuse an ``n_time_samples`` the deck cannot carry as given: not a
+    whole number of at least 2, or not a power of two. oasp.tex:129 states
+    ``NT = 2^M``, and OASP changes any other count to the next power of
+    two (unoasp22.f:222-232)."""
+    whole_count(name, n_time_samples, 2)
+    n = int(n_time_samples)
+    if n & (n - 1):
+        up = 1 << (n - 1).bit_length()
+        raise ConfigurationError(
+            f"{name}={n} is not a power of two: oasp.tex:129 states "
+            f"NT = 2^M, and OASP changes any other count to the next one "
+            f"(unoasp22.f:222-232).",
+            remediation=f"Pass n_time_samples={up} or {up // 2}.")

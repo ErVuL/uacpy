@@ -1,11 +1,15 @@
 """Locator for the offline data cache (install-time-downloaded datasets).
 
-Public datasets — the GEBCO bathymetry grid, the WOA23 climatology grids, the
-DECK41 + grain-size sediment samples, the EMODnet seabed-substrate polygons and
-the Natural Earth coastline — are **not bundled**. Exactly like OASES, they are
-downloaded by ``install.sh`` into a gitignored cache and sampled locally; this
+Public datasets — the twelve of :data:`DATASETS`: the GEBCO bathymetry grid,
+the WOA23 climatology grids, the grain-size sediment samples, the EMODnet
+seabed-substrate polygons, the Natural Earth coastline, GlobSed, CRUST1.0, the
+Diesing lithology, the NSIDC sea-ice and NBS wind climatologies, GLODAP pH and
+the Graw density grid — are **not bundled**. Exactly like OASES, they are
+downloaded by ``install.sh`` (or, for all but GEBCO and WOA23, a
+``download_*`` function) into a gitignored cache and sampled locally; this
 module only *locates* them. A missing dataset raises a typed
-:class:`ConfigurationError` naming the exact install flag to run.
+:class:`ConfigurationError` naming the exact install flag to run and the
+Python downloader where there is one.
 
 Cache location: ``$UACPY_DATA_CACHE`` if set; else ``<repo>/data_cache``
 when running from a checkout; else the per-user cache directory
@@ -55,11 +59,14 @@ def _default_cache_root() -> Path:
 
 @dataclass(frozen=True)
 class _Dataset:
-    """One install-time dataset: where it lives and how to install it."""
+    """One install-time dataset: where it lives and how to install it.
+    ``downloader`` is the Python call that fills it, ``None`` where only
+    ``install.sh`` does (GEBCO, WOA23)."""
     id: str
     subdir: str
     install_flag: str
     description: str
+    downloader: Optional[str] = None
 
 
 DATASETS = {
@@ -72,34 +79,44 @@ DATASETS = {
     'sediment': _Dataset(
         'sediment', 'sediment', './install.sh --data sediment',
         'NCEI seafloor grain-size samples (grainsize.csv; the reader also picks '
-        'up a hand-placed deck41.csv)'),
+        'up a hand-placed deck41.csv)',
+        downloader='uacpy.data.download_sediment_db()'),
     'emodnet': _Dataset(
         'emodnet', 'emodnet', './install.sh --data emodnet',
-        'EMODnet Geology seabed substrate polygons (Folk 5cl, European seas)'),
+        'EMODnet Geology seabed substrate polygons (Folk 5cl, European seas)',
+        downloader='uacpy.data.download_emodnet_db()'),
     'coastline': _Dataset(
         'coastline', 'coastline', './install.sh --data coastline',
-        'Natural Earth land polygons (coastline backdrop, public domain)'),
+        'Natural Earth land polygons (coastline backdrop, public domain)',
+        downloader='uacpy.visualization.basemap.download_coastline()'),
     'globsed': _Dataset(
         'globsed', 'globsed', './install.sh --data globsed',
-        'GlobSed v3 total sediment thickness grid (NOAA NCEI)'),
+        'GlobSed v3 total sediment thickness grid (NOAA NCEI)',
+        downloader='uacpy.data.download_globsed_db()'),
     'crust1': _Dataset(
         'crust1', 'crust1', './install.sh --data crust1',
-        'CRUST1.0 layered crustal model — Vp/Vs/density (Laske et al. 2013)'),
+        'CRUST1.0 layered crustal model — Vp/Vs/density (Laske et al. 2013)',
+        downloader='uacpy.data.download_crust1_db()'),
     'diesing': _Dataset(
         'diesing', 'diesing', './install.sh --data diesing',
-        'Diesing 2020 global deep-sea seafloor lithology map (CC-BY)'),
+        'Diesing 2020 global deep-sea seafloor lithology map (CC-BY)',
+        downloader='uacpy.data.download_diesing_db()'),
     'seaice': _Dataset(
         'seaice', 'seaice', './install.sh --data seaice',
-        'NSIDC sea-ice concentration monthly climatology (public domain)'),
+        'NSIDC sea-ice concentration monthly climatology (public domain)',
+        downloader='uacpy.data.download_seaice_db()'),
     'glodap': _Dataset(
         'glodap', 'glodap', './install.sh --data glodap',
-        'GLODAPv2.2016b mapped seawater pH climatology (CC-BY)'),
+        'GLODAPv2.2016b mapped seawater pH climatology (CC-BY)',
+        downloader='uacpy.data.download_glodap_db()'),
     'wind': _Dataset(
         'wind', 'wind', './install.sh --data wind',
-        'NBS 10 m wind-speed monthly climatology (NOAA, public domain)'),
+        'NBS 10 m wind-speed monthly climatology (NOAA, public domain)',
+        downloader='uacpy.data.download_wind_db()'),
     'graw': _Dataset(
         'graw', 'graw', './install.sh --data graw',
-        'Graw 2021 predicted seabed bulk-density grid (CC-BY 4.0)'),
+        'Graw 2021 predicted seabed bulk-density grid (CC-BY 4.0)',
+        downloader='uacpy.data.download_graw_db()'),
 }
 
 
@@ -166,8 +183,12 @@ def require(name: str, *relative: str) -> Path:
         target = f"{ds.description} ({path})" if relative else ds.description
         raise ConfigurationError(
             f"Offline {name} data not found: {target}.",
-            remediation=f"Run `{ds.install_flag}` to download it, or set "
-                        f"$UACPY_DATA_CACHE to a directory that has it.",
+            remediation=(
+                f"Run `{ds.install_flag}` from the uacpy repository root"
+                + ('' if ds.downloader is None
+                   else f", or call {ds.downloader} in Python")
+                + " to download it, or set $UACPY_DATA_CACHE to a "
+                  "directory that has it."),
         )
     return path
 

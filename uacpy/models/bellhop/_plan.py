@@ -16,21 +16,26 @@ from uacpy.io.bellhop_writer import (
 from uacpy.core.deck_limits import NO_RECEIVER_RANGE_FALLBACK_M
 from uacpy.io.oalib_writer import resolve_ssp_interp
 from uacpy.models._band import _real_pulse
+from uacpy.models._defaults import (
+    DEFAULT_BROADBAND_BANDWIDTH_FACTOR, DEFAULT_BROADBAND_N_FREQUENCIES,
+)
 from uacpy.models._budget import memory_budget
 from uacpy.models.base import StageInputs
 from uacpy.models.bellhop._settings import _BAND_FROM_CALL, _BAND_FROM_SOURCE
 from uacpy.models.bellhop._tables import (
     _INFLUENCE_ROUTINE, _RUN_MODE_TO_INFLUENCE_LETTER,
-    _UNIFORM_RANGE_BEAM_TYPES, grid_is_paired,
+    _UNIFORM_RANGE_BEAM_TYPES, grid_is_paired, writes_origin_column,
 )
 from uacpy.core.exceptions import NumericsWarning, ValidityWarning
 from uacpy.models._notices import message_notice
 
 #: Water depths per wavelength below which uacpy's own model-validity table
 #: (``docs/models/README.md``, ``docs/models/bellhop.md``) marks ray theory ✗ —
-#: "rays are meaningless", use a modal or wavenumber-integral solver. The same
-#: table calls 5-20 a cross-check band and >= 20 comfortable, so only the ✗
-#: side warns: a cross-check is a suggestion, not a defect.
+#: use a modal or wavenumber-integral solver. The number is uacpy's guidance:
+#: JKPS §3.4.2 gives no a-priori criterion, only the rule that the wavelength
+#: be substantially smaller than the water depth and every other physical
+#: scale. The same table calls 5-20 a cross-check band and >= 20 comfortable,
+#: so only the ✗ side warns: a cross-check is a suggestion, not a defect.
 _RAY_VALIDITY_D_OVER_LAMBDA = 5.0
 
 
@@ -93,12 +98,14 @@ _ANGLEMOD_C0 = 1500.0
 # 26.56 dB max / 6.48 dB rms out, depth/50 (100 m) 1.90 / 0.46, depth/500
 # (10 m) 0.42 / 0.10. Shallow water was never badly served but improves
 # too: 100 m guide at 1 kHz, 0.151 dB max at depth/10 against 0.026 at
-# depth/50. depth/50 is also what AT's own deep-water reference deck picks
-# (``tests/MunkRot/Munk.env`` writes 100.0 m in a 5500 m box; its arctic
-# deck goes finer still, 10 m in 3800 m), and it costs 0.7 s against 0.6 s
-# on the Munk case. Ray sums near a caustic are not monotone in the step,
-# so a convergence check remains the only way to be sure (JKPS section
-# 3.3).
+# depth/50. AT's MunkRot deck writes depth/50 (``tests/MunkRot/Munk.env``,
+# 100.0 m in a 5500 m box; its arctic deck goes finer still, 10 m in
+# 3800 m); most AT test decks write 0. It costs 0.7 s against 0.6 s on the
+# Munk case. Ray sums near a caustic are not monotone in the step, so a
+# convergence check remains the only way to be sure: "If you use STEP=0.0
+# BELLHOP will use a default step-size and tell you what it picked. You
+# should then halve the step size until the results are convergent to your
+# required accuracy." (``doc/bellhop.htm``).
 _STEP_PER_DEPTH = 50.0
 
 
@@ -134,7 +141,7 @@ def carrier_frequency(source, mode) -> float:
     return float(freqs[0])
 
 
-def carrier_source(source, mode, center_frequency) -> Source:
+def carrier_source(source, mode, fc) -> Source:
     """The Source the deck is written for: ``source`` itself, or on
     BROADBAND / TIME_SERIES a copy at the one carrier frequency the
     arrivals are traced at (the ``'A'`` deck takes a single
@@ -143,7 +150,7 @@ def carrier_source(source, mode, center_frequency) -> Source:
         return source
     return Source(
         depths=source.depths,
-        frequencies=center_frequency,
+        frequencies=fc,
         source_type=source.source_type,
         beam_pattern=source.beam_pattern,
     )
@@ -153,24 +160,45 @@ def launch_source(inputs: StageInputs) -> Source:
     """:func:`carrier_source` of the launch's own source."""
     return carrier_source(
         inputs.source, inputs.settings.mode,
-        inputs.settings.engine.center_frequency)
+        inputs.settings.engine.fc)
 
 
-def band_origin(mode, source, kwargs, *, n_freqs,
+def band_origin(mode, source, kwargs, *, n_frequencies,
                 bandwidth_factor) -> Optional[str]:
     """BROADBAND only: where the frequency grid came from — a
     ``frequencies=`` passed to the run (``kwargs``, the call's keywords), a
     multi-frequency Source that is the band, or the package's expansion of
-    one carrier by the ``n_freqs`` / ``bandwidth_factor`` knobs. ``None`` on
-    every other mode."""
+    one carrier by the ``n_frequencies`` / ``bandwidth_factor`` knobs.
+    ``None`` on every other mode."""
     if mode != RunMode.BROADBAND:
         return None
     if kwargs.get('frequencies') is not None:
         return _BAND_FROM_CALL
     if np.atleast_1d(source.frequencies).size > 1:
         return _BAND_FROM_SOURCE
-    return (f"{n_freqs} bins over fc*(1 +/- "
-            f"{bandwidth_factor:g}/2)")
+    n = DEFAULT_BROADBAND_N_FREQUENCIES if n_frequencies is None else n_frequencies
+    bw = (DEFAULT_BROADBAND_BANDWIDTH_FACTOR if bandwidth_factor is None
+          else bandwidth_factor)
+    return f"{n} bins over fc*(1 +/- {bw:g}/2)"
+
+
+def unused_band_knobs_notice(mode, band, *, n_frequencies,
+                             bandwidth_factor) -> Optional[str]:
+    """A notice when ``n_frequencies`` / ``bandwidth_factor`` are set but
+    the run does not expand a band with them — any mode but BROADBAND, or a
+    BROADBAND band the call or the Source names (``band``, from
+    :func:`band_origin`) — else ``None``."""
+    pinned = [f"{name}={value:g}" for name, value in
+              (('n_frequencies', n_frequencies),
+               ('bandwidth_factor', bandwidth_factor)) if value is not None]
+    if not pinned or (mode == RunMode.BROADBAND
+                      and band not in (_BAND_FROM_CALL, _BAND_FROM_SOURCE)):
+        return None
+    why = (f"the band is the run's {band}" if band is not None
+           else f"a {getattr(mode, 'name', mode)} run expands no band")
+    return (f"Bellhop({', '.join(pinned)}) is not used: {why}. The knobs "
+            f"shape only the band a BROADBAND run expands from a "
+            f"one-frequency Source without frequencies=.")
 
 
 def pulse_samples(mode, kwargs) -> Optional[int]:
@@ -187,17 +215,16 @@ def pulse_samples(mode, kwargs) -> Optional[int]:
 
 
 def resolve_ray_step(env, *, ray_step) -> float:
-    """Ray step (m) for the deck: the caller's if pinned, else
-    ``env.depth / _STEP_PER_DEPTH``.
-
-    Returning a positive number keeps ``bellhop.f90:170-174`` from
-    substituting its own ``depth/10``.
-    """
-    if ray_step:
+    """Ray step (m) for the deck: the caller's when pinned, ``0``
+    included — the value with which BELLHOP chooses its own ``depth/10``
+    (``bellhop.f90:170-174``) — else ``env.depth / _STEP_PER_DEPTH``.
+    Without a positive depth to scale by, the deck carries ``0`` and the
+    binary chooses."""
+    if ray_step is not None:
         return float(ray_step)
     depth = float(env.depth)
     if not np.isfinite(depth) or depth <= 0.0:
-        return float(ray_step)      # no depth to scale by; binary decides
+        return 0.0
     return depth / _STEP_PER_DEPTH
 
 
@@ -206,7 +233,7 @@ def ray_step_origin(resolved, *, ray_step) -> str:
     from, given the ``ray_step`` knob: the constructor, ``env.depth /
     _STEP_PER_DEPTH``, or the binary's own when there is no positive depth
     to scale by."""
-    if ray_step:
+    if ray_step is not None:
         return 'Bellhop(ray_step=…)'
     if resolved:
         return f"env.depth / {_STEP_PER_DEPTH:g}"
@@ -235,36 +262,25 @@ def resolve_ray_box(env, receiver, *, z_box,
     return float(box_z), z_origin, float(box_r), r_origin
 
 
-def resolve_interp_ssp(env, *, interp_ssp,
-                       log) -> Tuple[Optional[str], Optional[str]]:
-    """``(interp_ssp, notice)``: the SSP interpolation the deck writer
-    gets, and the notice when a pinned ``'quad'`` falls back. 'quad' is
-    Bellhop's external .ssp (2-D) interpolator; with a range-independent
-    SSP there is no .ssp file to write, so it falls back to the automatic
-    1-D interpolation instead of letting Bellhop fail on a missing
-    model.ssp. On a pinned non-quad scheme the RD-SSP capability flag is
-    False and ``_project_environment`` has already collapsed the SSP to
-    1-D; on the 'quad' / automatic path the 2-D profile is written
-    verbatim."""
-    effective = resolve_ssp_interp(env, interp_ssp)
+def resolve_interp_ssp(env, *, interp_ssp, log) -> Optional[str]:
+    """The SSP interpolation the deck writer gets: the caller's as given,
+    logging what ``None`` resolves to. A pinned ``'quad'`` on a
+    range-independent SSP is written as its one profile held over the ray
+    box (:func:`~uacpy.io.bellhop_writer.write_bellhop_env_file`).
+    On a pinned non-quad scheme the RD-SSP capability flag is False and
+    ``_project_environment`` has already collapsed the SSP to 1-D; on the
+    'quad' / automatic path the 2-D profile is written verbatim."""
     if interp_ssp is None:
         log(
-            f"interp_ssp auto-picked = {effective!r} "
+            f"interp_ssp auto-picked = "
+            f"{resolve_ssp_interp(env, interp_ssp)!r} "
             f"(env.ssp.is_range_dependent={env.ssp.is_range_dependent})"
         )
-    if effective == 'quad' and not env.ssp.is_range_dependent:
-        fallback = resolve_ssp_interp(env, None)
-        return fallback, (
-            f"Bellhop(interp_ssp='quad') needs a range-dependent env.ssp "
-            f"(the external .ssp / 2-D profile); this environment's SSP is "
-            f"range-independent, so falling back to "
-            f"interp_ssp={fallback!r}. Provide a range-dependent SSP to "
-            f"use the quad profile.")
-    return interp_ssp, None
+    return interp_ssp
 
 
 def pad_receiver_ranges(receiver, run_type, *, beam_type, grid_type,
-                        model_name):
+                        model_name, arrivals_result=False):
     """``(deck_ranges, trim, notice)``: the receiver ranges to write for
     this run, the ``(lo, hi)`` slice that recovers the caller's range
     axis from what the engine wrote — ``(None, None, notice)`` when
@@ -278,7 +294,10 @@ def pad_receiver_ranges(receiver, run_type, *, beam_type, grid_type,
     before the last (``:216``). One extra range at each end, one step
     away so the grid stays uniform, gives the engine somewhere to skip.
     A first range within one step of the source cannot be padded ahead
-    of — that column stays NaN and the run says so.
+    of: that column is NaN in a TL or synthesised result
+    (:func:`~uacpy.models.bellhop._output.mask_unwritten_first_range`), an
+    ARRIVALS result (``arrivals_result``) holds no arrivals there, and the
+    run says so.
 
     EIGENRAYS ('E') skips the same first column but cannot be padded
     around, so its notice says so instead — see below.
@@ -328,9 +347,11 @@ def pad_receiver_ranges(receiver, run_type, *, beam_type, grid_type,
             f"receiver-range column (influence.f90:223-228), and "
             f"receiver.ranges starts at {ranges[0]:g} m, within one range "
             f"step ({dr:g} m) of the source, so no column can be written "
-            f"ahead of it: the {ranges[0]:g} m column comes back NaN. "
-            f"Start receiver.ranges more than one step from the source "
-            f"to have it filled.")
+            f"ahead of it: the {ranges[0]:g} m column "
+            + ("holds no arrivals, the cell never being evaluated. "
+               if arrivals_result else "comes back NaN. ")
+            + "Start receiver.ranges more than one step from the source "
+              "to have it filled.")
     # Only 'C' also drops the LAST column (influence.f90:216).
     trail = [ranges[-1] + dr] if beam_type == 'C' else []
     padded = ([ranges[0] - dr] if lead else []) + list(ranges) + trail
@@ -422,9 +443,13 @@ def ray_validity_notice(env, source, *, model_name) -> Optional[str]:
     uacpy's model-validity table (``docs/models/README.md``,
     ``docs/models/bellhop.md``) marks ``D/lambda < 5`` ✗ — rays are the
     wrong tool, take a modal or wavenumber-integral solver — and this
-    check is where the code says so. Measured on an 80 m isovelocity guide
-    at 20 Hz (``D/lambda = 1.07``): Bellhop reads 10.1 to 17.6 dB below
-    Kraken over 1-10 km.
+    check is where the code says so. The threshold is uacpy's guidance, not
+    a published bound: Jensen et al. (JKPS §3.4.2) state that whether a ray
+    solution meets an accuracy requirement cannot be predicted a priori and
+    give the often-quoted rule that the wavelength be substantially smaller
+    than the water depth and every other physical scale. As an illustration,
+    on an 80 m isovelocity guide at 20 Hz (``D/lambda = 1.07``) Bellhop read
+    10.1 to 17.6 dB below Kraken over 1-10 km.
 
     ``c`` is the sea-surface speed of the first profile, the same reference
     speed :func:`~uacpy.models.bellhop._synthesis.synthesise` stamps as
@@ -462,9 +487,10 @@ def ray_validity_notice(env, source, *, model_name) -> Optional[str]:
         f"c = {c:.0f} m/s), below the D/lambda >= "
         f"{_RAY_VALIDITY_D_OVER_LAMBDA:g} floor uacpy's model-validity "
         f"table sets for ray theory (docs/models/README.md). Ray theory is "
-        f"asymptotic in frequency and carries no error bound here — "
-        f"measured 10 to 18 dB against Kraken on an 80 m guide at 20 Hz. "
-        f"Use Kraken (normal modes) or Scooter / OASES (wavenumber "
+        f"a high-frequency approximation that needs the wavelength "
+        f"substantially smaller than the water depth (Jensen et al., "
+        f"Computational Ocean Acoustics §3.4.2) and carries no error bound "
+        f"here. Use Kraken (normal modes) or Scooter / OASES (wavenumber "
         f"integral), or cross-check this run against one.")
 
 
@@ -535,8 +561,8 @@ def fan_miss_notice(source, receiver, *, launch_angles, grid_type,
         # extremal quantity, and the steepest angle among the MISSES is
         # a corner only when the fan spans the horizontal (measured
         # wrong in 6,369 of 99,698 random cases on fans that exclude 0,
-        # which launch_angles=(17, 74) is — :758 requires only
-        # alpha_lo < alpha_hi). Both come exactly off the sorted range
+        # which launch_angles=(17, 74) is — _checks.check_knobs requires
+        # only alpha_lo < alpha_hi). Both come exactly off the sorted range
         # axis instead.
         n_out, worst = _fan_miss_count_and_worst(
             zs, zr, rr, fan_lo, fan_hi)
@@ -551,39 +577,87 @@ def fan_miss_notice(source, receiver, *, launch_angles, grid_type,
     limit = max(abs(fan_lo), abs(fan_hi))
     dz = max(abs(float(zr.max()) - float(zs.min())),
              abs(float(zr.min()) - float(zs.max())))
-    cone = dz / np.tan(np.radians(limit)) if 0.0 < limit < 90.0 else 0.0
-    blind = (f"a blind cone of range < {cone:.2f} m (= {dz:g} m of depth "
-             f"offset / tan {limit:g} deg)")
+
+    def cone(angle):
+        """The range inside which a receiver at the largest depth offset
+        ``dz`` needs a launch steeper than ``angle``."""
+        return dz / np.tan(np.radians(angle)) if 0.0 < angle < 90.0 else 0.0
+
+    where = (f"receivers closer than {cone(limit):.2f} m in range (at the "
+             f"{dz:g} m depth offset)")
     if limit >= _FAN_WIDENING_CEILING:
         # Widening chases an asymptote: 90 deg is a vertical ray, so the
         # cone shrinks with every extra tenth of a degree but never
         # closes. Only the receiver ranges close it.
         remedy = (
-            f"launch_angles already spans {limit:g} deg and 90 deg is a vertical "
-            f"ray, so widening it chases an asymptote. These pairs lie "
-            f"inside {blind}; start the receiver ranges beyond it if the "
-            f"near field matters."
-        )
+            f"With launch_angles already at {limit:g} deg, {where} stay in a "
+            f"blind cone: 90 deg is a vertical ray, so widening the fan only "
+            f"chases an asymptote. Start the receiver ranges beyond "
+            f"{cone(limit):.2f} m if the near field matters.")
     else:
         # Margin past the angle needed, because proximity to the edge
         # costs level too — 76 deg against an 80 deg edge is 3.71 dB, see
         # the function docstring.
         wider = min(max(needed, limit) + 5.0, 89.9)
-        remedy = (f"Widen launch_angles (e.g. launch_angles=(-{wider:g}, {wider:g})) if "
-                  f"the near field matters.")
-        if needed >= _FAN_WIDENING_CEILING:
-            remedy += (f" That leaves {blind} whatever the fan, since "
-                       f"90 deg is a vertical ray; start the receiver "
-                       f"ranges beyond it to close it entirely.")
+        remedy = (f"With this fan, {where} miss it. Widen launch_angles "
+                  f"(e.g. launch_angles=(-{wider:g}, {wider:g})) if the near "
+                  f"field matters")
+        if float(rr.min()) < cone(wider):
+            remedy += (f"; that still leaves a blind cone of "
+                       f"{cone(wider):.2f} m, which only receiver ranges "
+                       f"beyond it close, since 90 deg is a vertical ray.")
+        else:
+            remedy += "."
     return (
         f"{model_name}: {n_out} of {n_pairs} "
         f"source/receiver pairs need a direct-path launch angle outside "
         f"launch_angles = [{fan_lo:g}, {fan_hi:g}] deg — the steepest is "
-        f"{worst:.1f} deg. angleMod.f90:58-61 launches nothing beyond the "
-        f"fan and bellhop.f90:252-258 only checks the beam count, so"
-        f" those "
-        f"receivers lose their direct path with no diagnostic from the "
-        f"binary. {remedy}")
+        f"{worst:.1f} deg — and Bellhop launches no ray beyond its fan, so "
+        f"those receivers get no direct path, with no word from the binary. "
+        f"{remedy}")
+
+
+#: Fraction of ``fc`` a band may reach from it, on either side, before a
+#: Gaussian-beam (``beam_type='B'``) BROADBAND / TIME_SERIES run is told
+#: its beam sum is first-order away from ``fc`` (:func:`gaussian_beam_band_notice`).
+GAUSSIAN_BEAM_BAND_FRACTION = 0.5
+
+
+def gaussian_beam_band_notice(run_mode, frequencies, fc, *, beam_type,
+                              model_name) -> Optional[str]:
+    """The notice for a Gaussian-beam band reaching more than
+    :data:`GAUSSIAN_BEAM_BAND_FRACTION` of ``fc`` from it, or ``None``.
+
+    One trace at ``fc`` serves the whole band. ``InfluenceGeoGaussianCart``
+    (``influence.f90:561-563``) floors each Gaussian beam's half-width at
+    ``pi * c / freq`` with ``freq = fc``, so every other bin is summed with
+    ``fc``'s beams. The hat-shaped beams (``'G'``, ``'g'``) carry no
+    frequency in their width, and their bins equal a trace at each
+    frequency. Measured against such traces, 2000 beams, 30 m of water over
+    sand, 100 m-5 km: ``'G'`` 0.04-0.06 dB median |ΔTL| at every bin of a
+    50-1950 Hz band (fc 1 kHz, ±95 %); ``'B'`` a mean-energy bias of
+    +0.74 / -0.40 dB at ±25 % and +1.41 / -0.88 dB at ±50 % (median |ΔTL|
+    1.14 dB at -50 %), and on a 5 km Munk profile, 25-475 Hz, ±0.13 dB at
+    ±50 %."""
+    if (run_mode not in (RunMode.BROADBAND, RunMode.TIME_SERIES)
+            or beam_type != 'B' or frequencies is None or not fc):
+        return None
+    f = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    if f.size < 2:
+        return None
+    reach = float(np.max(np.abs(f / fc - 1.0)))
+    if reach <= GAUSSIAN_BEAM_BAND_FRACTION:
+        return None
+    return (
+        f"{model_name}: beam_type='B' takes every Gaussian beam's width "
+        f"from the one trace at fc = {fc:g} Hz, and this band "
+        f"({f.min():g}-{f.max():g} Hz) reaches {100 * reach:.0f} % of fc "
+        f"from it, so its bins away from fc are first-order: measured on a "
+        f"30 m sand guide against a trace at each frequency, the mean "
+        f"energy is off by +1.41 / -0.88 dB at ±50 % of fc. Run sub-bands "
+        f"near their own fc, or the default beam_type='G', whose hat-shaped "
+        f"beams carry no frequency in their width (0.05 dB at ±95 % on "
+        f"the same guide).")
 
 
 def beam_type_run_mode_notice(run_mode, *, beam_type) -> Optional[str]:
@@ -648,15 +722,15 @@ def line_source_sgb_notice(source, run_mode, *, beam_type, backend,
         f"line source as a point source: InfluenceSGB applies the "
         f"launch weight sqrt(cos(alpha)) unconditionally "
         f"(influence.f90:665), where every other beam type and the "
-        f"bellhopcxx / bellhopcuda ports weight a line source by 1. "
-        f"Measured on a 100 m Pekeris guide at 300 Hz, the mean TL "
-        f"against Scooter is 0.45 dB here and 0.28 dB on the ports, more "
-        f"at steep angles. Use beam_type='G' or 'B', or backend='cxx', "
-        f"for a line source.")
+        f"bellhopcxx / bellhopcuda ports weight a line source by 1, so "
+        f"a path launched at alpha comes back changed by "
+        f"10*log10(cos(alpha)) dB (-0.3 dB at 20 deg, -3 dB at 60 deg). "
+        f"Use beam_type='G' or "
+        f"'B', or backend='cxx', for a line source.")
 
 
 def geometry_notices(env, source, receiver, mode, *, launch_angles, grid_type,
-                     n_beams, model_name, ray_step, memory_backed):
+                     beam_type, n_beams, model_name, ray_step, memory_backed):
     """The stage-3 notices of the geometry, in the order they are
     announced: a receiver the launch fan cannot reach, a first range at
     r = 0, a water column too shallow for ray theory, an eigenray file
@@ -664,23 +738,26 @@ def geometry_notices(env, source, receiver, mode, *, launch_angles, grid_type,
     notices = [message_notice(fan_miss_notice(source, receiver, launch_angles=launch_angles,
                                            grid_type=grid_type, model_name=model_name),
                            NumericsWarning)]
-    # Bellhop never writes the r=0 column (no ray travels zero
-    # distance), so it comes back as NaN no-data cells on the TL grids
-    # and as zero-arrival cells — NaN after synthesis — on the
-    # broadband routes. Newcomers using ``np.linspace(0, R, N)`` for
-    # ``receiver.ranges`` hit a wall of NaN at r=0 and rightly wonder
-    # what is wrong. An all-zero grid is refused in stage 2, so it gets
-    # the refusal alone.
+    # Bellhop evaluates no field at r = 0 unless writes_origin_column says
+    # so: the TL grids come back NaN there (_output.mask_unwritten_origin),
+    # and so do the broadband routes, whose arrivals only 'G', 'B' and 'g'
+    # record and none of them at r = 0. Newcomers using
+    # ``np.linspace(0, R, N)`` for ``receiver.ranges`` hit a column of NaN
+    # at r=0 and rightly wonder what is wrong. An all-zero grid is refused
+    # in stage 2, so it gets the refusal alone.
     if (mode in _FIELD_RUN_MODES
+            and not writes_origin_column(source.source_type, beam_type)
             and len(receiver.ranges) > 0
             and float(receiver.ranges[0]) == 0.0
             and receiver.range_max > 0.0):
         notices.append(
             message_notice(f"{model_name}: receiver.ranges starts at r=0 m. "
-                        f"Bellhop writes no data there (no ray travels zero "
-                        f"distance), so that column is NaN. Start ranges at a "
-                        f"small positive value (e.g. ``np.linspace(eps, R, N)``) "
-                        f"to avoid surprise.", ValidityWarning))
+                        f"Bellhop evaluates no field there: its receiver loops "
+                        f"start right of the source range and its point-source "
+                        f"factor 1/sqrt(r) is set to 0 at r = 0 "
+                        f"(influence.f90:419, :786-787), so that column is "
+                        f"NaN. Start ranges at a small positive value (e.g. "
+                        f"``np.linspace(eps, R, N)``).", ValidityWarning))
     # Ray-theory validity: the D/lambda floor is a statement about the
     # FIELD the beam sum produces, so RAYS / EIGENRAYS / ARRIVALS —
     # geometry, not a field — stay silent.

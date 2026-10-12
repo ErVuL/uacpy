@@ -38,49 +38,10 @@ _FIELD_COMPLETION_MARKER = 'field completed successfully'
 _FIELD_FATAL_MARKER = 'fatal error'
 
 
-# Deck roots: the modes solve of a MODES run, the modes + field pair of a
-# field run, and the single-frequency mode count of the broadband cutoff
-# search.
+# Deck roots: the modes solve of a MODES run and the modes + field pair of a
+# field run.
 _MODES_BASE = 'modes'
 _FIELD_BASE = 'kfield'
-_PROBE_BASE = 'mcut'
-# Root of the finer solve a krakenc launch's mode count is held to.
-_CHECK_BASE = 'mcheck'
-# Root of the adiabatic pass a coupled launch's field is held to.
-_ADIABATIC_BASE = 'kadiab'
-
-# Far-field gap (dB) between field.exe's coupled and adiabatic sums of the
-# same .mod above which a coupled run warns. The coupled projection
-# (EvaluateCMMod.f90 NewProfile) is not unitary on modes above or just below a
-# fluid half-space's speed: kraken.exe normalises their tails with the real
-# part of the lossless impedance derivative (kraken.f90 Normalize), and
-# field.exe projects them with the lossy complex gamma (CalculateTail). Over
-# many short segments it can amplify or annihilate the field. Measured gap
-# (coupled minus adiabatic intensity, every receiver beyond half the longest
-# range): PE Workshop 4c at the automatic decomposition +27.5 dB (the shelf
-# 22 dB above COUPLE07), 401 identical Pekeris profiles 25 m apart -62.1 and
-# +74.0 dB; the runs that are right or merely approximate: 4c at 50 / 100 /
-# 400 uniform profiles -0.7 / -1.0 / -0.7, the ASA wedge -1.5, the
-# corrugated seafloor -2.7, the kraken.md 6.6 shelf +0.6, a third Pekeris
-# identity case -3.3. 10 dB sits three times above the largest benign gap
-# and well below the smallest pathological one.
-_COUPLED_GAP_WARN_DB = 10.0
-
-
-def far_field_gap_dB(shd_coupled: Path, shd_adiabatic: Path) -> float:
-    """``10 log10`` of the coupled over the adiabatic intensity, summed over
-    every frequency, depth and receiver beyond half the longest range."""
-    totals = []
-    for shd in (shd_coupled, shd_adiabatic):
-        frequencies = np.atleast_1d(read_shd_bin(str(shd)).frequencies)
-        total = 0.0
-        for frequency in frequencies:
-            field = read_shd_bin(str(shd), frequency=float(frequency))
-            ranges = np.asarray(field.receiver_ranges, dtype=float)
-            far = ranges >= 0.5 * np.max(ranges)
-            total += float(np.nansum(np.abs(field.pressure[..., far]) ** 2))
-        totals.append(total)
-    return float(10.0 * np.log10(totals[0] / totals[1]))
 
 
 def tolerate_field_teardown(exc, work_dir, *, model_name) -> bool:
@@ -144,7 +105,8 @@ def attach_field_prt_path(result, work_dir, *, cleanup) -> None:
     (``cleanup=False``) and the file exists.
 
     ``field.f90:44`` hard-codes the log name ``field.prt``
-    (``_FIELD_PRT_ROOT``), so :meth:`_attach_output_paths` — which keys
+    (``_FIELD_PRT_ROOT``), so
+    :func:`~uacpy.models._extract.attach_output_paths` — which keys
     ``prt_file`` on ``<base_name>.prt``, here the modes binary's
     ``kfield.prt`` — never sees it, and its ``primary_files`` tuple
     cannot carry a root that differs from ``base_name``.
@@ -159,7 +121,7 @@ def attach_field_prt_path(result, work_dir, *, cleanup) -> None:
 def raise_on_field_fatal(work_dir, *, model_name) -> None:
     """Raise when field.exe reported a fatal but left a readable ``.shd``.
 
-    ``_raise_on_fortran_fatal`` cannot see either of field.exe's stop
+    ``raise_on_fortran_fatal`` cannot see either of field.exe's stop
     routes, because both write to ``field.prt`` — ``field.f90:44``
     hard-codes that name — rather than ``<base_name>.prt``:
 
@@ -200,11 +162,11 @@ def raise_on_field_fatal(work_dir, *, model_name) -> None:
 
 def require_band_axis(work_dir: Path, base: str, band, *, model_name) -> None:
     """Refuse a band's ``.shd`` whose frequency axis does not match the
-    request: a sub-cutoff (zero-mode) frequency corrupts the
-    multi-frequency ``.mod``, and field.exe sometimes produces a ``.shd``
-    anyway but with a garbage (e.g. all-zero) frequency axis. The error
-    lets :meth:`_launch` recover the propagating sub-band instead of
-    returning a zero field."""
+    deck's ``band``: field.exe can write a ``.shd`` with a garbage (e.g.
+    all-zero) frequency axis from a multi-frequency ``.mod`` it did not
+    read whole. A zero-mode bin, which leaves the ``.mod`` so, never
+    reaches field.exe (:meth:`Kraken._launch_band_deck` takes it out), so
+    this is a failure, raised rather than returned as a zero field."""
     freqs_read = np.asarray(
         read_shd_bin(str(work_dir / f'{base}.shd')).frequencies, dtype=float)
     if (len(freqs_read) == len(band)
@@ -214,11 +176,10 @@ def require_band_axis(work_dir: Path, base: str, band, *, model_name) -> None:
         return
     exc = ModelExecutionError(
         model_name, return_code=0, stdout=None,
-        stderr=("field.exe returned a frequency axis that does "
-                "not match the request — the modes file is "
-                "corrupted by a sub-cutoff (zero-mode) frequency."))
-    # The modes run's log, which names the frequency with no
-    # modes; field.exe itself reports nothing wrong here.
+        stderr=(f"field.exe returned {len(freqs_read)} frequencies where "
+                f"the deck carries {len(band)}: it did not read the "
+                f"multi-frequency mode file whole."))
+    # The modes run's log; field.exe itself reports nothing wrong here.
     attach_prt_tail(exc, work_dir, base)
     raise exc
 

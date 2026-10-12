@@ -34,7 +34,7 @@ namespace.
 | `sample_covariance(snapshots, *, diagonal_loading=0.0)` | `(n_elements, n_snapshots)` | Hermitian `R`, `(N, N)` |
 | `bartlett(covariance, weights, *, normalize=None)` | covariance + manifold (any rows of element weights, row-major `(..., N)`) | conventional power per row, each row unit-normalised; `normalize='trace'` divides by `tr R` |
 | `mvdr(covariance, weights, *, diagonal_loading=1e-6, normalize=None)` | covariance + manifold | Capon power per row; `normalize='max'` scales it to peak at 1; NaN where it is undefined |
-| `music_spectrum(covariance, steering, n_sources)` | covariance + manifold + model order | pseudospectrum per angle |
+| `music_spectrum(covariance, weights, n_sources, *, normalize=None)` | covariance + manifold + model order | pseudospectrum per angle; `weights` rows are scaled to unit norm and laid out as `bartlett`'s (`(..., N)`, or `(F, ..., N)` against an `(F, N, N)` stack); `normalize='max'` peaks it at 1 as on `mvdr`; a row of zeros (a replica bank's shadow cell) is NaN, as on `mvdr` |
 | `shading_taper(n_elements, window='hann')` | element count, any `scipy.signal.get_window` spec | RMS-normalised amplitude weights |
 | `beamform(..., weights=None, ranges=None)` | as above + per-element shading; `ranges` (m), one per column, rides on the result as `.ranges` | shaded `BeamformResult` |
 | `beamform_field(pressure, positions_m, angles_deg, frequency, *, sound_speed=1500.0, weights=None, grid_coords=None)` | `(n_elements, *grid)` pressure; `frequency` scalar **or band**; `grid_coords`, one 1-D array per grid axis (e.g. `{'depth': z, 'range': r}`), rides on the result as `.grid_coords` | `BeamformedField(response, angles, element_power, frequencies)` |
@@ -231,8 +231,9 @@ In covariance form that is
 P_bartlett(θ) = eᴴ(θ) · R · e(θ)
 ```
 
-which is what `bartlett(R, steering)` computes, one value per row of
-`steering` (each row scaled to unit norm, which the manifold already is). It is the baseline every other processor is measured against: no
+which is what `bartlett(R, weights)` computes, one value per row of
+`weights` — here the steering manifold (each row scaled to unit norm, which the
+manifold already is). It is the baseline every other processor is measured against: no
 free parameters, no matrix inverse, no assumption about how many sources there
 are, and it never fails — it just may not resolve.
 
@@ -605,8 +606,8 @@ The middle panel is the money shot, and it is worth quoting numerically:
 | Processor | Peaks found (truth ±2°) | Trough between them |
 |---|---|---|
 | Bartlett | **one** merged peak at 0° | — |
-| MVDR | two, at −2.0° and +1.75° | −4.6 dB |
-| MUSIC (`n_sources=2`) | two, at −2.0° and +2.0° | −17.4 dB |
+| MVDR | two, at −1.95° and +1.93° | −4.8 dB |
+| MUSIC (`n_sources=2`) | two, at −2.03° and +2.00° | −16.8 dB |
 
 Bartlett does not produce a shallow dip — it produces a **single local
 maximum**. There is no threshold you could set that recovers two sources from
@@ -617,16 +618,17 @@ is 12 dB down:
 
 | Processor | Bearing reported | Level reported |
 |---|---|---|
-| Bartlett | +9.0° — pulled 1° toward the loud source | −11.1 dB, 0.9 dB high |
-| MVDR | +10.00° | −11.8 dB |
-| MUSIC | +10.00° | −13.4 dB, **and not a power estimate** |
+| Bartlett | +9.15° — pulled 0.85° toward the loud source | −11.0 dB, 1.0 dB high |
+| MVDR | +10.05° | −11.7 dB |
+| MUSIC | +10.03° | −14.4 dB, **and not a power estimate** |
 
 Bartlett's mainlobe skirt from the loud source is leaking into the weak one's
 beam, which both inflates its level and drags its apparent bearing. MVDR nulls
 the loud source and reports both correctly. MUSIC gets the bearing exactly
 right and tells you nothing at all about level: the height of a MUSIC peak is
 a measure of subspace orthogonality, not of received power, and reading it as
-dB re anything is a mistake. It landed near −12 dB here by coincidence.
+dB re anything is a mistake. Its −14.4 dB here is the geometry of this draw's
+subspaces, not the source's −12 dB.
 
 ### Choosing between them
 
@@ -661,21 +663,22 @@ the element count.
 
 | `K` | `K/N` | `cond(R̂)` | Trough between the sources | Background beyond ±20° |
 |---|---|---|---|---|
-| 8 | 0.5 | 2.9 × 10¹⁷ | −0.6 dB — barely split | −15.8 dB |
-| 16 | 1 | 2.6 × 10⁴ | −3.1 dB | −23.1 dB |
-| 32 | 2 | 1.5 × 10³ | −5.0 dB | −22.3 dB |
-| 256 | 16 | 3.5 × 10² | −4.9 dB | −22.1 dB |
+| 8 | 0.5 | 2.7 × 10¹⁷ | −1.7 dB — barely split | −17.2 dB |
+| 16 | 1 | 3.3 × 10⁴ | −1.0 dB — barely split | −24.9 dB |
+| 32 | 2 | 1.7 × 10³ | −5.8 dB | −22.5 dB |
+| 256 | 16 | 3.7 × 10² | −5.0 dB | −22.0 dB |
 
 That is the `K ≳ 2N` rule, measured. At `K = 2N = 32` the notch between the two
-sources is within 0.1 dB of what 16× more snapshots delivers, and the
-background has fully settled. Below `N` the pattern is visibly degraded — a
-0.6 dB trough is not a resolved pair — and the background has risen 7 dB,
-which is output SNR you have simply lost.
+sources is as deep as 16× more snapshots make it (0.8 dB deeper, in this
+draw), and the background has settled to within 0.5 dB. Up to `K = N` the
+pattern is visibly degraded — a 1–2 dB trough is not a resolved pair — and at
+`K = 8` the background has risen 5 dB, which is output SNR you have simply
+lost.
 
 The bottom-left panel makes the mechanism explicit, and contains one detail
 worth internalising: **the error curve is perfectly smooth through `K = N`.**
 The estimate `R̂` degrades gracefully as snapshots get scarce, tracking `K^−1/2`
-(0.34 at `K = N`, 0.216 at `K = 2N`, 0.037 at `K = 64N`). Nothing dramatic
+(0.34 at `K = N`, 0.222 at `K = 2N`, 0.038 at `K = 64N`). Nothing dramatic
 happens to `R̂` at `K = N`. What breaks is the **inverse**: below `N` snapshots
 `R̂` has rank `K < N` and is exactly singular, and MVDR's whole premise is
 `R̂⁻¹`.
@@ -687,20 +690,21 @@ before inverting — a small amount of artificial white noise that lifts the
 zero eigenvalues off the floor. The default is `1e-6`, which is enough to make
 the inverse well-defined without meaningfully changing the answer. The
 bottom-right panel is `K = 12` against `N = 16`, so `rank(R̂) = 12` and
-`cond(R̂) ≈ 2 × 10¹⁷`:
+`cond(R̂) ≈ 1 × 10¹⁷`:
 
 | `diagonal_loading` | Sources at ±2° | Loudest spurious peak | Background |
 |---|---|---|---|
-| `0` | found, at −0.6° and +1.5° | **−2.9 dB at −35.5°** | −42 dB |
-| `1e-6` (default) | found, at −1.9° and +2.0° | −15.6 dB | −19 dB |
-| `1e-2` | found, at −1.8° and +2.0° | −16.6 dB | −18 dB |
-| `1` | **merged** into one peak at +1.0° | −9.0 dB | −9.5 dB |
+| `0` | **not found** — NaN over 91% of the scan | **0 dB at −55.5°**, the spectrum's maximum | — |
+| `1e-6` (default) | found, at −1.65° and +1.9° | −15.4 dB | −19 dB |
+| `1e-2` | found, at −1.7° and +1.85° | −16.5 dB | −18 dB |
+| `1` | **merged** into one peak at +0.1° | −10.0 dB | −10.3 dB |
 
-With no loading the spectrum shatters into tall narrow spikes standing on a
-very deep floor, and the loudest of them is within 3 dB of the real sources at
-a bearing where nothing exists. Those spikes are scan directions that happen to
-sit near the range space of a rank-deficient estimate; they are an artefact of
-the inverse, and they look exactly like detections.
+With no loading the inverse of the rank-12 estimate is not positive-definite:
+`w^H R̂⁻¹ w` is not positive at most scan angles, so `mvdr` returns NaN there
+(the gaps in the blue curve), and what is left is a few tall narrow spikes —
+the loudest, at −55.5°, is the maximum of the whole spectrum, at a bearing
+where nothing exists, while the real sources are not found at all. The spikes
+are an artefact of the inverse, and they look exactly like detections.
 
 At the other end, `loading = 1` adds as much white noise power as the average
 element already carries. It swamps the structure MVDR was exploiting, the
@@ -731,7 +735,7 @@ Out of range raises `ConfigurationError` rather than returning something
 plausible:
 
 ```
-ConfigurationError: music_spectrum: n_sources must be in [1, 15], got 16
+ConfigurationError: music_spectrum: n_sources must be in [1, 15], got 16.
 ```
 
 ![MUSIC and the source count](figures/arrays_music_order.png)
@@ -742,7 +746,7 @@ largest. **Right:** the pseudospectrum for three model orders, with the
 conventional beampattern for the same `R` drawn in grey.
 
 The left panel is how you *pick* `n_sources` in practice. The two signal
-eigenvalues sit at 0 and −1.05 dB; the fourteen noise eigenvalues sit between
+eigenvalues sit at 0 and −1.08 dB; the fourteen noise eigenvalues sit between
 −20.9 and −24.6 dB. The **19.8 dB cliff** between eigenvalue 2 and eigenvalue 3
 is the source count, read directly off the data. Note that the noise
 eigenvalues are not identical — they spread over 3.7 dB — because `K` is finite;
@@ -753,15 +757,15 @@ The right panel shows the two directions of error are not symmetric:
 
 | `n_sources` | dim(`Eₙ`) | Peaks found | Contrast (peak to floor) |
 |---|---|---|---|
-| 1 — too few | 15 | **one** blob at +0.1°, 3.9° wide | 8.8 dB |
-| 2 — correct | 14 | −2.95° and +3.00° | 35.7 dB |
-| 4 — too many | 12 | −2.97° and +2.98° | 36.1 dB |
+| 1 — too few | 15 | **one** blob at +0.15°, 3.9° wide | 8.8 dB |
+| 2 — correct | 14 | −3.03° and +3.00° | 35.2 dB |
+| 4 — too many | 12 | −3.03° and +3.00° | 36.1 dB |
 
 **Too few is catastrophic.** With `n_sources = 1`, one genuine signal
 eigenvector is misclassified as noise. The noise subspace now contains a
 direction the true steering vectors are *not* orthogonal to, the null stops
 being a null, and both sources collapse into a single blob — and the contrast
-falls from 36 dB to 8.8 dB, so the whole pseudospectrum flattens along with it.
+falls from 35 dB to 8.8 dB, so the whole pseudospectrum flattens along with it.
 The grey Bartlett curve on the same axes has a 12.85° mainlobe here; MUSIC with
 the wrong order has narrowed it to 3.9° but is still reporting **one** source
 where there are two, which is a more dangerous kind of wrong.
@@ -809,27 +813,30 @@ fixed **+20 dB** interferer at 8° (dotted). **Left:** conventional, via
 `beamform` with the block power-averaged. **Right:** MVDR on the same blocks.
 Both share the colour scale, which spans 40 dB down from the global maximum.
 
-Both processors get the interferer's level right — 32.6 dB conventional, 31.8
-dB MVDR, against the 32 dB expected from a +20 dB source plus `10·log10(16)` of
-array gain. What differs is everything else.
+The conventional processor gets the interferer's level right — 32.0 dB averaged
+over the record, against the 32 dB expected from a +20 dB source plus
+`10·log10(16)` of array gain; MVDR reads it at 30.8 dB, the finite-snapshot bias
+described below. What differs is everything else.
 
 **The conventional map is dominated by the interferer's pattern, not by the
 interferer.** Its mainlobe smears over the full 6° beamwidth (−3 dB span +5.0°
 to +11.0°), and its sidelobes band the entire scan: 40° away from it the map
-still reads 9.6 dB. Those bands sit at 13–15 dB, and the target's own track sits
-at 12–17 dB. The loudest sidelobe is as bright as the target. You can see the
+still reads 9.5 dB. Those bands sit at 12–15 dB (19 dB for the first sidelobe
+either side of the mainlobe), and the target's own track sits at 12–20 dB,
+14 dB median. The loudest sidelobe is brighter than the target. You can see the
 diagonal in the left panel because you already know where to look; by level
 alone it is not separable from the horizontal banding.
 
 **The MVDR map is the scene.** The interferer occupies a single 0.25° scan
 cell, the sidelobe banding is gone, the clear-water background sits at about
-−1 dB, and the target track reads 10–11 dB — about **11 dB of contrast at every
-block in the record**. The track is lost only where it physically crosses the
+−1 dB, and the target track reads 10–12 dB (10.9 dB median) — about **12 dB of
+contrast at every block in the record**. The track is lost only where it physically crosses the
 interferer, around block 68, which is a genuine ambiguity rather than a
 processing failure.
 
 One honest caveat visible in those numbers: MVDR reports the 0 dB target at
-10–11 dB where 12 dB is correct. That 1–2 dB shortfall is the finite-snapshot
+10–12 dB (10.9 dB median) where 12 dB is correct. That shortfall of about 1 dB
+is the finite-snapshot
 signal-cancellation bias — with `K/N = 4`, the target leaks into its own
 estimated covariance and MVDR partially nulls it. More snapshots reduce it;
 diagonal loading trades it against stability.
@@ -844,7 +851,7 @@ column = 10.0 * np.log10(np.mean(10.0 ** (snr / 10.0), axis=1))
 ```
 
 That average is not an approximation of the conventional spectrum — it **is**
-`bartlett(sample_covariance(block), steering)`, to within 3 × 10⁻¹³ dB.
+`bartlett(sample_covariance(block), steering)`, to within 4 × 10⁻¹³ dB.
 Averaging beam power over snapshots and beamforming the sample covariance are
 the same arithmetic in a different order, which is a useful thing to know when
 you have a processor written one way and a theory written the other.

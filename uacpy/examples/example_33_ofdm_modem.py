@@ -1,4 +1,4 @@
-"""OFDM underwater modem — text → .wav → text.
+"""OFDM underwater modem — text → passband waveform → text.
 
 The multicarrier counterpart of example 32: a real payload over OFDM, recovered
 through a dispersive, Doppler-shifted channel. FEC + QPSK subcarriers +
@@ -7,11 +7,12 @@ estimate and resample out the common Doppler, Schmidl-Cox the timing and CFO,
 FFT, pilot channel estimate, one-tap per-subcarrier equalise with per-symbol
 phase tracking, Viterbi decode, check the CRC.
 
-Uses: comms.OFDMTransmitter/OFDMReceiver.transmit_passband ·
+Uses: comms.OFDMTransmitter.transmit_passband ·
 OFDMReceiver.receive_passband(return_diagnostics=) ·
 comms.estimate_doppler_scale · comms.awgn ·
-schmidl_cox_sync · remove_cfo · estimate_channel · uacpy.io.write_wav
-· plot_scatter
+schmidl_cox_sync · schmidl_cox_metric · remove_cfo · estimate_channel ·
+uacpy.io.write_wav · acoustic_signal.spectrogram · plot_sync_metric ·
+plot_subcarriers · plot_scatter
 """
 
 import os
@@ -24,7 +25,9 @@ import matplotlib.pyplot as plt
 from scipy.signal import resample_poly
 import uacpy
 from uacpy import comms
-from uacpy.comms import estimate_channel, remove_cfo, schmidl_cox_sync
+from uacpy.acoustic_signal import spectrogram
+from uacpy.comms import (estimate_channel, remove_cfo, schmidl_cox_metric,
+                         schmidl_cox_sync)
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -78,11 +81,13 @@ print(f"  CRC      : {'OK' if crc_ok else 'FAIL'}, "
       f"payload match {payload == message}")
 print(f"  recovered: {payload[:60]!r}{'...' if len(payload) > 60 else ''}")
 
-# The per-subcarrier channel for the figure, from the same public steps the
-# receiver takes: sync on the baseband, remove the CFO, estimate H from the
-# pilot block (block 0 is the Schmidl-Cox preamble, block 1 the pilot).
+# The timing metric and the per-subcarrier channel for the figure, from the
+# same public steps the receiver takes: the Schmidl-Cox metric of the
+# baseband, sync on it, remove the CFO, estimate H from the pilot block
+# (block 0 is the Schmidl-Cox preamble, block 1 the pilot).
 baseband = receiver.from_passband(received, fs, fc, oversample=oversampling,
                                   doppler_scale=scale)
+metric = schmidl_cox_metric(baseband, nsc)
 start, cfo = schmidl_cox_sync(baseband, nsc)
 block = nsc + cp
 x = remove_cfo(baseband[start:], cfo)
@@ -90,31 +95,24 @@ H = estimate_channel(x[block:2 * block], receiver.pilot_values, nsc, cp)
 constellation = receiver.modulator.constellation
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
-axes[0, 0].specgram(received, NFFT=256, Fs=fs, noverlap=200, cmap='jet')
+# The waveform's samples read as pascals: the levels are dB re 1 Pa²/Hz.
+spectrogram(received, fs, nperseg=256, noverlap=200).plot(
+    ax=axes[0, 0], ref=1.0, freq_max=fs / 2,
+    title='received passband spectrogram')
 axes[0, 0].axhline(fc, color='w', ls='--', lw=1)
-axes[0, 0].set_title('received passband spectrogram')
-axes[0, 0].set_xlabel('Time [s]')
-axes[0, 0].set_ylabel('Frequency [Hz]')
-axes[0, 0].set_ylim(0, fs / 2)
 
-axes[0, 1].plot(diag.sync_metric)
-axes[0, 1].set_title('Schmidl-Cox timing metric')
-axes[0, 1].set_xlabel('Sample index')
-axes[0, 1].set_ylabel('Metric')
-axes[0, 1].grid(alpha=0.3)
+# schmidl_cox_sync takes the metric's peak as the preamble when it reaches
+# the 0.5 default threshold.
+uacpy.plot.plot_sync_metric(metric, ax=axes[0, 1], threshold=0.5,
+                            title='Schmidl-Cox timing metric')
 
-axes[1, 0].plot(np.arange(nsc) - nsc // 2,
-                np.fft.fftshift(20 * np.log10(np.abs(H) + 1e-9)))
-axes[1, 0].set_title('per-subcarrier channel |H|')
-axes[1, 0].set_xlabel('Subcarrier')
-axes[1, 0].set_ylabel('|H| [dB]')
-axes[1, 0].grid(alpha=0.3)
+# The plotter takes an impulse response; the estimate's inverse DFT is one.
+uacpy.plot.plot_subcarriers(np.fft.ifft(H), nsc, ax=axes[1, 0],
+                            title='per-subcarrier channel |H|')
 
-uacpy.plot.plot_scatter(diag.symbols, ax=axes[1, 1],
+uacpy.plot.plot_scatter(diag.symbols, ax=axes[1, 1], ideal=constellation,
                         title=f"recovered QPSK "
                               f"(CRC {'OK' if crc_ok else 'FAIL'})")
-axes[1, 1].scatter(constellation.real, constellation.imag, marker='x', s=80,
-                   color='k', zorder=5)
 
 fig.savefig(OUT / 'example_33_ofdm_modem.png', dpi=120)
 plt.close(fig)

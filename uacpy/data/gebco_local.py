@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from uacpy.core.exceptions import (
-    ConfigurationError, DataFetchError, FallbackWarning, IOWarning,
+    DataFetchError, FallbackWarning, IOWarning,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
@@ -122,15 +122,9 @@ def _grid_path():
             f"({', '.join(p.name for p in grids)}); sampling {nc.name}.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if nc is None:
-        # The cache dir exists but holds no .nc grid: raise the same typed
-        # error require() gives for the canonical missing file.
-        ds = _cache.DATASETS['gebco']
-        raise ConfigurationError(
-            f"Offline gebco data not found: {ds.description} "
-            f"({path / 'GEBCO_2025.nc'}).",
-            remediation=f"Run `{ds.install_flag}` to download it, or set "
-                        f"$UACPY_DATA_CACHE to a directory that has it.",
-        )
+        # No GEBCO_<year>.nc in the cache dir, so the canonical file is
+        # absent too and require() raises its typed cache-miss error.
+        _cache.require('gebco', 'GEBCO_2025.nc')
     return nc
 
 

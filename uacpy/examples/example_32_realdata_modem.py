@@ -9,8 +9,8 @@ carrier PLL, Viterbi-decode, and check the CRC.
 
 Uses: comms.pack_frame/unpack_frame · Transmitter.transmit_passband ·
 CommsReceiver.from_passband/receive(return_diagnostics=) · comms.DFE ·
-comms.awgn · uacpy.io.write_wav · plot_scatter · plot_sync_metric ·
-plot_convergence
+comms.awgn · uacpy.io.write_wav/read_wav · acoustic_signal.spectrogram ·
+plot_scatter · plot_sync_metric · plot_convergence
 """
 
 import os
@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 from scipy.signal import resample_poly
 import uacpy
 from uacpy import comms
+from uacpy.acoustic_signal import spectrogram
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -40,16 +41,19 @@ frame_bits = comms.pack_frame(message)
 code = comms.ConvCode(interleave_depth=16)
 tx = comms.Transmitter("qpsk", code=code, preamble=256)
 waveform = tx.transmit_passband(frame_bits, fs, fc, sps=sps)
-uacpy.io.write_wav(OUT / 'example_32_modem.wav', waveform, fs)
+wav_path = OUT / 'example_32_modem.wav'
+uacpy.io.write_wav(wav_path, waveform, fs)
 print(f"  payload  : {len(message)} bytes → {frame_bits.size} framed bits")
 print(f"  waveform : {waveform.size} real samples, "
       f"{waveform.size / fs * 1e3:.0f} ms @ {fs / 1e3:.0f} kHz, "
       f"carrier {fc / 1e3:.0f} kHz")
 
-# Channel: 3-path multipath, 200 ppm clock skew, propagation delay, then noise.
+# Channel: the .wav read back (16-bit PCM, scaled to ±1), then 3-path
+# multipath, 200 ppm clock skew, propagation delay and noise.
+transmitted, _ = uacpy.io.read_wav(wav_path)
 impulse_response = np.zeros(40)
 impulse_response[[0, 17, 33]] = [1.0, 0.4, 0.2]
-received = np.convolve(waveform, impulse_response)
+received = np.convolve(transmitted, impulse_response)
 received = resample_poly(received, 100020, 100000)
 received = np.concatenate([np.zeros(11), received])
 snr_dB = 22.0
@@ -72,20 +76,18 @@ print(f"  CRC      : {'OK' if crc_ok else 'FAIL'}, "
 print(f"  recovered: {payload[:60]!r}{'...' if len(payload) > 60 else ''}")
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
-axes[0, 0].specgram(received, NFFT=256, Fs=fs, noverlap=200, cmap='jet')
+# The record is the .wav's samples, scaled to ±1, read as pascals: the
+# levels are dB re 1 Pa²/Hz.
+spectrogram(received, fs, nperseg=256, noverlap=200).plot(
+    ax=axes[0, 0], ref=1.0, freq_max=fs / 2,
+    title='received passband spectrogram')
 axes[0, 0].axhline(fc, color='w', ls='--', lw=1)
-axes[0, 0].set_title('received passband spectrogram')
-axes[0, 0].set_xlabel('Time [s]')
-axes[0, 0].set_ylabel('Frequency [Hz]')
-axes[0, 0].set_ylim(0, fs / 2)
 
 # The first 200 payload symbols are left out: the DFE is still settling there.
 uacpy.plot.plot_scatter(diag.symbols[200:], ax=axes[0, 1],
+                        ideal=receiver.modulator.constellation,
                         title=f"recovered QPSK "
                               f"(CRC {'OK' if crc_ok else 'FAIL'})")
-axes[0, 1].scatter(receiver.modulator.constellation.real,
-                   receiver.modulator.constellation.imag,
-                   marker='x', s=80, color='k', zorder=5)
 uacpy.plot.plot_sync_metric(diag.sync_metric, threshold=0.4, ax=axes[1, 0])
 uacpy.plot.plot_convergence(diag.mse, ax=axes[1, 1],
                             title='(DFE + carrier PLL)')

@@ -50,8 +50,9 @@ plt.close(fig)
 # nfft is the IFFT chunk size and sets the synthesis bin width
 # df = sample_rate / nfft. The Wenz target starts at 1 Hz, so the chunk has to
 # be long enough for the low-frequency shape to survive resampling onto the
-# FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz. (The library clamps nfft
-# to [16, 262144], so a token value like 1 would silently become the default.)
+# FFT-native grid: 96 kHz / 65536 gives df = 1.46 Hz. (The library holds nfft
+# to [16, 262144]: a token value like 1 becomes the default 65536, with a
+# FallbackWarning.)
 sample_rate, nfft, duration = 96000, 65536, 30.0
 frequencies = np.linspace(1.0, sample_rate / 2, 10000)   # up to Nyquist
 wenz = WenzNoise(frequencies, **conditions)
@@ -85,9 +86,13 @@ fig.savefig(OUT / 'example_09_ssrp_spectrogram.png', dpi=150,
             bbox_inches='tight')
 plt.close(fig)
 
+# Welch's default 8192-sample segment makes 11.7 Hz bins at 96 kHz, too coarse
+# for the curve's steep fall below 20 Hz, so the PPSD starts at 20 Hz as the
+# constant-Q one below does.
 fig, ax = uacpy.plot.plot_ppsd(
-    probabilistic_welch(pressure, fs, ref=UPA, segment_duration=1.0, segment_overlap_percent=50, level_step_dB=1.0,
-         level_min_dB=20, level_max_dB=140),
+    probabilistic_welch(pressure, fs, ref=UPA, segment_duration=1.0,
+                        segment_overlap_percent=50, level_step_dB=1.0,
+                        level_min_dB=20, level_max_dB=140, freq_min=20.0),
     title=label, ymin=20, ymax=120)
 # The check: the analytic curve the realisation came from, over its own PPSD.
 ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
@@ -119,7 +124,7 @@ ax.semilogx(wenz.frequencies, wenz.total, color='magenta', linewidth=2.0,
 # own mean line sits below it — the single-look bias the print below measures,
 # not an error in the synthesis. Dotted because the plotter already draws that
 # mean solid black and its ±STD dashed black.
-ax.semilogx(cq_mean.frequencies, 10 * np.log10(cq_mean.power / UPA ** 2),
+ax.semilogx(cq_mean.frequencies, cq_mean.level_dB(ref=UPA),
             color='k', lw=2.2, ls=':',
             label='constant_q')
 ax.legend(loc='upper right', fontsize='small', framealpha=0.85)
@@ -131,7 +136,7 @@ plt.close(fig)
 # histogram, and compare a target curve against the power mean instead.
 analytic = np.interp(cq_hist.frequencies, wenz.frequencies, wenz.total)
 print(f"  constant-Q: power mean "
-      f"{np.nanmedian(10 * np.log10(cq_mean.power / UPA ** 2) - analytic):+.2f}"
+      f"{np.nanmedian(cq_mean.level_dB(ref=UPA) - analytic):+.2f}"
       f" dB against the analytic curve, per-bin dB mean "
       f"{np.nanmedian(cq_hist.mean_dB - analytic):+.2f} dB "
       f"(single-look log mean, 2.51 dB low by construction)")
@@ -147,8 +152,6 @@ print(f"  SEL: broadband "
 # The estimate carries its bands and its scaling, so the bars and the unit on
 # the level axis come from the estimate rather than from arguments repeated
 # here: exposure.plot() is the same figure.
-fig, _ = uacpy.plot.plot_sel(exposure, ref=UPA,
-                             duration=pressure.size / fs,
-                             band_type='decidecade', title=label)
+fig, _ = uacpy.plot.plot_sel(exposure, ref=UPA, title=label)
 fig.savefig(OUT / 'example_09_sel.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

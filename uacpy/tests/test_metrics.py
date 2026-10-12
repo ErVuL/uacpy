@@ -75,7 +75,7 @@ class TestTLRmseBasic:
             uacpy.metrics.tl_rmse(a, object())
 
     def test_nan_no_data_cells_excluded(self):
-        # NaN marks a no-data cell (e.g. a Bellhop cell no ray reached); it
+        # NaN marks a no-data cell (e.g. Bellhop's r = 0 column); it
         # must be excluded from every statistic, not read as a value.
         d = np.array([10.0, 20.0])
         r = np.array([100.0, 200.0])
@@ -354,8 +354,91 @@ class TestSharedRangesStatesWhatItCompares:
         with pytest.raises(ConfigurationError, match="not dB"):
             tl_rmse_on_shared_ranges(pd, a, depth=10.0)
 
+    @pytest.mark.parametrize('metric', ['tl_rmse_on_shared_ranges',
+                                        'tl_rmse'])
+    def test_a_multi_depth_field_on_either_side_names_one_source_or_the_sum(
+            self, metric):
+        """A field over source depths is one TL map per source: either
+        side is refused typed, naming at(source_depth=...) and superpose();
+        one plane compares."""
+        import uacpy.core.metrics as metrics
+        call = getattr(metrics, metric)
+        a = self._field([10.0, 20.0], np.linspace(100, 1000, 10))
+        pair = Field(data=np.stack([a.data, 2.0 * a.data]),
+                     coords={'source_depth': np.array([5.0, 15.0]),
+                             **a.coords},
+                     model='Synthetic', source_depths=[5.0, 15.0])
+        kwargs = {'depth': 10.0} if metric == 'tl_rmse_on_shared_ranges' \
+            else {}
+        for field, reference in ((pair, a), (a, pair)):
+            with pytest.raises(ConfigurationError,
+                               match=rf"{metric}: .*got coords "
+                                     rf"\['source_depth'") as err:
+                call(field, reference, **kwargs)
+            assert 'at(source_depth=...)' in str(err.value)
+            assert 'superpose()' in str(err.value)
+        assert call(pair.at(source_depth=5.0), a, **kwargs) == \
+            pytest.approx(0.0, abs=1e-9)
+
 
 # ── (field, reference) on plain dB arrays and on 1-D cuts ────────────────────
+
+class TestSharedRangesTakesTwoPlainCurves:
+    """``tl_rmse_on_shared_ranges`` runs on two ``(ranges, tl_dB)`` curves
+    with no Field built, to the number the Field form gives for the same
+    curves; depth= belongs to Fields only, the two forms do not mix, and a
+    curve whose ranges cannot be interpolated on is refused."""
+
+    R_FINE = np.linspace(1000.0, 5000.0, 65)
+    R_COARSE = np.linspace(1500.0, 6000.0, 10)
+
+    def _curves(self):
+        tl_fine = 60.0 + 10.0 * np.log10(self.R_FINE) + np.sin(
+            self.R_FINE / 300.0)
+        tl_coarse = 61.0 + 10.0 * np.log10(self.R_COARSE)
+        return (self.R_FINE, tl_fine), (self.R_COARSE, tl_coarse)
+
+    def test_two_curves_give_the_field_forms_number(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        (r_a, tl_a), (r_b, tl_b) = self._curves()
+        plain = tl_rmse_on_shared_ranges((r_a, tl_a), (r_b, tl_b))
+        fields = [Field(data=tl[None, :], coords={'depth': np.array([50.0]),
+                                                  'range': r},
+                        unit='dB', kind='pressure')
+                  for r, tl in ((r_a, tl_a), (r_b, tl_b))]
+        assert plain == pytest.approx(
+            tl_rmse_on_shared_ranges(*fields, depth=50.0), rel=1e-12)
+        assert np.isfinite(plain) and plain > 0.5
+
+    def test_depth_with_two_curves_is_refused(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        with pytest.raises(ConfigurationError, match='one depth'):
+            tl_rmse_on_shared_ranges(*self._curves(), depth=50.0)
+
+    def test_a_field_and_a_curve_together_are_refused(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        (r_a, tl_a), curve = self._curves()
+        field = Field(data=tl_a[None, :], coords={'depth': np.array([50.0]),
+                                                  'range': r_a},
+                      unit='dB', kind='pressure')
+        with pytest.raises(ConfigurationError, match='both be Fields'):
+            tl_rmse_on_shared_ranges(field, curve, depth=50.0)
+
+    def test_two_fields_without_a_depth_are_refused(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        (r, tl), _ = self._curves()
+        field = Field(data=tl[None, :], coords={'depth': np.array([50.0]),
+                                                'range': r},
+                      unit='dB', kind='pressure')
+        with pytest.raises(ConfigurationError, match='pass depth='):
+            tl_rmse_on_shared_ranges(field, field)
+
+    def test_ranges_that_do_not_increase_are_refused(self):
+        from uacpy.core.metrics import tl_rmse_on_shared_ranges
+        (r, tl), other = self._curves()
+        with pytest.raises(ConfigurationError, match='strictly increasing'):
+            tl_rmse_on_shared_ranges((r[::-1], tl), other)
+
 
 class TestMetricsTakeFieldAndReference:
     """The four metrics spell their pair ``(field, reference)`` and the

@@ -15,6 +15,9 @@ import warnings
 
 import functools
 
+from decimal import Decimal
+from fractions import Fraction
+
 import numpy as np
 import pytest
 
@@ -863,10 +866,10 @@ def test_surface_source_warns_for_field_runs():
                                         attenuation=0.5))
     rcv = uacpy.Receiver(depths=[50.0], ranges=[2000.0])
     with pytest.raises(uacpy.ConfigurationError, match="top boundary"):
-        Bellhop().compute_tl(env, uacpy.Source(depths=0.0, frequencies=200.0), rcv)
+        Bellhop().compute_field(env, uacpy.Source(depths=0.0, frequencies=200.0), rcv)
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        Bellhop().compute_tl(env, uacpy.Source(depths=10.0, frequencies=200.0), rcv)
+        Bellhop().compute_field(env, uacpy.Source(depths=10.0, frequencies=200.0), rcv)
 
 
 # --- Silent-coercion guards: extrapolation and container types -------------
@@ -888,7 +891,8 @@ def test_sound_speed_at_warns_on_extrapolation():
 def test_francois_garrison_accepts_list_pH():
     """pH as a Python list must not raise a bare TypeError (it is coerced)."""
     from uacpy.core.acoustics.attenuation import absorption_francois_garrison
-    out = absorption_francois_garrison(10000, 10, 35, [8.0, 8.1], 100)
+    out = absorption_francois_garrison(10000, 10, 35, [8.0, 8.1],
+                                       [100.0, 100.0])
     out = np.atleast_1d(np.asarray(out, dtype=float))
     assert out.shape == (2,) and np.all(out > 0)
 
@@ -975,6 +979,38 @@ class TestAttenuationCeiling:
         between 54.0 and 54.6, so a rounder bound would reject legal input."""
         assert uacpy.core.BoundaryProperties(
             sound_speed=1800.0, density=2.0, attenuation=alpha) is not None
+
+    @pytest.mark.parametrize('channel', ['attenuation', 'shear_attenuation'])
+    @pytest.mark.parametrize('alpha, warns', [(10.0, False), (10.5, True),
+                                              (50.0, True)])
+    def test_a_value_past_every_seabed_warns_of_its_unit(self, channel,
+                                                         alpha, warns):
+        """JKPS Table 1.3 tops out at 1.0 dB/wavelength compressional and
+        2.5 shear; past ten, a dB/km or dB/m value typed as dB/wavelength is
+        the likelier reading. Accepted (under the solver ceiling), with a
+        warning naming the unit and the converter; 10.0 is silent."""
+        from uacpy.core.boundary import SedimentLayer
+        for build in (
+                lambda: uacpy.core.BoundaryProperties(
+                    sound_speed=1800.0, density=2.0, shear_speed=400.0,
+                    **{channel: alpha}),
+                lambda: SedimentLayer(thickness=1.0, sound_speed=1600.0,
+                                      density=1.7, shear_speed=300.0,
+                                      **{channel: alpha})):
+            with recorded_warnings() as record:
+                build()
+            said = [str(w.message) for w in record
+                    if 'JKPS Table 1.3' in str(w.message)]
+            assert bool(said) is warns, said
+            if warns:
+                assert 'convert_attenuation_units' in said[0]
+
+    def test_every_material_preset_is_silent(self):
+        from uacpy.core.materials import MATERIALS
+        with recorded_warnings() as record:
+            for name in MATERIALS:
+                uacpy.core.BoundaryProperties.from_preset(name)
+        assert not [w for w in record if 'JKPS Table 1.3' in str(w.message)]
 
     def test_the_shear_channel_is_bounded_too(self):
         from uacpy.core.boundary import SedimentLayer
@@ -1272,8 +1308,8 @@ def test_ram_broadband_grid_round_trips_the_request():
             for f in req:
                 assert np.isclose(marched, f).any(), (n, f, marched)
             assert marched.size <= req.size + 1
-    with pytest.warns(UserWarning, match="pinned"):
-        ram = RAM(q_factor=2.0, record_duration=10.0)
+    ram = RAM(q_factor=2.0, record_duration=10.0)
+    with pytest.raises(ConfigurationError, match="contradict each other"):
         ram_band.resolve_broadband_grid(
             uacpy.Source(depths=25.0, frequencies=np.linspace(100, 110, 11)),
             knobs=ram._knob_record(), log=ram._log)
@@ -1360,6 +1396,42 @@ class TestValidatorMessagesStayBounded:
         msg = str(exc.value)
         assert len(msg) < 500
         assert "-2" in msg and "index 7" in msg
+
+    @pytest.mark.parametrize('guard', ['require_positive',
+                                       'require_non_negative'])
+    @pytest.mark.parametrize('values, said', [
+        ('1.0', r'X must be a number, not text \(got \'1\.0\'\)\.'),
+        (b'1', r'X must be a number, not text'),
+        (True, r'X must be a number, not a bool \(got True\)\.'),
+        (np.array(True), r'X must be a number, not a bool'),
+        (np.complex128(1.0), r'X must be a real number, not complex'),
+        (None, r'X must be a scalar number \(got None\)\.'),
+        (Decimal('1.5'), r'X must be a scalar number'),
+        (np.array(['1.0', '2.0']), r'X must be real numbers; got text in'),
+        (np.array([True, True]), r'X must be real numbers; got a bool in'),
+        ([True, 2.0], r'X must be real numbers; got a bool in'),
+        ([2.0, np.True_], r'X must be real numbers; got a bool in'),
+        ([1.0, None], r'X must be real numbers; got a value that is not a '
+                      r'number in'),
+        (np.array([1.0 + 0j]), r'X must be real numbers')])
+    def test_a_carrier_guard_reads_only_real_numbers(self, guard, values,
+                                                     said):
+        """The carrier guards read values by the package's one rule, element
+        by element: cast to float, text would pass as what it spells, a
+        bool as 1 or 0 — also among numbers, which NumPy reads as numbers —
+        and a complex value as its real part."""
+        from uacpy.core import _validate
+        with pytest.raises(ConfigurationError, match=f'^{said}'):
+            getattr(_validate, guard)(values, "X")
+
+    @pytest.mark.parametrize('values', [2, np.int64(2), np.float32(2.0),
+                                        np.array(2.0), [1.0, 2], (1, 2),
+                                        Fraction(3, 2), [Fraction(1, 2), 2.0],
+                                        np.array([1.0, 2.0], dtype=object)])
+    def test_a_carrier_guard_takes_real_numbers(self, values):
+        from uacpy.core._validate import require_non_negative, require_positive
+        require_positive(values, "X")
+        require_non_negative(values, "X")
 
     def test_non_negative_reports_first_offender(self):
         from uacpy.core._validate import require_non_negative
@@ -1946,6 +2018,75 @@ class TestAReceiverWhoseLargestRangeIsZeroIsRefusedBeforeTheDeck:
         Kraken(verbose=False).validate_inputs(
             env, src, uacpy.Receiver(depths=[50.0], ranges=[0.0]),
             run_mode=RunMode.MODES)
+
+
+class TestAGridInsideOneWavelengthIsNamed:
+    """Every field model warns when every receiver range lies within one
+    wavelength of the source (the highest frequency of the run's band, the
+    slowest water), where no far-field sum holds, and names metres as the
+    unit: ranges typed in km land there at low frequency. A grid reaching
+    past one wavelength is a real short-range run and is not flagged: 100 Hz
+    in 1500 m/s water is 15 m, so 14.9 m warns and 15.1 m does not."""
+
+    @staticmethod
+    def _messages(model_cls, ranges, frequency=100.0, ssp=1500.0, **run):
+        env = uacpy.Environment(name='near', bathymetry=100.0, ssp=ssp)
+        src = uacpy.Source(depths=50.0, frequencies=frequency)
+        with recorded_warnings() as record:
+            try:
+                model_cls(verbose=False).validate_inputs(
+                    env, src, uacpy.Receiver(depths=[50.0], ranges=ranges),
+                    **run)
+            except ConfigurationError:
+                # Scooter refuses a grid this short on its own (one
+                # wavenumber sample); the warning has been given by then.
+                pass
+        return [str(w.message) for w in record
+                if 'within one wavelength' in str(w.message)]
+
+    @pytest.mark.parametrize('model_cls', _field_model_params())
+    @pytest.mark.parametrize('farthest, warns', [(14.9, True), (15.1, False)])
+    def test_the_boundary_is_one_wavelength(self, model_cls, farthest,
+                                            warns):
+        said = self._messages(model_cls, np.linspace(1.0, farthest, 5))
+        assert bool(said) is warns, said
+        if warns:
+            assert 'Ranges are in metres' in said[0]
+
+    def test_ranges_typed_in_km_at_low_frequency_are_named(self):
+        said = self._messages(Bellhop, np.linspace(0.5, 5.0, 10))
+        assert len(said) == 1 and 'the farthest at 5 m' in said[0]
+
+    def test_the_highest_frequency_sets_the_wavelength(self):
+        # A band to 400 Hz has a 3.75 m wavelength: 5 m is past it.
+        from uacpy.core.run_settings import RunMode
+        assert self._messages(Bellhop, np.linspace(1.0, 5.0, 5),
+                              frequency=[100.0, 400.0],
+                              run_mode=RunMode.BROADBAND) == []
+        assert self._messages(Bellhop, np.linspace(1.0, 5.0, 5),
+                              frequency=[100.0, 200.0],
+                              run_mode=RunMode.BROADBAND)
+
+    def test_the_band_the_run_carries_sets_the_wavelength(self):
+        # A 100 Hz Source run over 500-2000 Hz: 0.75 m at the top, so 10 m is
+        # thirteen wavelengths out, while the Source alone would say 15 m.
+        from uacpy.core.run_settings import RunMode
+        ranges = np.linspace(1.0, 10.0, 5)
+        assert self._messages(Bellhop, ranges, frequency=100.0,
+                              run_mode=RunMode.BROADBAND,
+                              frequencies=np.linspace(500.0, 2000.0, 4)) == []
+        assert self._messages(Bellhop, ranges, frequency=100.0)
+
+    @pytest.mark.parametrize('farthest, warns', [(14.4, True), (14.6, False)])
+    def test_the_slowest_water_sets_the_wavelength(self, farthest, warns):
+        # 1450-1550 m/s at 100 Hz: 14.5 m in the slowest water, 15.0 m in the
+        # mean and 15.5 m in the fastest.
+        said = self._messages(Bellhop, np.linspace(1.0, farthest, 5),
+                              ssp=[(0.0, 1450.0), (100.0, 1550.0)])
+        assert bool(said) is warns, said
+        if warns:
+            assert 'every receiver range lies within' in said[0]
+            assert 'at 100 Hz in 1450 m/s water' in said[0]
 
 
 # --- Assignment after construction runs the constructor's checks -----------

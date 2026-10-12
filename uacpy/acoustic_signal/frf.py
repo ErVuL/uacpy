@@ -9,6 +9,7 @@ on a record pair or averaged over a block of measurements.
 
 from __future__ import annotations
 
+import numbers
 import warnings
 from collections import namedtuple
 
@@ -256,11 +257,21 @@ class FRFResult(PlottedResult,
 
 
 def _paired_records(x, y, who):
-    """``x`` and ``y`` as one input/output record pair: 1-D, of one length,
-    not empty. Every estimator pairs ``x[n]`` with ``y[n]`` sample by
-    sample."""
+    """``x`` and ``y`` as one input/output record pair: real, 1-D, of one
+    length, not empty. Every estimator pairs ``x[n]`` with ``y[n]`` sample
+    by sample, on the one-sided frequency grid up to Nyquist that a real
+    record has."""
     x = np.asarray(x)
     y = np.asarray(y)
+    if np.iscomplexobj(x) or np.iscomplexobj(y):
+        raise ConfigurationError(
+            f"{who}: x and y must be real passband records; got "
+            f"{x.dtype} and {y.dtype}. The FRF family works on the one-sided "
+            f"grid up to Nyquist, which a complex (baseband) record does not "
+            f"have.",
+            remediation="Upconvert a baseband pair to passband first "
+                        "(uacpy.comms.upconvert), then identify the "
+                        "passband channel.")
     if x.ndim != 1 or y.ndim != 1:
         raise ConfigurationError(
             f"{who}: x and y must be 1-D records; got shapes {x.shape} and "
@@ -387,9 +398,9 @@ def etfe(x, y, sample_rate):
     FRFResult
         ``method='etfe'``, on the rfft grid of the whole record,
         ``k * sample_rate / len(x)`` up to Nyquist. That is finer than the
-        ``nperseg`` grid :func:`frf_welch`, :func:`periodic_etfe` and
-        :func:`lsfir` share: the ETFE spends one raw rfft bin per frequency,
-        so its grid is set by the record length.
+        ``nperseg`` grid :func:`frf_welch` and :func:`lsfir` share (and
+        :func:`periodic_etfe`'s at ``period=nperseg``): the ETFE spends one
+        raw rfft bin per frequency, so its grid is set by the record length.
     """
     x, y = _paired_records(x, y, "etfe")
     sample_rate = require_positive_finite_scalar(
@@ -417,8 +428,9 @@ def periodic_etfe(x, y, sample_rate, *, period):
     sample_rate : float
         Sampling frequency (Hz).
     period : int
-        The excitation's period in samples; the frequency grid is its rfft
-        grid, ``k * sample_rate / period`` up to Nyquist.
+        The excitation's period in samples, a whole number of at least 1
+        (2.5, ``True`` or ``'64'`` is refused); the frequency grid is its
+        rfft grid, ``k * sample_rate / period`` up to Nyquist.
 
     Returns
     -------
@@ -428,8 +440,8 @@ def periodic_etfe(x, y, sample_rate, *, period):
     x, y = _paired_records(x, y, "periodic_etfe")
     sample_rate = require_positive_finite_scalar(
         sample_rate, "periodic_etfe", "sample_rate", " Hz")
-    period = int(period)
-    n_periods = x.size // period if period > 0 else 0
+    period = _whole_period(period, "periodic_etfe")
+    n_periods = x.size // period
     if n_periods < 1:
         raise ConfigurationError(
             f"periodic_etfe: signal length must be at least one period; got "
@@ -473,8 +485,8 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
         improvement.
     nperseg : int
         The frequency response is evaluated on the rfft grid of ``nperseg``
-        samples, so it lines up bin for bin with :func:`frf_welch` and
-        :func:`periodic_etfe`.
+        samples, so it lines up bin for bin with :func:`frf_welch`, and
+        with :func:`periodic_etfe` at ``period=nperseg``.
 
     Returns
     -------
@@ -497,6 +509,10 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
     sample_rate = require_positive_finite_scalar(
         sample_rate, "lsfir", "sample_rate", " Hz")
     N = u.size if n_samples is None else int(n_samples)
+    if not 1 <= N <= u.size:
+        raise ConfigurationError(
+            f"lsfir: n_samples ({N}) must be in [1, {u.size}] — it counts "
+            f"the leading samples of the records the fit uses.")
     criterion = order if order in _ORDER_CRITERIA else None
     m = order
 
@@ -622,6 +638,11 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
         # bit whenever the LU is trustworthy and says so when it is not.
     else:
         m = int(m)
+        if m < 1:
+            raise ConfigurationError(
+                f"lsfir: FIR order must be at least 1; got {m}. Pass a "
+                f"positive order, or a selection criterion ('AIC', 'BIC', "
+                f"'FPE', 'CP').")
         if m > N:
             raise ConfigurationError(
                 f"lsfir: FIR order ({m}) must be <= n_samples "
@@ -633,8 +654,8 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
     g, rcond = _solve_info_matrices(Minfo, Vinfo, m)
 
     # Frequency response on the nperseg rfft grid, so an ls_fir result
-    # lines up bin-for-bin with a welch or p_etfe one ('etfe' alone uses
-    # the full-record grid instead).
+    # lines up bin-for-bin with a welch one, and with a p_etfe one whose
+    # period is nperseg ('etfe' uses the full-record grid instead).
     freqs = np.fft.rfftfreq(int(nperseg), d=1.0 / sample_rate)
     _, h = _sig.freqz(g, worN=freqs, fs=sample_rate)
     return FRFResult(freqs, h, method="ls_fir", impulse_response=g,
@@ -644,6 +665,42 @@ def lsfir(x, y, sample_rate, *, order, n_samples=None, max_order=4096,
 
 #: The estimator each :class:`FRF` method runs.
 _FRF_METHODS = ("welch", "ls_fir", "etfe", "p_etfe")
+
+
+def _resolve_period(method, period, who):
+    """The ``'p_etfe'`` excitation period as a whole number of samples, or
+    ``None`` for another method; refused where the method does not match
+    it, since only ``'p_etfe'`` reads a period and it cannot run without
+    one."""
+    if method != "p_etfe":
+        if period is not None:
+            raise ConfigurationError(
+                f"{who}: period= is the excitation period of method='p_etfe'; "
+                f"method={method!r} does not read it.",
+                remediation="Drop period=, or use method='p_etfe'.")
+        return None
+    if period is None:
+        raise ConfigurationError(
+            f"{who}: method='p_etfe' averages whole periods of a periodic "
+            f"excitation, and no period= was given.",
+            remediation="Pass period=, the excitation's period in samples.")
+    return _whole_period(period, who)
+
+
+def _whole_period(period, who):
+    """``period`` as an ``int`` of samples, refused unless it is a real
+    whole number of at least 1: a ``bool``, a string or 2.5 is not a period,
+    and truncating one would average over a period nobody asked for."""
+    is_number = (isinstance(period, numbers.Real)
+                 and not isinstance(period, bool))
+    value = float(period) if is_number else float("nan")
+    if not (np.isfinite(value) and value >= 1 and value.is_integer()):
+        raise ConfigurationError(
+            f"{who}: period={period!r} is not a whole number of samples "
+            f"of at least 1.",
+            remediation="Pass the excitation's period in samples as a "
+                        "positive integer.")
+    return int(value)
 
 
 class FRF(SettingsRepr):
@@ -657,7 +714,8 @@ class FRF(SettingsRepr):
     keeps no result: every :meth:`compute` returns its own.
     """
 
-    def __init__(self, method="welch", estimator="H1", order=512, **kwargs):
+    def __init__(self, method="welch", estimator="H1", order=512, *,
+                 period=None, **kwargs):
         """
         Parameters
         ----------
@@ -669,8 +727,8 @@ class FRF(SettingsRepr):
             - ``'ls_fir'`` -- :func:`lsfir`, a least-squares impulse
               response.
             - ``'etfe'`` -- :func:`etfe` over the whole signal.
-            - ``'p_etfe'`` -- :func:`periodic_etfe` over segments of
-              ``nperseg`` samples.
+            - ``'p_etfe'`` -- :func:`periodic_etfe` over whole periods of
+              ``period`` samples.
         estimator : str
             Estimator type for ``'welch'``. One of:
 
@@ -680,10 +738,14 @@ class FRF(SettingsRepr):
             FIR order for ``'ls_fir'``, or the criterion that selects it
             (``'AIC'``, ``'BIC'``, ``'FPE'``, ``'CP'``) — :func:`lsfir`'s
             ``order``.
+        period : int, optional
+            The excitation's period in samples, which ``'p_etfe'`` requires
+            and averages the records over (:func:`periodic_etfe`'s
+            ``period``); its rfft grid is the result's. Refused under
+            another method.
         **kwargs
             Welch options (``nperseg``, ``noverlap``, ``window``, ...), as on
-            :func:`frf_welch`; ``nperseg`` is also the ``'ls_fir'`` grid and
-            the ``'p_etfe'`` period.
+            :func:`frf_welch`; ``nperseg`` is also the ``'ls_fir'`` grid.
         """
         self.params = {
             "nperseg": _DEFAULT_NPERSEG,
@@ -718,6 +780,7 @@ class FRF(SettingsRepr):
         self.method = method
         self.estimator = _require_estimator(estimator, "FRF")
         self.order = order
+        self.period = _resolve_period(method, period, "FRF")
 
     def compute(
         self,
@@ -731,12 +794,15 @@ class FRF(SettingsRepr):
         noverlap=None,
         max_order=4096,
         stop_count=50,
+        *,
+        period=None,
     ):
         """
         Estimate the frequency response of one record pair, or the mean over
         the measurements (rows) of a 2-D block.
 
-        ``order``, ``method``, ``estimator``, ``nperseg`` and ``noverlap`` apply to
+        ``order``, ``method``, ``estimator``, ``nperseg``, ``noverlap`` and
+        ``period`` apply to
         this call alone: they override the constructor's values for the run and
         leave the object's own settings as the constructor set them, so two
         results from one ``FRF`` are comparable unless the caller says
@@ -772,6 +838,10 @@ class FRF(SettingsRepr):
         stop_count : int
             A criterion search stops after this many consecutive orders with
             no improvement. Default 50, as on :func:`lsfir`.
+        period : int, optional
+            The ``'p_etfe'`` excitation period in samples for this call; the
+            constructor's ``period`` when omitted. Refused under another
+            method.
 
         Returns
         -------
@@ -798,6 +868,12 @@ class FRF(SettingsRepr):
             raise ConfigurationError(
                 f"FRF.compute: unknown method={method!r}; "
                 "valid: 'welch', 'ls_fir', 'etfe', 'p_etfe'")
+        # A period given to this call must belong to the method it runs; the
+        # constructor's is read only when this call runs 'p_etfe'.
+        if period is not None or method == "p_etfe":
+            period = _resolve_period(
+                method, self.period if period is None else period,
+                "FRF.compute")
 
         # Convert inputs to 2D arrays (rows = measurements)
         x = np.asarray(x)
@@ -840,13 +916,14 @@ class FRF(SettingsRepr):
                 results.append(etfe(x_i, y_i, sample_rate))
             else:
                 results.append(periodic_etfe(x_i, y_i, sample_rate,
-                                             period=params["nperseg"]))
+                                             period=period))
         if single_measurement:
             return results[0]
 
         # A block's measurements share one record length, so every row
-        # lands on the same grid: the nperseg rfft grid for 'welch',
-        # 'ls_fir' and 'p_etfe', the full-record one for 'etfe'.
+        # lands on the same grid: the nperseg rfft grid for 'welch' and
+        # 'ls_fir', the period's for 'p_etfe', the full-record one for
+        # 'etfe'.
         first = results[0]
         per_fit = {}
         if method == "ls_fir":

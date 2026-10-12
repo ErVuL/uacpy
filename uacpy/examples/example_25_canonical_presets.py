@@ -6,9 +6,10 @@ factory — isovelocity, Munk, and one derived from T(z), S(z) through TEOS-10
 
 Granite is left out of the loss panel: its 5750 m/s would sit on top of
 basalt's 5250 m/s. plot_bottom_loss ignores each preset's shear speed by
-construction, and rules each critical angle — clay gets none, being slower
-than the water it is bounced against, so it has an angle of intromission
-instead.
+construction, and rules each critical angle against its 1500 m/s water. Clay
+gets none: its 1500 m/s equals the water's, so no angle is critical and its
+loss is set by the density contrast alone, (ρ − 1)/(ρ + 1) = 0.2, a flat
+14 dB above a few degrees grazing.
 
 Uses: SoundSpeedProfile.from_isovelocity / from_munk / from_temperature_salinity ·
 ssp.plot(ax=, label=, color=) · visualization.plot_bottom_loss

@@ -9,14 +9,18 @@ the eigenvalues the same run printed into its ``.prt``.
 import re
 import struct
 import subprocess
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 import uacpy
+from uacpy.core import Environment, BoundaryProperties, Source, Receiver
 from uacpy.core.exceptions import ConfigurationError, FileFormatError
+from uacpy.core.run_settings import RunMode
 from uacpy.io.modes_reader import _read_modes_payload, read_modes
+from uacpy.models import Kraken
 
 _AT_BIN = Path(uacpy.__file__).parent / 'bin' / 'oalib'
 
@@ -24,6 +28,54 @@ _AT_BIN = Path(uacpy.__file__).parent / 'bin' / 'oalib'
 # split across the G18.10 / G10.2 fields, i.e. index, Re(k), Im(k), cp, cg.
 _PRT_ROW = re.compile(
     r'^\s*(\d+)\s+([-\d.E+]+)\s+([-\d.E+]+)\s+([-\d.E+]+)\s+([-\d.E+]+)\s*$')
+
+
+def test_a_mode_file_record_length_that_reads_both_ways_is_read_by_its_counts(
+        tmp_path):
+    """LRecordLength = 65536 little-endian reads 256 big-endian; the four
+    counts after the title in record 1 (kraken.f90:593) settle the order."""
+    import uacpy.io._fortran_helpers as fh
+    from uacpy.io.modes_reader import _mod_header_counts
+    record = bytearray(4 * 65536)
+    record[0:84] = struct.pack('<i', 65536) + b'mode file'.ljust(80)
+    record[84:100] = struct.pack('<4i', 1, 1, 201, 201)
+    path = tmp_path / 'lrecl65536.mod'
+    path.write_bytes(bytes(record))
+    emitted = fh._ENDIAN_WARN_EMITTED
+    try:
+        fh._ENDIAN_WARN_EMITTED = True
+        with open(path, 'rb') as fid:
+            daf = fh.DirectAccessFile(fid, 'test',
+                                      header_counts=_mod_header_counts)
+            assert (daf.endian, daf.record_words) == ('<', 65536)
+    finally:
+        fh._ENDIAN_WARN_EMITTED = emitted
+
+
+def test_a_large_mode_file_is_read_in_its_own_order(tmp_path):
+    """A ``.mod`` past 16 MiB with one frequency and one medium: the
+    record-1 counts byte-swapped (1 → 16 777 216) still lie inside the file,
+    so only the mesh count opening record 2 (kraken.f90:594) settles the
+    order. A sparse file keeps the disk cost to a few pages."""
+    import uacpy.io._fortran_helpers as fh
+    from uacpy.io.modes_reader import _mod_header_counts
+    lrecl = 65536
+    path = tmp_path / 'large.mod'
+    with open(path, 'wb') as f:
+        f.write(struct.pack('<i', lrecl) + b'mode file'.ljust(80)
+                + struct.pack('<4i', 1, 1, 32768, 32768))
+        f.seek(4 * lrecl)
+        f.write(struct.pack('<i', 200) + b'ACOUSTIC')
+        f.truncate(17 * 2 ** 20)
+    emitted = fh._ENDIAN_WARN_EMITTED
+    try:
+        fh._ENDIAN_WARN_EMITTED = True
+        with open(path, 'rb') as fid:
+            daf = fh.DirectAccessFile(fid, 'test',
+                                      header_counts=_mod_header_counts)
+            assert (daf.endian, daf.record_words) == ('<', lrecl)
+    finally:
+        fh._ENDIAN_WARN_EMITTED = emitted
 
 
 def _run_kraken(work_dir, root, deck, exe='kraken.exe'):
@@ -400,3 +452,164 @@ class TestAModeFileReadsAsTheModesCarrier:
         again = read_modes(run.metadata['mod_file'])
         np.testing.assert_array_equal(again.k, run.k)
         np.testing.assert_array_equal(again.phi, run.phi)
+
+
+class TestTheSeabedAttenuationLeavesTheVolumeLawOut:
+    """``_seabed_attenuation`` inverts CRCI's ``cp = c + i·alphaT·c²/ω``
+    (``misc/AttenMod.f90:114``) and takes the deck's volume law out of
+    ``alphaT``: the seabed's own dB/wavelength, 0 for a lossless seabed whose
+    record carries the law alone to single precision, ``None`` when the
+    deck is not the record's or names a law it does not know."""
+
+    @staticmethod
+    def _cp(seabed_dB_per_wavelength, frequency, volume_np_per_m, c=1800.0):
+        from uacpy.core.deck_limits import AT_DB_PER_NEPER
+        omega = 2.0 * np.pi * frequency
+        alpha = (seabed_dB_per_wavelength * frequency / (AT_DB_PER_NEPER * c)
+                 + volume_np_per_m)
+        return complex(c, alpha * c ** 2 / omega)
+
+    @staticmethod
+    def _thorp_np(frequency):
+        from uacpy.acoustics import absorption_thorp
+        from uacpy.core.deck_limits import AT_DB_PER_NEPER
+        return float(absorption_thorp(frequency)) / (AT_DB_PER_NEPER * 1000.0)
+
+    def test_thorp_is_taken_out(self):
+        from uacpy.io.modes_reader import _seabed_attenuation
+        cp = self._cp(0.5, 4000.0, self._thorp_np(4000.0))
+        assert _seabed_attenuation(cp, 4000.0, ('T', None)) == pytest.approx(
+            0.5, rel=1e-12)
+        assert _seabed_attenuation(cp, 4000.0, (' ', None)) > 0.5
+
+    @pytest.mark.parametrize('short, expected', [(1e-8, 0.0), (1e-5, None)])
+    def test_a_record_short_of_the_law_is_zero_or_unknown(self, short,
+                                                          expected):
+        from uacpy.io.modes_reader import _seabed_attenuation
+        cp = self._cp(0.0, 4000.0, self._thorp_np(4000.0) * (1.0 - short))
+        assert _seabed_attenuation(cp, 4000.0, ('T', None)) == expected
+
+    @pytest.mark.parametrize('law', [None, ('X', None)])
+    def test_an_unknown_law_leaves_it_unknown(self, law):
+        from uacpy.io.modes_reader import _seabed_attenuation
+        assert _seabed_attenuation(self._cp(0.5, 400.0, 0.0), 400.0,
+                                   law) is None
+
+
+@pytest.mark.requires_binary
+class TestTheModFileGivesTheSeabedAttenuation:
+    """``read_modes`` inverts the bottom record's complex speed
+    ``cp = c + i·α·c²/ω`` (``misc/AttenMod.f90:114``, α in Np/m) to the
+    dB/wavelength the deck was given, on kraken and krakenc; the record is
+    single precision, so it agrees to about 2e-8. The volume law the deck
+    beside the ``.mod`` adds to the half-space (``misc/sspMod.f90:437``) is
+    taken out in closed form; without that deck the share is unknown."""
+
+    @pytest.mark.parametrize('leaky_modes', [False, True])
+    @pytest.mark.parametrize('attenuation', [0.0, 0.1, 0.5, 0.8])
+    def test_it_is_the_attenuation_the_deck_was_given(self, attenuation,
+                                                      leaky_modes):
+        env = Environment(
+            bathymetry=100.0, ssp=1500.0,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=attenuation))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            modes = Kraken(verbose=False, leaky_modes=leaky_modes
+                           ).compute_modes(env, Source(depths=36.0,
+                                                       frequencies=50.0))
+        assert modes.media.halfspace_attenuation == pytest.approx(
+            attenuation, rel=1e-7, abs=1e-12)
+
+    @staticmethod
+    def _env(absorption, attenuation=0.5):
+        from uacpy.core.absorption import Thorp, FrancoisGarrison, Biological
+        law = {'none': None, 'thorp': Thorp(),
+               'francois_garrison': FrancoisGarrison(10.0, 35.0, 8.0),
+               'biological': Biological(
+                   layers=[(10.0, 50.0, 3000.0, 5.0, 2.0)])}[absorption]
+        return Environment(
+            bathymetry=100.0, ssp=1500.0, absorption=law,
+            bottom=BoundaryProperties(acoustic_type='half-space',
+                                      sound_speed=1800.0, density=1.8,
+                                      attenuation=attenuation))
+
+    def _modes(self, absorption, attenuation=0.5, **kraken):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return Kraken(verbose=False, **kraken).compute_modes(
+                self._env(absorption, attenuation),
+                Source(depths=36.0, frequencies=4000.0))
+
+    @pytest.mark.parametrize('absorption', [
+        'none', 'thorp', 'francois_garrison', 'biological'])
+    def test_the_volume_law_is_taken_out_of_the_record(self, absorption):
+        """Thorp is added to the half-space's attenuation too: its record
+        holds 0.500127 dB/λ at 4 kHz, 1.27e-4 of it the deck's Thorp
+        (``AttenMod.f90:86-94``). One-frequency Francois-Garrison is a table
+        on the water rows and a biological layer acts only between its
+        depths, so neither reaches it."""
+        media = self._modes(absorption).media
+        assert media.halfspace_sound_speed == 1800.0
+        assert media.halfspace_attenuation == pytest.approx(0.5, rel=1e-7)
+
+    def test_a_lossless_seabed_under_thorp_reads_zero(self):
+        """The record's single precision leaves Im(cp) - Thorp a hair either
+        side of zero; the seabed's own is 0."""
+        media = self._modes('thorp', attenuation=0.0).media
+        assert media.halfspace_attenuation == pytest.approx(0.0, abs=1e-9)
+        assert media.halfspace_attenuation >= 0.0
+
+    def test_a_broadband_francois_garrison_deck_is_taken_out_too(
+            self, tmp_path):
+        """One Francois-Garrison row on a broadband deck is TopOpt(4) 'F',
+        added to the half-space with the row's T, S, pH and z_bar
+        (``AttenMod.f90:127-171``)."""
+        from uacpy.io import read_modes
+        frequencies = np.array([2000.0, 3000.0, 4000.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            Kraken(verbose=False, work_dir=tmp_path, cleanup=False).run(
+                self._env('francois_garrison'),
+                Source(depths=36.0, frequencies=frequencies),
+                Receiver(depths=[30.0], ranges=[1000.0, 2000.0]),
+                run_mode=RunMode.BROADBAND, frequencies=frequencies)
+            deck = next(tmp_path.rglob('kfield.env')).read_text()
+            assert deck.splitlines()[3].strip("'")[3] == 'F'
+            stored = [read_modes(next(tmp_path.rglob('kfield.mod')),
+                                 frequency=f).media.halfspace_attenuation
+                      for f in frequencies]
+        np.testing.assert_allclose(stored, 0.5, rtol=1e-7)
+
+    def test_a_deck_that_is_not_the_runs_leaves_it_unknown(self, tmp_path):
+        """A lossless seabed's .mod read beside a Thorp deck has less in its
+        record than the deck's Thorp alone: the deck is not the run's."""
+        import shutil
+        from uacpy.io import read_modes
+        self._modes('none', attenuation=0.0, work_dir=tmp_path / 'run',
+                    cleanup=False)
+        self._modes('thorp', work_dir=tmp_path / 'other', cleanup=False)
+        shutil.copy(next((tmp_path / 'run').rglob('modes.mod')),
+                    next((tmp_path / 'other').rglob('modes.mod')))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            media = read_modes(
+                next((tmp_path / 'other').rglob('modes.mod'))).media
+        assert media.halfspace_attenuation is None
+
+    def test_a_mod_read_without_its_deck_leaves_it_unknown(self, tmp_path):
+        import shutil
+        from uacpy.io import read_modes
+        self._modes('none', work_dir=tmp_path, cleanup=False)
+        mod = next(tmp_path.rglob('modes.mod'))
+        alone = tmp_path / 'alone'
+        alone.mkdir()
+        shutil.copy(mod, alone / 'modes.mod')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            beside = read_modes(mod).media
+            without = read_modes(alone / 'modes.mod').media
+        assert beside.halfspace_attenuation == pytest.approx(0.5, rel=1e-7)
+        assert without.halfspace_attenuation is None
+        assert without.halfspace_sound_speed == 1800.0

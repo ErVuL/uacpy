@@ -40,6 +40,15 @@ class SoundSpeeds(FrozenRecord):
         The fastest water-column speed (Bellhop): Bellhop traces rays in
         the water and has no head wave through the seabed, so the
         waveguide's fastest speed would open the window early for nothing.
+        A Field built from arrivals
+        (:meth:`Arrivals.transfer_function
+        <uacpy.core.results.Arrivals.transfer_function>`) carries no
+        profile and states here the fastest mean horizontal speed
+        ``r / tau`` of a cell's first arrival instead: a path at least
+        ``r`` long at speeds no faster than the water's fastest takes at
+        least ``r`` over that speed, so this value is a lower bound of the
+        fastest water-column speed, and a window anchored on
+        ``r / water_max`` opens at or before every cell's first arrival.
     waveguide_min, waveguide_max : float, optional
         The slowest and fastest compressional speeds of the waveguide the
         producing run resolved, water column and every bottom layer

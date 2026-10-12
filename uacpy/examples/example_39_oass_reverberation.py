@@ -8,8 +8,7 @@ the same work dir, and hands its .rhs to oass2. Pinning work_dir with
 cleanup=False keeps both decks on disk, which is what makes the chain
 debuggable.
 
-Uses: uacpy.OASS(interface=, correlation_length=, spectral_exponent=,
-rms_roughness=) · RunMode.REVERBERATION · Field.kind ('reverberation', a
+Uses: uacpy.OASS(interface=, correlation_length=, rms_roughness=) · RunMode.REVERBERATION · Field.kind ('reverberation', a
 different quantity from TL in the same dB unit) · result.plot()
 """
 
@@ -29,9 +28,10 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 # A 100 m isovelocity duct over a rough sand half-space. The roughness on the
 # bottom carrier is what lets the mean-field run write a non-empty .rhs; the
-# *spectrum* (correlation length and exponent) is OASS's own, because OASES
-# reads CL and M from the scattering deck rather than from the producer
-# (oass.tex:182-183).
+# *spectrum* is OASS's own, because OASES reads it from the scattering deck
+# rather than from the producer (oass.tex:182-183). The default Gaussian
+# spectrum reads the correlation length alone; a spectral exponent belongs to
+# roughness_spectrum='goff-jordan'.
 env = uacpy.Environment(
     bathymetry=100.0,
     ssp=uacpy.SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1500.0]),
@@ -54,7 +54,7 @@ work_dir = OUT / 'example_39_work'
 # is shown as usual.
 with warnings.catch_warnings(record=True) as caught:
     reverb = uacpy.OASS(interface=3, correlation_length=10.0,
-                        spectral_exponent=2.0, rms_roughness=0.5,
+                        rms_roughness=0.5,
                         work_dir=work_dir, cleanup=False).run(
         env, source, receiver, run_mode=uacpy.RunMode.REVERBERATION)
 for warning in caught:

@@ -2,13 +2,9 @@
 
 ``wind_noise_level`` and the ``WenzNoise`` class (wind / shipping / rain /
 thermal / turbulence), ship-radiated noise, and the marine-mammal auditory
-weightings — the levels themselves, and the four ways a caller can be misled
+weightings — the levels themselves, and the three ways a caller can be misled
 about them:
 
-* **Grid dependence.** ``band_integrate=True`` takes each band's width from
-  the spacing of the caller's frequency vector, so a plotting grid returned
-  per-band levels that moved with its density: 80.60 dB at 20 points against
-  62.60 dB at 1200 over one decade, 18.0 dB apart on identical physics.
 * **Unstated units.** ``WenzNoise`` took a wind speed in knots without saying
   so, unlike its ``chapman_harris_surface`` neighbour.
 * **Silent substitution.** An unrecognised ``water_depth`` fell back to a
@@ -24,16 +20,13 @@ about them:
 """
 
 import inspect
-import warnings
 
 import numpy as np
 import pytest
 
-from uacpy.acoustic_signal.bands import decidecade_bands
 from uacpy.core.exceptions import ConfigurationError
-from uacpy.noise import auditory_weighting, wind_noise_level, WenzNoise
+from uacpy.noise import wind_noise_level, WenzNoise
 from uacpy.noise import ambient as N
-from uacpy.tests.conftest import warning_messages
 
 NAN = float('nan')
 #: Three decades, three points — enough for a guard to reject or accept.
@@ -101,46 +94,6 @@ def test_compute_windnoise_shallow_louder_than_deep(freqs):
     shallow = wind_noise_level(freqs, wind_speed_kn=10, water_depth='shallow')
     band = (freqs >= 100) & (freqs <= 1500)
     assert np.mean(shallow[band]) > np.mean(deep[band])
-
-
-def test_compute_windnoise_band_integrate(freqs):
-    """``band_integrate=True`` returns the band SPL: the spectral level plus
-    ``10·log10(Δf)``, where the band edges sit at the midpoints between
-    consecutive frequencies and the two end bands span only the half-spacing
-    to their single neighbour."""
-    pointwise = wind_noise_level(freqs, wind_speed_kn=10, water_depth='deep')
-    integrated = wind_noise_level(freqs, wind_speed_kn=10, water_depth='deep', band_integrate=True)
-    assert pointwise.shape == freqs.shape
-    assert integrated.shape == freqs.shape
-    assert np.all(np.isfinite(integrated))
-    mids = (freqs[1:] + freqs[:-1]) / 2
-    edges = np.concatenate(([freqs[0]], mids, [freqs[-1]]))
-    df = edges[1:] - edges[:-1]
-    np.testing.assert_allclose(integrated, pointwise + 10 * np.log10(df),
-                               rtol=0, atol=1e-9)
-    # Octave grid anchor: the 400 Hz band spans 300-600 Hz, so its band SPL
-    # is the spectral level plus 10·log10(300) = +24.771 dB.
-    f5 = np.array([100.0, 200.0, 400.0, 800.0, 1600.0])
-    spec = wind_noise_level(f5, wind_speed_kn=10, water_depth='deep')
-    band = wind_noise_level(f5, wind_speed_kn=10, water_depth='deep', band_integrate=True)
-    assert band[2] == pytest.approx(spec[2] + 10 * np.log10(300.0), abs=1e-9)
-
-
-def test_compute_windnoise_band_integrate_descending_equals_ascending():
-    """Band widths come from the sorted grid and each level is returned at its
-    frequency's own position, so a descending vector gives exactly the
-    ascending band levels reversed — not the all-NaN spectrum that negative
-    bandwidths produced. The absolute anchor keeps the equality off a
-    degenerate pair: ``np.array_equal`` is False on NaN, but not on a wrong
-    finite spectrum shared by both orderings."""
-    f5 = np.array([100.0, 200.0, 400.0, 800.0, 1600.0])
-    asc = wind_noise_level(f5, wind_speed_kn=10, water_depth='deep', band_integrate=True)
-    desc = wind_noise_level(f5[::-1], wind_speed_kn=10, water_depth='deep',
-                             band_integrate=True)
-    assert np.array_equal(desc, asc[::-1])
-    # The 400 Hz octave band spans 300-600 Hz: spectral level + 10·log10(300)
-    # at u = 10 kn deep is 86.3316 dB re 1 µPa².
-    assert asc[2] == pytest.approx(86.33157913459968, abs=1e-6)
 
 
 def test_compute_windnoise_pinned_anchors():
@@ -516,45 +469,19 @@ class TestShipRadiatedNoise:
 
 
 class TestMarineMammalWeighting:
-    """Southall et al. 2019 auditory weighting functions (Table 5)."""
+    """Southall et al. 2019 auditory weighting applied to level spectra. The
+    weighting itself, W(f), is tested with the other frequency weightings in
+    test_acoustics_check_values.py."""
 
-    ALL_GROUPS = ("LF", "HF", "VHF", "SI", "PCW", "OCW", "PCA", "OCA")
-
-    def test_weighting_params_cover_all_eight_groups(self):
-        """Southall Table 5 defines exactly eight hearing groups — the six
-        in-water ones plus the in-air PCA and OCA — each carrying the five
-        curve parameters and the published exposure constant K."""
-        from uacpy.noise import WEIGHTING_PARAMS, HEARING_GROUPS
-        assert set(WEIGHTING_PARAMS) == set(self.ALL_GROUPS)
-        assert set(HEARING_GROUPS) == set(self.ALL_GROUPS)
-        for params in WEIGHTING_PARAMS.values():
-            assert set(params) == {"a", "b", "f1", "f2", "C", "K"}
-
-    def test_peak_is_zero_dB(self):
-        from uacpy.noise import auditory_weighting
-        import numpy as np
-        f = np.logspace(1, 5.5, 5000)
-        for g in self.ALL_GROUPS:
-            assert auditory_weighting(f, g).max() == pytest.approx(0.0, abs=0.02)
-
-    def test_low_frequency_slope_is_20a(self):
-        from uacpy.noise import auditory_weighting, WEIGHTING_PARAMS
-        for g in self.ALL_GROUPS:
-            a = WEIGHTING_PARAMS[g]["a"]
-            f1 = WEIGHTING_PARAMS[g]["f1"] * 1000.0
-            slope = auditory_weighting(0.1 * f1, g) - auditory_weighting(0.01 * f1, g)
-            assert slope == pytest.approx(20.0 * a, abs=0.3)   # +20a dB/decade
-
-    def test_weighting_anchors_at_30_hz(self):
-        """Southall Table 5 closed form at the 30 Hz shipping peak:
-        LF −16.445 dB, VHF −92.314 dB — a 75.87 dB spread between the two
-        groups' reception of the same band."""
-        from uacpy.noise import auditory_weighting
-        lf = auditory_weighting(30.0, "LF")
-        vhf = auditory_weighting(30.0, "VHF")
-        assert lf == pytest.approx(-16.4448, abs=1e-3)
-        assert vhf == pytest.approx(-92.3142, abs=1e-3)
-        assert lf - vhf == pytest.approx(75.8694, abs=1e-2)
+    def test_the_weighting_exported_here_is_the_core_one(self):
+        """uacpy.noise exports the weighting from core.acoustics.weighting
+        rather than a copy, so the spectrum helpers here and every
+        weighting= argument read one parameter table."""
+        import uacpy.noise as noise
+        from uacpy.core.acoustics import weighting as core
+        for name in ('auditory_weighting', 'WEIGHTING_PARAMS',
+                     'HEARING_GROUPS', 'EXPOSURE_THRESHOLDS'):
+            assert getattr(noise, name) is getattr(core, name)
 
     def test_weighted_broadband_levels_of_the_guide_spectrum(self):
         """The guide §8 spectrum (10 kn, medium shipping, 10 Hz-100 kHz on a
@@ -571,28 +498,6 @@ class TestMarineMammalWeighting:
         assert unweighted == pytest.approx(97.5772, abs=5e-3)
         assert weighted_level(wenz.total, frequency=f, group="LF") == pytest.approx(94.0292, abs=5e-3)
         assert weighted_level(wenz.total, frequency=f, group="VHF") == pytest.approx(83.5095, abs=5e-3)
-
-    def test_unknown_group_raises(self):
-        from uacpy.noise import auditory_weighting
-        from uacpy.core.exceptions import ConfigurationError
-        with pytest.raises(ConfigurationError,
-                           match=r"'MF' is an NMFS \(2018\) group name"):
-            auditory_weighting(1000.0, "MF")
-
-    @pytest.mark.parametrize('nmfs, southall', [('MF', 'HF'), ('PW', 'PCW'),
-                                                ('OW', 'OCW')])
-    def test_an_nmfs_group_name_is_refused_naming_its_southall_twin(
-            self, nmfs, southall):
-        with pytest.raises(ConfigurationError,
-                           match=rf"NMFS {nmfs} is '{southall}'.*NMFS 'HF' "
-                                 rf"is Southall 'VHF'"):
-            auditory_weighting(1000.0, nmfs)
-
-    def test_the_module_states_the_nmfs_label_mapping(self):
-        from uacpy.noise import marine_mammal
-        doc = ' '.join(marine_mammal.__doc__.split())
-        assert ('NMFS LF / MF / HF / PW / OW are Southall LF / HF / VHF / '
-                'PCW / OCW') in doc
 
     def test_apply_and_weighted_level(self):
         from uacpy.noise import apply_weighting, weighted_level, auditory_weighting
@@ -710,157 +615,6 @@ class TestNoisePositivityGuardsRefuseNaN:
 
     def test_compute_windnoise_zero_wind_returns_minus_inf(self):
         assert np.all(np.isneginf(wind_noise_level(_GUARD_FREQS, wind_speed_kn=0.0)))
-
-    def test_auditory_weighting_nan_frequency_raises(self):
-        with pytest.raises(ConfigurationError, match="must be > 0 Hz and finite"):
-            auditory_weighting(np.array([NAN, 1000.0]), 'LF')
-
-
-class TestWindNoiseBandGrid:
-    def test_decidecade_centres_are_accepted(self):
-        """``decidecade_bands`` centres sit exactly on the threshold and are
-        the reference vector the guard exists to accept; ``log10`` reproduces
-        their 0.1-decade step only to a few ulp, so a bare ``<`` rejects them.
-        """
-        centres = decidecade_bands(100.0, 1000.0)[1]
-        assert warning_messages(
-            lambda: wind_noise_level(centres, wind_speed_kn=10.0, band_integrate=True),
-            _DECIDECADE) == []
-
-    def test_the_documented_decidecade_snippet_is_accepted(self):
-        """The exact call ``docs/guide/noise.md`` section 6 teaches as the
-        right way to use ``band_integrate=True``. The step between these
-        centres computes as 0.09999999999999964, short of 0.1 by 3.6e-16, so
-        an exact comparison warns about the very usage it recommends."""
-        centres = decidecade_bands(100.0, 1000.0)[1]
-        assert centres.size == 11
-        assert warning_messages(
-            lambda: wind_noise_level(centres, wind_speed_kn=15.0, band_integrate=True),
-            _DECIDECADE) == []
-
-    def test_one_extra_point_across_the_same_decade_warns(self):
-        """The discriminating neighbour of the documented snippet: 12 points
-        where the decidecade set has 11, i.e. 0.0909 decades. Without this the
-        accepting test above would pass just as well with the guard removed."""
-        msgs = warning_messages(
-            lambda: wind_noise_level(np.logspace(2.0, 3.0, 12), wind_speed_kn=15.0,
-                                      band_integrate=True),
-            _DECIDECADE)
-        assert len(msgs) == 1
-
-    def test_the_documented_band_level_matches_the_explicit_formula(self):
-        """noise.md section 6's own numbers: the 316.23 Hz decidecade band is
-        72.98 Hz wide, and the band level equals the spectral level plus
-        10*log10 of that width."""
-        lower, centres, upper = decidecade_bands(100.0, 1000.0)
-        i = int(np.argmin(np.abs(centres - 316.23)))
-        with warnings.catch_warnings():
-            warnings.simplefilter('error', UserWarning)
-            band = wind_noise_level(centres, wind_speed_kn=15.0, band_integrate=True)
-            spectral = wind_noise_level(centres, wind_speed_kn=15.0, band_integrate=False)
-        width = upper[i] - lower[i]
-        assert width == pytest.approx(72.98, abs=0.01)
-        assert spectral[i] == pytest.approx(64.97, abs=0.01)
-        assert band[i] == pytest.approx(83.63, abs=0.01)
-        assert band[i] == pytest.approx(spectral[i] + 10 * np.log10(width),
-                                        abs=0.05)
-
-    def test_the_midpoint_width_offset_is_constant_on_interior_bands(self):
-        """Why band levels on decidecade centres sit 0.0287 dB above the
-        explicit ``spectral + 10*log10(width)``: the widths come from the
-        midpoints between centres, and for a log grid of ratio ``rho`` the
-        midpoint width exceeds the edge-to-edge width by exactly
-        ``(sqrt(rho) + 1/sqrt(rho)) / 2`` — the arithmetic-over-geometric-mean
-        gap, so it is positive for every ``rho > 1`` and free of frequency.
-        """
-        lower, centres, upper = decidecade_bands(100.0, 1000.0)
-        mids = (centres[1:] + centres[:-1]) / 2
-        edges = np.concatenate(([centres[0]], mids, [centres[-1]]))
-        used = edges[1:] - edges[:-1]
-        offsets = 10 * np.log10(used[1:-1] / (upper - lower)[1:-1])
-        root_rho = (10.0 ** 0.1) ** 0.5
-        predicted = 10 * np.log10((root_rho + 1.0 / root_rho) / 2.0)
-        assert predicted == pytest.approx(0.0287, abs=0.0001)
-        np.testing.assert_allclose(offsets, predicted, atol=1e-12)
-
-    def test_the_outer_bands_span_only_half_the_spacing(self):
-        """The counterpart the interior constant does NOT cover: the first and
-        last bands reach only halfway to their single neighbour, so on
-        decidecade centres they come back 2.5 and 3.5 dB BELOW the
-        edge-to-edge band level. The end entries of a ``band_integrate``
-        result are not full band levels, whatever the vector."""
-        lower, centres, upper = decidecade_bands(100.0, 1000.0)
-        mids = (centres[1:] + centres[:-1]) / 2
-        edges = np.concatenate(([centres[0]], mids, [centres[-1]]))
-        used = edges[1:] - edges[:-1]
-        ends = 10 * np.log10(used[[0, -1]] / (upper - lower)[[0, -1]])
-        assert ends[0] == pytest.approx(-2.5103, abs=0.001)
-        assert ends[1] == pytest.approx(-3.5103, abs=0.001)
-
-    def test_spacing_just_coarser_than_a_decidecade_is_accepted(self):
-        f = 10.0 ** np.arange(2.0, 3.0, 0.1001)
-        assert warning_messages(
-            lambda: wind_noise_level(f, wind_speed_kn=10.0, band_integrate=True),
-            _DECIDECADE) == []
-
-    def test_spacing_just_finer_than_a_decidecade_warns(self):
-        f = 10.0 ** np.arange(2.0, 3.0, 0.0999)
-        msgs = warning_messages(
-            lambda: wind_noise_level(f, wind_speed_kn=10.0, band_integrate=True),
-            _DECIDECADE)
-        assert len(msgs) == 1
-        assert 'band_integrate=False' in msgs[0]
-
-    def test_octave_centres_are_accepted(self):
-        f = np.array([100.0, 200.0, 400.0, 800.0, 1600.0])
-        assert warning_messages(
-            lambda: wind_noise_level(f, wind_speed_kn=10.0, band_integrate=True),
-            _DECIDECADE) == []
-
-    def test_a_dense_plotting_grid_warns(self):
-        f = np.logspace(2.0, 3.0, 1200)
-        assert len(warning_messages(
-            lambda: wind_noise_level(f, wind_speed_kn=10.0, band_integrate=True),
-            _DECIDECADE)) == 1
-
-    def test_a_linear_grid_warns(self):
-        """A linear vector is coarser than a decidecade at its bottom end and
-        far finer at its top, and the tightest gap is what decides."""
-        f = np.linspace(10.0, 1000.0, 100)
-        assert len(warning_messages(
-            lambda: wind_noise_level(f, wind_speed_kn=10.0, band_integrate=True),
-            _DECIDECADE)) == 1
-
-    def test_repeated_frequencies_are_named_rather_than_counted(self):
-        """A zero-width band would make the points-per-decidecade count the
-        message otherwise quotes unbounded."""
-        msgs = warning_messages(
-            lambda: wind_noise_level(np.array([100.0, 100.0]), wind_speed_kn=10.0,
-                                      band_integrate=True),
-            _DECIDECADE)
-        assert len(msgs) == 1
-        assert 'zero width' in msgs[0]
-        assert 'inf' not in msgs[0]
-
-    def test_the_spectral_form_is_silent_on_any_grid(self):
-        f = np.logspace(2.0, 3.0, 1200)
-        assert warning_messages(
-            lambda: wind_noise_level(f, wind_speed_kn=10.0, band_integrate=False),
-            _DECIDECADE) == []
-
-    def test_the_band_level_moves_with_the_grid_the_warning_reports(self):
-        """The 18 dB the message quotes, measured here: the per-band level
-        moves while the band SUM does not."""
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            coarse = wind_noise_level(np.logspace(2.0, 3.0, 20), wind_speed_kn=10.0,
-                                       band_integrate=True)
-            fine = wind_noise_level(np.logspace(2.0, 3.0, 1200), wind_speed_kn=10.0,
-                                     band_integrate=True)
-        assert coarse.max() - fine.max() == pytest.approx(18.0, abs=0.2)
-        summed = [10 * np.log10(np.sum(10 ** (x / 10))) for x in (coarse, fine)]
-        assert summed[0] == pytest.approx(summed[1], abs=0.01)
-
 
 class TestWenzNoiseNamesItsWindSpeedUnit:
     """``chapman_harris_surface(wind_speed_kn=)`` and ``WenzNoise`` take the
@@ -1085,8 +839,8 @@ class TestShipRadiatedNoiseGuardsRefuseNaN:
 
 
 def test_every_band_integrator_reads_an_empty_band_as_minus_inf():
-    """decidecade_band_levels, WenzNoise.band_level, weighted_level and
-    wind_noise_level(band_integrate=True) all integrate through
+    """decidecade_band_levels, WenzNoise.band_level and weighted_level all
+    integrate through
     core.acoustics.band_level, and a band that carries no power is -inf in
     each (weighted_level floored it at -3076 dB, decidecade_band_levels
     returned NaN)."""
@@ -1104,19 +858,6 @@ def test_every_band_integrator_reads_an_empty_band_as_minus_inf():
     assert silent.band_level(100.0, 1000.0, component='wind') == -np.inf
     fw = np.geomspace(10.0, 1e5, 50)
     assert weighted_level(np.full(fw.size, -np.inf), frequency=fw, group='LF') == -np.inf
-    assert np.all(np.isneginf(wind_noise_level(
-        np.array([100.0, 200.0]), wind_speed_kn=0.0, band_integrate=True)))
-
-
-def test_the_wind_band_level_is_its_spectral_level_over_the_band_width():
-    """wind_noise_level(band_integrate=True) is the spectral level held across
-    each band, integrated by band_level: NL + 10·log10(width) to round-off."""
-    fc = np.array([100.0, 200.0, 400.0])
-    spectral = wind_noise_level(fc, wind_speed_kn=12.0)
-    band = wind_noise_level(fc, wind_speed_kn=12.0, band_integrate=True)
-    widths = np.array([50.0, 150.0, 100.0])
-    np.testing.assert_allclose(band, spectral + 10 * np.log10(widths),
-                               rtol=0, atol=1e-9)
 
 
 def test_wenz_decidecade_levels_carry_their_bands_and_reference():
@@ -1129,8 +870,53 @@ def test_wenz_decidecade_levels_carry_their_bands_and_reference():
     result = w.decidecade_levels(100.0, 1000.0)
     assert isinstance(result, BandLevels)
     lower, centres, upper = decidecade_bands(100.0, 1000.0)
-    np.testing.assert_array_equal(result.centres, centres)
+    np.testing.assert_array_equal(result.centers, centres)
     np.testing.assert_array_equal(result.lower, lower)
     np.testing.assert_array_equal(result.upper, upper)
     assert (result.band_type, result.ref) == ('decidecade', 1e-6)
     assert result.levels[3] == w.band_level(lower[3], upper[3])
+
+
+class TestTheMeanShipSourceSpectrumIsWalesAndHeitmeyer:
+    """``ship_source_level_wales_heitmeyer`` is the Wales and Heitmeyer
+    (2002) mean monopole spectrum as Ainslie (2010) Eq. (8.195) gives it,
+    ``230.0 - 35.94·log10 f + 9.17·log10[1 + (f/340)²]`` dB re 1 µPa² m²/Hz
+    over the measured 30-1200 Hz, then sect. 8.3.1.4's -23 dB/decade
+    extrapolation, joined at 1200 Hz, to 15 kHz. The values are the equation
+    evaluated by hand."""
+
+    @pytest.mark.parametrize('f, level', [
+        (30.0, 176.9431), (100.0, 158.4504), (340.0, 141.7791),
+        (1000.0, 131.2083), (1200.0, 129.6866),
+        (2000.0, 124.5841), (10000.0, 108.5078), (15000.0, 104.4577)])
+    def test_it_is_equation_8_195_and_its_extrapolation(self, f, level):
+        from uacpy.noise import ship_source_level_wales_heitmeyer
+        assert ship_source_level_wales_heitmeyer(f) == pytest.approx(
+            level, abs=1e-4)
+
+    def test_the_extrapolation_falls_23_dB_per_decade_from_the_join(self):
+        from uacpy.noise import ship_source_level_wales_heitmeyer
+        levels = ship_source_level_wales_heitmeyer(
+            np.array([1200.0, 1200.0 * (1 + 1e-9), 1500.0, 15000.0]))
+        assert levels[1] == pytest.approx(levels[0], abs=1e-6)
+        assert levels[2] - levels[3] == pytest.approx(23.0, abs=1e-9)
+
+    def test_an_empty_frequency_is_refused(self):
+        from uacpy.noise import ship_source_level_wales_heitmeyer
+        with pytest.raises(ConfigurationError,
+                           match=r'^ship_source_level_wales_heitmeyer: '
+                                 r'frequency is empty\.'):
+            ship_source_level_wales_heitmeyer([])
+
+    @pytest.mark.parametrize('f, refused', [(30.0, False), (29.9, True),
+                                            (15000.0, False),
+                                            (15000.1, True)])
+    def test_the_band_is_the_measured_and_extrapolated_one(self, f, refused):
+        from uacpy.noise import ship_source_level_wales_heitmeyer
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match=r'^ship_source_level_wales_heitmeyer: '
+                                     r'frequency must lie in 30-15000 Hz'):
+                ship_source_level_wales_heitmeyer(f)
+        else:
+            assert np.isfinite(ship_source_level_wales_heitmeyer(f))

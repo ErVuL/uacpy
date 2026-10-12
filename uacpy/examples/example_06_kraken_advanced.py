@@ -10,9 +10,9 @@ higher cost.)
 
 The modes are also computed at each end on their own, so the shelf set and the
 slope set can be compared directly. The slope bottom has shear, so it needs
-krakenc, and it admits Scholte/Stoneley interface waves whose phase speed sits
-below the water sound speed — those are filtered out of the shape panel so the
-two sides are comparable.
+krakenc, and it carries a Scholte interface wave whose phase speed sits far
+below the water sound speed. Its mode window is opened low enough to find it,
+and it is filtered out of the shape panel so the two sides are comparable.
 
 A last run drives two sources in antiphase through the same segmented guide.
 The mode sum is linear in the source amplitude, so the stack the run returns
@@ -21,8 +21,9 @@ depths is not excited at all.
 
 Uses: uacpy.FrancoisGarrison on the Environment · Bottom.from_halfspaces ·
 Bottom.halfspace_at · Kraken.compute_modes · Kraken(backend='krakenc') ·
-Kraken(mode_coupling='adiabatic', n_segments=) ·
-multi-depth Source(weights=) → ResultStack · ResultStack.superpose ·
+Kraken(c_low=, c_high=) · Kraken(mode_coupling='adiabatic', n_segments=) ·
+Field.mask_below_seafloor ·
+multi-depth Source(weights=) → one Field over source_depth · Field.superpose ·
 Modes.excitation · Modes.phase_speeds · Modes.plot(show_imaginary=) ·
 plot_mode_wavenumbers · plot_modes_heatmap · plot_field(contours=, source=)
 """
@@ -68,8 +69,8 @@ env = uacpy.Environment(name="Continental shelf", bathymetry=bathymetry,
                         ssp=uacpy.SoundSpeedProfile.from_pairs(ssp_pairs),
                         bottom=bottom, absorption=absorption)
 source = uacpy.Source(depths=50.0, frequencies=50.0)
-# Ranges start at 1 km: closer in, the deepest receivers see direct and
-# surface-reflected paths steeper than the modes' 25° window carries.
+# Ranges start at 1 km: closer in, paths to the deepest shelf receivers are
+# steeper than the 18° the segmented runs' mode window carries (below).
 receiver = uacpy.Receiver(depths=np.linspace(5, 380, 60),
                           ranges=np.linspace(1000, 20000, 96))
 
@@ -99,39 +100,55 @@ for warning in caught:
                              warning.filename, warning.lineno)
 warnings.filterwarnings('ignore', message='FrancoisGarrison: .* below 200 Hz',
                         category=uacpy.ValidityWarning)
-# The slope bottom has shear, which is what krakenc adds over kraken.
-slope_modes = uacpy.Kraken(backend='krakenc').compute_modes(slope_env, source)
+# The slope bottom has shear, which is what krakenc adds over kraken. Its
+# Scholte wave travels at about 0.85 × the 600 m/s shear speed (JKPS §5.10.5),
+# below the slowest water speed where the derived window opens, so c_low is
+# set under it.
+slope_modes = uacpy.Kraken(backend='krakenc', c_low=400.0).compute_modes(
+    slope_env, source)
 print(f"  shelf (cs={shelf_env.bottom.halfspace_at(range=0).shear_speed:.0f} "
       f"m/s): {len(shelf_modes.k)} modes; "
       f"slope (cs={slope_env.bottom.halfspace_at(range=0).shear_speed:.0f} "
       f"m/s): {len(slope_modes.k)} modes")
 
-tl = uacpy.Kraken(mode_coupling='adiabatic', n_segments=N_SEGMENTS).run(
-    env, source, receiver)
+# The segmented runs keep the mode search under the slowest seabed speed,
+# 1600 m/s at r = 0: that is every mode the shelf traps, a window of
+# arccos(1520/1600) = 18° grazing. Above it the window holds leaky modes
+# (docs/models/kraken.md §6.5), on which krakenc's root finder fails to
+# converge in this guide and says so in its .prt log.
+C_HIGH = 1600.0
+# Kraken's deck carries the sediment under the shelf down to the deepest
+# receiver and returns a field there; each field is cut at the seafloor.
+tl = uacpy.Kraken(mode_coupling='adiabatic', n_segments=N_SEGMENTS,
+                  c_high=C_HIGH).run(env, source, receiver)
+tl = tl.mask_below_seafloor(env)
 # result.data is complex pressure; min/max on complex is numpy's lexicographic
 # order, not a TL bound, so TL is read off .dB.
 print(f"  adiabatic run over {N_SEGMENTS} segments: TL "
       f"{np.nanmin(tl.dB):.1f} to {np.nanmax(tl.dB):.1f} dB")
 
-# Two sources 20 m apart with weights [1, -1]: the run returns a ResultStack
-# holding the unit-amplitude field of each depth, and superpose() adds them
+# Two sources 20 m apart with weights [1, -1]: the run returns one Field
+# whose source_depth axis holds the unit-amplitude field of each depth, and
+# superpose() adds them
 # with the Source's weights — Σ wᵢ·pᵢ as one complex Field. Each shelf mode
 # is excited in proportion to φ_m(40) − φ_m(60), so the modes whose shapes
 # match at the two depths drop out of the dipole's field.
 dipole_source = uacpy.Source(depths=[40.0, 60.0], frequencies=50.0,
                              weights=[1, -1])
-dipole_stack = uacpy.Kraken(mode_coupling='adiabatic',
-                            n_segments=N_SEGMENTS).run(
+pair = uacpy.Kraken(mode_coupling='adiabatic', n_segments=N_SEGMENTS,
+                    c_high=C_HIGH).run(
     env, dipole_source, receiver, run_mode=uacpy.RunMode.COHERENT_TL)
-dipole = dipole_stack.superpose()                 # weights = [1, -1]
-in_phase = dipole_stack.superpose(weights=[1, 1])
+pair = pair.mask_below_seafloor(env)
+dipole = pair.superpose()                         # weights = [1, -1]
+in_phase = pair.superpose(weights=[1, 1])
 # Modes.excitation is Σ wᵢ·φₘ(zᵢ): shelf mode 1 is driven by the difference of
 # its shape at the two depths under the dipole, by the sum in phase.
 in_phase_source = uacpy.Source(depths=[40.0, 60.0], frequencies=50.0,
                                weights=[1, 1])
 excitation_ratio = (abs(shelf_modes.excitation(dipole_source)[0])
                     / abs(shelf_modes.excitation(in_phase_source)[0]))
-print(f"  antiphase pair at 40/60 m: {dipole_stack.n_slabs} slabs superposed; "
+print(f"  antiphase pair at 40/60 m: {pair.coords['source_depth'].size} "
+      f"sources superposed; "
       f"shelf mode 1 excited {20 * np.log10(excitation_ratio):.1f} dB "
       f"relative to the in-phase pair; median TL "
       f"{np.nanmedian(dipole.dB):.1f} dB vs {np.nanmedian(in_phase.dB):.1f} "
@@ -141,26 +158,27 @@ fig, _ = env.plot()
 fig.savefig(OUT / 'example_06_bottom.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-# Mode shapes at both ends. On the slope, krakenc numbers the interface waves
-# first (highest Re(k)); their phase speed is below the water sound speed, so
-# filtering on that leaves the trapped water-column modes the shelf panel shows.
+# Mode shapes at both ends. On the slope, krakenc numbers the interface wave
+# first (highest Re(k)); its phase speed is below the water sound speed, so
+# filtering on that leaves the water-borne modes the shelf panel shows.
 phase_speed = slope_modes.phase_speeds      # ω / Re(k), m/s
 c_water_min = float(np.min(ssp_pairs[:, 1]))
-trapped = np.where(phase_speed >= c_water_min)[0]
+water_borne = np.where(phase_speed >= c_water_min)[0]
 n_interface = int(np.sum(phase_speed < c_water_min))
 print(f"  slope: {n_interface} interface mode(s) below {c_water_min:.0f} m/s "
-      f"(Scholte/Stoneley type), {trapped.size} trapped")
+      f"(Scholte type, {phase_speed.min():.0f} m/s), "
+      f"{water_borne.size} water-borne")
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 for index in range(min(5, shelf_modes.phi.shape[1])):
     axes[0].plot(shelf_modes.phi[:, index].real, shelf_modes.depths,
                  label=f'Mode {index + 1}')
 axes[0].set_title(f'Shelf modes (100 m)\n{shelf_modes.phi.shape[1]} total')
-for index in trapped[:5]:
+for index in water_borne[:5]:
     axes[1].plot(slope_modes.phi[:, index].real, slope_modes.depths,
                  label=f'Mode {index + 1}')
 axes[1].set_title(f'Slope modes (400 m)\n{slope_modes.phi.shape[1]} total '
-                  f'({n_interface} interface, {trapped.size} trapped)')
+                  f'({n_interface} interface, {water_borne.size} water-borne)')
 for ax in axes:
     ax.invert_yaxis()
     ax.set_xlabel('Mode amplitude')
@@ -173,7 +191,7 @@ fig.savefig(OUT / 'example_06_modes.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 fig, ax = uacpy.plot.plot_mode_wavenumbers(shelf_modes)
-ax.set_title(f'Mode wavenumbers in the complex k-plane\n'
+ax.set_title(f'Mode wavenumbers: Re(k) and Im(k) per mode\n'
              f'shelf — {shelf_modes.phi.shape[1]} modes', fontweight='bold')
 fig.savefig(OUT / 'example_06_wavenumbers.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
@@ -211,7 +229,7 @@ uacpy.plot.plot_field(dipole.to_dB(), right, env=env, show_colorbar=False,
                  title='Pair in antiphase\n'
                        'Source(weights=[1, -1]) → superpose()')
 uacpy.plot.shared_colorbar(fig, (left, right), label='TL (dB)')
-fig.suptitle('Two sources, one ResultStack, two weightings',
+fig.suptitle('Two sources, one Field, two weightings',
              fontsize='x-large', fontweight='bold')
 fig.savefig(OUT / 'example_06_superposed_pair.png', dpi=150,
             bbox_inches='tight')

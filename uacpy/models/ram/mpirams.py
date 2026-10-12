@@ -3,11 +3,13 @@ water attenuation), its domain and grid, the memory its field needs, and the
 TL and broadband fields read from its output."""
 
 import numpy as np
+import os
 import warnings
 from pathlib import Path
 from typing import Optional, List
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._budget import memory_budget
+from uacpy.models._launch import openmp_thread_env
 from uacpy.models._notices import give_notice
 from uacpy.models.ram._pe_phase import psi_to_travelling_wave
 from uacpy.core.environment import (
@@ -26,6 +28,7 @@ from uacpy.core.bathymetry import mask_below_seafloor
 from uacpy.models.ram._interp import interp_to_receiver_grid
 from uacpy.models.ram._domain import (
     absorber_span,
+    check_source_inside_the_domain,
     check_source_row_is_solved,
     compute_zmax,
     deck_depth,
@@ -45,13 +48,26 @@ from uacpy.models.ram._band import (
     resolve_broadband_grid,
 )
 from uacpy.models.ram._stability import (
+    stability_terms,
     warn_stability_range_inert_on_a_multi_range_grid,
 )
 from uacpy.models.ram.grid import (
+    SEAFLOOR_CELL_OFFSET,
+    SEAFLOOR_QUARTER_TOLERANCE,
     compute_grid_lytaev,
+    seafloor_snap_depth,
     warn_if_trapped_modes_unresolved,
 )
+from uacpy.models._extract import (
+    attach_output_paths, mask_source_axis, result_kwargs,
+)
 
+
+#: Floor of the sediment control-point count ``nzs`` an unset
+#: ``n_sediment_points`` takes (:func:`prepare_bottom_properties`): uacpy
+#: guidance, holding ``profl``'s interpolation interval far below a
+#: wavelength on ordinary geometries.
+DEFAULT_N_SEDIMENT_POINTS = 1000
 
 # Ceiling on the number of mpiramS sediment profiles written for a
 # range-independent bottom whose seafloor water speed varies with range, and
@@ -86,10 +102,9 @@ MPIRAMS_RANGE_TOL_M = 0.1
 
 
 def mpirams_zmax(env: Environment, freq: float, dz: float, *,
-                  max_range: float, notices=None, knobs, log,
-                  speed_bounds) -> float:
-    """PE domain depth for an mpiramS march, snapped onto the ``deltaz``
-    grid.
+                  max_range: float, source_depth: float = 0.0,
+                  notices=None, knobs, log) -> float:
+    """PE domain depth for an mpiramS march, on the ``deltaz`` lattice.
 
     ``peramx.f90:391,404`` sizes the depth grid as
     ``icount = floor(zmax/deltaz - 0.5) + 2`` and then fills it with
@@ -100,26 +115,73 @@ def mpirams_zmax(env: Environment, freq: float, dz: float, *,
     assume ``deltaz``. The two agree only when ``zmax`` is an exact
     multiple of ``deltaz``.
 
-    The value snapped has to be the one ``:388`` actually reads. Under
-    ``earth_curvature`` ``:268-274`` rescales the whole depth axis
-    *before* ``zmax = maxval(zw)``, so snapping the geometric depth leaves
-    the transformed grid off the multiple again. Snapping in the
-    transformed frame and mapping back is what makes the spacing exact on
-    both paths.
+    The value on the lattice has to be the one ``:388`` actually reads.
+    Under ``earth_curvature`` ``:268-274`` rescales the whole depth axis
+    *before* ``zmax = maxval(zw)``, so the lattice is the transformed
+    frame's, mapped back here.
+
+    An automatic ``zmax`` is snapped onto the lattice. A pinned one is
+    returned as given: with ``dz`` automatic, :func:`resolve_mpirams_grid`
+    has already chosen a ``dz`` that divides it; with both pinned and
+    ``zmax`` off the lattice the binary cannot take the pair, and the run
+    is refused naming the nearest ``zmax`` on it.
     """
-    zmax = compute_zmax(env, freq, max_range=max_range, notices=notices,
-                        knobs=knobs, speed_bounds=speed_bounds)
+    zmax = compute_zmax(env, freq, max_range=max_range,
+                        source_depth=source_depth, notices=notices,
+                        knobs=knobs)
     transformed = (flat_earth_depth(zmax) if knobs.earth_curvature
                    else zmax)
-    snapped = (int(np.floor(transformed / float(dz) - 0.5)) + 1) * float(dz)
-    result = (flat_earth_depth_inverse(snapped) if knobs.earth_curvature
-              else snapped)
-    if knobs.zmax is not None and abs(result - float(knobs.zmax)) > 1e-9:
-        log(
-            f"zmax {float(knobs.zmax):.6g} m snapped to {result:.6g} m so "
-            f"mpiramS's depth grid reproduces dz={float(dz):g} m exactly"
-        )
-    return result
+    cells = transformed / float(dz)
+    if knobs.zmax is not None:
+        if abs(cells - round(cells)) > 1e-9 * max(1.0, cells):
+            lattice = [k * float(dz) for k in (max(1, int(np.floor(cells))),
+                                               int(np.ceil(cells)))]
+            if knobs.earth_curvature:
+                lattice = [flat_earth_depth_inverse(z) for z in lattice]
+            raise ConfigurationError(
+                f"RAM:mpirams: the pinned zmax={float(knobs.zmax):g} m is "
+                f"{cells:.6g} cells of the pinned dz={float(dz):g} m, not a "
+                f"whole number. mpiramS lays its depth grid out as "
+                f"linspace(0, zmax, floor(zmax/dz - 0.5) + 2) "
+                f"(peramx.f90:391, :404) while its depth operator and "
+                f"seafloor index use dz itself (ram.f90:51, :101), so off "
+                f"the dz lattice its output depths and its operator disagree "
+                f"by up to half a cell. The nearest zmax on the lattice are "
+                f"{lattice[0]:.10g} m and {lattice[1]:.10g} m.",
+                remediation=(
+                    f"Pin zmax={lattice[0]:.10g} or {lattice[1]:.10g} m, "
+                    f"leave zmax unset to have it placed on the lattice, or "
+                    f"leave dz unset to have it chosen to divide zmax."),
+            )
+        return float(knobs.zmax)
+    snapped = (int(np.floor(cells - 0.5)) + 1) * float(dz)
+    return (flat_earth_depth_inverse(snapped) if knobs.earth_curvature
+            else snapped)
+
+
+def dz_dividing_the_domain(env: Environment, zmax: float, dz: float, *,
+                           knobs) -> float:
+    """The ``dz`` at or below ``dz`` that divides a pinned ``zmax`` (in the
+    deck's frame) a whole number of times, as mpiramS needs
+    (:func:`mpirams_zmax`): among the cell counts from the fewest that
+    reach ``dz`` up to a quarter more, the first that puts the shallowest
+    seafloor within :data:`grid.SEAFLOOR_QUARTER_TOLERANCE` of the
+    quarter-cell placement the automatic grid uses, else the nearest."""
+    zmax_deck = float(flat_earth_depth(zmax) if knobs.earth_curvature
+                      else zmax)
+    h = float(deck_depth(seafloor_snap_depth(env), knobs=knobs))
+    first = max(1, int(np.ceil(zmax_deck / float(dz) - 1e-9)))
+    best, best_distance = zmax_deck / first, 2.0
+    for k in range(first, int(1.25 * first) + 2):
+        candidate = zmax_deck / k
+        frac = (h / candidate) % 1.0
+        offset = abs(frac - SEAFLOOR_CELL_OFFSET)
+        distance = min(offset, 1.0 - offset)
+        if distance <= SEAFLOOR_QUARTER_TOLERANCE:
+            return candidate
+        if distance < best_distance:
+            best, best_distance = candidate, distance
+    return best
 
 
 def prepare_ssp(env: Environment, work_dir: Path,
@@ -148,6 +210,19 @@ def prepare_ssp(env: Environment, work_dir: Path,
     it depends on the bathymetry only through the profiles the caller declared,
     and the intermediate columns make mpiramS's nearest-profile march follow
     the linear gradient between them.
+
+    The depth axis is ``max(50, zmax/(2·dz))`` uniform depths, the same for
+    every profile, and the deck format asks for exactly that: ``peramx.f90``
+    counts the depths of the first profile (``:225-234``) and reads every
+    profile's depths into the one ``zw`` array (``:236-243``), so the
+    profiles must share one depth axis; it takes the domain depth as the
+    deepest of them (``zmax = maxval(zw)``, ``:388``), so the axis must
+    reach ``zmax_pe``; and ``ram.f90:309`` interpolates the column onto the
+    march's grid with a cubic spline (``gorp2``), so the column is sampled
+    every two depth cells for that spline to follow ``env.ssp``'s own
+    interpolation between its declared points rather than overshoot them.
+    The two-cell spacing and the 50-point floor are uacpy guidance: mpiramS
+    takes any depth list (upstream's ``test.ssp`` is non-uniform).
     """
     n_points = max(50, int(float(zmax_pe) / float(dz) / 2))
     depths = np.linspace(0, zmax_pe, n_points)
@@ -330,10 +405,10 @@ def prepare_bottom_properties(env: Environment, work_dir: Path,
     # moved the field by 1.04 dB rms / 4.84 dB max at the default 1000
     # points, and equalising the control-point INTERVAL instead collapsed
     # that to 0.16 / 0.67 — so the interval is the mechanism, not the depth.
-    # At the default the interval is already 0.263 m, i.e. 2.2 depth cells,
-    # at zmax=400 m. Hold it to one depth cell: ``nzs-3 >= sedlayer/dz``.
-    # ``n_sediment_points`` stays the floor, so a caller who raised it still
-    # gets what they asked for.
+    # At 1000 points the interval is already 0.263 m, i.e. 2.2 depth cells,
+    # at zmax=400 m. Left unset, ``nzs`` holds it to one depth cell,
+    # ``nzs-3 >= sedlayer/dz``, with :data:`DEFAULT_N_SEDIMENT_POINTS` as the
+    # floor; a pinned ``n_sediment_points`` is written as given.
     dz_grid = float(dz)
     # ``absorber_span`` is where the automatic domain puts the ramp start
     # (``_domain.adequate_zmax``: the real-seabed pad below the stack); one
@@ -346,10 +421,12 @@ def prepare_bottom_properties(env: Environment, work_dir: Path,
     # deepest modelled stack (``Bottom.total_thickness_max``). Size
     # ``nzs`` against the span it will end up with, not the one it is
     # handed.
-    nzs = max(int(knobs.n_sediment_points),
-              int(np.ceil(max(sedlayer,
-                              float(env.bottom.total_thickness_max()))
-                          / dz_grid)) + 3)
+    nzs = (int(knobs.n_sediment_points)
+           if knobs.n_sediment_points is not None else
+           max(DEFAULT_N_SEDIMENT_POINTS,
+               int(np.ceil(max(sedlayer,
+                               float(env.bottom.total_thickness_max()))
+                           / dz_grid)) + 3))
     return sediment_profiles(env, work_dir, nzs, sedlayer, zmax, knobs=knobs,
                              log=log)
 
@@ -379,7 +456,7 @@ def sample_layered_column(col, nzs: int, sedlayer: float):
     placed well below the ocean bottom interface and the attenuation is
     increased over the lower few wavelengths of the grid" (RAM manual;
     Collins & Siegmann, *Parabolic Wave Equations with Applications*,
-    §on absorbing layers) — and Jensen, Kuperman, Porter & Schmidt,
+    §1.2.5 "Lossy Media and Absorbing Layers") — and Jensen, Kuperman, Porter & Schmidt,
     *Computational Ocean Acoustics* §7.3.4.3 (Fig. 7.5; the PE's own
     sponge is set up in §6.5.3) adds the constraint that "the
     sponge layer must be designed such that the internal reflections are
@@ -523,20 +600,20 @@ def write_sediment_profiles(work_dir, ranges, cs_profiles,
 
 
 def resolve_mpirams_tl(env, source, receiver, *,
-                        notices=None, knobs, log, speed_bounds) -> dict:
+                        notices=None, knobs, log) -> dict:
     """Stage 3 of an mpiramS COHERENT_TL run: the grid at the source
     frequency, the deck's ``(fc, Q, T)`` sweep collapsed to the one bin
-    at fc (Q→∞, T=1) whatever ``self.q_factor`` / ``self.record_duration`` hold — the TL field
-    keeps only the centre bin, so a wider band pinned for broadband runs
-    would be marched and thrown away."""
+    at fc (Q→∞, T=1) whatever ``q_factor`` / ``record_duration`` hold — the
+    TL field keeps only the centre bin, so a wider band pinned for broadband
+    runs would be marched and thrown away (a pinned value gives the notice of
+    :func:`_band.warn_if_band_pins_unused_on_tl`)."""
     freq = float(source.frequencies[0])
     zsrc = float(np.min(source.depths))
     ranges = receiver.ranges
     rmax = float(np.max(ranges))
 
     dr, dz = resolve_mpirams_grid(env, freq, rmax, zs=zsrc,
-                                  notices=notices, knobs=knobs, log=log,
-                                  speed_bounds=speed_bounds)
+                                  notices=notices, knobs=knobs, log=log)
 
     # COHERENT_TL collapses the mpiramS broadband window to one bin
     # (Q→∞, T=1): a band narrower than one bin marches fc alone
@@ -555,14 +632,14 @@ def resolve_mpirams_tl(env, source, receiver, *,
     log(f"Output grid: {len(ranges)} ranges x {len(receiver.depths)} depths")
     grid, rs = resolve_mpirams_deck(
         env, source, receiver, freq, Q_tl, T_tl, dr, dz, zmax_freq=freq,
-        notices=notices, knobs=knobs, log=log, speed_bounds=speed_bounds)
+        notices=notices, knobs=knobs, log=log)
     return dict(fc=freq, q_factor=Q_tl, record_duration=T_tl, bandwidth_hz=None, df_hz=None,
                 marched_frequencies=marched, requested_frequencies=None,
                 zmax_frequency=freq, stability_range_m=rs, grids=(grid,))
 
 
 def resolve_mpirams_band(env, source, receiver, *,
-                          notices=None, knobs, log, speed_bounds) -> dict:
+                          notices=None, knobs, log) -> dict:
     """Stage 3 of an mpiramS BROADBAND / TIME_SERIES run.
 
     The band the result carries is the caller's own bins when they
@@ -595,7 +672,7 @@ def resolve_mpirams_band(env, source, receiver, *,
 
     dr, dz = resolve_mpirams_grid(
         env, freq_max, rmax, zs=float(np.min(source.depths)), notices=notices,
-        knobs=knobs, log=log, speed_bounds=speed_bounds)
+        knobs=knobs, log=log)
     log(
         f"mpiramS (broadband): fc={freq:.1f} Hz, Q={Q_bb}, T={T_bb}s, "
         f"band={freq_min:.2f}-{freq_max:.2f} Hz, "
@@ -606,10 +683,9 @@ def resolve_mpirams_band(env, source, receiver, *,
               f"(fc ± {freq / Q_bb:.2f} Hz)")
     grid, rs = resolve_mpirams_deck(
         env, source, receiver, freq, Q_bb, T_bb, dr, dz, zmax_freq=freq_min,
-        notices=notices, knobs=knobs, log=log, speed_bounds=speed_bounds)
+        notices=notices, knobs=knobs, log=log)
     report_band_grid_cost(env, 'mpirams', grid, freq_min, freq_max,
-                          notices=notices, knobs=knobs, log=log,
-                          speed_bounds=speed_bounds)
+                          notices=notices, knobs=knobs, log=log)
     return dict(fc=freq, q_factor=Q_bb, record_duration=T_bb,
                 bandwidth_hz=2.0 * freq / Q_bb, df_hz=1.0 / T_bb,
                 marched_frequencies=marched, requested_frequencies=target,
@@ -618,8 +694,7 @@ def resolve_mpirams_band(env, source, receiver, *,
 
 def resolve_mpirams_deck(env, source, receiver, freq: float,
                           q_factor: float, record_duration: float, dr: float, dz: float, *,
-                          zmax_freq: float, notices=None, knobs, log,
-                          speed_bounds):
+                          zmax_freq: float, notices=None, knobs, log):
     """``(grid, rs)``: the domain depth and the stability range one
     mpiramS deck carries, with the checks the deck needs before any file
     is written.
@@ -633,15 +708,19 @@ def resolve_mpirams_deck(env, source, receiver, freq: float,
     wavelengths deep at the longest wavelength in the band rather than at
     fc.
     """
-    for zs in np.atleast_1d(source.depths):
+    depths = np.atleast_1d(np.asarray(source.depths, dtype=float))
+    for zs in depths:
         check_source_row_is_solved(float(zs), dz)
     rmax = float(np.max(receiver.ranges))
     zmax_pe = mpirams_zmax(env, float(zmax_freq), dz, max_range=rmax,
-                           notices=notices, knobs=knobs, log=log,
-                           speed_bounds=speed_bounds)
-    check_mpirams_field_memory(
-        zmax_pe, dz, freq, q_factor, record_duration, len(np.atleast_1d(receiver.ranges)),
-        notices=notices, knobs=knobs)
+                           source_depth=float(depths.max()),
+                           notices=notices, knobs=knobs, log=log)
+    for zs in depths:
+        check_source_inside_the_domain(deck_depth(float(zs), knobs=knobs), dz,
+                                       deck_depth(zmax_pe, knobs=knobs))
+    check_mpirams_memory(
+        zmax_pe, dz, freq, q_factor, record_duration,
+        len(np.atleast_1d(receiver.ranges)), notices=notices, knobs=knobs)
     rs = (knobs.stability_range_m if knobs.stability_range_m is not None
           else rmax)
     warn_stability_range_inert_on_a_multi_range_grid(receiver,
@@ -657,7 +736,7 @@ def resolve_mpirams_deck(env, source, receiver, freq: float,
 
 def resolve_mpirams_grid(env, freq: float, rmax: float,
                           zs: Optional[float] = None, *, notices=None, knobs,
-                          log, speed_bounds):
+                          log):
     """``(dr, dz)`` for an mpiramS march: user values where pinned, the
     Lytaev Padé-error optimizer for whatever is still ``None``.
 
@@ -678,19 +757,25 @@ def resolve_mpirams_grid(env, freq: float, rmax: float,
     impossible at any ``dr`` on any grid, which is a property of the
     Fortran and is pinned by
     ``test_ram_backends.TestMarchLandsOnEachOutputRange``.
+
+    With ``zmax`` pinned the automatic ``dz`` is moved, to the finer side,
+    onto a value dividing it (:func:`dz_dividing_the_domain`): mpiramS's
+    depth grid is right only on that lattice (:func:`mpirams_zmax`).
     """
     dr = float(knobs.dr) if knobs.dr is not None else None
     dz = float(knobs.dz) if knobs.dz is not None else None
     if dr is None or dz is None:
         dr_auto, dz_auto = compute_grid_lytaev(
             env, freq, max_range=rmax, kind='mpirams', zs=zs,
-            notices=notices, knobs=knobs, log=log, speed_bounds=speed_bounds
+            notices=notices, knobs=knobs, log=log
         )
         dr = dr_auto if dr is None else dr
-        dz = dz_auto if dz is None else dz
+        if dz is None:
+            dz = (dz_auto if knobs.zmax is None else dz_dividing_the_domain(
+                env, float(knobs.zmax), dz_auto, knobs=knobs))
     warn_if_trapped_modes_unresolved(env, freq, 'mpirams', dr, dz,
                                      rmax, notices=notices, knobs=knobs,
-                                     log=log, speed_bounds=speed_bounds)
+                                     log=log)
     return dr, dz
 
 
@@ -749,41 +834,96 @@ def mpirams_field_shape(zmax_pe: float, dz: float, freq: float,
     return nzo, nf, int(n_ranges)
 
 
-def check_mpirams_field_memory(zmax_pe, dz, freq, q_factor, record_duration, n_ranges, *,
-                               notices=None, knobs) -> None:
-    """Weigh the field mpiramS will allocate, times the copies the wrapper
-    then holds of it, with :func:`~uacpy.models._budget.memory_budget`
-    before the deck is written: its notice goes to ``notices``, and a field
-    over what the host reports free is refused.
+#: Bytes one mpiramS thread holds per depth point while it marches, beside
+#: its ``psi(nz+2, nr)`` buffer (``ram.f90:158``, THREADPRIVATE at
+#: ``fld.f90:10``): the Padé matrices ``r1..s3``, six complex(8) per Padé
+#: term (``matrc.f90:24-25``), six complex vectors (``uu``, ``f3``, ``ksq``,
+#: ``ksqw``, ``ksqb``, ``solvetri``'s ``v``; ``mattri.f90:12``,
+#: ``profiles.f90:8``, ``matrc.f90:41``, ``solvetri.f90:19``) and about ten
+#: real ones (``f1``, ``f2``, ``cwg``, ``rhob``, ``alpw``, ``alpb``,
+#: ``csg``, ``attng``, the spline's ``gorp2`` and ``attwg``).
+_MPIRAMS_COMPLEX_VECTORS_PER_DEPTH = 6
+_MPIRAMS_REAL_VECTORS_PER_DEPTH = 10
+
+
+def mpirams_threads(n_frequencies: int) -> int:
+    """How many mpiramS threads march at once: the OpenMP thread count of
+    :func:`~uacpy.models._launch.openmp_thread_env` (an exported
+    ``OMP_NUM_THREADS``, 1 in a ``run_parallel`` worker, else one per CPU),
+    at most one per frequency — each thread allocates its arrays inside the
+    frequency loop it runs (``peramx.f90:414-439``)."""
+    env, _ = openmp_thread_env()
+    try:
+        threads = int(env.get('OMP_NUM_THREADS', os.cpu_count() or 1))
+    except ValueError:
+        threads = os.cpu_count() or 1
+    return max(1, min(int(n_frequencies), threads))
+
+
+def mpirams_march_bytes(zmax_pe: float, dz: float, n_ranges: int,
+                        n_threads: int, *, knobs) -> int:
+    """Bytes the mpiramS march holds across ``n_threads`` threads on a grid
+    of ``nz = floor(zmax/dz - 0.5)`` depth rows (``ram.f90:56``, on the
+    transformed ``zmax``): per thread and depth row, the arrays of
+    :data:`_MPIRAMS_COMPLEX_VECTORS_PER_DEPTH` and the ``psi`` buffer of
+    ``n_ranges`` (16 bytes each) and :data:`_MPIRAMS_REAL_VECTORS_PER_DEPTH`
+    (8 bytes each)."""
+    transformed = (flat_earth_depth(zmax_pe) if knobs.earth_curvature
+                   else float(zmax_pe))
+    rows = int(np.floor(transformed / float(dz) - 0.5)) + 2
+    per_row = (16 * (6 * int(knobs.n_pade)
+                     + _MPIRAMS_COMPLEX_VECTORS_PER_DEPTH + int(n_ranges))
+               + 8 * _MPIRAMS_REAL_VECTORS_PER_DEPTH)
+    return int(n_threads) * rows * per_row
+
+
+def check_mpirams_memory(zmax_pe, dz, freq, q_factor, record_duration,
+                         n_ranges, *, notices=None, knobs) -> None:
+    """Weigh what an mpiramS run holds at its peak — the field it will
+    allocate times the copies the wrapper then holds of it, and the arrays
+    its threads march with — with
+    :func:`~uacpy.models._budget.memory_budget` before the deck is written:
+    its notice goes to ``notices``, and a run over what the host reports
+    free is refused.
 
     The binary has no estimate of its own (``allocate(psif(nzo,nf,nr))``
     at ``peramx.f90:399`` is the first thing that fails), and the Python
     side holds about four more copies, so a many-range broadband run at
-    high ``q_factor`` would die of a MemoryError or an OOM kill after the march.
+    high ``q_factor`` would die of a MemoryError or an OOM kill after the
+    march. The march arrays grow with the depth rows alone, which a pinned
+    ``accuracy`` marches with no depth-point cap
+    (:func:`grid.grid_for_pinned_accuracy`).
     """
-    nzo, nf, nr = mpirams_field_shape(zmax_pe, dz, freq, q_factor, record_duration,
-                                      n_ranges, knobs=knobs)
+    nzo, nf, nr = mpirams_field_shape(zmax_pe, dz, freq, q_factor,
+                                      record_duration, n_ranges, knobs=knobs)
     field = _MPIRAMS_FIELD_BYTES_PER_SAMPLE * nzo * nf * nr
-    total = _MPIRAMS_FIELD_COPIES * field
+    threads = mpirams_threads(nf)
+    march = mpirams_march_bytes(zmax_pe, dz, nr, threads, knobs=knobs)
+    total = _MPIRAMS_FIELD_COPIES * field + march
     gib = 1024.0 ** 3
     notice = memory_budget(
-        total, model_name='RAM:mpirams', what='mpiramS field copies',
+        total, model_name='RAM:mpirams', what='mpiramS field and march',
         detail=(
             f"this deck makes the binary allocate a field of nzo={nzo} "
             f"depths × nf={nf} frequencies × nr={nr} ranges, "
             f"{field / gib:.2f} GiB of complex(8) (peramx.f90:399), and the "
             f"wrapper then holds about {_MPIRAMS_FIELD_COPIES} copies of it "
-            f"({total / gib:.2f} GiB)."),
+            f"({_MPIRAMS_FIELD_COPIES * field / gib:.2f} GiB); its "
+            f"{threads} marching thread(s) hold {march / gib:.2f} GiB of "
+            f"arrays over the dz={float(dz):.4g} m depth grid (ram.f90:158, "
+            f"matrc.f90:24-25) — {total / gib:.2f} GiB in all."),
         remediation=(
             "Thin the field with depth_decimation (every n-th depth), "
-            "fewer receiver ranges, or fewer frequency bins (a larger q_factor or "
-            "a smaller record_duration)."))
+            "fewer receiver ranges, or fewer frequency bins (a larger "
+            "q_factor or a smaller record_duration); shrink the march with "
+            "a coarser dz (a looser accuracy, or accuracy unset), a "
+            "shallower zmax, or fewer threads (OMP_NUM_THREADS)."))
     if notice is not None:
         give_notice(notices, notice.message, notice.category,
                     skip_file_prefixes=USER_FRAME_SKIP)
 
 
-def write_mpirams_deck(inputs, *, knobs, log, speed_bounds) -> Path:
+def write_mpirams_deck(inputs, *, knobs, log) -> Path:
     """Stage 4 of an mpiramS run: every input file the march reads —
     ``ssp.dat``, the bathymetry and sediment files, the water-attenuation
     table, ``ranges.dat`` — and ``in.pe``, whose path it returns, all from
@@ -812,8 +952,7 @@ def write_mpirams_deck(inputs, *, knobs, log, speed_bounds) -> Path:
     sedlayer, nzs, cs, rho_arr, attn_arr, isedrd, sed_filename = \
         prepare_bottom_properties(
             env, work_dir,
-            absorber_span(env, engine.zmax_frequency, zmax_pe, knobs=knobs,
-                          speed_bounds=speed_bounds),
+            absorber_span(env, engine.zmax_frequency, zmax_pe, knobs=knobs),
             zmax_pe, dz=dz, knobs=knobs, log=log)
     water_attn_filename = (
         write_mpirams_water_attenuation(env, work_dir, freq, Q, T,
@@ -841,7 +980,7 @@ def write_mpirams_deck(inputs, *, knobs, log, speed_bounds) -> Path:
         dz=dz,
         dr=grid.dr,
         n_pade=knobs.n_pade,
-        n_stability=knobs.n_stability,
+        n_stability=stability_terms(knobs),
         stability_range_m=engine.stability_range_m,
         depth_decimation=knobs.depth_decimation,
         ssp_filename=ssp_filename,
@@ -901,8 +1040,8 @@ def write_mpirams_water_attenuation(env: Environment,
 
 
 def assemble_tl_field(result, env, source, receiver, work_dir,
-                       freq, dr, *, attach_output_paths, knobs,
-                       mask_source_axis, result_kwargs):
+                       freq, dr, *, knobs, model_name, provenance,
+                       cleanup):
     """Stage 5 of an mpiramS COHERENT_TL run: the TL :class:`Field` from a
     finished ``psif`` result — pick the centre-frequency bin, interpolate
     complex pressure to the receiver grid (NaN-safe), convert to
@@ -1000,7 +1139,7 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
     # so |psi| = |psif| * 4*pi.
     #
     # A receiver at r = 0 is scaled at dr so the rest of the row still
-    # computes; _mask_source_axis NaNs that column after assembly.
+    # computes; mask_source_axis NaNs that column after assembly.
     log_ranges = rcv_ranges.astype(np.float64).copy()
     log_ranges[log_ranges <= 0.0] = dr
 
@@ -1024,24 +1163,24 @@ def assemble_tl_field(result, env, source, receiver, work_dir,
         data=pressure_field,
         coords={'depth': receiver.depths, 'range': receiver.ranges},
         **result_kwargs(
-            source,
+            model_name, provenance, source,
             phase_reference='travelling_wave',
             backend='mpirams',
             frequencies=float(freq),
         )
     )
-    field = mask_source_axis(field, source)
+    field = mask_source_axis(model_name, field, source)
     field = field.mask_below_seafloor(env.bathymetry)
     attach_output_paths(
         field, work_dir, '',
-        primary_files=(('psif_file', 'psif.dat'),)
+        primary_files=(('psif_file', 'psif.dat'),), cleanup=cleanup
     )
     return field
 
 
 def assemble_broadband_field(result, env, source, receiver,
-                              work_dir, engine, grid, *, attach_output_paths,
-                              log, mask_source_axis, result_kwargs):
+                              work_dir, engine, grid, *, log, model_name,
+                              provenance, cleanup):
     """Stage 5 of an mpiramS BROADBAND / TIME_SERIES run: the
     transfer-function :class:`Field` from a finished ``psif`` result —
     convert to travelling-wave pressure, interpolate onto the receiver
@@ -1064,7 +1203,7 @@ def assemble_broadband_field(result, env, source, receiver,
     rout = np.asarray(result.ranges, dtype=np.float64)  # (nr,)
     zg = result.depths
     # A receiver at r = 0 is scaled at dr so the rest of the row still
-    # computes; _mask_source_axis NaNs that column after assembly.
+    # computes; mask_source_axis NaNs that column after assembly.
     rout_safe = rout.copy()
     rout_safe[rout_safe <= 0.0] = float(dr) if dr and dr > 0 else 1.0
     # psif shape: (nzo, nf, nr) — convert to engineering
@@ -1151,18 +1290,18 @@ def assemble_broadband_field(result, env, source, receiver,
         # (peramx.f90:354-356): the synthesis floors its FFT length at it.
         synthesis_floor=result.n_samples,
         **result_kwargs(
-            source,
+            model_name, provenance, source,
             phase_reference='travelling_wave',
             backend='mpirams',
             frequencies=frq_out,
         )
     )
-    tf = mask_source_axis(tf, source)
+    tf = mask_source_axis(model_name, tf, source)
     # Mask sub-seafloor samples with NaN (same semantics as every
     # backend), against the ranges the Field advertises.
     tf.data = mask_below_seafloor(tf.data, out_depths, rout, env.bathymetry)
     attach_output_paths(
         tf, work_dir, '',
-        primary_files=(('psif_file', 'psif.dat'),)
+        primary_files=(('psif_file', 'psif.dat'),), cleanup=cleanup
     )
     return tf

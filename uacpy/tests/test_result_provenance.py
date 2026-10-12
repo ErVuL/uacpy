@@ -94,7 +94,8 @@ def test_ifft_trace_keeps_model_source():
 
 def test_synthesized_time_series_keeps_model_source():
     wf = np.zeros(64); wf[:8] = 1.0
-    ts = _broadband().synthesize_time_series(wf, sample_rate=4000.0)
+    ts = _broadband().synthesize_time_series(source_waveform=wf,
+                                             sample_rate=4000.0)
     assert ts.model_source is _SRC
 
 
@@ -187,7 +188,8 @@ def test_derived_fields_keep_the_run_mode_of_their_run():
     wf = np.zeros(64)
     wf[0] = 1.0
     for derived in (H.at(depth=25.0), H.to_time_trace(),
-                    H.synthesize_time_series(wf, sample_rate=4000.0)):
+                    H.synthesize_time_series(source_waveform=wf,
+                                             sample_rate=4000.0)):
         assert derived.run_mode == RunMode.BROADBAND
 
 
@@ -216,7 +218,7 @@ def test_synthesize_time_series_stamps_source_model():
     H = _broadband()
     wf = np.zeros(64)
     wf[0] = 1.0
-    ts = H.synthesize_time_series(wf, sample_rate=4000.0)
+    ts = H.synthesize_time_series(source_waveform=wf, sample_rate=4000.0)
     assert ts.metadata['source_model'] == H.model
     assert H.to_time_trace().metadata['source_model'] == H.model
 
@@ -264,6 +266,29 @@ class TestBellhopCreditsTheBinaryThatRan:
         if model._resolved_backend != version:
             pytest.skip(f"the {version} binary is not built on this machine")
         assert model.provenance.id == expected_id
+
+    @pytest.mark.parametrize('model,backend,credit', [
+        ('Bellhop', 'cuda', 'Bellhop (cuda) — '),
+        ('Bellhop', 'fortran', 'Bellhop (fortran) — '),
+        ('Kraken', 'krakenc', 'Kraken (krakenc) — '),
+        ('Kraken', 'kraken', 'Kraken — '),
+    ])
+    def test_the_figure_credit_names_the_backend_that_ran(
+            self, model, backend, credit):
+        """``result.backend`` joins the model's name in the footnote unless
+        it is that name."""
+        import matplotlib.pyplot as plt
+        field = Field(data=np.ones((4, 5), complex),
+                      coords={'depth': np.linspace(10.0, 40.0, 4),
+                              'range': np.linspace(100.0, 500.0, 5)},
+                      kind='pressure', unit='Pa', model=model,
+                      backend=backend, frequencies=200.0,
+                      model_source=model_provenance('acoustics_toolbox'))
+        fig, _ = field.plot()
+        try:
+            assert [t for t in _credits(fig) if credit in t]
+        finally:
+            plt.close(fig)
 
     def test_the_ported_engines_do_not_carry_porters_authorship(self):
         """The two entries name different people, so crediting the wrong one
@@ -330,7 +355,9 @@ class TestEveryRunStampsItsRunMode:
         r = uacpy.Kraken(verbose=False).run(*self._case(), run_mode=run_mode)
         assert r.run_mode is RunMode(run_mode)
 
-    def test_default_mode_and_every_slab_of_a_stack(self):
+    def test_default_mode_and_a_field_over_source_depths(self):
         from uacpy.core.run_settings import RunMode
-        stack = uacpy.Scooter(verbose=False).run(*self._case([30.0, 60.0]))
-        assert [s.run_mode for s in stack.slabs] == [RunMode.COHERENT_TL] * 2
+        field = uacpy.Scooter(verbose=False).run(*self._case([30.0, 60.0]))
+        assert list(field.coords)[0] == 'source_depth'
+        assert field.run_mode is RunMode.COHERENT_TL
+        assert field.isel(source_depth=1).run_mode is RunMode.COHERENT_TL

@@ -8,8 +8,10 @@ Environment` that drops straight into any propagation model.
                                        bottom='sand')
 
 Each axis is handled the same way: supply it as a **literal** (``ssp=`` /
-``bathymetry=`` / ``bottom=`` / ``surface=`` / ``altimetry=``, exactly as
-:class:`Environment` takes them) and/or fetch it from one or more **sources**
+``bathymetry=`` / ``bottom=`` / ``surface=`` / ``altimetry=``, as
+:class:`Environment` takes them, except that a ``bottom=`` number is a mean
+grain size ϕ where ``Environment`` reads a half-space sound speed) and/or
+fetch it from one or more **sources**
 (``ssp_sources`` / ``bathymetry_sources`` / ``bottom_sources`` /
 ``surface_sources``). If both are given for an axis the source is fetched first
 and the literal is the **fallback** when the fetch yields nothing (no coverage,
@@ -45,18 +47,19 @@ from uacpy.core.environment import (
     SoundSpeedProfile,
 )
 from uacpy.core.exceptions import (
-    ConfigurationError, DataFetchError, FallbackWarning, ProvenanceWarning,
+    ConfigurationError, DataFetchError, FallbackWarning,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.geo import Coordinate, as_coordinate, great_circle_km
 from uacpy.data._geo import (
-    DEFAULT_MAX_TRANSECT_POINTS, checked_max_distance, checked_offset,
+    DEFAULT_MAX_TRANSECT_POINTS, checked_max_days, checked_max_distance,
+    checked_offset, mid_depth,
 )
 from uacpy.core.acoustics.seawater import pressure_dbar_to_depth
-from uacpy.data._chain import first_answer, source_tuple
+from uacpy.data._chain import first_answer, lower_source_spec, source_tuple
 from uacpy.data.bathymetry import (
-    _refuse_a_dry_point,
-    DEFAULT_DATASET, _BATHY_CHAIN, transect_length,
+    _refuse_a_dry_point, _bathymetry_vintage,
+    _BATHY_CHAIN, transect_length,
 )
 from uacpy.core.sediment import (DEFAULT_GRAIN_SIZE_MODEL,
                                  canonical_grain_size_selection)
@@ -67,7 +70,8 @@ from uacpy.data.sound_speed import (
     extend_ssp_below_data, fetch_ssp, fetch_ts_profile,
 )
 from uacpy.data.sources import SOURCES, DataProvenance
-from uacpy.data._provenance_notice import one_provenance_notice
+from uacpy.data._provenance_notice import (one_provenance_notice,
+                                           provenance_notice)
 
 __all__ = ['fetch_environment', 'fetch_bottom', 'fetch_bottom_transect']
 
@@ -95,18 +99,6 @@ def _resolve_cached(call, order, *, axis):
                         "use 'auto' / a live source.",
         )
     return first_answer(order, lambda src, backend: call((src, backend)))
-
-
-def _lower_source_spec(spec):
-    """Lower-case a ``*_sources`` value in place of its own shape: ``None``
-    stays ``None``, a preset or single name stays a ``str``, a sequence
-    becomes a tuple of names — so the preset checks and the per-axis
-    resolvers downstream all compare against one spelling."""
-    if spec is None:
-        return None
-    if isinstance(spec, str):
-        return spec.lower()
-    return source_tuple(spec)
 
 
 def _require_nonempty_sources(spec, *, axis):
@@ -141,7 +133,7 @@ def fetch_environment(
                   None] = None,
     bottom_sources: Union[str, Sequence[str], None] = None,
     bottom_model: str = DEFAULT_GRAIN_SIZE_MODEL,
-    bottom_environment: Optional[str] = None,
+    bottom_hamilton_fit: Optional[str] = None,
     surface: Optional[BoundaryProperties] = None,
     surface_sources: Union[str, Sequence[str], None] = None,
     altimetry=None,
@@ -182,7 +174,12 @@ def fetch_environment(
         m/s → isovelocity, or ``(depth_m, c_m_per_s)`` pairs). If ``ssp_sources``
         is *also* given, the source is fetched first and this literal is the
         **fallback** when the fetch yields nothing; on its own, SSP is not
-        fetched at all.
+        fetched at all. A literal is not deepened: one that stops above the
+        seafloor is held at its deepest speed by ``Environment``, which warns
+        (``FallbackWarning``) once the hold is long enough to matter, whereas
+        a fetched profile is continued below its data. Extend a cast yourself
+        before passing it (:func:`extend_ssp_below_data`, valid from the deep
+        isothermal layer down).
     ssp_sources : str or sequence of str, optional
         Sound-speed source(s) to **fetch**, tried in order with the next as
         fallback (a bare string is a 1-element list), or a preset: ``'auto'``
@@ -218,6 +215,13 @@ def fetch_environment(
         fetched first and this literal is the **fallback**. (A bottom *string*
         is a material name here, never a source — source keywords go in
         ``bottom_sources`` — which is why the two are separate args.)
+
+        A class name is the material's **fluid** preset, as ``Environment``
+        reads it (pass ``bottom_from_class(name)`` for the elastic one). A
+        number is a grain size, not the half-space sound speed
+        ``Environment(bottom=1800)`` reads: a number with ``|ϕ| > 20`` (a
+        grain coarser than 1 km or finer than 1 nm) is refused as a likely
+        sound speed; pass a sound speed as a ``BoundaryProperties``.
 
         There is no ``bottom_roughness=`` knob, and because the literal is only
         a fallback, a ``BoundaryProperties(roughness=...)`` passed alongside a
@@ -354,8 +358,10 @@ def fetch_environment(
         the top boundary as an upper half-space line, with no thickness field to
         give it, so concentration decides *whether* there is ice, never how
         thick. Default ``None`` (no surface fetch). Point classification only
-        (the carrier's surface is one boundary). The fetched canopy is the
-        smooth plate the tabulated parameters describe (roughness 0), which
+        (the carrier's surface is one boundary). The half-space is the
+        thick-ice limit of the 4 m plate the parameters are tabulated for, so
+        it holds well above c_s/h, about 450 Hz for 4 m of ice. The fetched
+        canopy is smooth (roughness 0), which
         under-predicts the loss over real deformed pack ice (see
         :func:`uacpy.data.sea_ice_surface`); a site roughness needs an
         explicit ``surface=`` literal, e.g. built with
@@ -385,7 +391,7 @@ def fetch_environment(
         Random generator a fetched sea-surface realization draws from
         (:func:`~uacpy.data.fetch_sea_surface`'s ``rng``); pass one for a
         reproducible surface, ``None`` draws a fresh one.
-    bottom_environment : str, optional
+    bottom_hamilton_fit : str, optional
         Which of Hamilton & Bachman's three fits ``bottom_model=DEFAULT_GRAIN_SIZE_MODEL``
         evaluates: ``'continental-terrace'`` (the default when ``None``, shelf
         and slope, 1 to 9 ϕ), ``'abyssal-hill'`` or ``'abyssal-plain'`` (both
@@ -395,7 +401,9 @@ def fetch_environment(
         Hamilton & Bachman measured for abyssal clay — but nothing infers it:
         the paper states no rule for choosing, so only the caller knows the
         site. Pairing it with ``bottom_model='apl-uw'`` raises, that report
-        publishing one set of relations rather than one per environment.
+        publishing one set of relations rather than one per fit. The
+        per-layer fetchers and converters take the same choice as
+        ``hamilton_fit=``.
     with_absorption : bool, optional
         If ``True``, attach a Francois-Garrison absorption built from the
         site's fetched temperature/salinity column (costs one extra T/S
@@ -461,13 +469,16 @@ def fetch_environment(
     formula = canonical_formula(formula, 'fetch_environment')
     lat, lon = as_coordinate(point)
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_environment')
+    if max_days is not None:
+        max_days = checked_max_days(max_days, 'fetch_environment')
     ssp_sources, bathymetry_sources, bottom_sources, surface_sources = (
         _checked_source_specs(ssp=ssp_sources, bathymetry=bathymetry_sources,
                               bottom=bottom_sources, surface=surface_sources))
-    bottom_model, bottom_environment = canonical_grain_size_selection(
-        bottom_model, bottom_environment, who='fetch_environment',
+    bottom_model, bottom_hamilton_fit = canonical_grain_size_selection(
+        bottom_model, bottom_hamilton_fit, who='fetch_environment',
         model_argument='bottom_model',
-        environment_argument='bottom_environment')
+        environment_argument='bottom_hamilton_fit')
+    _check_bottom_literal(bottom)
 
     # Each axis is a literal (ssp=/bathymetry=/bottom=) and/or fetched from
     # source(s) (*_sources). When both are given the source is fetched first and
@@ -525,7 +536,7 @@ def fetch_environment(
     # ── Bottom (optional): fetch from bottom_sources / 'auto', else literal ──
     bottom_props, bottom_kw = _fetch_bottom_axis(
         plan, bottom, bottom_sources, ssp, seafloor, point, transect_to,
-        model=bottom_model, hamilton_fit=bottom_environment,
+        model=bottom_model, hamilton_fit=bottom_hamilton_fit,
         max_distance_km=max_distance_km, n_points=bottom_n_points,
         max_points=max_points, timeout=timeout, verbose=verbose)
 
@@ -558,7 +569,7 @@ def _checked_source_specs(**specs):
     for axis, spec in specs.items():
         _require_nonempty_sources(spec, axis=axis)
     # Source names and presets are matched lower-case on every axis.
-    return tuple(_lower_source_spec(spec) for spec in specs.values())
+    return tuple(lower_source_spec(spec) for spec in specs.values())
 
 
 class _AxisFetch(NamedTuple):
@@ -906,8 +917,7 @@ def _assemble(point, transect_to, *, name, date, seafloor, ssp, bottom_props,
         # The T/S row nearest the column's mid-depth sets the one water
         # density the decks carry (IES-80, kg/m³ -> g/cm³).
         column = absorption.profile_depths
-        mid = (0.5 * (float(column.min()) + float(column.max()))
-               if column is not None else 0.0)
+        mid = mid_depth(column) if column is not None else 0.0
         kwargs['water_density'] = float(density(
             *_water_at(absorption, mid))) / 1000.0
     env = Environment(**kwargs)
@@ -922,10 +932,10 @@ def _water_at(absorption, depth: float):
     property's sample nearest ``depth`` (its number when it has no
     profile)."""
     def nearest(value):
-        if np.ndim(value) == 0:
+        if isinstance(value, float):                    # one water row
             return float(value)
-        return float(value[int(np.argmin(np.abs(value[:, 0] - float(depth)))),
-                           1])
+        return float(value.values[int(np.argmin(np.abs(
+            value.depths - float(depth))))])
     return nearest(absorption.temperature), nearest(absorption.salinity)
 
 
@@ -981,11 +991,10 @@ def _record_provenance(env, bathy_src, ssp_src, bottom_kw, bottom_props,
     for src in {prov.source.id: prov.source
                 for prov in env.data_sources}.values():
         if not src.commercial_use:
-            warnings.warn(
+            provenance_notice(
                 f"fetch_environment: data source {src.id!r} ({src.name}) does "
                 f"not permit commercial use without verification — see "
-                f"uacpy.data.citations(env) for its licence/attribution.",
-                ProvenanceWarning, skip_file_prefixes=USER_FRAME_SKIP)
+                f"uacpy.data.citations(env) for its licence/attribution.")
 
 
 #: Cached monthly climatologies whose reference period is recorded in the
@@ -1044,20 +1053,6 @@ def _bathymetry_provenance(bathy, point, *, max_distance_km=None):
         DataProvenance(source=SOURCES[bathy.source], data_date=vintage,
                        data_point=data_point, requested_point=(lat, lon)),
         who='fetch_environment', warn_km=0.0, max_distance_km=max_distance_km)
-
-
-def _bathymetry_vintage(src_id, backend):
-    """What a bathymetry provenance record cites for its ``data_date``: the
-    local grid's release (its file name), or the live service and dataset."""
-    if backend == 'local' and src_id == 'gebco':
-        from uacpy.data import gebco_local
-        try:
-            return gebco_local.grid_name()
-        except (ConfigurationError, DataFetchError, FileNotFoundError):
-            return 'local'          # a stubbed backend: no grid to name
-    if backend == 'api' and src_id == 'gebco':
-        return f"{DEFAULT_DATASET} via OpenTopoData"
-    return f"{backend} (live)" if backend else None
 
 
 def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
@@ -1121,8 +1116,7 @@ def _fetch_absorption(point, *, date, ssp_source, ssp_backend, cache_only,
     # GLODAP gives its pH column, (depth, pH) pairs on its own levels;
     # Copernicus BGC one value, read at the T/S column's mid-depth.
     z_arr = np.asarray(depths, dtype=float)
-    ref_depth = (0.5 * (float(z_arr.min()) + float(z_arr.max()))
-                 if z_arr.size else None)
+    ref_depth = mid_depth(z_arr) if z_arr.size else None
     pH, ph_src = _fetch_ph(point, date=date, ssp_source=ssp_source,
                            cache_only=cache_only, timeout=timeout,
                            verbose=verbose, reference_depth=ref_depth,
@@ -1185,36 +1179,24 @@ def _fetch_ph(point, *, date=None, ssp_source=None, cache_only=False,
         profile.provenance
 
 
-#: Depth span (m) over which an Argo cast hands over to the WOA23 column below
-#: it: the cast's deepest this-many metres are a raised-cosine blend from the
-#: cast to the climatology, so the joined profile carries no step and no
-#: gradient kink at the join (a step would read as a reflector and a kink as a
-#: false turning depth to a ray model). Core floats stop near 2000 dbar, so the
-#: default blends over 1500-2000 m.
-CAST_BLEND_M = 500.0
-
-
 def _deepen_cast_with_woa23(cast, depth_max, point, *, date, formula,
                             resolution, cache_only, timeout, verbose):
-    """An Argo cast continued below its deepest level by the WOA23 column.
+    """An Argo cast continued below its deepest level by the WOA23 column,
+    blended as :func:`~uacpy.data.deepen_with_climatology` blends it.
 
     A core Argo float profiles to about 2000 dbar. Below that the deep water
     keeps cooling, which the fixed-temperature extrapolation of
     :func:`~uacpy.data.extend_ssp_below_data` cannot follow; the WOA23 column
-    at the same point and month has the analysed deep water. Over the cast's
-    deepest :data:`CAST_BLEND_M` the profile blends from the cast to WOA23
-    with a raised-cosine weight, and below the cast it is WOA23. The result
-    carries both provenance records.
+    at the same point and month has the analysed deep water.
 
     Returned unchanged when the cast already reaches the seafloor (to within
     the extension's own 50 m tolerance), when WOA23 cannot be read at the
     point, or when WOA23 ends no deeper than the cast; the caller's
     extrapolation then covers any remaining depth, with its warning.
     """
-    from uacpy.data.sound_speed import _EXTRAPOLATION_WARN_M
-    z_cast = np.asarray(cast.depths, dtype=float)
-    c_cast = np.asarray(cast.sound_speed, dtype=float)[:, 0]
-    z_last = float(z_cast[-1])
+    from uacpy.data.sound_speed import (_EXTRAPOLATION_WARN_M,
+                                        _blend_cast_onto_column)
+    z_last = float(np.asarray(cast.depths, dtype=float)[-1])
     if depth_max - z_last <= _EXTRAPOLATION_WARN_M:
         return cast
     try:
@@ -1227,29 +1209,7 @@ def _deepen_cast_with_woa23(cast, depth_max, point, *, date, formula,
                     f"WOA23 is unavailable below it ({exc.message}); "
                     f"extrapolating instead", verbose=verbose)
         return cast
-    z_woa = np.asarray(woa.depths, dtype=float)
-    c_woa = np.asarray(woa.sound_speed, dtype=float)[:, 0]
-    if z_woa[-1] <= z_last:
-        return cast
-    top = max(float(z_cast[0]), z_last - CAST_BLEND_M)
-    above = z_cast < top
-    blend_z = np.union1d(z_cast[(z_cast >= top) & (z_cast <= z_last)],
-                         z_woa[(z_woa >= top) & (z_woa <= z_last)])
-    span = z_last - top
-    weight = (0.5 * (1.0 - np.cos(np.pi * (blend_z - top) / span))
-              if span > 0.0 else np.ones_like(blend_z))
-    blend_c = ((1.0 - weight) * np.interp(blend_z, z_cast, c_cast)
-               + weight * np.interp(blend_z, z_woa, c_woa))
-    below = z_woa > z_last
-    log_message('sound_speed', f"Argo cast ends at {z_last:.0f} m; WOA23 "
-                f"continues it to {z_woa[-1]:.0f} m (blended over "
-                f"{top:.0f}-{z_last:.0f} m)", verbose=verbose)
-    return SoundSpeedProfile(
-        depths=np.concatenate([z_cast[above], blend_z, z_woa[below]]),
-        sound_speed=np.concatenate([c_cast[above], blend_c, c_woa[below]]),
-        kind='measured',
-        data_sources=tuple(cast.data_sources) + tuple(woa.data_sources),
-        formula=cast.formula)
+    return _blend_cast_onto_column(cast, woa, verbose=verbose)
 
 
 # Bottom data sources — single declarative registry. To add a sediment source:
@@ -1393,7 +1353,7 @@ def _bottom_order(bottom_source, who='fetch_environment'):
 #: Keywords ``_fetch_bottom`` supplies to the providers itself, so a
 #: provider option of the same name is refused rather than overriding them.
 _SUPPLIED_BOTTOM_KEYWORDS = frozenset({
-    'cache_only', 'max_distance_km', 'depth', 'model', 'environment',
+    'cache_only', 'max_distance_km', 'depth', 'model',
     'water_sound_speed', 'roughness', 'n_points', 'max_points', 'timeout',
     'verbose'})
 
@@ -1569,7 +1529,7 @@ def _bottom_request(source, who):
             f"{who}: source={source!r} selects no source.",
             remediation="Pass 'auto', 'local', a source id, or a non-empty "
                         "sequence of source ids.")
-    return _bottom_order(_lower_source_spec(source), who)
+    return _bottom_order(lower_source_spec(source), who)
 
 
 def fetch_bottom(
@@ -1782,23 +1742,53 @@ def _seabed_depth_along(seafloor, start):
     return at
 
 
+# ϕ = -log2(d / 1 mm) (Ainslie, Principles of Sonar Performance Modelling,
+# App. B and §4.4.1.2), so |ϕ| = 20 is a grain of about 1 km or 1 nm. The
+# Udden-Wentworth classes of Ainslie Table 4.16 run from boulder gravel (below
+# -8 ϕ) to fine clay (10 to 11 ϕ); a ``bottom=`` number past this limit is no
+# grain size, and is most likely the half-space sound speed ``Environment``
+# reads a number as.
+_BOTTOM_PHI_LIMIT = 20.0
+
+
+def _check_bottom_literal(bottom):
+    """Refuse a ``bottom=`` literal of the wrong type, or a number that is no
+    grain size (``|ϕ| > _BOTTOM_PHI_LIMIT`` or not finite)."""
+    if bottom is None or isinstance(bottom, (str, BoundaryProperties,
+                                             SeabedColumn, Bottom)):
+        return
+    if not isinstance(bottom, (int, float)) or isinstance(bottom, bool):
+        raise ConfigurationError(
+            f"fetch_environment: bottom must be a ϕ float, a class name, a "
+            f"BoundaryProperties, a SeabedColumn, a Bottom, or None; got "
+            f"{type(bottom).__name__}.",
+        )
+    if not abs(float(bottom)) <= _BOTTOM_PHI_LIMIT:
+        raise ConfigurationError(
+            f"fetch_environment: a bottom= number is a mean grain size in ϕ, "
+            f"and ϕ={bottom!r} is none (|ϕ| > {_BOTTOM_PHI_LIMIT:g} is a grain "
+            f"coarser than 1 km or finer than 1 nm); it reads as a sound "
+            f"speed, which fetch_environment does not take as a number.",
+            remediation=(
+                "Pass a sound-speed half-space as bottom=BoundaryProperties("
+                "acoustic_type='half-space', sound_speed=..., density=...), "
+                "or give the grain size in ϕ (e.g. bottom=2.0 for fine sand)."),
+        )
+
+
 def _resolve_bottom(bottom, *, water_sound_speed=None, model=DEFAULT_GRAIN_SIZE_MODEL,
                     hamilton_fit=None):
     """The ``bottom=`` literal as a seabed: a ready ``BoundaryProperties``,
     ``SeabedColumn`` or ``Bottom`` passes unchanged with its own provenance
-    (``Environment`` coerces it), a class name takes its preset and a ϕ float
-    goes through the grain-size relations."""
+    (``Environment`` coerces it), a class name takes its fluid preset (as
+    ``Environment`` reads a name) and a ϕ float goes through the grain-size
+    relations."""
+    _check_bottom_literal(bottom)
     if bottom is None or isinstance(bottom, (BoundaryProperties, SeabedColumn,
                                              Bottom)):
         return bottom
     if isinstance(bottom, str):
-        return bottom_from_class(bottom)
-    if isinstance(bottom, (int, float)) and not isinstance(bottom, bool):
-        return bottom_from_grain_size(
-            float(bottom), model=model, hamilton_fit=hamilton_fit,
-            water_sound_speed=water_sound_speed)
-    raise ConfigurationError(
-        f"fetch_environment: bottom must be a ϕ float, a class name, a "
-        f"BoundaryProperties, a SeabedColumn, a Bottom, or None; got "
-        f"{type(bottom).__name__}.",
-    )
+        return bottom_from_class(bottom, elastic=False)
+    return bottom_from_grain_size(
+        float(bottom), model=model, hamilton_fit=hamilton_fit,
+        water_sound_speed=water_sound_speed)

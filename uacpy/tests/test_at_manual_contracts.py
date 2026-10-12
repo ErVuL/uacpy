@@ -103,6 +103,27 @@ class TestTopOptInterpolationLetters:
         with pytest.raises(ConfigurationError, match='not recognised'):
             resolve_ssp_topopt(_measured_env(), spelling)
 
+    @pytest.mark.parametrize('model', ['Kraken', 'Scooter', 'SPARC'])
+    def test_an_evaluate_ssp_deck_names_only_the_values_it_takes(self, model):
+        """The decks read through EvaluateSSP (misc/sspMod.f90:61-89) refuse
+        an unknown name with their own list, which leaves out Bellhop's
+        'quad'; every name on it passes."""
+        from uacpy.core.exceptions import UnsupportedFeatureError
+        from uacpy.io.oalib_writer import (
+            EVALUATE_SSP_INTERPS, reject_unsupported_ssp_interp)
+        assert EVALUATE_SSP_INTERPS == ('linear', 'n2linear', 'pchip',
+                                        'spline')
+        with pytest.raises(ConfigurationError,
+                           match="interp_ssp='cubic' not recognised") as info:
+            reject_unsupported_ssp_interp(model, 'cubic')
+        text = str(info.value)
+        assert text.startswith(f"{model}: interp_ssp='cubic' not recognised")
+        assert 'quad' not in text
+        for name in EVALUATE_SSP_INTERPS:
+            reject_unsupported_ssp_interp(model, name)
+        with pytest.raises(UnsupportedFeatureError, match="'quad'"):
+            reject_unsupported_ssp_interp(model, 'quad')
+
     def test_analytic_is_refused(self):
         # 'A' selects the hard-coded Munk curve in misc/munk.f90, which
         # ignores env.ssp entirely, so the writer refuses it.

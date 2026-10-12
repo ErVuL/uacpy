@@ -20,6 +20,7 @@ from uacpy.core._export import (Exportable, decode_attrs, encode_attrs,
                                 join_complex, unwrap_0d)
 from uacpy.core._plotting import plotter
 from uacpy.core._repr import axis, build, value_bit
+from uacpy.core.exceptions import ConfigurationError
 
 #: The spelling of the reference pressure in a dB unit: the package's
 #: underwater reference, 1 µPa, by name, and any other in Pa.
@@ -36,6 +37,13 @@ def reference_text(ref: float) -> str:
 #: ``scaling`` that names the statistic: a density per hertz, the power in
 #: a bin, or an exposure (the time integral of the squared pressure).
 POWER_UNITS = {'density': 'Pa²/Hz', 'spectrum': 'Pa²', 'exposure': 'Pa²·s'}
+
+
+#: The ``attrs`` key :meth:`ResultTuple.to_xarray` lists the result's fields
+#: under, comma-separated: a listed field the object does not hold was
+#: ``None``, so :meth:`ResultTuple.from_xarray` can tell it from a field the
+#: writer never had.
+RESULT_FIELDS_ATTR = 'uacpy_result_fields'
 
 
 def level_unit(ref: float, scaling: str) -> str:
@@ -126,17 +134,36 @@ class ResultTuple(Exportable):
                 out[name] = array
         return out
 
+    def _declared_dims(self) -> Dict[str, Tuple[str, ...]]:
+        """The dimensions a result states for some of its fields, used in
+        place of :meth:`_axes`' length matching — for a field whose data
+        comes before its axes, or whose axes a length coincidence could
+        swap. Empty here."""
+        return {}
+
+    def _axis_coords(self) -> Dict[str, Tuple[np.ndarray, str]]:
+        """``dim -> (values, unit)`` for an axis a result carries as an
+        attribute rather than a field (a beam scan's ``ranges``). Empty
+        here."""
+        return {}
+
     def _axes(self) -> Dict[str, Tuple[str, ...]]:
-        """The dimensions of each numeric field: an axis takes the name of
-        the first earlier 1-D field of its length not already used, else
-        ``<field>_dim<i>``. So ``power(frequencies, times)`` of a
-        spectrogram is labelled by the two fields before it. A 1-D field
-        that labels a later field's axis lies on its own name, which makes
-        it that axis's coordinate; a 1-D field labelling nothing keeps
-        ``<field>_dim0``."""
+        """The dimensions of each numeric field. A field the result declares
+        (:meth:`_declared_dims`) takes its declared names; for any other, an
+        axis takes the name of the first earlier 1-D field of its length not
+        already used, else ``<field>_dim<i>``. So ``power(frequencies,
+        times)`` of a spectrogram is labelled by the two fields before it. A
+        1-D field that labels another field's axis lies on its own name,
+        which makes it that axis's coordinate; a 1-D field labelling nothing
+        keeps ``<field>_dim0``."""
         arrays = self._arrays()
+        declared = self._declared_dims()
         axes, seen = {}, []
         for name, array in arrays.items():
+            if len(declared.get(name, ())) == array.ndim > 0:
+                axes[name] = tuple(declared[name])
+                seen.append(name)
+                continue
             free = [f for f in seen if arrays[f].ndim == 1]
             dims = []
             for i, n in enumerate(array.shape):
@@ -158,9 +185,14 @@ class ResultTuple(Exportable):
         units = self._field_units()
         axes = self._axes()
         used = {d for dims in axes.values() for d in dims}
-        return {name: (array, units.get(name) or '')
-                for name, array in self._arrays().items()
-                if array.ndim == 1 and name in used and axes[name] == (name,)}
+        coords = {name: (array, units.get(name) or '')
+                  for name, array in self._arrays().items()
+                  if array.ndim == 1 and name in used
+                  and axes[name] == (name,)}
+        for dim, (values, unit) in self._axis_coords().items():
+            if dim in used and dim not in coords:
+                coords[dim] = (np.asarray(values), unit)
+        return coords
 
     def _payload(self):
         units = self._field_units()
@@ -188,16 +220,53 @@ class ResultTuple(Exportable):
                      attrs, who=f"{type(self).__name__}.to_xarray")
         return attrs
 
+    def to_xarray(self):
+        """The result as an ``xarray.Dataset`` (optional extra
+        ``uacpy[xarray]``): every numeric field as a variable or a
+        coordinate in its unit, the attributes in ``attrs``, and the field
+        names in ``attrs['uacpy_result_fields']`` — a field held as ``None``
+        is listed there and not written. :meth:`from_xarray` reads it
+        back."""
+        dataset = super().to_xarray()
+        dataset.attrs[RESULT_FIELDS_ATTR] = ','.join(self._fields)
+        return dataset
+
     @classmethod
     def from_xarray(cls, obj):
         """The result :meth:`to_xarray` wrote: each field from the
-        variable or coordinate of its name, each attribute from ``attrs``."""
+        variable or coordinate of its name, each attribute from ``attrs``.
+        A field the object's ``uacpy_result_fields`` lists and does not hold
+        is ``None`` (:meth:`to_xarray` lists a field held as ``None``); one
+        it neither holds nor lists is refused."""
         obj = join_complex(obj)
-        fields = [np.asarray(obj[name].values) if name in obj.variables
+        held = {str(name) for name in obj.variables}
+        listed = set(str(obj.attrs.get(RESULT_FIELDS_ATTR, '')).split(','))
+        cls._refuse_missing_fields(
+            [name for name in cls._fields
+             if name not in held and name not in listed],
+            held, 'from_xarray')
+        fields = [np.asarray(obj[name].values) if name in held
                   else None for name in cls._fields]
-        attrs = decode_attrs(obj.attrs)
+        attrs = decode_attrs(obj.attrs, reserved=(RESULT_FIELDS_ATTR,))
         return cls(*fields, **{name: attrs[name] for name in cls._attrs
                                if name in attrs})
+
+    @classmethod
+    def _refuse_missing_fields(cls, missing, held, method: str) -> None:
+        """Refuse a saved result that holds none of the fields ``missing``
+        (``held``: the names it holds), naming the call ``method`` of this
+        class."""
+        if not missing:
+            return
+        raise ConfigurationError(
+            f"{cls.__name__}.{method}: the saved result holds no "
+            f"{', '.join(repr(name) for name in missing)} field (it holds "
+            f"{', '.join(repr(name) for name in sorted(held)) or 'nothing'}), "
+            f"so it is not a {cls.__name__} with the fields "
+            f"{', '.join(cls._fields)}.",
+            remediation=(f"Pass what {cls.__name__}.to_dict() or "
+                         f"to_xarray() wrote, or rename its entries to the "
+                         f"fields {', '.join(cls._fields)}."))
 
     def to_dict(self) -> Dict[str, Any]:
         """The fields and the attributes, by name (arrays copied).
@@ -212,9 +281,13 @@ class ResultTuple(Exportable):
     @classmethod
     def from_dict(cls, d) -> 'ResultTuple':
         """The result :meth:`to_dict` wrote; ``d`` may be the mapping
-        ``np.load(path, allow_pickle=True)`` returns."""
+        ``np.load(path, allow_pickle=True)`` returns. A mapping that holds
+        no entry for a field is refused (:meth:`to_dict` writes every field,
+        ``None`` included)."""
         d = {k: unwrap_0d(v) for k, v in dict(d).items()}
-        return cls(*(d.get(name) for name in cls._fields),
+        cls._refuse_missing_fields(
+            [name for name in cls._fields if name not in d], d, 'from_dict')
+        return cls(*(d[name] for name in cls._fields),
                    **{name: d[name] for name in cls._attrs if name in d})
 
 

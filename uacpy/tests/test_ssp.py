@@ -16,6 +16,16 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.ssp import SoundSpeedProfile
 
 
+def test_a_one_dimensional_profile_collapses_to_a_copy():
+    """Every collapse returns a new profile, a 1-D one too, so writing to
+    the result never writes to the source (Bottom's contract)."""
+    ssp = SoundSpeedProfile.from_pairs([(0.0, 1500.0), (100.0, 1490.0)])
+    out = ssp.collapse_range('median')
+    assert out is not ssp
+    out.sound_speed[0, 0] = 1.0
+    assert ssp.sound_speed[0, 0] == 1500.0
+
+
 class TestGenerateSeaSurfaceSynthesis:
     """The realisation is the inverse DFT of the Pierson-Moskowitz
     random-phase spectrum, so it must equal the direct cosine sum it is
@@ -552,8 +562,9 @@ class TestTheProfileAnswersItsSoundSpeedAtADepth:
 
 class TestFromTemperatureSalinityTakesTheWaterRule:
     """``from_temperature_salinity`` takes each property as a single value,
-    an array on ``depths``, or ``(depth, value)`` pairs; with pairs and no
-    ``depths`` it builds on the union of their depths."""
+    an array of exactly the shape of ``depths``, or ``(depth, value)`` pairs
+    of shape ``(M, 2)``; with no ``depths`` it builds on the union of the
+    pairs' depths. Any other array is refused."""
 
     T = [(0.0, 22.0), (60.0, 12.0), (200.0, 10.0)]
     S = [(0.0, 35.5), (300.0, 34.6)]
@@ -565,8 +576,21 @@ class TestFromTemperatureSalinityTakesTheWaterRule:
         np.testing.assert_array_equal(ssp.depths, z)
         from uacpy.acoustics import sound_speed_mackenzie
         want = sound_speed_mackenzie(np.interp(z, *np.array(self.T).T),
-                                     np.interp(z, *np.array(self.S).T), z)
+                                     np.interp(z, *np.array(self.S).T),
+                                     depth=z)
         np.testing.assert_array_equal(ssp.sound_speed[:, 0], want)
+
+    def test_a_profile_record_builds_like_its_pairs(self):
+        """The record a law hands back (``law.temperature``) is read as the
+        pairs it holds."""
+        from uacpy.core._water import WaterProfile
+        record = SoundSpeedProfile.from_temperature_salinity(
+            None, WaterProfile(*np.array(self.T).T), self.S,
+            formula='mackenzie')
+        pairs = SoundSpeedProfile.from_temperature_salinity(
+            None, self.T, self.S, formula='mackenzie')
+        np.testing.assert_array_equal(record.depths, pairs.depths)
+        np.testing.assert_array_equal(record.sound_speed, pairs.sound_speed)
 
     def test_the_three_forms_mix_on_given_depths(self):
         z = np.array([0.0, 30.0, 100.0])
@@ -578,10 +602,37 @@ class TestFromTemperatureSalinityTakesTheWaterRule:
         np.testing.assert_array_equal(mixed.sound_speed, arrays.sound_speed)
 
     def test_no_depths_and_no_pairs_is_refused(self):
-        with pytest.raises(ConfigurationError, match='no property is given'):
+        with pytest.raises(ConfigurationError,
+                           match='no property is given as .depth, value. '
+                                 'pairs'):
             SoundSpeedProfile.from_temperature_salinity(None, 10.0, 35.0)
 
-    def test_an_array_off_the_depths_is_refused(self):
-        with pytest.raises(ConfigurationError, match='must share shape'):
+    @pytest.mark.parametrize('temperature', [
+        [10.0, 9.0, 8.0], [10.0], [[10.0], [9.0]], [[10.0, 9.0, 8.0]]],
+        ids=['one long', 'one element', 'a column', 'three columns'])
+    def test_an_array_neither_values_nor_pairs_is_refused(self, temperature):
+        with pytest.raises(ConfigurationError,
+                           match=r'temperature has shape .*, and the depth it '
+                                 r'is evaluated at has shape \(2,\)') as e:
             SoundSpeedProfile.from_temperature_salinity(
-                [0.0, 50.0], [10.0, 9.0, 8.0], 35.0)
+                [0.0, 50.0], temperature, 35.0)
+        assert '(depth, value) pairs of shape (M, 2)' in str(e.value)
+
+    def test_malformed_pairs_are_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match='the depths of the temperature pairs must be '
+                                 'non-negative'):
+            SoundSpeedProfile.from_temperature_salinity(
+                None, [(-5.0, 22.0), (60.0, 12.0)], 35.0)
+        with pytest.raises(ConfigurationError, match='strictly increasing'):
+            SoundSpeedProfile.from_temperature_salinity(
+                [0.0, 50.0], [(60.0, 22.0), (0.0, 12.0)], 35.0)
+
+    def test_an_array_of_the_depths_shape_is_one_value_per_depth(self):
+        from uacpy.acoustics import sound_speed_mackenzie
+        ssp = SoundSpeedProfile.from_temperature_salinity(
+            [0.0, 50.0], [10.0, 9.0], [35.0, 34.0], formula='mackenzie')
+        np.testing.assert_array_equal(
+            ssp.sound_speed[:, 0],
+            [sound_speed_mackenzie(10.0, 35.0, depth=0.0),
+             sound_speed_mackenzie(9.0, 34.0, depth=50.0)])

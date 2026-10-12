@@ -16,6 +16,7 @@ from uacpy.core.acoustics.modal import (
     _modal_grazing_angles, modal_phase_speeds,
 )
 from uacpy.core.bottom import medium_density_at
+from uacpy.core.boundary import BoundaryProperties
 
 from uacpy.core.results._base import (PhaseReference, Result, _count,
                                       coordinate_axis)
@@ -47,6 +48,18 @@ class MediaTable(FrozenRecord):
         half-space starts.
     halfspace_density : float, optional
         g/cm³ of the bottom half-space.
+    halfspace_sound_speed : float, optional
+        Compressional speed (m/s) of a fluid bottom half-space, the speed a
+        mode's phase speed must stay under to be trapped in the duct
+        rather than radiate into the seabed; ``None`` when the seabed has no
+        single such speed (an elastic, vacuum, rigid or tabulated one) or
+        the table was built without it (a ``.moa``, a hand-built mode set).
+    halfspace_attenuation : float, optional
+        The seabed's own compressional attenuation (dB/wavelength) in that
+        fluid half-space, the deck's volume law taken out of what the solver
+        applied (:func:`~uacpy.io.read_modes`); ``None`` when the speed is,
+        and when no deck beside the ``.mod`` says which volume law that
+        was.
     """
 
     water_density: float
@@ -54,9 +67,13 @@ class MediaTable(FrozenRecord):
     densities: Optional[Tuple[float, ...]] = None
     bottom_depth: Optional[float] = None
     halfspace_density: Optional[float] = None
+    halfspace_sound_speed: Optional[float] = None
+    halfspace_attenuation: Optional[float] = None
 
     _REPR_UNITS = {'water_density': 'g/cm³', 'tops': 'm', 'densities': 'g/cm³',
-                   'bottom_depth': 'm', 'halfspace_density': 'g/cm³'}
+                   'bottom_depth': 'm', 'halfspace_density': 'g/cm³',
+                   'halfspace_sound_speed': 'm/s',
+                   'halfspace_attenuation': 'dB/λ'}
 
     def __post_init__(self):
         object.__setattr__(self, 'water_density', float(self.water_density))
@@ -72,10 +89,25 @@ class MediaTable(FrozenRecord):
                 f"MediaTable: tops {self.tops} and densities "
                 f"{self.densities} must both be given, one density per "
                 f"medium top.")
-        for name in ('bottom_depth', 'halfspace_density'):
+        for name in ('bottom_depth', 'halfspace_density',
+                     'halfspace_sound_speed', 'halfspace_attenuation'):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, float(value))
+        speed = self.halfspace_sound_speed
+        if speed is not None and not (np.isfinite(speed) and speed > 0.0):
+            raise ConfigurationError(
+                f"MediaTable: halfspace_sound_speed must be a positive speed "
+                f"(m/s); got {speed!r}.",
+                remediation="Pass the fluid half-space's compressional speed, "
+                            "or None when the seabed has none.")
+        loss = self.halfspace_attenuation
+        if loss is not None and not (np.isfinite(loss) and loss >= 0.0):
+            raise ConfigurationError(
+                f"MediaTable: halfspace_attenuation must be a non-negative "
+                f"attenuation (dB/wavelength); got {loss!r}.",
+                remediation="Pass the fluid half-space's compressional "
+                            "attenuation, or None when it is not known.")
 
     @classmethod
     def from_dict(cls, d) -> 'MediaTable':
@@ -147,8 +179,10 @@ class Modes(Result):
         speeds will be wrong for leaky modes".
     """
 
-    #: The metadata spellings of the :class:`MediaTable` members: a file
-    #: that keeps them in its metadata loads them into :attr:`media`, and a
+    #: The plotter that draws this result (``.plot()``).
+    _plotter = '_plot_mode_functions'
+
+    #: The metadata spellings of the :class:`MediaTable` members: a
     #: ``metadata=`` carrying one is refused.
     _METADATA_MEDIA = {'water_density': 'water_density',
                        'media_depths': 'tops',
@@ -214,7 +248,20 @@ class Modes(Result):
         return len(self.k)
 
     def _repr_bits(self) -> list:
-        return [count(self.n_modes, 'mode'), coordinate_axis('depth', self.depths)]
+        # The count splits into trapped and not when the media table knows
+        # the fluid seabed's speed and some mode's phase speed is above it,
+        # '8 modes (7 trapped, 1 above the 1800 m/s seabed)': such a mode
+        # radiates into the seabed rather than being trapped in the duct
+        # (the default window reaches 5 % past that speed, kraken.md §6.1).
+        modes = count(self.n_modes, 'mode')
+        c_bottom = (None if self.media is None
+                    else self.media.halfspace_sound_speed)
+        if c_bottom is not None and self.f0 is not None:
+            above = int(np.sum(self.phase_speeds > c_bottom))
+            if above:
+                modes += (f" ({self.n_modes - above} trapped, {above} above "
+                          f"the {c_bottom:g} m/s seabed)")
+        return [modes, coordinate_axis('depth', self.depths)]
 
     def to_dict(self) -> dict:
         """Serialise these modes to plain arrays: ``k``, ``phi`` (depth ×
@@ -222,7 +269,9 @@ class Modes(Result):
         reported none), ``media`` (the :class:`MediaTable` as its plain
         dict, or ``None``) and the identity, as :meth:`Field.to_dict` writes it.
         ``np.savez(f, **d)`` stores it; read it back with
-        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`."""
+        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`. That load
+        unpickles, so use it only on files you wrote; :meth:`to_netcdf` /
+        :meth:`from_netcdf` is the route for a file from elsewhere."""
         return {
             'k': self.k.copy(),
             'phi': self.phi.copy(),
@@ -236,7 +285,9 @@ class Modes(Result):
     #: ``attrs`` the xarray export writes for :attr:`media`, by member.
     _MEDIA_ATTRS = {member: f'media_{member}'
                     for member in ('water_density', 'tops', 'densities',
-                                   'bottom_depth', 'halfspace_density')}
+                                   'bottom_depth', 'halfspace_density',
+                                   'halfspace_sound_speed',
+                                   'halfspace_attenuation')}
 
     def _payload(self):
         payload = {'k': (self.k, ('mode',), 'rad/m'),
@@ -277,7 +328,9 @@ class Modes(Result):
     def _table(self):
         """One row per mode: ``mode`` (1-based), ``k_real`` and ``k_imag``
         (rad/m), ``phase_speed`` (m/s; NaN without a frequency),
-        ``group_speed`` (m/s; NaN where the solver reported none) and
+        ``group_speed`` (m/s; NaN where the solver reported none, as the
+        default ``kraken`` backend never does — :meth:`group_velocity_between`
+        gives it from a second solve) and
         ``attenuation_dB_per_km``, the modal decay ``20·log10(e)·|Im(k)|``
         per km: the decay rate :func:`~uacpy.core.acoustics.modal_field`
         applies, which takes ``|Im(k)|`` whichever sign convention the
@@ -302,29 +355,20 @@ class Modes(Result):
     def from_dict(cls, d: dict) -> "Modes":
         """Reconstruct :class:`Modes` from :meth:`to_dict` output, or from
         the mapping ``np.load(f, allow_pickle=True)`` returns for a file
-        written with ``np.savez(f, **modes.to_dict())``. A file that keeps
-        the media table in its metadata loads it into :attr:`media`.
+        written with ``np.savez(f, **modes.to_dict())`` (load such a file
+        only if you wrote it: ``allow_pickle=True`` unpickles).
 
         Parameters
         ----------
         d : mapping
             :meth:`to_dict` output, or the mapping ``np.load`` returns for it.
         """
-        d = cls._unwrap_saved(d, payload=('k', 'phi', 'depths'))
+        d = cls._unwrap_saved(d, payload=('k', 'phi', 'depths'),
+                              required=('group_velocity', 'media'))
         identity = cls._identity_from_dict(d)
-        metadata = dict(identity['metadata'] or {})
-        stated = {member: metadata.pop(key)
-                  for key, member in cls._METADATA_MEDIA.items()
-                  if key in metadata}
-        identity['metadata'] = metadata or None
         media = d.get('media')
         if media is not None:
             media = MediaTable.from_dict(media)
-        elif stated:
-            media = MediaTable(
-                water_density=stated.pop('water_density',
-                                         DEFAULT_WATER_DENSITY_G_CM3),
-                **stated)
         return cls(k=d['k'], phi=d['phi'], depths=d['depths'],
                    group_velocity=d.get('group_velocity'), media=media,
                    **identity)
@@ -554,7 +598,8 @@ class Modes(Result):
         """
         if self.f0 is None:
             raise ConfigurationError(
-                "Modes.phase_speeds requires frequencies; got None."
+                "Modes.grazing_angles: needs the mode set's frequency; this "
+                "Modes has none."
             )
         return _modal_grazing_angles(self.k, self.f0, sound_speed,
                                     who='Modes.grazing_angles')
@@ -584,13 +629,23 @@ class Modes(Result):
         half-space evanescent tail is counted). The tabulated ``ψ`` stops
         at the seabed, so the tail is added in closed form —
         ``ψ(D)²/(2 γ_m ρ_b)`` for a trapped mode — which needs ``γ_m`` and
-        ``ρ_b`` and therefore needs ``bottom=``. **Without ``bottom=`` the
-        normalisation stops at the seabed and every returned ``Im(k)`` is
-        an upper bound**: the omitted term is positive and only ever lowers
-        ``α_m``. Measured on an analytic Pekeris guide (D = 100 m, c
-        1500/1800 m/s, ρ 1.0/1.8 g/cm³, 50 Hz, uniform α in the water) the
+        ``ρ_b``, and the seabed-loss term beside it needs the seabed's
+        attenuation. They come from ``bottom=`` or, without it, from the
+        fluid half-space the mode set records (``media.halfspace_sound_speed``,
+        ``halfspace_density`` and ``halfspace_attenuation``, from a Kraken
+        ``.mod``) when it lies directly under the water column and the
+        tabulation reaches it (``media.bottom_depth``): on Kraken's modes of
+        a 100 m Pekeris guide over a 0, 0.1, 0.5 or 0.8 dB/λ seabed the
+        recorded half-space returns the ``bottom=env.bottom`` result to
+        rounding, on kraken and krakenc, with any volume law. **With neither, the normalisation
+        stops at the seabed, no seabed-loss term is added, and every
+        returned ``Im(k)`` is an upper bound on the water-column term**: the
+        omitted tail is positive and only ever lowers ``α_m``. Measured in
+        that case on an analytic Pekeris guide (D = 100 m, c 1500/1800 m/s,
+        ρ 1.0/1.8 g/cm³, lossless seabed, 50 Hz, uniform α in the water) the
         water-only normalisation returns 0.7 %, 2.4 %, 5.1 % and 17 % high
-        for modes 1-4 — the near-cutoff mode, which dominates at long
+        for modes 1-4 (0.7 %, 2.4 %, 5.2 % and 18 % on Kraken's modes of
+        the same guide) — the near-cutoff mode, which dominates at long
         range, is over-attenuated the most because its shallow ``γ_m``
         pushes the most energy into the bottom.
 
@@ -656,7 +711,9 @@ class Modes(Result):
             A uniform water density cancels from the water-column integrals;
             it matters against ``bottom.density`` in the seabed tail.
         bottom : BoundaryProperties or Bottom, optional
-            Half-space below the water column. ``env.bottom`` is accepted
+            Half-space below the water column; ``None`` takes the
+            half-space the media table records, where it applies (above).
+            ``env.bottom`` is accepted
             when it is range-independent and unlayered (its half-space is
             read); otherwise pass ``env.bottom.halfspace_at(range=0.0)``. When supplied, adds an
             evanescent-tail bottom-attenuation contribution proportional
@@ -677,7 +734,8 @@ class Modes(Result):
             ``depths[-1]`` is validated against it (0.1 % tolerance) and a
             short tabulation raises instead of silently mis-evaluating
             ``ψ(D)``. When omitted, a ``FallbackWarning`` states which depth
-            the bottom term was evaluated at.
+            the bottom term was evaluated at; the recorded half-space takes
+            ``media.bottom_depth``.
 
         Returns
         -------
@@ -705,6 +763,26 @@ class Modes(Result):
         if density_z is None:
             density_z = (DEFAULT_WATER_DENSITY_G_CM3 if self.media is None
                          else self.media.water_density)
+        # Without bottom=, the fluid half-space the media table records
+        # (speed, density, attenuation) gives both the normalisation tail
+        # and the seabed-loss term when it lies directly under the water
+        # column and the tabulation reaches it.
+        media = self.media
+        if (bottom is None and media is not None
+                and media.halfspace_sound_speed is not None
+                and media.halfspace_density is not None
+                and media.halfspace_attenuation is not None
+                and media.bottom_depth is not None
+                and (media.tops is None or len(media.tops) == 1)
+                and np.isclose(self.depths[-1], media.bottom_depth,
+                               rtol=1e-3)):
+            bottom = BoundaryProperties(
+                acoustic_type='half-space',
+                sound_speed=media.halfspace_sound_speed,
+                density=media.halfspace_density,
+                attenuation=media.halfspace_attenuation)
+            if seafloor_depth is None:
+                seafloor_depth = media.bottom_depth
         alpha_m = _modal_attenuation(
             self.k, self.phi, self.depths, alpha_dB_per_m,
             frequency=self.f0, sound_speed_z=sound_speed_z,

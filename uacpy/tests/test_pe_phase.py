@@ -74,8 +74,9 @@ def test_rams_broadband_no_carrier_no_radial():
         H, convention=RAMS, ranges_m=np.linspace(100, 5000, 6),
         range_axis=1, freq_axis=2, apply_radial=False,
     )
-    hankel = np.exp(-1j * np.pi / 4.0)
-    np.testing.assert_allclose(out, np.conj(H) * hankel, atol=1e-12, rtol=0)
+    point_source_phase = np.exp(-1j * np.pi / 4.0)
+    np.testing.assert_allclose(out, np.conj(H) * point_source_phase,
+                               atol=1e-12, rtol=0)
 
 
 def test_ramsurf_broadband_carrier_applied():

@@ -15,8 +15,8 @@ from typing import Optional
 from uacpy.core._export import ExportRecord
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.geo import as_coordinate
-from uacpy.data._chain import first_answer
-from uacpy.data._geo import checked_max_distance
+from uacpy.data._chain import first_answer, lower_source_spec
+from uacpy.data._geo import checked_max_days, checked_max_distance
 from uacpy.data.sources import DataProvenance
 
 __all__ = ['SeaStateRecord', 'fetch_waves', 'WAVE_SOURCES']
@@ -53,6 +53,7 @@ WAVE_SOURCES = ('waverys', 'ww3')
 
 
 def _resolve_order(source):
+    source = lower_source_spec(source)
     if source == 'auto':
         return WAVE_SOURCES
     order = (source,) if isinstance(source, str) else tuple(source)
@@ -102,6 +103,8 @@ def fetch_waves(point, *, date, source='auto', max_days=None, timeout=120.0,
     """
     as_coordinate(point)                       # validate before any request
     limit = checked_max_distance(max_distance_km, 'fetch_waves')
+    if max_days is not None:
+        max_days = checked_max_days(max_days, 'fetch_waves')
     order = _resolve_order(source)
 
     def call(name, _backend):

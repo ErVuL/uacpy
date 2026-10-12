@@ -6,6 +6,8 @@ scripts. Keeps numeric-comparison logic out of plotting and IO modules.
 Public helpers: :func:`tl_rmse`, :func:`tl_max_error`, :func:`tl_bias`,
 :func:`tl_rmse_on_shared_ranges`. Every one takes ``(field, reference)``
 and every signed difference is ``field - reference``.
+:func:`tl_rmse_on_shared_ranges` takes two Fields read at one depth, or two
+``(ranges, tl_dB)`` curves (a measurement, another code's output).
 
 :func:`tl_rmse`, :func:`tl_max_error` and :func:`tl_bias` take either two
 plain dB arrays of one shape (a measured TL curve, a table from another
@@ -65,6 +67,28 @@ def _resolve_window(
 _TL_AXES = ('depth', 'range')
 
 
+def _refuse_axes_beyond_tl(f, label: str, fname: str) -> None:
+    """Refuse a Field ``f`` with an axis besides depth and range, naming
+    the step that removes it: one source, or the sources' sum, for the
+    ``source_depth`` axis of a multi-depth run; one value of any other."""
+    axes = list(f.coords)
+    extra = [a for a in axes if a not in _TL_AXES]
+    if axes and not extra:
+        return
+    others = ', '.join(f'{a}=...' for a in extra if a != 'source_depth')
+    raise ConfigurationError(
+        f"{fname}: {label} must be a Field on depth and/or range axes (a "
+        f"(depth, range) grid or a 1-D cut); got coords {axes}.",
+        remediation=(
+            "Compare one source with field.at(source_depth=...), or the "
+            "sources driven together with field.superpose()."
+            + (f" Select one value of each other axis with field.at("
+               f"{others})." if others else "")
+            if 'source_depth' in extra else
+            f"Select one value of each other axis with field.at({others})."
+            if others else "Pass a Field on depth and/or range axes."))
+
+
 def _tl_difference(
     tl_field: np.ndarray,
     tl_reference: np.ndarray,
@@ -122,13 +146,7 @@ def _tl_fields(field, reference, range_window, depth_window, fname):
             raise ConfigurationError(
                 f"{fname}: field and reference must both be Fields or both "
                 f"be dB arrays; {label} is a {type(f).__name__}.")
-        axes = list(f.coords)
-        if not axes or any(a not in _TL_AXES for a in axes):
-            raise ConfigurationError(
-                f"{fname}: {label} must be a Field on depth and/or range "
-                f"axes (a (depth, range) grid or a 1-D cut); got coords "
-                f"{axes}.",
-                remediation="Narrow it first, e.g. field.at(frequency=f).")
+        _refuse_axes_beyond_tl(f, label, fname)
     if list(field.coords) != list(reference.coords):
         raise ConfigurationError(
             f"{fname}: field is on axes {list(field.coords)} but reference "
@@ -150,7 +168,7 @@ def _tl_fields(field, reference, range_window, depth_window, fname):
     # ``Field.dB`` refuses a real field whose unit is not dB, and raises
     # AttributeError doing it. Matching the kind above is not enough to make
     # the pair a TL pair — a probability-of-detection field passes it — so the
-    # unit is checked here, the way ``ResultStack.dB`` pre-checks its slabs.
+    # unit is checked here, before ``Field.dB`` is read.
     for label, f in (('field', field), ('reference', reference)):
         if not f.is_complex and f.unit != 'dB':
             raise ConfigurationError(
@@ -323,7 +341,55 @@ def tl_bias(
     return float(np.mean(diff[kept]))
 
 
-def tl_rmse_on_shared_ranges(field, reference, *, depth: float) -> float:
+def _rmse_on_coarser_shared_axis(r_a, tl_a, r_b, tl_b, fname: str) -> float:
+    """RMS of ``tl_a - tl_b`` (dB) on the coarser of two increasing range
+    axes clipped to their shared span, each curve read there by
+    ``np.interp``; no-energy cells are NaN (counted by a FallbackWarning)
+    and drop out with the other non-finite cells. ``nan`` when the axes
+    share no range or no finite cell."""
+    n_marker = int(np.count_nonzero(no_energy_mask(tl_a))
+                   + np.count_nonzero(no_energy_mask(tl_b)))
+    _warn_no_energy_cells(n_marker, fname)
+    tl_a = np.where(no_energy_mask(tl_a), np.nan, tl_a)
+    tl_b = np.where(no_energy_mask(tl_b), np.nan, tl_b)
+
+    def _spacing(r):
+        return float(np.median(np.diff(r))) if r.size > 1 else float('inf')
+    common = r_a if _spacing(r_a) >= _spacing(r_b) else r_b
+    common = common[(common >= max(r_a[0], r_b[0]))
+                    & (common <= min(r_a[-1], r_b[-1]))]
+    if common.size == 0:
+        return float('nan')
+    residual = np.interp(common, r_a, tl_a) - np.interp(common, r_b, tl_b)
+    finite = np.isfinite(residual)
+    return (float(np.sqrt(np.mean(residual[finite] ** 2)))
+            if finite.any() else float('nan'))
+
+
+def _range_curve(curve, label: str, fname: str):
+    """A ``(ranges, tl_dB)`` pair as two float64 1-D arrays of one length,
+    the ranges finite and strictly increasing."""
+    try:
+        ranges, tl = curve
+        ranges = np.asarray(ranges, dtype=float)
+        tl = np.asarray(tl, dtype=float)
+    except (TypeError, ValueError):
+        raise ConfigurationError(
+            f"{fname}: {label} must be a Field or a (ranges, tl_dB) pair of "
+            f"1-D arrays; got {type(curve).__name__}.") from None
+    if ranges.ndim != 1 or tl.shape != ranges.shape or ranges.size == 0:
+        raise ConfigurationError(
+            f"{fname}: {label}'s ranges and tl_dB must be 1-D arrays of one "
+            f"non-zero length; got shapes {ranges.shape} and {tl.shape}.")
+    if not (np.all(np.isfinite(ranges)) and np.all(np.diff(ranges) > 0)):
+        raise ConfigurationError(
+            f"{fname}: {label}'s ranges must be finite and strictly "
+            f"increasing (m).")
+    return ranges, tl
+
+
+def tl_rmse_on_shared_ranges(field, reference, *,
+                             depth: Optional[float] = None) -> float:
     """RMS dB difference at one depth, over the ranges both fields reach,
     **resampling** onto the coarser of the two axes.
 
@@ -353,12 +419,19 @@ def tl_rmse_on_shared_ranges(field, reference, *, depth: float) -> float:
     a depth step outside a field's depth axis is refused: its nearest sample
     would be the axis end, a depth nobody asked for.
 
+    The same computation takes two ``(ranges, tl_dB)`` curves — a
+    measured TL curve, a table from another code — with no Field built:
+    ``tl_rmse_on_shared_ranges((r_meas, tl_meas), (r_model, tl_model))``.
+
     Parameters
     ----------
-    field, reference : Field
-        TL-like fields with ``ranges`` and a ``dB`` view.
+    field, reference : Field or (ranges, tl_dB) pair
+        TL-like fields with ``ranges`` and a ``dB`` view; or two pairs of
+        1-D arrays, ranges in metres (finite, strictly increasing) and TL in
+        dB. Both Fields or both pairs.
     depth : float
-        The receiver depth to compare at, on both fields.
+        The receiver depth to compare at, on both fields (m). Required for
+        Fields; a pair is one depth's curve already and takes none.
 
     Returns
     -------
@@ -371,10 +444,32 @@ def tl_rmse_on_shared_ranges(field, reference, *, depth: float) -> float:
     ConfigurationError
         The two fields are different physical quantities (``kind``), so
         their difference is not an agreement metric, a real field is not
-        in dB, or ``depth`` lies outside a field's depth axis.
+        in dB, a field has an axis besides depth and range (the
+        ``source_depth`` axis of a multi-depth run: pass one source,
+        ``field.at(source_depth=…)``, or the sum, ``field.superpose()``), or
+        ``depth`` lies outside a field's depth axis.
     """
     fname = 'tl_rmse_on_shared_ranges'
+    are_fields = [isinstance(f, Field) for f in (field, reference)]
+    if not any(are_fields):
+        if depth is not None:
+            raise ConfigurationError(
+                f"{fname}: depth= selects a depth of a Field; a (ranges, "
+                f"tl_dB) pair is one depth's curve already.",
+                remediation="Drop depth=, or pass two Fields.")
+        r_a, tl_a = _range_curve(field, 'field', fname)
+        r_b, tl_b = _range_curve(reference, 'reference', fname)
+        return _rmse_on_coarser_shared_axis(r_a, tl_a, r_b, tl_b, fname)
+    if not all(are_fields):
+        raise ConfigurationError(
+            f"{fname}: field and reference must both be Fields or both be "
+            f"(ranges, tl_dB) pairs.")
+    if depth is None:
+        raise ConfigurationError(
+            f"{fname}: two Fields are compared at one depth; pass depth= "
+            f"(m).")
     for label, f in (('field', field), ('reference', reference)):
+        _refuse_axes_beyond_tl(f, label, fname)
         if not f.is_complex and f.unit != 'dB':
             raise ConfigurationError(
                 f"{fname}: {label} is in {f.unit!r}, not dB, so its values "
@@ -407,27 +502,11 @@ def tl_rmse_on_shared_ranges(field, reference, *, depth: float) -> float:
             f"compares those two depths. Put both on a common depth grid "
             f"(Field.resample_to) to compare one depth.",
             FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    tl_a = np.asarray(cut_a.dB, dtype=float)
-    tl_b = np.asarray(cut_b.dB, dtype=float)
-    n_marker = int(np.count_nonzero(no_energy_mask(tl_a))
-                   + np.count_nonzero(no_energy_mask(tl_b)))
-    _warn_no_energy_cells(n_marker, fname)
-    tl_a = np.where(no_energy_mask(tl_a), np.nan, tl_a)
-    tl_b = np.where(no_energy_mask(tl_b), np.nan, tl_b)
-    r_a = np.asarray(field.ranges, dtype=float)
-    r_b = np.asarray(reference.ranges, dtype=float)
-
-    def _spacing(r):
-        return float(np.median(np.diff(r))) if r.size > 1 else float('inf')
-    common = r_a if _spacing(r_a) >= _spacing(r_b) else r_b
-    common = common[(common >= max(r_a[0], r_b[0]))
-                    & (common <= min(r_a[-1], r_b[-1]))]
-    if common.size == 0:
-        return float('nan')
-    residual = np.interp(common, r_a, tl_a) - np.interp(common, r_b, tl_b)
-    finite = np.isfinite(residual)
-    return (float(np.sqrt(np.mean(residual[finite] ** 2)))
-            if finite.any() else float('nan'))
+    return _rmse_on_coarser_shared_axis(
+        np.asarray(field.ranges, dtype=float),
+        np.asarray(cut_a.dB, dtype=float),
+        np.asarray(reference.ranges, dtype=float),
+        np.asarray(cut_b.dB, dtype=float), fname)
 
 
 __all__ = ["tl_rmse", "tl_max_error", "tl_bias",

@@ -146,9 +146,10 @@ def _pekeris_fluid() -> Scenario:
 def _pekeris_elastic() -> Scenario:
     """The Pekeris-elastic scenario — the canonical RAMS-vs-krakenc validation.
 
-    Tuning rationale: ``RAM(...)`` defaults to ``n_pade=6`` and
-    ``rams_rotation_angle=45`` (see uacpy/models/ram/_stability.py:theta_for_freq). On
-    this scenario the dispatcher routes to rams0.5; with those defaults the
+    Tuning rationale: the comparison pins ``n_pade=6`` and
+    ``rams_rotation_angle=45`` (the rotation's default, see
+    uacpy/models/ram/_stability.py:theta_for_freq). On
+    this scenario the dispatcher routes to rams0.5; with those values the
     RMSE against Kraken (which auto-routes to the krakenc backend for elastic)
     is ~1.5 dB over the 1-8 km window and TL @ 5 km matches within 0.1 dB.
     """
@@ -192,7 +193,8 @@ def _pekeris_elastic() -> Scenario:
     # were tuned against the krakenc-backend reference (RMSE ≈ 1.5 dB over
     # 1-8 km, TL@5km within 0.1 dB). The README of the upstream code
     # explicitly notes that RAMS needs hand-tuning per problem; uacpy's
-    # default ``rams_rotation_angle=45`` and ``n_pade=6`` come from this scenario.
+    # default ``rams_rotation_angle=45`` comes from this scenario (at
+    # n_pade=6; the RAM default order is 8, Collins' sample deck).
     def rams(env_unused, src, rcv):
         ram = RAM(verbose=False, n_pade=6, dr=2.0, dz=0.25, zmax=400.0,
                   rams_rotation_angle=45.0)

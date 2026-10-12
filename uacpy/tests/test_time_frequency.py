@@ -302,7 +302,7 @@ class TestCWT:
         t = np.arange(512) / FS
         x = (np.sin(2 * np.pi * 60 * t) * np.exp(-0.5 * ((t - 0.25) / 0.05) ** 2)
              + 0.4 * np.sin(2 * np.pi * 150 * t))
-        f, _, W = cwt(x, FS, wavelet=wavelet, n_freqs=96)
+        f, _, W = cwt(x, FS, wavelet=wavelet, n_frequencies=96)
         xr = inverse_cwt(W, f, FS, wavelet=wavelet)
         # A 96-scale bank over a finite frequency span cannot resolve the
         # identity, and the cone of influence corrupts both ends of the record,
@@ -314,7 +314,7 @@ class TestCWT:
 
     def test_icwt_bad_shape_raises(self):
         with pytest.raises(ConfigurationError,
-                           match=r'W must be \(n_freqs, n_time\)'):
+                           match=r'W must be \(n_frequencies, n_time\)'):
             inverse_cwt(np.zeros((3, 10)), np.array([1.0, 2.0]), FS)
 
     @pytest.mark.parametrize("wavelet,kw", [
@@ -331,7 +331,7 @@ class TestCWT:
         t = np.arange(n) / FS
         x = (1.7 * np.sin(2 * np.pi * 450.0 * t)
              + 0.8 * np.sin(2 * np.pi * 1500.0 * t))
-        f, _, W = cwt(x, FS, wavelet=wavelet, n_freqs=200, **kw)
+        f, _, W = cwt(x, FS, wavelet=wavelet, n_frequencies=200, **kw)
         xr = inverse_cwt(W, f, FS, wavelet=wavelet, **kw)
         mid = slice(n // 4, 3 * n // 4)      # outside the cone of influence
         assert np.std(xr[mid]) / np.std(x[mid]) == pytest.approx(1.0, rel=0.06)
@@ -363,7 +363,7 @@ class TestCWT:
     def test_icwt_odd_dog_order_raises(self, order):
         """An odd DOG is an odd function: psi0(0) = 0 and the eq.-11 inverse
         does not exist. Reject it instead of dividing by a pinned constant."""
-        f, _, W = cwt(np.zeros(512), FS, wavelet="dog", order=order, n_freqs=16)
+        f, _, W = cwt(np.zeros(512), FS, wavelet="dog", order=order, n_frequencies=16)
         with pytest.raises(ConfigurationError, match='is an odd function'):
             inverse_cwt(W, f, FS, wavelet="dog", order=order)
 
@@ -747,7 +747,7 @@ class TestTheTimeFrequencyResultsCarryTheirAxes:
 
     def test_cwt_times_are_the_sample_times(self):
         from uacpy.acoustic_signal import cwt
-        r = cwt(self._chirp(), self.FS, n_freqs=12)
+        r = cwt(self._chirp(), self.FS, n_frequencies=12)
         f, t, W = r
         assert t is r.times and W is r.coefficients
         assert np.array_equal(t, np.arange(1024) / self.FS)
@@ -757,7 +757,7 @@ class TestTheTimeFrequencyResultsCarryTheirAxes:
     def test_the_scalogram_is_drawn_on_the_carried_times(self):
         from uacpy.acoustic_signal import cwt
         from uacpy.core.exceptions import ConfigurationError
-        r = cwt(self._chirp(), self.FS, n_freqs=12)
+        r = cwt(self._chirp(), self.FS, n_frequencies=12)
         fig, ax = r.plot()
         mesh = ax.collections[0]
         assert mesh.get_coordinates()[0, :, 0].max() == pytest.approx(
@@ -798,3 +798,87 @@ class TestTheTimeFrequencyResultsCarryTheirAxes:
         with pytest.raises(ConfigurationError,
                            match='carries its own quefrency axis'):
             plot_cepstrum(cepstrum(self._chirp()), sample_rate=self.FS)
+
+
+class TestAMagnitudeSpectrogramStatesItsUnit:
+    """``mode='magnitude'`` / ``'complex'`` hold the STFT scaled by the square
+    root of the scaling's factor, with no one-sided doubling: Pa/√Hz under
+    'density', Pa under 'spectrum' (a tone of amplitude A reads A/2)."""
+
+    FS, F0, N = 1000.0, 125.0, 256
+
+    def _tone_spectrogram(self, scaling, mode):
+        x = np.cos(2 * np.pi * self.F0 * np.arange(4 * self.N) / self.FS)
+        return spectrogram(x, self.FS, window="boxcar", nperseg=self.N,
+                           noverlap=0, detrend=False, scaling=scaling,
+                           mode=mode)
+
+    @pytest.mark.parametrize("scaling, unit", [("density", "Pa/√Hz"),
+                                               ("spectrum", "Pa")])
+    def test_the_magnitude_field_carries_the_scalings_amplitude_unit(
+            self, scaling, unit):
+        result = self._tone_spectrogram(scaling, "magnitude")
+        assert result._field_units()["power"] == unit
+
+    def test_a_tone_reads_half_its_amplitude_under_spectrum_scaling(self):
+        result = self._tone_spectrogram("spectrum", "magnitude")
+        k = int(np.argmin(np.abs(result.frequencies - self.F0)))
+        np.testing.assert_allclose(result.power[k], 0.5, rtol=1e-12)
+
+    def test_its_square_is_half_the_one_sided_density_off_dc(self):
+        mag = self._tone_spectrogram("density", "magnitude")
+        psd = self._tone_spectrogram("density", "psd")
+        np.testing.assert_allclose(mag.power[1:-1] ** 2, psd.power[1:-1] / 2,
+                                   rtol=1e-12, atol=1e-30)
+
+    def test_the_plot_names_the_squared_panel_two_sided(self):
+        fig, ax = plot_spectrogram(self._tone_spectrogram("density",
+                                                           "magnitude"))
+        label = fig.axes[-1].get_ylabel()
+        assert label == "Level (dB re 1 µPa²/Hz, two-sided)", label
+        plt.close(fig)
+
+    def test_a_psd_panel_keeps_the_one_sided_caption(self):
+        fig, ax = plot_spectrogram(self._tone_spectrogram("density", "psd"))
+        assert fig.axes[-1].get_ylabel() == "Level (dB re 1 µPa²/Hz)"
+        plt.close(fig)
+
+
+@pytest.mark.parametrize('n_frequencies, refused', [(16, False), (17, True)])
+def test_cwt_refuses_a_scalogram_past_its_byte_cap(monkeypatch, n_frequencies,
+                                                   refused):
+    """Both sides of the cap: 16 complex rows of 1024 samples is exactly
+    256 KiB, 17 is past it. The default cap is 1 GiB, the WVD's."""
+    from uacpy.acoustic_signal import timefreq
+    monkeypatch.setattr(timefreq, "_MAX_SURFACE_BYTES", 16 * 16 * 1024)
+    x = np.sin(2 * np.pi * 50 * np.arange(1024) / 1000.0)
+    if refused:
+        with pytest.raises(ConfigurationError,
+                           match=r"cwt: the scalogram would be 17 x 1024"):
+            cwt(x, 1000.0, n_frequencies=n_frequencies)
+    else:
+        assert cwt(x, 1000.0, n_frequencies=n_frequencies).coefficients.shape == (16, 1024)
+
+
+def test_the_wigner_cap_is_the_surface_byte_cap_in_float64_cells():
+    from uacpy.acoustic_signal import timefreq
+    assert timefreq._MAX_WIGNER_CELLS * 8 == timefreq._MAX_SURFACE_BYTES == 2 ** 30
+
+
+@pytest.mark.parametrize('scaling', ['density', 'spectrum'])
+def test_a_spectrogram_level_is_power_to_dB_of_its_panel(scaling):
+    from uacpy.core.acoustics import power_to_dB
+    x = np.random.default_rng(5).standard_normal(4096)
+    res = spectrogram(x, 1000.0, nperseg=256, scaling=scaling)
+    np.testing.assert_array_equal(res.level_dB(), power_to_dB(res.power))
+    np.testing.assert_array_equal(res.level_dB(2e-5),
+                                  power_to_dB(res.power, 2e-5))
+
+
+@pytest.mark.parametrize('mode', ['magnitude', 'complex', 'angle', 'phase'])
+def test_a_spectrogram_panel_that_holds_no_power_has_no_level(mode):
+    x = np.random.default_rng(5).standard_normal(4096)
+    res = spectrogram(x, 1000.0, nperseg=256, mode=mode)
+    with pytest.raises(ConfigurationError,
+                       match=rf"SpectrogramResult.level_dB: .*mode='{mode}'"):
+        res.level_dB()

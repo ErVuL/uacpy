@@ -37,7 +37,10 @@ def _griddap_url(var, when, lat, lon):
 def fetch_hs(point, *, date, timeout=60.0, verbose=False, max_distance_km=None):
     """Significant wave height (m) at a ``(lat, lon)`` point and date from WW3.
 
-    Raises ``DataFetchError`` where WW3 has no value (land, or a date outside the
+    The field is read at 00:00 UTC of ``date`` (a time of day is ignored);
+    the record :func:`uacpy.data.fetch_waves` returns names the step read in
+    its ``data_date``. The host is the module constant :data:`ERDDAP_URL`
+    (a third-party PacIOOS mirror); reassign it to read another. Raises ``DataFetchError`` where WW3 has no value (land, or a date outside the
     served window), naming what each variable request answered, so a network
     failure reads differently from a miss. ``max_distance_km`` refuses a grid
     node standing farther than that (km) from ``point`` (the offset rule).
@@ -65,7 +68,7 @@ def hs_at(point, *, date, timeout=60.0, verbose=False, max_distance_km=None,
         except DataFetchError as exc:
             outcomes.append(f"{var}: {exc.message}")  # variable / range miss — next
             continue
-        node_lat, node_lon, hs = erddap_point(body)
+        node_lat, node_lon, step, hs = erddap_point(body)
         # A wave height cannot be negative: a negative number is a fill or a
         # schema change, and reads as no value rather than as its magnitude.
         if np.isfinite(hs) and hs >= 0.0:
@@ -73,6 +76,7 @@ def hs_at(point, *, date, timeout=60.0, verbose=False, max_distance_km=None,
                 DataProvenance(
                     source=SOURCES['ww3'],
                     data_point=(None if node_lat is None else (node_lat, node_lon)),
+                    data_date=step,
                     requested_point=(lat, lon),
                     requested_date=parse_date(date).isoformat(),
                     point_kind='cell'),

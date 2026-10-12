@@ -36,7 +36,6 @@ deck, launches the binary, reads its output and builds the result
 it.
 """
 
-import contextlib
 import inspect
 import warnings
 from abc import ABC, ABCMeta, abstractmethod
@@ -49,15 +48,14 @@ from typing import (Any, Dict, List, Mapping, Optional, Self,
 
 import numpy as np
 
-from uacpy._log import _log_enabled, _resolve_threshold, log_message
+from uacpy._log import _log_enabled, log_message
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import (
     ConfigurationError, ExecutableNotFoundError, FallbackWarning,
-    InvalidDepthError, ProvenanceWarning,
-    UnsupportedFeatureError, ValidityWarning,
+    ProvenanceWarning, UnsupportedFeatureError,
 )
 from uacpy.core.receiver import Receiver
-from uacpy.core.results import Result, ResultStack
+from uacpy.core.results import Result
 from uacpy.core.source import Source
 from uacpy.models.provenance import MODEL_PROVENANCE, model_provenance
 from uacpy.core.run_settings import (
@@ -65,47 +63,36 @@ from uacpy.core.run_settings import (
 )
 from uacpy.models._registry import engines_running
 from uacpy.models._band import (
-    BandResolution, _positive_finite, _real_pulse, frequencies_text,
-    pad_waveform_to_duration, resolve_band,
+    BandResolution, check_run_frequencies, frequencies_text, resolve_band,
+    time_settings,
 )
 from uacpy.models._checks import (
-    check_carrier_types, check_per_range_receiver_depth,
-    reject_malformed_irc_bottom, speed_bounds, total_media_depth,
-    warn_on_range_coverage, warn_on_ssp_start,
-    warn_receiver_below_resolvable,
+    check_carrier_types, check_run_signature, check_source_depths,
+    reject_unsupported_run_kwargs, require_timeseries_signal, speed_bounds,
+    total_media_depth, validate_geometry, warn_ignored_run_kwargs,
+    warn_receivers_within_a_wavelength,
 )
-from uacpy.models._extract import (
-    _settings_as_run, attach_output_paths, check_output_contract,
-    mask_source_axis, mask_unresolvable_depths, result_kwargs, stamp_result,
-)
+from uacpy.models._extract import _settings_as_run, check_output_contract
 from uacpy.core._records import _plain
-from uacpy.models._knobs import refuse_unknown_knob
+from uacpy.models._knobs import read_numeric_knobs, refuse_unknown_knob
 from uacpy.models._replay import (check_recorded_per_launch,
                                   model_from_run_settings)
 from uacpy.models._introspect import (
-    _NO_DEFAULT, _collect_init_params, _short_repr, _values_equal,
+    _collect_init_params, model_copy, model_repr,
 )
 from uacpy.models._launch import (
-    Launch, _is_runnable, attach_prt_tail, find_executable_in_paths,
-    raise_on_fortran_fatal, require_output, run_launch, run_subprocess,
-    warn_on_prt_warnings,
+    BinarySearch, LaunchContext, _is_runnable, run_subprocess,
 )
 from uacpy.models._notices import (
     _INSIDE_RUN, _WARNED_MODEL_PROVENANCE, _warn_if_volume_absorption_is_missing,
 )
-from uacpy.models._projection import (
-    DEFAULT_COLLAPSE, VALID_COLLAPSE_METHODS, environment_projection,
-)
+from uacpy.models._projection import environment_projection
 from uacpy.models._spec import _CAPABILITY_FLAGS, EngineTraits, ModelSpec
-
-#: s — how long one engine launch may run before it is stopped; every
-#: engine's ``timeout`` default.
-DEFAULT_RUN_TIMEOUT_S = 600.0
 from uacpy.models._stacking import (
     _slabs_of, refuse_a_one_depth_weight_on_dB, run_depth_loop,
 )
 from uacpy.models._workspace import (
-    FileManager, ScratchPolicy, _SCRATCH_REDIRECT, _effective_work_dir,
+    FileManager, ScratchPolicy, _effective_work_dir, scratch_subdir,
     setup_file_manager,
 )
 
@@ -120,6 +107,12 @@ from uacpy.models._workspace import (
 # why ``tests`` / ``examples`` are excluded, and why each directory entry ends
 # at a separator.
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.models._host import check_host_parameters, set_host_options
+
+#: s — how long one engine launch may run before it is stopped; every
+#: engine's ``timeout`` default. uacpy guidance: a wall-clock guard on the
+#: host, not a numerical setting — no engine reads a time limit.
+DEFAULT_RUN_TIMEOUT_S = 600.0
 
 #: The traits of a class that declares no spec.
 _DEFAULT_TRAITS = EngineTraits()
@@ -137,6 +130,29 @@ _TIME_SERIES_KEYWORDS = frozenset({'source_waveform', 'sample_rate',
 #: :meth:`PropagationModel._run_engine` calls them.
 _STAGE_HOOKS = ('_write_input', '_launch', '_read_output', '_to_result')
 
+#: Every member of :class:`PropagationModel` an engine may override, by the
+#: stage that reads it: docs/DEV.md §2.2 lists each with its default and the
+#: engines that override it. The four of :data:`_STAGE_HOOKS` are abstract.
+_ENGINE_HOOKS = (
+    # construction, identity and the rebuilt model
+    'provenance', '_check_knobs', '_default_backend', '_repr_backend',
+    '_per_launch_knob_values',
+    # stage 1: the call's own arguments and the environment the engine reads
+    '_default_run_mode', '_default_run_mode_for', '_refuse_run_mode',
+    '_normalise_env', '_project_environment',
+    # stage 2: the carriers against the resolved mode
+    '_check_time_series_request', '_multi_frequency_refusal',
+    '_validate_geometry', '_check_source_depths', '_max_receiver_depth',
+    '_source_below_domain_note', '_receiver_grid_is_paired',
+    '_validate_engine',
+    # stage 3: the settings
+    '_broadband_band_knobs', '_requested_frequencies',
+    '_resolve_engine_settings', '_announce_engine_settings',
+    '_marched_frequencies',
+    # stages 4-5: the launches and the result
+    '_n_launches', '_prepare_launches',
+) + _STAGE_HOOKS
+
 
 @dataclass(frozen=True)
 class _RunCall:
@@ -153,13 +169,6 @@ class _RunCall:
     kwargs: Dict[str, object]
     env: Optional['Environment'] = None
     engine_request: object = None
-
-
-@dataclass(frozen=True)
-class ModesRequest:
-    """The engine request of :meth:`PropagationModel.compute_modes`: the
-    call's mode cap, ``None`` to keep the engine's own ``n_modes``."""
-    n_modes: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -206,11 +215,15 @@ class StageInputs:
 
 
 class _ConstructedModel(ABCMeta):
-    """Marks an engine constructed once its whole constructor chain has
-    returned, so :meth:`PropagationModel.__setattr__` lets the constructors
-    create attributes and refuses an unknown public one afterwards."""
+    """Reads every numeric knob of a constructor call by the package's one
+    rule for numbers before the constructor runs
+    (:func:`~uacpy.models._knobs.read_numeric_knobs`), and marks an engine
+    constructed once its whole constructor chain has returned, so
+    :meth:`PropagationModel.__setattr__` lets the constructors create
+    attributes and refuses an unknown public one afterwards."""
 
     def __call__(cls, *args, **kwargs):
+        args, kwargs = read_numeric_knobs(cls, args, kwargs)
         model = super().__call__(*args, **kwargs)
         vars(model)['_constructed'] = True
         return model
@@ -247,7 +260,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
        deck with the io writers, :meth:`_launch` runs the binary and
        :meth:`_read_output` reads what it wrote with the io readers;
     5. extract — :meth:`_to_result` builds the result, whose class and
-       conventions :meth:`_check_output_contract` holds to the engine's
+       conventions :func:`~uacpy.models._extract.check_output_contract`
+       holds to the engine's
        :attr:`outputs` entry for the mode;
     6. stamp — :meth:`run` records the settings on the result.
 
@@ -305,12 +319,12 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
     # has to fail with TypeError at the call site, not be silently swallowed.
     _RUN_POSITIONAL = ('self', 'env', 'source', 'receiver', 'run_mode')
 
-    # Declarative metadata. When a subclass declares a :class:`ModelSpec`, the
-    # base validates it at class-definition time and applies it in
-    # ``__init__``. A subclass without one keeps the base defaults and sets
-    # ``_supported_modes`` / ``_supports_*`` / collapse by hand in ``__init__``.
-    # What the engine does with the parts of a call the base decides is the
-    # spec's ``traits`` (:class:`EngineTraits`), read through :attr:`_traits`.
+    # Declarative metadata. A concrete model declares a :class:`ModelSpec`
+    # (``__init_subclass__`` refuses one without it); the base validates it at
+    # class-definition time and applies it in ``__init__`` over the defaults
+    # below. What the engine does with the parts of a call the base decides is
+    # the spec's ``traits`` (:class:`EngineTraits`), read through
+    # :attr:`_traits`.
     spec: Optional['ModelSpec'] = None
 
     # Provenance/licence: ``id`` of this engine's entry in
@@ -327,6 +341,29 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
     #: run checks every result it builds against it. Empty
     #: on the base.
     outputs: 'Mapping[RunMode, OutputSpec]' = MappingProxyType({})
+
+    #: The binaries the engine launches, by backend — the ``backend=`` value
+    #: that runs each, or the engine's name in lower case for a one-binary
+    #: engine — and where each is looked for (:class:`BinarySearch`). The
+    #: engine's own lookup (:meth:`_find_binary`) and
+    #: :func:`uacpy.models.engine_status` read the same entries. Empty on the
+    #: base.
+    _BINARIES: 'Mapping[str, BinarySearch]' = MappingProxyType({})
+
+    # The capability flags of an instance, one per name of
+    # :data:`~uacpy.models._spec._CAPABILITY_FLAGS`: set False by
+    # ``__init__``, then read off the spec by :meth:`_apply_spec`.
+    _supports_altimetry: bool
+    _supports_range_dependent_bathymetry: bool
+    _supports_range_dependent_ssp: bool
+    _supports_range_dependent_bottom: bool
+    _supports_layered_bottom: bool
+    _supports_elastic_media: bool
+    _supports_multi_source_depth: bool
+    _supports_source_beam_pattern: bool
+    _supports_rough_surface: bool
+    _supports_rough_bottom: bool
+    _supports_volume_attenuation: bool
 
     @property
     def _traits(self) -> EngineTraits:
@@ -350,6 +387,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
                     f"{cls.__name__}.provenance_id = {cls.provenance_id!r} is not a known "
                     f"model source. Valid: {sorted(MODEL_PROVENANCE)}."
                 )
+        check_host_parameters(cls, inspect.signature(PropagationModel.__init__))
         # (attribute name, function) — the attribute name is what the
         # messages below quote, because a ``run`` declared as a lambda has
         # ``__name__ == '<lambda>'``.
@@ -372,8 +410,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         # (COHERENT_TL only, no env-shape support, point sources), which are
         # nobody's real answer; without ``provenance_id`` the licence and citation
         # machinery is skipped entirely, so an engine that must warn on use
-        # would not (``_warn_restricted_provenance`` returns on ``source is
-        # None``). Both are checked here rather than at ``__init__`` so a
+        # would not (``_warn_restricted_provenance`` returns on a ``None``
+        # provenance). Both are checked here rather than at ``__init__`` so a
         # missing declaration fails on import.
         missing = [name for name in ('spec', 'provenance_id')
                    if getattr(cls, name, None) is None]
@@ -390,67 +428,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             )
 
         for name, body in bodies:
-            cls._check_run_signature(name, body)
-
-    @classmethod
-    def _check_run_signature(cls, name: str, body) -> None:
-        """Refuse a subclass's own ``run`` whose signature breaks the one
-        every model shares: the four carriers by position, every extra as
-        a keyword, no ``**kwargs`` sink, and no default of its own for
-        ``run_mode``."""
-        import inspect
-
-        label = f"{cls.__name__}.{name}()"
-        params = list(inspect.signature(body).parameters.values())
-        for p in params:
-            if p.kind is inspect.Parameter.VAR_KEYWORD:
-                raise TypeError(
-                    f"{label} must not use **kwargs: an unknown "
-                    "keyword has to raise TypeError, not be swallowed. Declare "
-                    "the accepted extras as keyword-only after a bare '*'."
-                )
-            # The mirror of the rule below: a *args sink accepts exactly the
-            # unknown positional arguments that rule exists to refuse.
-            if p.kind is inspect.Parameter.VAR_POSITIONAL:
-                raise TypeError(
-                    f"{label} must not use *args: an unknown positional "
-                    "argument has to raise TypeError, not be swallowed. The "
-                    "four carriers are the whole positional contract."
-                )
-
-        leading = params[:len(cls._RUN_POSITIONAL)]
-        names = tuple(p.name for p in leading)
-        if names != cls._RUN_POSITIONAL:
-            raise TypeError(
-                f"{label} must begin with "
-                f"{cls._RUN_POSITIONAL!r}; got {names!r}."
-            )
-        for p in leading:
-            if p.kind is inspect.Parameter.KEYWORD_ONLY:
-                raise TypeError(
-                    f"{label} parameter {p.name!r} must be "
-                    "positional-or-keyword, not keyword-only."
-                )
-        # The override hands ``run_mode`` to ``super().run()``, which
-        # resolves ``None`` through ``_default_run_mode()``: a default of the
-        # override's own would be a second decider of the default mode.
-        # ``inspect.Parameter.empty`` (no default at all) decides nothing, so
-        # only a non-None default is refused.
-        run_mode = leading[-1]
-        if run_mode.default not in (None, inspect.Parameter.empty):
-            raise TypeError(
-                f"{label} declares run_mode={run_mode.default!r}; the "
-                f"default must be None — run() resolves it through "
-                f"_default_run_mode(), which is the place to change it."
-            )
-
-        for p in params[len(cls._RUN_POSITIONAL):]:
-            if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
-                raise TypeError(
-                    f"{label} parameter {p.name!r} must be "
-                    "keyword-only (place it after a bare '*') so unknown "
-                    "positional args cannot reach it."
-                )
+            check_run_signature(cls, name, body)
 
     def __setattr__(self, name: str, value) -> None:
         """Assign ``name``; on a constructed engine, a public name it does
@@ -471,105 +449,18 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         timeout: float = DEFAULT_RUN_TIMEOUT_S,
         collapse: Optional[Dict[str, str]] = None,
     ):
-        _resolve_threshold(verbose)  # validate up front
         self.model_name = self.__class__.__name__
-        self.use_tmpfs = use_tmpfs
-        self.verbose = verbose
-        self.work_dir = work_dir
-        # cleanup defaults to True only when uacpy owns the work dir. Whether
-        # the caller passed it is kept so ``copy()`` can re-resolve against a
-        # new work_dir instead of carrying an auto-derived True onto a
-        # caller-supplied directory and deleting it.
-        self._cleanup_explicit = cleanup is not None
-        self.cleanup = (work_dir is None) if cleanup is None else bool(cleanup)
-        self.timeout = float(timeout)
-        # Per-feature collapse policies applied by ``_project_environment``
-        # when an env contains a feature this model doesn't support. Pass
-        # ``collapse={'bathymetry': 'min', 'ssp': 'mean', ...}`` to override
-        # any subset; missing keys keep the defaults.
-        #
-        # ``VALID_COLLAPSE_METHODS`` above lists the methods each key
-        # takes, and is itself read from the carriers that implement them, so
-        # the values are not restated here. What each key reduces:
-        #
-        # 'bathymetry'    : a range-dependent depth profile to one depth
-        # 'ssp'           : a range-dependent sound-speed field to one column
-        # 'bottom_range'  : a range-dependent bottom to one column ('mean' and
-        #                   'median' are numeric, so an all-half-space bottom
-        #                   only — a layer stack cannot be averaged)
-        # 'bottom_layers' : each column's layer stack to a half-space; see
-        #                   SeabedColumn.collapse_layers for what each method keeps
-        # 'altimetry'     : a rough sea surface, dropped entirely
-        # 'surface'       : a range-dependent Surface to a single boundary
-        # 'elastic'       : a shear-supporting boundary to one that does not
-        #                   ('fluid' zeroes the shear, 'vacuum' replaces it)
-        #
-        # ``self._collapse`` is the resolved policy (defaults ← spec ← user);
-        # ``self.collapse`` keeps the constructor argument verbatim, because
-        # ``copy()`` and ``__repr__`` read every knob off ``self.<param>``.
-        self._collapse: Dict[str, str] = dict(DEFAULT_COLLAPSE)
-        self._user_collapse: Dict[str, str] = {}
-        self.collapse = dict(collapse) if collapse else None
-        if collapse:
-            unknown = set(collapse) - set(DEFAULT_COLLAPSE)
-            if unknown:
-                raise ConfigurationError(
-                    f"Unknown collapse keys: {sorted(unknown)}. "
-                    f"Valid keys: {sorted(DEFAULT_COLLAPSE)}."
-                )
-            for key, value in collapse.items():
-                if value not in VALID_COLLAPSE_METHODS[key]:
-                    raise ConfigurationError(
-                        f"Invalid collapse value for {key!r}: {value!r}. "
-                        f"Valid values: {sorted(VALID_COLLAPSE_METHODS[key])}."
-                    )
-            self._collapse.update(collapse)
-            self._user_collapse = dict(collapse)
+        set_host_options(self, use_tmpfs=use_tmpfs, verbose=verbose,
+                         work_dir=work_dir, cleanup=cleanup, timeout=timeout,
+                         collapse=collapse)
 
-        # Subclasses override to declare the run modes they support.
+        # The defaults a class with no spec keeps: one run mode, every
+        # capability flag (:data:`~uacpy.models._spec._CAPABILITY_FLAGS`)
+        # False but the volume absorption its traits state, point sources.
         self._supported_modes: List[RunMode] = [RunMode.COHERENT_TL]
-
-        # Capability flags — one per axis of ``Environment`` shape. Subclasses
-        # flip True for each feature they honour natively; anything left False
-        # that's present in env on ``run()`` is collapsed by
-        # ``_project_environment`` and triggers one ``FallbackWarning`` per dropped
-        # feature.
-        #
-        # The flag list is intentionally bounded. Add a flag ONLY for a
-        # question of the form "does this env shape work with this model?".
-        # Niche numerical-method requirements (3-D, broadband, specific SSP
-        # interp scheme, volume-attenuation formula) belong in run()-time
-        # asserts, not here.
-        self._supports_altimetry: bool = False
-        self._supports_range_dependent_bathymetry: bool = False
-        self._supports_range_dependent_ssp: bool = False
-        self._supports_range_dependent_bottom: bool = False
-        self._supports_layered_bottom: bool = False
-        self._supports_elastic_media: bool = False
-        # An engine writes one source-depth grid into a single deck in the
-        # modes its ``spec.traits.native_multi_depth_modes`` lists, and this flag is
-        # True exactly when that table is non-empty (``_apply_spec``). Every other engine
-        # and mode reads one source depth per deck: in a field mode ``run()`` loops over the
-        # depths in Python and stacks the slabs
-        # (:func:`~uacpy.models._stacking.run_per_source_depth`); in any other mode the ten models that
-        # read source geometry raise from ``_validate_geometry``. Bounce
-        # accepts a multi-depth ``Source`` without raising because it reads
-        # no source geometry at all and overrides ``_validate_geometry`` to
-        # a no-op (``bounce/_model.py``); the extra depths reach no deck.
-        self._supports_multi_source_depth: bool = False
-        self._supports_source_beam_pattern: bool = False
-        # Surface sigma(1). SPARC's GetPar (Scooter/sparc.f90:177) and
-        # Bounce's elastic branch (Kraken/bounce.f90:104) ERROUT on a
-        # non-zero SSP%sigma; Kraken consumes it (Kraken/kraken.f90:902) and
-        # Scooter in its vacuum-boundary impedance (Scooter/scooter.f90:309).
-        self._supports_rough_surface: bool = False
-        # Seabed sigma(NMedia+1). Kraken/KrakenC feed it to the
-        # Kuperman-Ingenito interfacial-roughness perturbation
-        # (Kraken/Scattering.f90:8, Kraken/kraken.f90:902); Bellhop's solver
-        # ignores the value and RAM's PE format has nowhere to put it.
-        self._supports_rough_bottom: bool = False
-        # Mirrors the class attribute; see _CAPABILITY_FLAGS.
-        self._supports_volume_attenuation: bool = \
+        for flag in sorted(_CAPABILITY_FLAGS):
+            setattr(self, f'_supports_{flag}', False)
+        self._supports_volume_attenuation = \
             self._traits.consumes_volume_absorption
         self._supported_source_types: frozenset = frozenset({'point'})
 
@@ -652,7 +543,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             self._set_collapse_defaults(spec.collapse)
 
     def _set_collapse_defaults(self, defaults: Dict[str, str]) -> None:
-        """Subclass hook: install model-specific collapse defaults.
+        """Install model-specific collapse defaults (``spec.collapse``,
+        from :meth:`_apply_spec`).
 
         Each ``(key, value)`` is applied only when the user did not pass
         an explicit value for ``key`` in ``Model(collapse={...})``, so
@@ -715,52 +607,6 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         the generic :class:`UnsupportedFeatureError`, which follows when this
         returns. Called only for a mode this model does not run. The base
         adds nothing."""
-
-    def _reject_unsupported_run_kwargs(self, **kwargs):
-        """Refuse the optional ``run()`` keywords a model never consumes.
-
-        Every model takes the full keyword set (``frequencies``,
-        ``source_waveform``, ``sample_rate``, ``output_duration``,
-        ``t_start``) so a polymorphic ``model.run(...)`` never raises
-        ``TypeError``. A keyword that no mode of this model reads — the
-        waveform keywords on a model without ``TIME_SERIES``, ``frequencies=``
-        on one without a broadband path — would be ignored, and ignoring it
-        *silently* would hide a caller mistake, so any of these passed a
-        non-``None`` value raises here instead.
-        :meth:`_run_keywords_never_consumed` names them; a keyword the model
-        reads on another mode is warned about and dropped instead."""
-        supplied = sorted(name for name, value in kwargs.items() if value is not None)
-        if supplied:
-            raise UnsupportedFeatureError(
-                self.model_name,
-                f"run parameter(s): {', '.join(supplied)}",
-                alternatives_label='run parameters',
-            )
-
-    def _warn_ignored_run_kwargs(self, run_mode, reason=None, **named_values):
-        """Warn when the resolved ``run_mode`` will not consume some of the
-        optional ``run()`` keywords the caller supplied.
-
-        Complements :meth:`_reject_unsupported_run_kwargs`: that helper is
-        for models that *never* consume a keyword (hard error); this one is
-        for keywords the model does consume, just not on the resolved run
-        mode's path. Only non-``None`` values are reported, in a single
-        ``FallbackWarning``. Consuming paths (BROADBAND/TIME_SERIES, …) must not
-        call it."""
-        ignored = [
-            f'{name}=' for name, value in named_values.items()
-            if value is not None
-        ]
-        if not ignored:
-            return
-        if reason is None:
-            reason = 'these apply to BROADBAND/TIME_SERIES only'
-        warnings.warn(
-            f"{self.model_name}.run(run_mode="
-            f"{getattr(run_mode, 'name', run_mode)}): ignoring "
-            f"{', '.join(ignored)} — {reason}.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
 
     @property
     def supported_modes(self) -> List[RunMode]:
@@ -853,32 +699,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             If ``overrides`` includes a key that isn't a parameter of
             the constructor.
         """
-        kwargs: Dict[str, object] = {}
-        valid_names = set()
-        for name, _default in _collect_init_params(type(self)):
-            valid_names.add(name)
-            if hasattr(self, name):
-                kwargs[name] = getattr(self, name)
-
-        unknown = set(overrides) - valid_names
-        if unknown:
-            raise ConfigurationError(
-                f"{type(self).__name__}.copy: unknown override(s) "
-                f"{sorted(unknown)}; valid parameters are "
-                f"{sorted(valid_names)}."
-            )
-
-        kwargs.update(overrides)
-
-        # An auto-derived ``cleanup`` describes *this* instance's work_dir, not
-        # the clone's. Hand back the ``None`` sentinel so the new instance
-        # re-resolves; otherwise ``model.copy(work_dir=d)`` off an unpinned
-        # model would arrive at ``cleanup=True`` and rmtree the caller's ``d``.
-        # An explicitly passed value is the caller's choice and is preserved.
-        if (not self._cleanup_explicit and 'cleanup' not in overrides):
-            kwargs['cleanup'] = None
-
-        return type(self)(**kwargs)
+        return model_copy(self, overrides)
 
     def run(
         self,
@@ -892,7 +713,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         sample_rate: Optional[float] = None,
         output_duration: Optional[float] = None,
         t_start: Optional[float] = None,
-    ) -> Union[Result, ResultStack]:
+    ) -> Result:
         """Run the propagation model.
 
         Every wrapper takes the same first four parameters in the same
@@ -923,7 +744,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         window (seconds); when given, the IFFT-based wrappers zero-pad
         the source waveform internally so the auto-derived broadband
         grid is tight enough (``Δf = 1/output_duration``), Bellhop
-        maps it to ``time_window`` for delay-and-sum synthesis, and SPARC
+        takes it as its arrival reception's record length, and SPARC
         takes it as ``time_max`` when ``time_max`` is unpinned. Models
         with a broadband path consume ``frequencies`` as an explicit
         override for ``source.frequencies``. No other kwargs are accepted —
@@ -990,21 +811,22 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
         Returns
         -------
-        result : Result or ResultStack
+        result : Result
             One of the typed :mod:`uacpy.core.results` subclasses
-            (``Field``, ``Arrivals``, ``Modes``, …) determined
-            by ``run_mode`` and the model — or a ``ResultStack`` of them
-            over ``source_depth`` when ``source`` carries several depths.
-            In a field mode (the TL modes, ``BROADBAND``, ``TIME_SERIES``)
-            every model returns that stack: the engine runs once per depth
-            with the same environment, receiver and keywords, and each
-            slab is the unit-amplitude field of one source, so
-            ``stack.superpose()`` adds them with ``source.weights``
-            (see DOCUMENTATION.md §ResultStack). Outside the field modes
-            only Bellhop stacks (``RAYS`` / ``ARRIVALS`` / ``EIGENRAYS``);
-            the other engines raise ``ConfigurationError``.
-            ``ResultStack`` is not a ``Result`` subclass, so a caller that
-            annotates the result has to name both.
+            (``Field``, ``Arrivals``, ``Modes``, …) determined by
+            ``run_mode`` and the model. When ``source`` carries several
+            depths, a field mode (the TL modes, ``BROADBAND``,
+            ``TIME_SERIES``) returns ONE ``Field`` on every model, its
+            leading ``source_depth`` axis holding the unit-amplitude field
+            of each source (the engine runs once per depth with the same
+            environment, receiver and keywords, or carries every depth in
+            one deck); ``field.superpose()`` adds them with
+            ``source.weights`` (DOCUMENTATION.md §8). The traces of a
+            ``TIME_SERIES`` run share one time axis. Bellhop's ``RAYS`` /
+            ``ARRIVALS`` / ``EIGENRAYS`` return a :class:`ResultStack` of
+            one result per source depth, and Kraken's ``MODES`` one
+            ``Modes`` tabulated at every depth; the other modes raise
+            ``ConfigurationError``.
         """
         call = self._check_call(
             env, source, receiver, run_mode, frequencies=frequencies,
@@ -1121,7 +943,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         :meth:`run` returns for that launch."""
         raw = self._read_output(inputs, deck)
         result = self._to_result(inputs, deck, raw)
-        self._check_output_contract(result, inputs.settings)
+        check_output_contract(self.model_name, result, inputs.settings)
         return self._stamp_run_settings(result, inputs.settings)
 
     # ── stages of a run ─────────────────────────────────────────────────
@@ -1135,7 +957,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         token = _INSIDE_RUN.set(True)
         try:
             settings = self._resolve_settings(env, source, receiver, call)
-            result = self._execute_call(env, source, receiver, call, settings)
+            result, settings = self._execute_call(env, source, receiver,
+                                                  call, settings)
             return self._stamp_run_settings(result, settings)
         finally:
             _INSIDE_RUN.reset(token)
@@ -1165,7 +988,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
     def _check_time_series_keywords(self, call: _RunCall) -> None:
         """Stage 2 on a model that declares ``TIME_SERIES``: in
         ``TIME_SERIES`` the pulse pair is refused when missing or unusable
-        (:meth:`_require_timeseries_signal`); in any other mode the
+        (:meth:`_check_time_series_request`); in any other mode the
         TIME_SERIES keywords are dropped with one warning, ``BROADBAND``
         naming its own reason. Once per call, whatever the source-depth
         loop."""
@@ -1180,19 +1003,21 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             reason = ('BROADBAND returns the transfer function H(f); the '
                       'source pulse and time-axis keywords apply to '
                       'TIME_SERIES only')
-        self._warn_ignored_run_kwargs(
-            call.mode, reason=reason,
+        warn_ignored_run_kwargs(
+            self.model_name, call.mode, reason=reason,
             source_waveform=kw['source_waveform'],
             sample_rate=kw['sample_rate'],
             output_duration=kw['output_duration'])
 
     def _check_time_series_request(self, call: _RunCall) -> None:
         """Engine hook, stage 2 of a ``TIME_SERIES`` call: refuse a missing
-        or unusable pulse pair (:meth:`_require_timeseries_signal`). SPARC,
+        or unusable pulse pair
+        (:func:`~uacpy.models._checks.require_timeseries_signal`). SPARC,
         which can march a pulse of its own, decides otherwise."""
         kw = call.kwargs
-        self._require_timeseries_signal(
-            call.mode, kw['source_waveform'], kw['sample_rate'])
+        require_timeseries_signal(
+            self.model_name, call.mode, kw['source_waveform'],
+            kw['sample_rate'])
 
     def _check_call(self, env, source, receiver, run_mode, *, frequencies,
                     source_waveform, sample_rate, output_duration,
@@ -1200,8 +1025,10 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """Check a call's own arguments and resolve its run mode, once.
 
         The part of a run that needs no environment projection: the carrier
-        types, the lossless-water notice, ``t_start`` / ``output_duration``,
-        the run mode (resolved here and nowhere else in the call), and the
+        types, the lossless-water notice, ``t_start`` / ``output_duration`` /
+        ``frequencies`` (refused by the rule a ``Source`` applies to its own
+        frequencies), the run mode (resolved here and nowhere else in the
+        call), and the
         one keyword rule (see :meth:`run`). Shared by :meth:`run`,
         :meth:`run_settings` and :meth:`validate_inputs`, so all three refuse
         the same calls with the same exceptions. ``announce=False`` (the
@@ -1225,9 +1052,9 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
                     f"{self.model_name}.run: t_start must be a finite time in "
                     f"seconds after emission.")
         if output_duration is not None:
-            # A NaN reached int() as a raw ValueError, and a zero or negative
-            # duration was silently dropped (padding only lengthens), so the
-            # record came back shorter than asked with nothing said.
+            # A NaN or a non-positive duration is refused: padding only
+            # lengthens the pulse, so the record would come back shorter than
+            # asked with nothing said.
             try:
                 duration = float(output_duration)
             except (TypeError, ValueError):
@@ -1249,7 +1076,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         # the single-mode refusal below points at the modes that read
         # frequencies=, which such a model does not have.
         never = self._run_keywords_never_consumed()
-        self._reject_unsupported_run_kwargs(
+        reject_unsupported_run_kwargs(
+            self.model_name,
             **{name: value for name, value in kwargs.items() if name in never})
         if (frequencies is not None
                 and not self._traits.consumes_single_mode_frequencies
@@ -1261,15 +1089,18 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
                 remediation=(
                     "Drop frequencies=, or set the frequency on the "
                     "Source, e.g. Source(depths=..., frequencies=f)."))
+        if frequencies is not None:
+            check_run_frequencies(frequencies, model_name=self.model_name)
         if t_start is not None and mode != RunMode.TIME_SERIES:
-            self._warn_ignored_run_kwargs(
-                mode, reason='it places the TIME_SERIES record',
-                t_start=t_start)
+            warn_ignored_run_kwargs(
+                self.model_name, mode,
+                reason='it places the TIME_SERIES record', t_start=t_start)
             kwargs['t_start'] = None
         elif t_start is not None and not self._traits.consumes_run_t_start:
-            self._warn_ignored_run_kwargs(
-                mode, reason=(f"{self.model_name} cannot place its "
-                              f"output record; it starts at emission"),
+            warn_ignored_run_kwargs(
+                self.model_name, mode,
+                reason=(f"{self.model_name} cannot place its output record; "
+                        f"it starts at emission"),
                 t_start=t_start)
             kwargs['t_start'] = None
         return _RunCall(mode=mode, kwargs=kwargs)
@@ -1393,13 +1224,19 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         weights_applied = mode in self._FIELD_MODES
         time = None
         if mode == RunMode.TIME_SERIES:
-            time = self._time_settings(kw)
+            time = time_settings(
+                kw, pads_pulse=self._traits.pads_pulse_to_output_duration)
         band = self._requested_frequencies(
             mode, source, self._call_frequencies(call), time)
         if (announce and band.notice is not None
                 and mode in self._traits.announced_band_modes):
             warnings.warn(band.notice, FallbackWarning,
                           skip_file_prefixes=USER_FRAME_SKIP)
+        if receiver is not None and mode not in self._NO_RANGE_AXIS_MODES:
+            warn_receivers_within_a_wavelength(
+                self.model_name, call.env,
+                (source.frequencies if band.frequencies is None
+                 else band.frequencies), receiver)
         level = getattr(source, 'source_level_dB', None)
         settings = RunSettings(
             model=self.model_name,
@@ -1412,7 +1249,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             source_weights=source.weights if weighted else None,
             weights_applied=weights_applied,
             time=time,
-            waveguide=WaveguideSpeeds(*self._speed_bounds(call.env)),
+            waveguide=WaveguideSpeeds(*speed_bounds(call.env)),
             output=self.outputs.get(mode),
         )
         refuse_a_one_depth_weight_on_dB(source, settings,
@@ -1423,9 +1260,12 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         if engine is not None:
             engine = dataclasses.replace(
                 engine, knobs=self._given_knobs())
-            check_recorded_per_launch(self, engine)
             settings = settings._replace(engine=engine)
             if announce:
+                # A rebuilt model's per-launch comparison is said by the
+                # first resolution that announces, so validate_inputs()
+                # leaves it to the run.
+                check_recorded_per_launch(self, engine)
                 self._announce_engine_settings(
                     call.env, source, receiver, settings)
         if announce and weighted and not weights_applied:
@@ -1470,8 +1310,16 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
           ``run(frequencies=…)``;
         - RAM's ``stability_range_m``: by default the farthest receiver of
           the call;
+        - RAM's ``q_factor`` / ``record_duration``: the ``(fc, Q, T)`` sweep
+          follows the call's frequencies, and a pinned pair would march the
+          whole sweep instead of the requested bins;
         - Kraken's ``c_high`` under ``leaky_modes``: the unbounded upper
-          speed ``leaky_modes`` itself sets.
+          speed ``leaky_modes`` itself sets;
+        - SPARC's ``n_mesh``: by default one count per medium, derived from
+          the call's environment, which one pinned count cannot rebuild;
+        - OASS / OASSP's ``spectral_exponent``: by default OASES' own 2.5,
+          which as a pin under the Gaussian spectrum would draw the notice
+          that the run does not use it.
 
         Parameters
         ----------
@@ -1565,33 +1413,6 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             warnings.warn(notice.message, notice.category,
                           skip_file_prefixes=USER_FRAME_SKIP)
 
-    def _time_settings(self, kwargs) -> TimeSettings:
-        """The TIME_SERIES request of a checked call. The pulse is stored as
-        the synthesis uses it (real, float64, zero-padded to
-        ``output_duration`` when ``spec.traits.pads_pulse_to_output_duration``)
-        when it is a usable pulse, the float64 1-D array :func:`_real_pulse`
-        admits. A pulse the engine will refuse is stored as ``None`` and the
-        refusal is the engine's (:meth:`_require_timeseries_signal`)."""
-        sample_rate = kwargs['sample_rate']
-        output_duration = kwargs['output_duration']
-        pulse = None
-        if kwargs['source_waveform'] is not None:
-            clean, problem = _real_pulse(kwargs['source_waveform'])
-            if problem is None:
-                pulse = np.asarray(clean, dtype=float).ravel()
-                if (_positive_finite(sample_rate)
-                        and self._traits.pads_pulse_to_output_duration):
-                    pulse = np.asarray(pad_waveform_to_duration(
-                        pulse, float(sample_rate), output_duration),
-                        dtype=float)
-        return TimeSettings(
-            source_waveform=pulse,
-            sample_rate=(float(sample_rate) if _positive_finite(sample_rate)
-                         else None),
-            output_duration=(None if output_duration is None
-                             else float(output_duration)),
-            t_start=kwargs['t_start'])
-
     def _call_frequencies(self, call: _RunCall):
         """The call's ``frequencies=`` as the band rules read it: ``None`` on
         a TIME_SERIES run of an engine whose TIME_SERIES ignores it
@@ -1612,11 +1433,16 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         (:meth:`_call_frequencies`). Stage 3 gives the notice on the modes the
         engine announces (``spec.traits.announced_band_modes``), resolves the
         engine's own settings from the grid, and :meth:`_marched_frequencies`
-        records the grid the engine propagates."""
-        n_freqs, bandwidth_factor = self._broadband_band_knobs()
-        return resolve_band(mode, source, frequencies, time,
-                            model_name=self.model_name, n_freqs=n_freqs,
-                            bandwidth_factor=bandwidth_factor)
+        records the grid the engine propagates. A TIME_SERIES grid's notice
+        names the solves of a large grid for the engines that solve each of
+        its bins, not for one whose TIME_SERIES ignores ``frequencies=``."""
+        n_frequencies, bandwidth_factor = self._broadband_band_knobs()
+        return resolve_band(
+            mode, source, frequencies, time,
+            model_name=self.model_name, n_frequencies=n_frequencies,
+            bandwidth_factor=bandwidth_factor,
+            solves_each_bin=(
+                self._traits.time_series_ignores_frequencies is None))
 
     def _marched_frequencies(self, settings: RunSettings):
         """Engine hook, the end of stage 3: the frequency grid (Hz) the
@@ -1631,14 +1457,16 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """Stages 4-5 of a checked call with its resolved ``settings``, on
         the projected environment: one :meth:`_run_engine` per call of the
         engine, inside the source-depth loop and the weights of
-        :func:`~uacpy.models._stacking.run_depth_loop`."""
+        :func:`~uacpy.models._stacking.run_depth_loop`. Returns the result
+        and the settings it ran with (the loop may run every depth again at
+        one record start)."""
         return run_depth_loop(
             source, settings,
-            lambda single: self._run_engine(call.env, single, receiver,
-                                            settings),
+            lambda single, ran: self._run_engine(call.env, single, receiver,
+                                                 ran),
             pad_time_axes=call.kwargs.get('output_duration') is None,
             model_name=self.model_name, verbose=self.verbose,
-            scratch_subdir=self._scratch_subdir)
+            scratch_subdir=lambda name: scratch_subdir(self, name))
 
     def _run_engine(self, env, source, receiver, settings: RunSettings):
         """Stages 4-5 for one call of the engine: in a fresh work directory
@@ -1673,7 +1501,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
                 result = self._to_result(first, decks, raws)
         finally:
             fm.finish()
-        self._check_output_contract(result, settings)
+        check_output_contract(self.model_name, result, settings)
         return result
 
     def _n_launches(self, settings: RunSettings) -> int:
@@ -1699,8 +1527,9 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
     def _launch(self, inputs: StageInputs, deck: Path) -> None:
         """Stage 4: run the binary on ``deck`` in ``inputs.work_dir``,
         as a :class:`~uacpy.models._launch.Launch` through
-        :meth:`_launch_binary` (:meth:`_run_and_attach_prt` for a binary that
-        writes a ``.prt``)."""
+        :func:`~uacpy.models._launch.run_launch`
+        (:func:`~uacpy.models._launch.run_prt_binary` for a binary that
+        writes a ``.prt``), with the engine's :meth:`_launch_context`."""
 
     @abstractmethod
     def _read_output(self, inputs: StageInputs, deck: Path):
@@ -1713,13 +1542,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """Stage 5: the result built from ``raw`` in the package's
         conventions — its class and conventions those of
         ``inputs.settings.output``, its identity from
-        :meth:`_result_kwargs` — with the output paths attached
-        (:meth:`_attach_output_paths`)."""
-
-    def _check_output_contract(self, result, settings: RunSettings) -> None:
-        """:func:`~uacpy.models._extract.check_output_contract` for this
-        model."""
-        check_output_contract(self.model_name, result, settings)
+        :func:`~uacpy.models._extract.result_kwargs` — with the output paths
+        attached (:func:`~uacpy.models._extract.attach_output_paths`)."""
 
     def _stamp_run_settings(self, result, settings: RunSettings):
         """Stage 6: record on ``result`` (every slab of a ``ResultStack``)
@@ -1756,8 +1580,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
     # Modes whose result is a gridded ``Field`` of pressure. A multi-depth
     # ``Source`` in one of these runs once per depth through
-    # ``_stacking.run_per_source_depth`` and returns a ``ResultStack`` whose slabs
-    # ``ResultStack.superpose`` can add; every other mode returns something
+    # ``_stacking.run_per_source_depth`` and returns one ``Field`` over
+    # ``source_depth`` that ``Field.superpose`` sums; every other mode returns something
     # (mode shapes, rays, a reflection table, an array product) that has no
     # per-source linear sum, so ``_validate_geometry`` refuses the extra
     # depths there unless the model stacks them itself.
@@ -1786,122 +1610,13 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
                 or mode in self._traits.native_multi_depth_modes
                 or mode in self._traits.python_stacked_modes)
 
-    @contextlib.contextmanager
-    def _scratch_subdir(self, name: str):
-        """Run the block with a pinned ``work_dir`` redirected into its
-        subdirectory ``name``; an unpinned one (a fresh temp dir per run)
-        needs no such split.
-
-        The redirect is recorded in a thread-local map keyed by this
-        instance rather than written to ``self.work_dir``: the attribute is
-        shared state that :meth:`_setup_file_manager` reads on every run, so
-        mutating it made a concurrent single-depth run on the same model
-        claim — and be refused for — a ``source_depth_*`` directory it never
-        asked for, and left the instance pointing inside a subdirectory if a
-        run raised between the two writes. Keying by ``id(self)`` keeps a
-        model a hook runs from inheriting the redirect of the model that runs
-        it."""
-        if self.work_dir is None:
-            yield
-            return
-        by_model = getattr(_SCRATCH_REDIRECT, 'by_model', None)
-        if by_model is None:
-            by_model = _SCRATCH_REDIRECT.by_model = {}
-        saved = by_model.get(id(self))
-        by_model[id(self)] = name
-        try:
-            yield
-        finally:
-            if saved is None:
-                by_model.pop(id(self), None)
-            else:
-                by_model[id(self)] = saved
-
-    def _require_timeseries_signal(
-        self,
-        run_mode: 'RunMode',
-        source_waveform,
-        sample_rate,
-    ) -> None:
-        """Refuse an unusable TIME_SERIES signal pair; returns nothing.
-
-        Raises :class:`ConfigurationError` when the caller asked for a
-        :attr:`RunMode.TIME_SERIES` result but did not supply both
-        ``source_waveform`` and ``sample_rate``, when the waveform is not a
-        real finite pressure pulse, or when ``sample_rate`` is not a
-        positive finite number.
-
-        The waveform rule is the one every waveform entry point applies
-        (:func:`_real_pulse`): a real, finite, 1-D array. A complex waveform
-        is refused whatever its imaginary part, and a ``(time, signal)`` pair
-        or a 2-D array with the pair hint.
-
-        Used by every wrapper that synthesises p(t) from a broadband
-        transfer function (Bellhop, RAM, Scooter, Kraken, OASP), and by
-        SPARC for the series a ``pulse_type`` opening with ``'F'`` / ``'B'``
-        stages as ``STSFIL``.
-        """
-        if run_mode == RunMode.TIME_SERIES and (
-            source_waveform is None or sample_rate is None
-        ):
-            raise ConfigurationError(
-                f"{self.model_name}.run(run_mode=TIME_SERIES) requires "
-                f"source_waveform and sample_rate. For the broadband "
-                f"transfer function H(f), use run_mode=RunMode.BROADBAND."
-            )
-        if run_mode == RunMode.TIME_SERIES and sample_rate is not None:
-            # Refuse a sample rate that is not a positive finite number. The
-            # test is NaN-closed (``not (sr > 0)`` rather than ``sr <= 0``)
-            # because nan compares False both ways and would slip through:
-            # nothing downstream stops it either — pad_waveform_to_duration
-            # and time_series_band (models/_band.py) no-op on a
-            # non-positive rate — so it surfaces as a ZeroDivisionError in
-            # the delay-and-sum, a raw ValueError from the deep guard in
-            # acoustic_signal/_synthesis.py (``waveform_synthesis_setup``),
-            # or a trace on a descending time axis.
-            try:
-                sr = float(sample_rate)
-            except (TypeError, ValueError):
-                sr = float('nan')
-            if not np.isfinite(sr) or not (sr > 0.0):
-                raise ConfigurationError(
-                    f"{self.model_name}.run(run_mode=TIME_SERIES): "
-                    f"sample_rate must be a positive finite number of Hz; "
-                    f"got {sample_rate!r}."
-                )
-        if run_mode == RunMode.TIME_SERIES and source_waveform is not None:
-            _, problem = _real_pulse(source_waveform)
-            if problem is not None:
-                raise ConfigurationError(
-                    f"{self.model_name}.run(run_mode=TIME_SERIES): {problem}")
-
     def _broadband_band_knobs(self):
-        """``(n_freqs, bandwidth_factor)`` a single BROADBAND carrier expands
-        with; ``None`` takes the package default
-        (:data:`~uacpy.models._defaults.DEFAULT_BROADBAND_N_FREQS`,
+        """``(n_frequencies, bandwidth_factor)`` a single BROADBAND carrier
+        expands with; ``None`` takes the package default
+        (:data:`~uacpy.models._defaults.DEFAULT_BROADBAND_N_FREQUENCIES`,
         :data:`~uacpy.models._defaults.DEFAULT_BROADBAND_BANDWIDTH_FACTOR`).
         A model with constructor knobs for the band returns them."""
         return None, None
-
-    def _finish_broadband(self, result, settings: RunSettings):
-        """Return the BROADBAND transfer function as computed or, for
-        TIME_SERIES, its synthesis with the pulse of ``settings.time``
-        (validated in stage 2, :meth:`_check_time_series_keywords`). Every
-        IFFT-based wrapper ends its broadband route here.
-
-        The transfer function carries ``settings`` while it is synthesised,
-        so the synthesis reads the waveguide the run resolved
-        (``run_settings.waveguide``) as every Field does; stage 6 stamps
-        the returned result.
-        """
-        if settings.mode != RunMode.TIME_SERIES:
-            return result
-        for slab in _slabs_of(result):
-            slab._run_settings = settings
-        time = settings.time
-        return result.synthesize_time_series(
-            source_waveform=time.source_waveform,
-            sample_rate=time.sample_rate, t_start=time.t_start)
 
     def scratch_policy(self) -> ScratchPolicy:
         """Where this model's runs put their scratch files and what happens
@@ -2004,7 +1719,12 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         The checks read the environment projected from ``env``, as
         ``run()``'s do, and the run's settings are resolved too, so the
         refusals of settings the engine cannot run (a grid too coarse, a
-        window too narrow) come from here as well.
+        window too narrow) come from here as well. The warnings of that
+        projection and of the geometry checks (an environment collapsed to
+        what the engine can run, a source at the surface) fire as in
+        ``run()``; the notices of how the run will go (the resolved
+        settings', the band's, a rebuilt model's re-derived per-launch
+        values) are ``run()``'s and ``run_settings()``'s alone.
         """
         call = self._check_call(
             env, source, receiver, run_mode, frequencies=frequencies,
@@ -2028,80 +1748,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         engine never launches a ray fan, so rejecting a pattern it simply
         ignores would break reusing one ``Source`` across models.
         """
-        if (source.beam_pattern is not None
-                and not self._supports_source_beam_pattern):
-            raise ConfigurationError(
-                f"{self.model_name} does not read a source beam pattern; "
-                f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
-            )
-
-        # Whether a multi-depth Source is legal is a question about the
-        # MODE, not about the model: ``_supports_multi_source_depth`` says
-        # the engine batches depths into one deck *somewhere*, which is the
-        # declarative capability the matrix prints, and would wave through a
-        # mode of that same engine which stacks nothing (Kraken MODES).
-        n_depths = len(np.atleast_1d(source.depths))
-        if n_depths > 1:
-            mode = (run_mode if run_mode is not None
-                    else self._default_run_mode())
-            if not self._stacks_source_depths(mode):
-                raise ConfigurationError(
-                    f"{self.model_name} takes a single source depth per "
-                    f"{mode.name} run; got {n_depths}: "
-                    f"{np.asarray(source.depths).tolist()}. A multi-depth "
-                    f"Source stacks "
-                    f"only in the field modes (COHERENT_TL / INCOHERENT_TL "
-                    f"/ SEMICOHERENT_TL / BROADBAND / TIME_SERIES); for "
-                    f"{mode.name} loop over single-depth Sources externally."
-                )
-
-        resolvable_depth = self._check_source_depths(env, source)
-
-        # A source exactly at z = 0 sits on the pressure-release sea surface,
-        # where the boundary forces p ≈ 0: a field run then returns a
-        # degenerate result (a null / saturated-TL sentinel, or — in RAM — an
-        # unphysical normalisation) that a valid-looking ``Source(depths=0)``
-        # hides. Reflection coefficients and mode shapes don't propagate a
-        # source field, so the warning doesn't apply to those.
-        if (run_mode not in (RunMode.REFLECTION, RunMode.MODES)
-                and np.any(np.asarray(source.depths) == 0.0)):
-            warnings.warn(
-                f"{self.model_name}: a source at depth 0 m is on the "
-                f"pressure-release sea surface, where the field is ~0 — the "
-                f"result is degenerate (null / saturated TL, model-dependent). "
-                f"Use a small positive depth (e.g. 1 m).",
-                ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
-            )
-
-        if receiver is None:
-            # A mode with no receiver geometry (Kraken MODES builds its own
-            # depth grid): nothing below reads one.
-            return
-
-        if receiver.depth_min < 0:
-            raise ConfigurationError("Receiver depths must be non-negative.")
-
-        # A point source's field carries a 1/sqrt(r) factor that is singular
-        # on the source axis, so a grid whose largest range is 0 m has no
-        # cell any engine can fill: every wrapper NaNs the r = 0 column, and
-        # the PE grid chooser divides by a range step it sizes from r_max.
-        # Modes that evaluate nothing on the receiver range axis are exempt
-        # (see ``_NO_RANGE_AXIS_MODES``); a mixed grid such as
-        # ``ranges=[0, 1000]`` keeps its NaN column and the masking warning.
-        if (run_mode not in self._NO_RANGE_AXIS_MODES
-                and receiver.range_max <= 0.0):
-            raise ConfigurationError(
-                f"{self.model_name}: the receiver's largest range is 0 m; "
-                f"give at least one positive receiver range (a field at "
-                f"r = 0 is undefined for a point source).",
-                remediation="Receiver(depths=<your depths>, ranges=[1000.0])",
-            )
-
-        warn_receiver_below_resolvable(self.model_name, env, receiver,
-                                       resolvable_depth)
-        self._check_per_range_receiver_depth(env, receiver)
-        warn_on_range_coverage(self.model_name, env, receiver)
-        warn_on_ssp_start(self.model_name, env)
+        validate_geometry(self, env, source, receiver, run_mode)
 
     def _check_source_depths(self, env: 'Environment',
                              source: 'Source') -> float:
@@ -2116,22 +1763,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         layer); :meth:`_validate_geometry`'s warning helpers surface that
         rather than rejecting it.
         """
-        resolvable_depth = self._max_receiver_depth(env)
-        if np.any(source.depths > resolvable_depth):
-            exc = InvalidDepthError(
-                float(source.depths.max()), resolvable_depth, "Source",
-            )
-            note = self._source_below_domain_note(env, resolvable_depth)
-            if note:
-                # Message enrichment only. ``InvalidDepthError.__reduce__``
-                # rebuilds from the three constructor arguments, so a copy
-                # that crosses a process boundary (``run_parallel``) carries
-                # the base remediation.
-                exc.remediation = f"{exc.remediation}.\n\n{note}"
-            raise exc
-        if np.any(source.depths < 0):
-            raise ConfigurationError("Source depths must be non-negative.")
-        return resolvable_depth
+        return check_source_depths(self, env, source)
 
     def _receiver_grid_is_paired(self, receiver: 'Receiver') -> bool:
         """Whether this model's deck pairs ``receiver.depths[i]`` with
@@ -2145,28 +1777,18 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """
         return False
 
-    def _check_per_range_receiver_depth(
-        self, env: 'Environment', receiver: 'Receiver',
-    ) -> None:
-        """:func:`~uacpy.models._checks.check_per_range_receiver_depth` for
-        this model, on the (depth, range) pairs its deck carries
-        (:meth:`_receiver_grid_is_paired`)."""
-        check_per_range_receiver_depth(
-            self.model_name, env, receiver,
-            paired=self._receiver_grid_is_paired(receiver),
-            verbose=self.verbose)
-
-    def compute_tl(
+    def compute_field(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
         *,
         run_mode: Optional['RunMode'] = None,
-    ) -> Union[Result, ResultStack]:
-        """Compute the coherent (or incoherent) complex pressure field on
-        the receiver grid; ``.tl`` / ``.dB`` give the transmission loss
-        (thin wrapper around ``run``).
+    ) -> Result:
+        """Compute the pressure field on the receiver grid (thin wrapper
+        around ``run``): the coherent complex pressure by default, whose
+        ``.tl`` / ``.dB`` give the transmission loss, or the real dB field
+        of an ``INCOHERENT_TL`` / ``SEMICOHERENT_TL`` run.
 
         Parameters
         ----------
@@ -2185,30 +1807,28 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
         Returns
         -------
-        result : Result or ResultStack
-            Transmission loss field, or a stack of them over source depth:
-            a ``Source`` with more than one depth hands back a
-            ``ResultStack`` from every model. An engine whose
-            ``spec.traits.native_multi_depth_modes`` lists the mode writes every depth
-            into one deck and its reader splits the slabs; every other engine
-            runs once per depth (:func:`~uacpy.models._stacking.run_per_source_depth`).
-            ``stack.superpose()`` adds
-            the slabs' complex pressure with ``source.weights``.
-            ``ResultStack`` is not a ``Result`` subclass, so a caller that
-            annotates the result has to name both.
+        result : Field
+            The pressure field. A ``Source`` with more than one depth gives
+            one Field with a leading ``source_depth`` axis, from every
+            model: an engine whose ``spec.traits.native_multi_depth_modes``
+            lists the mode writes every depth into one deck; every other
+            engine runs once per depth
+            (:func:`~uacpy.models._stacking.run_per_source_depth`).
+            ``field.superpose()`` adds the sources' complex pressure with
+            ``source.weights``.
 
         Examples
         --------
         >>> bellhop = Bellhop()
         >>> rcv = uacpy.Receiver(depths=np.linspace(0, env.depth, 50),
         ...                       ranges=np.linspace(100, 10_000, 100))
-        >>> tl = bellhop.compute_tl(env, source, rcv)
+        >>> field = bellhop.compute_field(env, source, rcv)
         """
         # Every ``compute_*`` names the engines that run its mode, read from
         # the engine registry when the refusal is raised (every engine module
         # is importable by then), so a new engine joins the advice without
         # an edit here.
-        self._require_mode(RunMode.COHERENT_TL, "transmission loss computation")
+        self._require_mode(RunMode.COHERENT_TL, "pressure field computation")
         if run_mode is None:
             run_mode = RunMode.COHERENT_TL
         tl_modes = (
@@ -2224,7 +1844,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         if run_mode not in tl_modes:
             got = run_mode.name if isinstance(run_mode, RunMode) else repr(run_mode)
             raise ConfigurationError(
-                f"compute_tl() got run_mode={got}; only COHERENT_TL / "
+                f"compute_field() got run_mode={got}; only COHERENT_TL / "
                 f"INCOHERENT_TL / SEMICOHERENT_TL (or their value strings "
                 f"{[m.value for m in tl_modes]}) are accepted. Call "
                 f"{self.model_name}.run(run_mode=…) for other modes."
@@ -2236,7 +1856,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
-    ) -> Union[Result, ResultStack]:
+    ) -> Result:
         """Compute ray paths (thin wrapper around ``run``).
 
         ``receiver`` is required — the receiver grid defines the ray-box
@@ -2253,15 +1873,12 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
         Returns
         -------
-        result : Result or ResultStack
-            Ray paths, or a stack of them over source depth.
-            The stacking is done by the readers, not by the caller: a
-            multi-depth ``.shd`` / ``.arr`` / ``.ray`` is split into one
-            slab per source depth and bundled
-            (``uacpy/io/oalib_reader.py``), so a run over a ``Source`` with
-            more than one depth hands back a ``ResultStack`` over
-            ``source_depth``. ``ResultStack`` is not a ``Result`` subclass,
-            so a caller that annotates the result has to name both.
+        result : Rays or ResultStack
+            Ray paths, or a :class:`ResultStack` of them over source depth:
+            the reader splits a multi-depth ``.ray`` into one slab per
+            source depth (``uacpy/io/oalib_reader.py``), so a run over a
+            ``Source`` with more than one depth hands back a
+            ``ResultStack`` over ``source_depth``.
 
         Examples
         --------
@@ -2278,7 +1895,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         env: Environment,
         source: Source,
         receiver: Receiver,
-    ) -> Union[Result, ResultStack]:
+    ) -> Result:
         """
         Compute the arrival structure (convenience wrapper around ``run``).
 
@@ -2293,15 +1910,12 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
         Returns
         -------
-        result : Result or ResultStack
-            Arrival data, or a stack of it over source depth.
-            The stacking is done by the readers, not by the caller: a
-            multi-depth ``.shd`` / ``.arr`` / ``.ray`` is split into one
-            slab per source depth and bundled
-            (``uacpy/io/oalib_reader.py``), so a run over a ``Source`` with
-            more than one depth hands back a ``ResultStack`` over
-            ``source_depth``. ``ResultStack`` is not a ``Result`` subclass,
-            so a caller that annotates the result has to name both.
+        result : Arrivals or ResultStack
+            Arrival data, or a :class:`ResultStack` of it over source depth:
+            the reader splits a multi-depth ``.arr`` into one slab per
+            source depth (``uacpy/io/oalib_reader.py``), so a run over a
+            ``Source`` with more than one depth hands back a
+            ``ResultStack`` over ``source_depth``.
 
         Raises
         ------
@@ -2320,7 +1934,6 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         self,
         env: Environment,
         source: Source,
-        n_modes: Optional[int] = None,
     ) -> Result:
         """
         Compute normal modes (convenience wrapper around ``run``).
@@ -2332,8 +1945,6 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             independent (with a warning) before the mode solve.
         source : Source
             Acoustic source (used for frequency).
-        n_modes : int, optional
-            Number of modes to compute. If ``None``, all modes are computed.
 
         Returns
         -------
@@ -2350,43 +1961,19 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         This is the one ``compute_*`` wrapper that takes no ``receiver``:
         normal modes are receiver-independent depth eigenfunctions, so there is
         nothing for the caller to position. It is ``run(env, source, None,
-        run_mode=RunMode.MODES)`` with ``n_modes`` as the call's mode cap: the
-        engine builds the depth grid the modes are tabulated on, and
-        ``run_settings`` with the same arguments previews it.
+        run_mode=RunMode.MODES)``: the engine builds the depth grid the modes
+        are tabulated on, and ``run_settings`` with the same arguments
+        previews it. How many modes are kept is the model's own setting
+        (``Kraken(n_modes=...)``), as every other run reads it.
 
         Examples
         --------
-        >>> kraken = Kraken()
-        >>> modes = kraken.compute_modes(env, source, n_modes=50)
+        >>> kraken = Kraken(n_modes=50)
+        >>> modes = kraken.compute_modes(env, source)
         >>> wavenumbers = modes.k
         >>> mode_shapes = modes.phi
         """
         self._require_mode(RunMode.MODES, "normal mode computation")
-
-        if n_modes is not None and (
-                isinstance(n_modes, bool)
-                or not isinstance(
-                    n_modes, (int, float, np.integer, np.floating))):
-            raise ConfigurationError(
-                f"compute_modes: n_modes must be an int or None; got "
-                f"{type(n_modes).__name__}. Unlike the other compute_* "
-                f"wrappers, compute_modes takes no receiver (normal modes are "
-                f"receiver-independent) — its third argument is n_modes. Pass "
-                f"it by keyword: compute_modes(env, source, n_modes=...).")
-        # Refuse a cap that is not a whole number. The backend applies it as
-        # int(n_modes), which truncates toward zero, so a fractional value
-        # would silently run a different cap than asked for and a non-finite
-        # one would raise from int() with no context.
-        if n_modes is not None and not (
-                np.isfinite(n_modes) and float(n_modes).is_integer()):
-            raise ConfigurationError(
-                f"compute_modes: n_modes must be a whole number of modes or "
-                f"None; got {n_modes!r}. The cap is applied as int(n_modes), "
-                f"which truncates toward zero.")
-        if n_modes is not None and n_modes < 1:
-            raise ConfigurationError(
-                f"compute_modes: n_modes must be >= 1 or None; got "
-                f"{n_modes!r}, a cap that keeps no mode.")
 
         # Every source depth is checked here, as run() checks it: the modes
         # are solved once for the whole Source (they do not depend on the
@@ -2408,23 +1995,21 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             env, unit, None, RunMode.MODES, frequencies=None,
             source_waveform=None, sample_rate=None, output_duration=None,
             t_start=None)
-        return self._run_call(env, unit, None, dataclasses.replace(
-            call, engine_request=ModesRequest(
-                n_modes=None if n_modes is None else int(n_modes))))
+        return self._run_call(env, unit, None, call)
 
     def compute_eigenrays(
         self,
         env: Environment,
         source: Source,
         receiver: Receiver,
-    ) -> Union[Result, ResultStack]:
+    ) -> Result:
         """Compute eigenrays — rays that arrive at the receiver(s).
 
         Thin wrapper around ``run(run_mode=RunMode.EIGENRAYS)``. Returns
         the raw :class:`Rays` from the solver — or, for a multi-depth
         ``Source``, a ``ResultStack`` of them over ``source_depth``
-        (Bellhop runs one eigenray deck per depth in
-        ``_run_eigenrays_multi_depth``).
+        (one eigenray deck per depth: the ``.ray`` file carries no
+        per-source boundary to split on).
         For a single-point target build a 1-point ``Receiver`` first:
 
         >>> receiver = uacpy.Receiver(depths=[30.0], ranges=[2000.0])
@@ -2481,7 +2066,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         output_duration: Optional[float] = None,
         frequencies: Optional[np.ndarray] = None,
         t_start: Optional[float] = None,
-    ) -> Union[Result, ResultStack]:
+    ) -> Result:
         """Compute time-domain pressure p(t) at the receiver(s).
 
         Forwards ``source_waveform``, ``sample_rate``, ``output_duration``,
@@ -2502,14 +2087,13 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         ``time_max`` is unpinned; it cannot place ``t_start``. Every other
         TIME_SERIES model requires the waveform/rate.
 
-        ``sample_rate`` is the rate of ``source_waveform`` (Hz), not a
-        request for the output rate. The returned field's own
-        ``sample_rate`` (``1/dt``) is the rate of its synthesis: Bellhop
-        returns the input rate, while Kraken, Scooter and RAM return
-        ``nfft·Δf`` of their frequency grid. Measured on a 100 m Pekeris
-        channel with a 0.2 s pulse at 2000 Hz: Bellhop 2000 Hz, and
-        Kraken / Scooter / RAM 2560 Hz (2048 samples at Δf = 1.25 Hz).
-        Resample the trace if a fixed output rate matters.
+        ``sample_rate`` is the rate of ``source_waveform`` (Hz) and of the
+        returned trace on every engine: Bellhop places each arrival on that
+        rate's samples, and the IFFT synthesizers (Kraken, Scooter, RAM,
+        OASP) sum the band at ``t_start + n/sample_rate`` exactly,
+        ``sample_rate/Δf`` samples per record (the next whole number above
+        it when that is not whole). A record ``1/Δf`` shorter than the
+        waveform is refused rather than returned folded.
 
         Parameters
         ----------
@@ -2533,11 +2117,11 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
         Returns
         -------
-        result : Result or ResultStack
-            The time-domain ``Field``, or a ``ResultStack`` of them over
-            ``source_depth`` for a multi-depth ``Source`` (one run per
-            depth); ``stack.superpose()`` sums the traces with
-            ``source.weights``.
+        result : Field
+            The time-domain ``Field``; for a multi-depth ``Source`` one
+            Field with a leading ``source_depth`` axis (one run per depth,
+            every trace on one time axis); ``field.superpose()`` sums the
+            traces with ``source.weights``.
         """
         self._require_mode(RunMode.TIME_SERIES, "time-series computation")
         return self.run(
@@ -2557,7 +2141,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         receiver: Receiver,
         *,
         frequencies: Optional[np.ndarray] = None,
-    ) -> Union[Result, ResultStack]:
+    ) -> Result:
         """Compute broadband complex transfer function H(f).
 
         Dispatches to ``run(run_mode=RunMode.BROADBAND)``. Pass
@@ -2577,11 +2161,10 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
 
         Returns
         -------
-        result : Result or ResultStack
-            The ``H(f)`` ``Field``, or a ``ResultStack`` of them over
-            ``source_depth`` for a multi-depth ``Source`` (one run per
-            depth); ``stack.superpose()`` adds them with
-            ``source.weights``.
+        result : Field
+            The ``H(f)`` ``Field``; for a multi-depth ``Source`` one Field
+            with a leading ``source_depth`` axis (one run per depth);
+            ``field.superpose()`` adds them with ``source.weights``.
         """
         self._require_mode(RunMode.BROADBAND, "broadband transfer-function computation")
         return self.run(
@@ -2623,8 +2206,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """Compute replica fields at the array elements per candidate
         source position (matched-field-processing templates).
 
-        Dispatches to ``run(run_mode=RunMode.REPLICA)``. Currently
-        OASN is the only model declaring this mode.
+        Dispatches to ``run(run_mode=RunMode.REPLICA)``. OASN is the one
+        model declaring this mode.
 
         Parameters
         ----------
@@ -2680,8 +2263,8 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             The user's constructor argument, verbatim.
         find : callable
             Zero-argument callable that locates the binary when
-            ``executable`` is ``None`` (typically a
-            :meth:`_find_executable_in_paths` closure).
+            ``executable`` is ``None`` (typically a :meth:`_find_binary`
+            closure).
         label : str, optional
             Model label for :class:`ExecutableNotFoundError`. Defaults to
             ``self.model_name``.
@@ -2701,13 +2284,37 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             )
         return exe
 
-    def _find_executable_in_paths(self, names, bin_subdirs=None,
-                                  dev_subdir: Optional[str] = None) -> Path:
-        """:func:`~uacpy.models._launch.find_executable_in_paths` for this
-        model: the first runnable ``names`` under ``uacpy/bin/<bin_subdirs>``,
-        the development tree ``third_party/<dev_subdir>``, then ``PATH``."""
-        return find_executable_in_paths(names, bin_subdirs, dev_subdir,
-                                        model_name=self.model_name)
+    def _find_binary(self, backend: str) -> Path:
+        """The binary of ``backend``, searched where :attr:`_BINARIES`
+        declares it (:meth:`~uacpy.models._launch.BinarySearch.find`)."""
+        return self._BINARIES[backend].find(self.model_name)
+
+    @classmethod
+    def _default_backend(cls) -> Optional[str]:
+        """The backend whose binary a construction with neither
+        ``backend=`` nor ``executable=`` resolves: the first entry of
+        :attr:`_BINARIES`, ``None`` for a class that declares none. Read
+        off the declaration; nothing is constructed."""
+        return next(iter(cls._BINARIES), None)
+
+    def _repr_backend(self) -> Optional[str]:
+        """The backend :meth:`__repr__` names when ``backend=`` was left
+        ``None``: ``None`` here, where the backend is chosen per
+        environment at run (Kraken, RAM) or the engine has one binary."""
+        return None
+
+    def _launch_context(self) -> LaunchContext:
+        """This engine's side of a binary launch
+        (:class:`~uacpy.models._launch.LaunchContext`): its name, its launch
+        seam :meth:`_run_subprocess`, the child's stdout logged when the
+        ``debug`` level prints, and the ERROUT messages its traits call
+        benign (``spec.traits.benign_fortran_fatals``). An engine launches
+        with :func:`~uacpy.models._launch.run_launch` or, for a binary that
+        writes a ``.prt``, :func:`~uacpy.models._launch.run_prt_binary`."""
+        return LaunchContext(
+            model_name=self.model_name, run=self._run_subprocess,
+            log=self._log if _log_enabled(self.verbose, 'debug') else None,
+            benign_fatals=self._traits.benign_fortran_fatals)
 
     def _run_subprocess(
         self,
@@ -2753,139 +2360,11 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             supported=frozenset(self.supported_features),
             collapse=self._collapse)
 
-    def _attach_output_paths(
-        self,
-        result: 'Result',
-        work_dir: Path,
-        base_name: str,
-        *,
-        primary_files: tuple = (),
-    ) -> None:
-        """:func:`~uacpy.models._extract.attach_output_paths` under this
-        model's ``cleanup``."""
-        attach_output_paths(result, work_dir, base_name, cleanup=self.cleanup,
-                            primary_files=primary_files)
-
-    def _require_output(self, candidates, *, what: str, process=None,
-                        hint: str = '', prt_base: Optional[str] = None,
-                        work_dir=None) -> Path:
-        """:func:`~uacpy.models._launch.require_output` for this model."""
-        return require_output(self.model_name, candidates, what=what,
-                              process=process, hint=hint, prt_base=prt_base,
-                              work_dir=work_dir)
-
-    @staticmethod
-    def _attach_prt_tail(exc, work_dir, base_name, tail_bytes: int = 2000):
-        """:func:`~uacpy.models._launch.attach_prt_tail`."""
-        attach_prt_tail(exc, work_dir, base_name, tail_bytes)
-
-    def _raise_on_fortran_fatal(self, result, work_dir, base_name):
-        """:func:`~uacpy.models._launch.raise_on_fortran_fatal` for this
-        model, with the ERROUT messages its traits call benign
-        (``spec.traits.benign_fortran_fatals``)."""
-        raise_on_fortran_fatal(self.model_name, result, work_dir, base_name,
-                               benign=self._traits.benign_fortran_fatals)
-
-    def _launch_binary(self, launch: Launch):
-        """:func:`~uacpy.models._launch.run_launch` for this model: through
-        :meth:`_run_subprocess`, the child's stdout logged when the
-        ``debug`` level prints."""
-        return run_launch(
-            launch, run=self._run_subprocess,
-            log=self._log if _log_enabled(self.verbose, 'debug') else None)
-
-    def _prt_launch(self, cmd, work_dir, base_name, *,
-                    timeout: Optional[float] = None,
-                    env: Optional[dict] = None,
-                    stale_outputs: tuple = (),
-                    report_prt_warnings: bool = True) -> Launch:
-        """The :class:`~uacpy.models._launch.Launch` of a binary that writes
-        ``<base_name>.prt`` (the Acoustics Toolbox, OASES): its outputs
-        ``<base_name><suffix>`` for each of ``stale_outputs`` and its
-        ``.prt`` cleared first, the ``.prt`` tail attached to a failure, then
-        :meth:`_raise_on_fortran_fatal` and, with ``report_prt_warnings``,
-        :meth:`_warn_on_prt_warnings`. See :meth:`_run_and_attach_prt`."""
-        checks = [lambda result: self._raise_on_fortran_fatal(
-            result, work_dir, base_name)]
-        if report_prt_warnings:
-            checks.append(lambda result: self._warn_on_prt_warnings(
-                work_dir, base_name))
-        return Launch(
-            argv=tuple(cmd), cwd=work_dir, env=env, timeout=timeout,
-            stale_outputs=tuple(f"{base_name}{suffix}"
-                                for suffix in stale_outputs),
-            prt_root=base_name, checks=tuple(checks),
-            stdout_label=self.model_name)
-
-    def _run_and_attach_prt(self, cmd, work_dir, base_name, *,
-                            timeout: Optional[float] = None,
-                            env: Optional[dict] = None,
-                            stale_outputs: tuple = (),
-                            report_prt_warnings: bool = True):
-        """Run a Fortran/AT binary as :meth:`_prt_launch` describes it
-        (:meth:`_launch_binary`), appending the ``<base>.prt`` tail to a
-        :class:`ModelExecutionError` on failure and logging stdout when
-        verbose. Returns the ``CompletedProcess``. Shared by every model's
-        binary-launch wrapper.
-
-        The AT engines hold the file root in ``CHARACTER(LEN=80)`` buffers,
-        so a root longer than 80 characters is silently truncated; launching
-        with ``work_dir`` as cwd and a short relative ``base_name`` keeps
-        every root far inside that limit.
-
-        ``stale_outputs`` lists the suffixes (``'.shd'``, ``'.arr'``, …) this
-        binary may write under ``base_name``. They are removed before launch
-        so a pinned work dir cannot hand an earlier run's output back as this
-        run's answer — the same reason the ``.prt`` is cleared.
-
-        ``report_prt_warnings=False`` leaves the binary's non-fatal ``.prt``
-        warnings unsaid (:meth:`_warn_on_prt_warnings`), for a launch whose
-        ``.prt`` describes a side computation rather than the run (Kraken's
-        mode-count check solve).
-        """
-        return self._launch_binary(self._prt_launch(
-            cmd, work_dir, base_name, timeout=timeout, env=env,
-            stale_outputs=stale_outputs,
-            report_prt_warnings=report_prt_warnings))
-
-    def _warn_on_prt_warnings(self, work_dir, base_name) -> None:
-        """:func:`~uacpy.models._launch.warn_on_prt_warnings` for this
-        model."""
-        warn_on_prt_warnings(self.model_name, work_dir, base_name)
-
-    def _result_kwargs(
-        self,
-        source: 'Source',
-        *,
-        backend: Optional[str] = None,
-        frequencies: Optional[Union[float, np.ndarray]] = None,
-        phase_reference: Optional[str] = None,
-        **extra,
-    ) -> dict:
-        """:func:`~uacpy.models._extract.result_kwargs` for this model: its
-        name and provenance identify the result."""
-        return result_kwargs(self.model_name, self.provenance, source,
-                             backend=backend, frequencies=frequencies,
-                             phase_reference=phase_reference, **extra)
-
-    def _stamp_result(self, result, source: 'Source', *,
-                      backend: Optional[str] = None,
-                      frequencies: Optional[Union[float, np.ndarray]] = None,
-                      phase_reference: Optional[str] = None):
-        """:func:`~uacpy.models._extract.stamp_result` for this model."""
-        return stamp_result(self.model_name, self.provenance, result, source,
-                            backend=backend, frequencies=frequencies,
-                            phase_reference=phase_reference)
-
-    @staticmethod
-    def _speed_bounds(env: 'Environment'):
-        """:func:`~uacpy.models._checks.speed_bounds` of ``env``."""
-        return speed_bounds(env)
-
     def _max_receiver_depth(self, env: 'Environment') -> float:
         """Deepest receiver depth this model can resolve the field at: the
         seafloor, or the deepest modelled interface when
-        ``spec.traits.receivers_reach_sediment`` (see :meth:`_total_media_depth`).
+        ``spec.traits.receivers_reach_sediment``
+        (:func:`~uacpy.models._checks.total_media_depth`).
 
         The value gates source and receiver depths asymmetrically in
         :meth:`_validate_geometry`: a source below it raises, a receiver
@@ -2893,7 +2372,7 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         placements are legal, not just which receivers warn.
         """
         if self._traits.receivers_reach_sediment:
-            return self._total_media_depth(env)
+            return total_media_depth(env)
         return float(env.depth)
 
     def _source_below_domain_note(self, env: 'Environment',
@@ -2908,12 +2387,6 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         """
         return None
 
-    def _mask_unresolvable_depths(self, result, receiver, media_depth):
-        """:func:`~uacpy.models._extract.mask_unresolvable_depths` for this
-        model."""
-        return mask_unresolvable_depths(self.model_name, result, receiver,
-                                        media_depth)
-
     def _require_mode(self, mode: RunMode, what: str) -> None:
         """Refuse ``what``, a ``compute_*`` wrapper's task, on a model that
         does not run ``mode``, naming the engines that do."""
@@ -2921,22 +2394,11 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
             raise UnsupportedFeatureError(
                 self.model_name, what, alternatives=engines_running(mode))
 
-    def _mask_source_axis(self, field, source, *, warn: bool = True):
-        """:func:`~uacpy.models._extract.mask_source_axis` for this model."""
-        return mask_source_axis(self.model_name, field, source, warn=warn)
-
-    def _reject_malformed_irc_bottom(self, env: 'Environment') -> None:
-        """:func:`~uacpy.models._checks.reject_malformed_irc_bottom` for this
-        model."""
-        reject_malformed_irc_bottom(self.model_name, env)
-
-    def _total_media_depth(self, env: 'Environment') -> float:
-        """:func:`~uacpy.models._checks.total_media_depth` of ``env``."""
-        return total_media_depth(env)
-
     def __repr__(self) -> str:
         """``ClassName(arg=val, …)`` showing only constructor params whose
-        current value differs from the constructor default.
+        current value differs from the constructor default. A ``backend=``
+        left ``None`` shows the backend the instance resolved at
+        construction (:meth:`_repr_backend`), when it resolves one.
 
         Walks ``__init__`` along the MRO (subclasses forward to
         ``super().__init__(**kwargs)``, so the union of named parameters
@@ -2946,22 +2408,21 @@ class PropagationModel(ABC, metaclass=_ConstructedModel):
         the result stays one-line-readable even when a model has many
         knobs.
         """
-        bits: List[str] = []
-        for name, default in _collect_init_params(type(self)):
-            if not hasattr(self, name):
-                continue
-            # Resolved binary paths are machine-specific and not copy-paste-
-            # portable — hide them regardless of value.
-            if name in ('executable', 'field_executable'):
-                continue
-            value = getattr(self, name)
-            # ``cleanup`` resolves to ``work_dir is None`` when left at its None
-            # default; hide it while it carries that auto value, matching
-            # ``copy()``, which hands the ``None`` sentinel back so the clone
-            # re-resolves against its own work_dir.
-            if name == 'cleanup' and not self._cleanup_explicit:
-                continue
-            if default is not _NO_DEFAULT and _values_equal(value, default):
-                continue
-            bits.append(f"{name}={_short_repr(value)}")
-        return f"{type(self).__name__}({', '.join(bits)})"
+        return model_repr(self)
+
+
+#: The host options (:mod:`uacpy.models._host`): the keyword parameters of
+#: :meth:`PropagationModel.__init__`, their one declaration. Every engine's
+#: constructor repeats them (checked when its class is defined) and forwards
+#: them with :func:`_host_options`; :func:`~uacpy.models._host.
+#: set_host_options` validates and stores them.
+_HOST_OPTIONS = tuple(
+    inspect.signature(PropagationModel.__init__).parameters)[1:]
+
+
+def _host_options(namespace) -> Dict[str, Any]:
+    """The host options (:data:`_HOST_OPTIONS`) among ``namespace`` — an
+    engine constructor's ``locals()`` before its first statement — as
+    :meth:`PropagationModel.__init__` takes them:
+    ``super().__init__(**_host_options(locals()))``."""
+    return {name: namespace[name] for name in _HOST_OPTIONS}

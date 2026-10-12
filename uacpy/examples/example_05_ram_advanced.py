@@ -6,12 +6,16 @@ stratified profile (range-independent), so the range dependence is entirely in
 the seabed and the bathymetry — which is RAM's case.
 
 The receiver grid spans 5-145 m while the seafloor runs 100-150 m, so the
-shallow-range columns place receivers inside the sub-bottom and come back NaN.
-Every number below is NaN-aware and says how much of the grid is water.
+shallow-range columns place receivers inside the sub-bottom. RAM and Bellhop
+return NaN there; Kraken's deck carries the sediment down to 150 m and returns
+its field in it. Every field is cut at the seafloor
+(Field.mask_below_seafloor), so the numbers below compare water with water and
+say how much of the grid is water.
 
 Uses: Bottom.from_halfspaces (range-dependent seabed) · a bathymetry array ·
-env.is_range_dependent flags · RAM · plot_field(contours=) ·
-compare_models · plot.plot_field_difference
+env.is_range_dependent flags · RAM · Kraken(backend='krakenc') ·
+Field.mask_below_seafloor · plot_field(contours=) · compare_models ·
+plot.plot_field_difference
 """
 
 import os
@@ -64,9 +68,18 @@ source = uacpy.Source(depths=50.0, frequencies=100.0)
 receiver = uacpy.Receiver(depths=np.linspace(5, 145, 30),
                           ranges=np.linspace(700, 3000, 24))
 
+# The mud at r = 0 (1500 m/s) is slower than the top of Kraken's mode window
+# (1.05 × the 1521 m/s surface water), so the modes between are leaky there.
+# kraken.exe, the automatic choice for a fluid seabed, works in real
+# arithmetic, so above the mud's speed it sets the half-space's vertical
+# wavenumber to its real part, 0, the rigid seabed's condition
+# (Kraken/BCImpedanceMod.f90:83-88). KRAKENC computes those modes as leaky
+# modes (kraken.htm (7), Phase Speed Limits), so it is chosen here.
 fields = {'RAM': uacpy.RAM().run(env, source, receiver),
           'Bellhop': uacpy.Bellhop(backend='fortran').run(env, source, receiver),
-          'Kraken': uacpy.Kraken().run(env, source, receiver)}
+          'Kraken': uacpy.Kraken(backend='krakenc').run(env, source, receiver)}
+fields = {name: field.mask_below_seafloor(env)
+          for name, field in fields.items()}
 
 for name, field in fields.items():
     tl = np.asarray(field.dB)
@@ -76,12 +89,13 @@ for name, field in fields.items():
 
 # Read the model spread with care: at 100 Hz this guide is only
 # D/λ = 7-10 wavelengths deep. Stergiopoulos §10.2.2 puts ray methods at
-# D/λ ≳ 100 and mode/PE methods below ~30, so Bellhop is outside its regime
-# here and RAM is the reference, not the other way round.
+# D/λ ≳ 100 and mode methods at ~30 or less, so Bellhop is outside its regime
+# here and RAM, a full-wave march through the range dependence, is the
+# reference, not the other way round.
 wavelength = 1500.0 / source.frequencies[0]
 print(f"  guide is D/λ = {env.bathymetry.depths.min() / wavelength:.0f}-"
       f"{env.bathymetry.depths.max() / wavelength:.0f} wavelengths deep — "
-      f"a PE regime, not a ray one")
+      f"a wave-theory regime, not a ray one")
 print(f"  mean |RAM − Bellhop| = "
       f"{np.nanmean(np.abs(fields['RAM'].dB - fields['Bellhop'].dB)):.1f} dB, "
       f"|RAM − Kraken| = "
@@ -91,7 +105,7 @@ fig, _ = env.plot()
 fig.savefig(OUT / 'example_05_environment.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-fig, ax = uacpy.plot.plot_field(fields['RAM'], env=env, contours=[70, 85, 100],
+fig, ax = uacpy.plot.plot_field(fields['RAM'], env=env, contours=[60, 70, 80],
                            vmin=40, vmax=100,
                            title='RAM — sediment transition, sloping shelf')
 fig.savefig(OUT / 'example_05_result.png', dpi=150, bbox_inches='tight')

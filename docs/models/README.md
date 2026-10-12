@@ -19,7 +19,7 @@ result = Model(**knobs).run(env, source, receiver, run_mode=...)
 |---|---|---|
 | **[Bellhop](bellhop.md)** | Gaussian-beam ray tracing | High frequency, range-dependent, and the **only** source of rays, eigenrays and arrivals |
 | **[Kraken](kraken.md)** | Normal modes | Low frequency, shallow water; gives you the **modes** themselves |
-| **[Scooter](scooter.md)** | Wavenumber integration (FFP) | **Reference-grade** exact solution; range-independent — over the whole spectrum only with `c_high=1e9` (the default cut drops paths steeper than `arccos(c/c_high)`, and warns when a receiver sees one) |
+| **[Scooter](scooter.md)** | Wavenumber integration (FFP) | **Reference-grade** exact solution; range-independent — over the whole spectrum by default (an unbounded `c_high`, `k_min = 0`; a pinned `c_high` drops paths steeper than `arccos(c/c_high)`, and warns when a receiver sees one) |
 | **[SPARC](sparc.md)** | Time-domain FFP | **Transient** propagation — watch a pulse evolve; vacuum or rigid seabed only |
 | **[RAM](ram.md)** | Parabolic equation | **Strongly range-dependent** environments, long ranges |
 | **[Bounce](bounce.md)** | Plane-wave reflection | Not a propagator — computes seabed `R(θ)` |
@@ -45,8 +45,9 @@ was dropped — see [collapse policy](../guide/environment.md). The source row
 is the exception: a ✗ model reads one depth per deck, and instead of
 collapsing, `run()` loops over the depths in the field modes (TL,
 `BROADBAND`, `TIME_SERIES`) — each depth in its own `source_depth_<z>m`
-subdirectory of a pinned `work_dir` — and returns a `ResultStack`; in any
-other mode a multi-depth `Source` raises `ConfigurationError`.
+subdirectory of a pinned `work_dir` — and returns one `Field` over
+`source_depth`; in any other mode a multi-depth `Source` raises
+`ConfigurationError`.
 
 | | Bellhop | Kraken | Scooter | SPARC | RAM | Bounce | OASES |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|

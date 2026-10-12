@@ -90,15 +90,22 @@ except UnsupportedFeatureError as exc:
 
 fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
 for ax, (label, env) in zip(axes, cases.items()):
-    # RAM's depth grid at 100 Hz (dz ≈ 0.8 m, from its λ/16 cost floor) is
+    # RAM's depth grid at 100 Hz (dz ≈ 1.0 m, from its λ/15 cost floor) is
     # coarse beside the 3 m corrugation, so ramsurf staircases it by up to a
-    # cell; its notice is printed. Any other warning is shown as usual.
+    # cell, and the surface asked at 1.6 m at r = 0 sits on the node above
+    # it, about 0.6 m higher. Both notices are printed, and any other
+    # warning is shown as usual. Where the surface dips below 2 m, the 2 m
+    # receivers sit above it and read no field: the dark band along the top
+    # of the rough panel.
     with warnings.catch_warnings(record=True) as caught:
         field = ram.run(env, source, receiver,
                         run_mode=uacpy.RunMode.COHERENT_TL)
     for warning in caught:
-        if 'staircased' in str(warning.message):
-            print(f"  noted: {str(warning.message).split(';')[0]}")
+        text = ' '.join(str(warning.message).split())
+        if 'staircased' in text:
+            print(f"  noted: {text.split(';')[0]}")
+        elif 'zeroes every row' in text:
+            print(f"  noted: {text.split('. dz=')[0]}.")
         else:
             warnings.showwarning(warning.message, warning.category,
                                  warning.filename, warning.lineno)

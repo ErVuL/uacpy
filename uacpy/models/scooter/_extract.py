@@ -1,15 +1,10 @@
 """The Hankel transform of Scooter's Green's function onto the receiver
 ranges, and the phase-speed pass band of the kernel taper applied before it."""
 
-import warnings
-
 import numpy as np
 
-from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, ModelExecutionError,
-)
-from uacpy.core.results import ResultStack
+from uacpy.core.exceptions import ConfigurationError, ModelExecutionError
+from uacpy.core.results._superposition import _stack_fields
 
 
 def taper_bounds(phase_speeds, *, taper):
@@ -52,26 +47,21 @@ def taper_bounds(phase_speeds, *, taper):
             remediation="A .grn with a corrupt cVec usually means the "
                         "run was interrupted; delete it and re-run.",
         )
-    if c.size < 4:
-        warnings.warn(
-            f"Scooter(taper={taper:.4g}) was requested but the "
-            f"Green's function's phase-speed grid holds only {c.size} "
-            f"value(s), too few to place a roll-off. The transform runs "
-            f"untapered, i.e. as taper=0.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    if c.size >= 4:
+        inv_lo, inv_hi = 1.0 / c.max(), 1.0 / c.min()   # k/omega at each edge
+        span = inv_hi - inv_lo
+    if c.size < 4 or span <= 0.0:
+        why = (f"holds only {c.size} value(s), too few to place a roll-off "
+               f"at each edge" if c.size < 4 else
+               "spans a single speed, so there is no edge to roll off")
+        raise ConfigurationError(
+            f"Scooter(taper={taper:.4g}): the Green's function's "
+            f"phase-speed grid {why}, so the taper cannot be applied.",
+            remediation=("Pass taper=0 to transform this Green's function "
+                         "untapered, or give the deck more wavenumbers (a "
+                         "wider c_low/c_high window or a longer RMax), so a "
+                         "roll-off fits at each edge."),
         )
-        return None, None
-    inv_lo, inv_hi = 1.0 / c.max(), 1.0 / c.min()   # k/omega at each edge
-    span = inv_hi - inv_lo
-    if span <= 0.0:
-        warnings.warn(
-            f"Scooter(taper={taper:.4g}) was requested but the "
-            f"Green's function's phase-speed grid spans a single speed, "
-            f"so there is no edge to roll off. The transform runs "
-            f"untapered, i.e. as taper=0.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
-        return None, None
     return (1.0 / (inv_hi - taper * span),
             1.0 / (inv_lo + taper * span))
 
@@ -110,8 +100,10 @@ def assemble_field_from_grn(greens_function, source, receiver, broadband_mode,
             model_name, return_code=0, stdout=None,
             stderr=(f"the Green's function holds {nsd} source depths for "
                     f"a Source of {depths.size}."))
-    return ResultStack.from_slabs(
-        [greens_function.to_field(receiver.ranges, source_depth_idx=i,
-                                  **transform_kwargs)
-         for i in range(nsd)],
-        depths, coordinate_name='source_depth')
+    fields = [greens_function.to_field(receiver.ranges, source_depth_idx=i,
+                                       **transform_kwargs)
+              for i in range(nsd)]
+    if nsd == 1:
+        return fields[0]
+    return _stack_fields(fields, depths, coordinate_name='source_depth',
+                         who=f"{model_name}.run")

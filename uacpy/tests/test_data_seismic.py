@@ -21,7 +21,7 @@ netCDF4 = pytest.importorskip('netCDF4')
 
 from uacpy.core.environment import SeabedColumn, Bottom
 from uacpy.core.exceptions import ConfigurationError, DataFetchError
-from uacpy.data import crust1_local, globsed_local
+from uacpy.data import crust1_local, environment, globsed_local
 from uacpy.data import _http
 from uacpy.tests._cache_builders import _write_crust1, _write_globsed
 from uacpy.tests.conftest import recorded_warnings
@@ -192,6 +192,56 @@ def test_crust1_globsed_fallback_keeps_native(cache):
     b = crust1_local.fetch_bottom_crust1((-90.0, -180.0))   # GlobSed NaN cell
     assert b.total_thickness() == pytest.approx(1000.0)
     assert b.sediment_thickness_source is None
+
+
+def _cache_with_an_unreadable_globsed(root):
+    """CRUST1.0 beside a GlobSed file whose thickness variable is missing."""
+    _write_crust1(root, marked_cells=True)
+    gdir = root / 'globsed'; gdir.mkdir(parents=True, exist_ok=True)
+    ds = netCDF4.Dataset(gdir / 'GlobSed-v3.nc', 'w')
+    ds.createDimension('lat', 181); ds.createDimension('lon', 361)
+    ds.createVariable('lat', 'f8', ('lat',))[:] = np.linspace(-90, 90, 181)
+    ds.createVariable('lon', 'f8', ('lon',))[:] = np.linspace(-180, 180, 361)
+    ds.createVariable('thickness', 'f4', ('lat', 'lon'))[:] = 500.0
+    ds.close()
+
+
+def test_a_globsed_grid_missing_its_variable_is_an_unreadable_cache(
+        tmp_path, monkeypatch):
+    _cache_with_an_unreadable_globsed(tmp_path)
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    _cache.invalidate_grids()
+    with pytest.raises(_cache.UnreadableCacheError, match="missing an expected"):
+        globsed_local.fetch_sediment_thickness((30.0, -40.0))
+
+
+def test_an_unreadable_globsed_is_announced_and_the_native_column_kept(
+        tmp_path, monkeypatch):
+    from uacpy.core.exceptions import FallbackWarning
+    _cache_with_an_unreadable_globsed(tmp_path)
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    _cache.invalidate_grids()
+    crust1_local._model.memo.clear()
+    with recorded_warnings() as caught:
+        b = crust1_local.fetch_bottom_crust1((30.0, -40.0))
+    assert b.total_thickness() == pytest.approx(1000.0)     # CRUST1.0's own
+    assert b.sediment_thickness_source is None
+    assert [w for w in caught if issubclass(w.category, FallbackWarning)
+            and 'GlobSed grid cannot be read' in str(w.message)]
+
+
+def test_an_uninstalled_globsed_keeps_the_native_column_quietly(
+        tmp_path, monkeypatch):
+    from uacpy.core.exceptions import FallbackWarning
+    _write_crust1(tmp_path, marked_cells=True)
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
+    _cache.invalidate_grids()
+    crust1_local._model.memo.clear()
+    with recorded_warnings() as caught:
+        b = crust1_local.fetch_bottom_crust1((30.0, -40.0))
+    assert b.total_thickness() == pytest.approx(1000.0)
+    assert not [w for w in caught if issubclass(w.category, FallbackWarning)
+                and 'GlobSed' in str(w.message)]
 
 
 def test_crust1_use_globsed_false(cache):
@@ -373,6 +423,24 @@ def test_crust1_emits_commercial_warning(cache):
                   if issubclass(w.category, UserWarning)
                   and 'commercial' in str(w.message)]
     assert len(commercial) == 1
+
+
+@pytest.mark.parametrize('read', [
+    lambda: crust1_local.fetch_crust1_profile((30.0, -40.0)),
+    lambda: crust1_local.fetch_bottom_crust1((30.0, -40.0)),
+    lambda: crust1_local.fetch_bottom_crust1_transect(
+        (30.0, -40.0), (31.0, -40.0), n_points=3),
+    lambda: environment.fetch_bottom((30.0, -40.0), source='crust1'),
+    lambda: environment.fetch_bottom_transect(
+        (30.0, -40.0), (31.0, -40.0), n_points=3, source='crust1'),
+], ids=['fetch_crust1_profile', 'fetch_bottom_crust1',
+        'fetch_bottom_crust1_transect', 'fetch_bottom', 'fetch_bottom_transect'])
+def test_every_public_crust1_reader_warns_that_it_is_non_commercial(cache, read):
+    from uacpy.core.exceptions import ProvenanceWarning
+    with recorded_warnings() as caught:
+        read()
+    assert [w for w in caught if issubclass(w.category, ProvenanceWarning)
+            and 'commercial' in str(w.message)]
 
 
 def test_crust1_transect_opens_no_process_global_filter_window(cache):

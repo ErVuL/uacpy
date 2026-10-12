@@ -14,14 +14,14 @@ import warnings
 from collections import namedtuple
 
 import numpy as np
-from uacpy.core.acoustics import integrate_psd
+from uacpy.core.acoustics import frequency_weighting, integrate_psd
 from uacpy.core.acoustics.levels import BAND_EDGE_RTOL
 from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core.constants import REFERENCE_PRESSURE_WATER
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._validate import (
-    require_finite_signal, require_increasing_axis,
-    require_positive_finite_scalar,
+    refuse_non_finite_samples, require_finite_signal,
+    require_increasing_axis, require_positive_finite_scalar,
 )
 from uacpy.acoustic_signal._results import PlottedResult, level_unit
 from uacpy.acoustic_signal.spectral import (
@@ -46,13 +46,23 @@ _REF_FREQ = 1000.0
 #: that one name, and one octave is exactly three decidecades.
 _LADDERS = {"octave": (1, 10), "decidecade": (3, 10)}
 
+#: Slack, in band steps, under which a frequency counts as ON a band edge.
+#: The edges are irrational (``10**2.85`` = 707.9458 Hz), so a typed edge is
+#: a rounded one: written to 4 significant digits, every octave edge lands
+#: within 4.7e-4 steps of its half-integer ladder position (1413 for
+#: 1412.54 Hz is the farthest), and a computed one within ~1e-12. Without the
+#: slack the direction the digits were rounded in decides which of the two
+#: bands the edge opens or closes. 1e-3 steps is 0.07 % of the frequency; a
+#: range end farther than that from an edge selects the band it falls in.
+_EDGE_TOLERANCE = 1e-3
+
 #: The bases :func:`octave_bands` builds: 10 (IEC 61260-1), or 2 for exact
 #: octaves.
 _OCTAVE_BASES = (10, 2)
 
 
 def _ladder(indices, fraction, base):
-    """``(lower, centres, upper)`` of the bands ``indices`` of the
+    """``(lower, centers, upper)`` of the bands ``indices`` of the
     1/``fraction``-octave ladder of ``base`` anchored at 1 kHz.
 
     Base 2: centres ``1000 * 2**(k/b)`` and edges ``centre * 2**(±1/(2b))``,
@@ -66,13 +76,13 @@ def _ladder(indices, fraction, base):
     """
     k = np.asarray(indices, dtype=float)
     if base == 10:
-        centres = _REF_FREQ * 10.0 ** (3.0 * k / (10.0 * fraction))
+        centers = _REF_FREQ * 10.0 ** (3.0 * k / (10.0 * fraction))
         half = 3.0 / (20.0 * fraction)
     else:
-        centres = _REF_FREQ * 2.0 ** (k / fraction)
+        centers = _REF_FREQ * 2.0 ** (k / fraction)
         half = 1.0 / (2.0 * fraction)
     radix = float(base)
-    return centres * radix ** (-half), centres, centres * radix ** half
+    return centers * radix ** (-half), centers, centers * radix ** half
 
 
 def _ladder_position(f, fraction, base):
@@ -84,7 +94,7 @@ def _ladder_position(f, fraction, base):
 
 def _overlapping_bands(freq_min, freq_max, fraction, base, who):
     """Every band of the 1/``fraction``-octave ladder of ``base`` that
-    overlaps ``[freq_min, freq_max]``, as ``(lower, centres, upper)``."""
+    overlaps ``[freq_min, freq_max]``, as ``(lower, centers, upper)``."""
     if freq_min <= 0 or freq_max <= freq_min:
         raise ConfigurationError(
             f"{who}: need 0 < freq_min < freq_max; "
@@ -93,13 +103,13 @@ def _overlapping_bands(freq_min, freq_max, fraction, base, who):
     # below is what selects.
     first = math.floor(_ladder_position(freq_min, fraction, base)) - 1
     last = math.ceil(_ladder_position(freq_max, fraction, base)) + 1
-    lower, centres, upper = _ladder(np.arange(first, last + 1), fraction, base)
+    lower, centers, upper = _ladder(np.arange(first, last + 1), fraction, base)
     keep = (upper >= freq_min) & (lower <= freq_max)
-    return lower[keep], centres[keep], upper[keep]
+    return lower[keep], centers[keep], upper[keep]
 
 
 def octave_bands(freq_min, freq_max, *, base=10):
-    """Octave band ``(lower, centres, upper)`` edges overlapping
+    """Octave band ``(lower, centers, upper)`` edges overlapping
     ``[freq_min, freq_max]``, anchored at 1 kHz.
 
     ``base=10`` (the default) is the IEC 61260-1:2014 octave: centres
@@ -150,7 +160,11 @@ def _standard_bands(freq_min, freq_max, *, band_type, sample_rate, n_bands,
     if freq_min <= 0 or freq_max <= freq_min:
         raise ConfigurationError(
             f"{who}: require {low} > 0 and {high} > {low}; got "
-            f"{low}={freq_min}, {high}={freq_max}.")
+            f"{low}={freq_min}, {high}={freq_max}.",
+            remediation=(f"Pass a positive {low} (Hz) below {high}: a band "
+                         f"has a positive lower edge, and DC carries no "
+                         f"band; sound_exposure's default range is "
+                         f"8.9125-22387 Hz."))
     nyquist = None if sample_rate is None else sample_rate / 2.0
     if band_type == "decidecade":
         # A band is kept when its CENTRE is in the requested range and its
@@ -161,21 +175,24 @@ def _standard_bands(freq_min, freq_max, *, band_type, sample_rate, n_bands,
         # a hertz, while its centre is 387 Hz clear of the limit. A band cut
         # by Nyquist is excluded outright: it would report the part that was
         # sampled as if it were the band.
-        lower, centres, upper = decidecade_bands(freq_min, freq_max)
-        keep = (centres >= freq_min) & (centres <= freq_max)
+        lower, centers, upper = decidecade_bands(freq_min, freq_max)
+        keep = (centers >= freq_min) & (centers <= freq_max)
         if nyquist is not None:
             keep &= upper <= nyquist
-        return lower[keep], centres[keep], upper[keep]
+        return lower[keep], centers[keep], upper[keep]
     if band_type == "octave":
         # From the band holding ``freq_min`` to the band holding ``freq_max``,
-        # clamped to the highest band whose whole width is sampled. Rounding
-        # the log position onto the centre grid, rather than flooring onto
-        # the half-band grid, is what stops the ladder shifting by half a
-        # step with the parity of the floor; clamping the upper EDGE rather
-        # than the centre keeps a band that is fully below Nyquist.
+        # clamped to the highest band whose whole width is sampled. A band k
+        # spans ladder positions [k - 1/2, k + 1/2], so a range end ON an
+        # edge (within _EDGE_TOLERANCE) selects the band on the range's side
+        # of it: freq_min opens the band above, freq_max closes the band
+        # below. Clamping the upper EDGE rather than the centre keeps a band
+        # that is fully below Nyquist.
         fraction, base = _LADDERS[band_type]
-        first = round(_ladder_position(freq_min, fraction, base))
-        last = math.ceil(_ladder_position(freq_max, fraction, base) - 0.5)
+        first = math.floor(_ladder_position(freq_min, fraction, base) + 0.5
+                           + _EDGE_TOLERANCE)
+        last = math.ceil(_ladder_position(freq_max, fraction, base) - 0.5
+                         - _EDGE_TOLERANCE)
         if nyquist is not None:
             last = min(last, math.floor(
                 _ladder_position(nyquist, fraction, base) - 0.5))
@@ -198,7 +215,7 @@ def _standard_bands(freq_min, freq_max, *, band_type, sample_rate, n_bands,
 
 def standard_bands(freq_min, freq_max, *, band_type="decidecade",
                    sample_rate=None, n_bands=None):
-    """The ``(lower, centres, upper)`` bands :func:`sound_exposure` reports a
+    """The ``(lower, centers, upper)`` bands :func:`sound_exposure` reports a
     range ``[freq_min, freq_max]`` on.
 
     ``band_type`` is one of
@@ -211,7 +228,10 @@ def standard_bands(freq_min, freq_max, *, band_type="decidecade",
     - ``'octave'`` (IEC 61260-1 base-10): from the band holding ``freq_min`` to
       the band holding ``freq_max``. An octave is three decidecades wide, so
       selecting on the centre would drop up to half an octave of the range
-      at each end (measured: 15 % of a 100-400 Hz request).
+      at each end (measured: 15 % of a 100-400 Hz request). A range end
+      within 0.07 % of a band edge counts as on it, so a typed edge
+      (``707.9``, ``1413``) starts the range at the band above it and ends
+      it at the band below.
     - ``'linear'``: ``n_bands`` equal-width bands spanning the range.
 
     Given ``sample_rate``, a band of a standard ladder whose upper edge lies
@@ -267,18 +287,18 @@ def _fractional_bin_weights(nperseg, sample_rate, bands):
     return out
 
 
-def _band_estimate(data, sample_rate, *, scaling="exposure",
+def _band_estimate(data, sample_rate, *,
                    freq_min=8.9125, freq_max=22387, band_type="decidecade",
                    n_bands=30, nperseg=None, window=_BAND_WINDOW,
-                   batch_size=None, who="sound_exposure", **welch_kwargs):
+                   batch_size=None, weighting=None, who="sound_exposure",
+                   **welch_kwargs):
     """Standard-band estimate: one value per IEC 61260-1 / ISO 18405 band.
 
-    Returns ``(centres, values, bands)``, reference-free and linear.
-    ``scaling='exposure'`` gives the sound exposure in each band (Pa²·s),
-    ``'spectrum'`` that divided by the record duration (Pa², the band power)
-    and ``'density'`` the band power per hertz of the band's own width
-    (Pa²/Hz). ``bands`` are the ``(low, centre, high)`` edges those values sit
-    on.
+    Returns ``(centers, exposure, bands)``, reference-free and linear: the
+    sound exposure in each band (Pa²·s), on the ``(low, center, high)``
+    edges ``bands``. ``data`` has time on its last axis and every other
+    axis is a channel: ``exposure`` then holds one band row per channel,
+    bands last, every channel summed with the same band weights.
 
     Uses a rectangular (boxcar) window with ``noverlap=0`` and no detrending so
     the summed PSD equals the band exposure exactly (Parseval). A tapering
@@ -333,6 +353,12 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
     issued when the signal is actually batched); with a multiple, only the
     signal's final partial batch does.
     """
+    rows = np.asarray(data)
+    if rows.size and np.issubdtype(rows.dtype, np.number):
+        # An exposure refuses a non-finite sample as the level functions
+        # do, naming the first one.
+        rows = rows.reshape(-1, rows.shape[-1])
+        refuse_non_finite_samples(rows, who, n_channels=rows.shape[0])
     data = require_finite_signal(data, who)
     if np.iscomplexobj(data):
         raise ConfigurationError(
@@ -345,10 +371,11 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
     bands = np.column_stack(_standard_bands(
         freq_min, freq_max, band_type=band_type, sample_rate=sample_rate,
         n_bands=n_bands, who=who))
-    if len(data) <= 0:
+    n_samples = np.shape(data)[-1]
+    if n_samples <= 0:
         raise ConfigurationError(
             f"{who}: no samples to integrate. Provide a non-empty "
-            f"signal; got {len(data)} sample(s) at "
+            f"signal; got {n_samples} sample(s) at "
             f"sample_rate={sample_rate:g} Hz.")
     if nperseg is None:
         # One-hertz bins: the resolution a band ladder is read at, which
@@ -361,7 +388,7 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
         # and a fixed sample count would never divide the default nperseg
         # (the sample rate). Written in segments, the default never does.
         batch_size = max(1, round(_TARGET_BATCH_SAMPLES / nperseg)) * nperseg
-    batch_size = min(int(batch_size), max(1, len(data)))
+    batch_size = min(int(batch_size), max(1, n_samples))
 
     if len(bands) == 0:
         raise ConfigurationError(
@@ -370,7 +397,7 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
             f"snapped lower edge sits above the Nyquist-clamped upper edge; "
             f"got freq_min={freq_min!r}, freq_max={freq_max!r}.",
             remediation="Raise sample_rate, or pass a lower freq_min explicitly.")
-    if len(data) > batch_size and batch_size % nperseg:
+    if n_samples > batch_size and batch_size % nperseg:
         warnings.warn(
             f"{who}: batch_size ({batch_size}) is not a multiple of "
             f"nperseg ({nperseg}), so every batch ends in a zero-padded "
@@ -379,6 +406,12 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
             "a batch_size that is a multiple of nperseg.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
     band_bins = _fractional_bin_weights(nperseg, sample_rate, bands)
+    if weighting is not None:
+        # The weighting scales each bin's energy at the bin's own frequency,
+        # so a band's sum is its weighted exposure.
+        gain = 10.0 ** (frequency_weighting(
+            np.fft.rfftfreq(nperseg, 1.0 / sample_rate), weighting) / 10.0)
+        band_bins = [(idx, weight * gain[idx]) for idx, weight in band_bins]
     # A band no bin reaches sums to exactly 0 Pa²·s, which reads as a measured
     # silence rather than as "not measured" — 'linear' bands are used as given,
     # so a freq_max above Nyquist produces whole empty bands (the octave ladders
@@ -395,10 +428,10 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
             f"{named} Hz. A band above Nyquist ({sample_rate / 2:g} Hz) has no "
             f"data at all. Lower freq_max.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
-    out = np.zeros(len(bands))
+    out = np.zeros(np.shape(data)[:-1] + (len(bands),))
 
-    for i in range(0, len(data), batch_size):
-        chunk = data[i: min(i + batch_size, len(data))]
+    for i in range(0, n_samples, batch_size):
+        chunk = data[..., i: min(i + batch_size, n_samples)]
         # One estimator, not two: the per-bin exposure of this batch is what
         # the Welch route returns under ``scaling='exposure'`` — boxcar, no
         # overlap, no detrending, and the batch padded to whole segments so
@@ -410,25 +443,19 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
         # The batching is memory, not method: a multi-hour record never
         # materialises as one segment matrix. Each batch's own exposure adds,
         # because energy does.
+        #
+        # Time is the last axis of every chunk (axis=-1), whatever its
+        # length: a short final batch of many channels is not a
+        # (n_samples, n_channels) record.
         per_bin = _estimate(
             chunk, sample_rate, method="welch", scaling="exposure",
-            window=window, nperseg=nperseg, who=who, **welch_kwargs).power
+            window=window, nperseg=nperseg, who=who, axis=-1,
+            **welch_kwargs).power
         for k, (idx, weight) in enumerate(band_bins):
-            out[k] += per_bin[idx] @ weight
+            out[..., k] += per_bin[..., idx] @ weight
 
-    centres = np.array([b[1] for b in bands], dtype=float)
-    edges = np.asarray(bands, dtype=float)
-    if scaling == "exposure":
-        values = out
-    else:
-        # Band power is the exposure spread back over the record it was
-        # integrated from; a density then divides by the band's own width,
-        # which is what makes decidecade levels comparable across bands that
-        # get wider with frequency.
-        values = out / (len(data) / sample_rate)
-        if scaling == "density":
-            values = values / (edges[:, 2] - edges[:, 0])
-    return centres, values, edges
+    centers = np.array([b[1] for b in bands], dtype=float)
+    return centers, out, np.asarray(bands, dtype=float)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -438,10 +465,10 @@ def _band_estimate(data, sample_rate, *, scaling="exposure",
 # the same edges.
 # ──────────────────────────────────────────────────────────────────────
 
-class BandLevels(PlottedResult, namedtuple("BandLevels", "centres levels")):
-    """Band levels on a standard ladder: the band ``centres`` (Hz) and one
+class BandLevels(PlottedResult, namedtuple("BandLevels", "centers levels")):
+    """Band levels on a standard ladder: the band ``centers`` (Hz) and one
     ``levels`` value each (dB re ``ref²``, the band power), so
-    ``centres, levels = ...`` unpacks it; :meth:`plot` draws it with
+    ``centers, levels = ...`` unpacks it; :meth:`plot` draws it with
     :func:`~uacpy.plot.plot_band_levels` against its own ``ref``.
 
     What the levels are stated on rides on attributes: ``lower`` and
@@ -452,11 +479,11 @@ class BandLevels(PlottedResult, namedtuple("BandLevels", "centres levels")):
 
     _attrs = ("lower", "upper", "band_type", "ref")
     _plotter = "plot_band_levels"
-    _plot_fields = ("centres", "levels")
+    _plot_fields = ("centers", "levels")
     _plot_defaults = ("ref", "band_type")
 
-    def __new__(cls, centres, levels, *, lower, upper, band_type, ref):
-        self = super().__new__(cls, centres, levels)
+    def __new__(cls, centers, levels, *, lower, upper, band_type, ref):
+        self = super().__new__(cls, centers, levels)
         self.lower = lower
         self.upper = upper
         self.band_type = str(band_type)
@@ -464,11 +491,7 @@ class BandLevels(PlottedResult, namedtuple("BandLevels", "centres levels")):
         return self
 
     def _field_units(self):
-        return {"centres": "Hz", "levels": level_unit(self.ref, "spectrum")}
-
-
-#: The ladder names as prose, for messages.
-_LADDER_WORDS = {"decidecade": "decidecade", "octave": "octave"}
+        return {"centers": "Hz", "levels": level_unit(self.ref, "spectrum")}
 
 
 def _band_levels(psd, frequencies, band_type, ref, who):
@@ -478,7 +501,7 @@ def _band_levels(psd, frequencies, band_type, ref, who):
             f"{who}: band_type={band_type!r} has no standard band edges; "
             f"valid: {', '.join(repr(t) for t in _LADDERS)}. Integrate any "
             f"other band with uacpy.acoustics.integrate_psd.")
-    word = _LADDER_WORDS[band_type]
+    word = band_type
     psd = np.asarray(psd, dtype=float)
     frequencies = np.asarray(frequencies, dtype=float)
     ref = require_positive_finite_scalar(ref, who, "ref", " Pa")
@@ -579,7 +602,7 @@ def band_levels(psd, frequencies, *, band_type="decidecade",
     Returns
     -------
     BandLevels
-        ``centres`` [Hz] and ``levels`` [dB re ``ref²``] of every band of the
+        ``centers`` [Hz] and ``levels`` [dB re ``ref²``] of every band of the
         ladder overlapping the grid, with the band edges, ``band_type`` and
         ``ref``; bands with no spectral support are ``nan``, and a covered
         band that carries no power is ``-inf``.
@@ -632,7 +655,7 @@ def decidecade_band_levels(psd, frequencies, *, ref=REFERENCE_PRESSURE_WATER):
     Returns
     -------
     BandLevels
-        ``centres`` [Hz] and ``levels`` [dB re ``ref²``], with the band edges;
+        ``centers`` [Hz] and ``levels`` [dB re ``ref²``], with the band edges;
         bands with no spectral support are ``nan`` (normally the first and
         last, see :func:`band_levels`), and a covered band that carries no
         power is ``-inf``.

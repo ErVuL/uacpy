@@ -107,11 +107,33 @@ def _endpoint_label_offset(ax, here, other):
                                               along)))
 
 
+def _draw_land(ax, rings, turns, lon_rng, lat_rng):
+    """Fill the land rings that reach the ``lon_rng`` × ``lat_rng`` window, each
+    shifted by every longitude ``turn``, as one collection.
+
+    A ring is kept when its bounding box (after the shift) overlaps the window,
+    which keeps a ring enclosing the whole window too; every other ring would be
+    clipped away by the axes, so drawing it only costs time."""
+    kept = []
+    for ring in rings:
+        x, y = ring[:, 0], ring[:, 1]
+        if y.max() < lat_rng[0] or y.min() > lat_rng[1]:
+            continue
+        for turn in turns:
+            if x.max() + turn >= lon_rng[0] and x.min() + turn <= lon_rng[1]:
+                kept.append(np.column_stack([x + turn, y]))
+    land = _mcoll.PolyCollection(kept, facecolors='#e9e3d4', edgecolors='0.3',
+                                 linewidths=0.6, zorder=2)
+    ax.add_collection(land, autolim=False)
+    return land
+
+
 @typed_plot_error
 def plot_bathymetry_map(
     lats,
-    lons,
-    depth,
+    lons=None,
+    depth=None,
+    ax=None,
     *,
     transect=None,
     basemap: bool = True,
@@ -123,16 +145,17 @@ def plot_bathymetry_map(
     relief_exag: float = 15.0,
     contours=None,
     figsize: Tuple[float, float] = (9, 7.5),
-    ax=None,
     title: Optional[str] = None,
     aspect=None,
     source=None,
     show_data_credit=True,
+    show_colorbar: bool = True,
 ):
     """Plot a fetched bathymetry grid as a geographic map.
 
-    ``lats`` / ``lons`` are the 1-D axes and ``depth`` the ``(n_lat, n_lon)``
-    array from :func:`uacpy.data.fetch_bathy_grid` (``NaN`` = land), with a labelled
+    Takes the :class:`~uacpy.data.BathyGrid` :func:`uacpy.data.fetch_bathy_grid`
+    returns, or its arrays: ``lats`` / ``lons`` the 1-D axes and ``depth`` the
+    ``(n_lat, n_lon)`` array (``NaN`` = land). The map has a labelled
     lat/lon graticule (``graticule`` labelled spacing, ``graticule_minor`` fine
     unlabelled spacing — ``None`` on either disables that layer, and ``None`` on
     ``graticule`` leaves the map with no tick labels) and an optional A→B
@@ -155,18 +178,23 @@ def plot_bathymetry_map(
     equal degree-per-unit scaling) or any Matplotlib aspect value.
 
     ``show_data_credit`` adds a licence-required data-source credit footnote for a
-    standalone figure (``ax=None``). The depth grid carries no provenance itself,
-    so pass an ``Environment`` / ``Result`` / list of ``DataSource`` / strings
-    (``True`` — the default — has nothing to credit here unless one is given).
+    standalone figure (``ax=None``). ``True`` (the default) credits a
+    ``BathyGrid``'s own ``provenance``; bare arrays carry none, so with them
+    pass an ``Environment`` / ``Result`` / list of ``DataSource`` / strings.
 
     Returns ``(fig, ax)``.
 
     Parameters
     ----------
-    lats, lons : array_like
-        The grid's 1-D axes (deg).
-    depth : ndarray
-        ``(n_lat, n_lon)`` depths (m, positive down; ``NaN`` is land).
+    lats : BathyGrid or array_like
+        The grid itself, or its 1-D latitude axis (deg).
+    lons : array_like, optional
+        The 1-D longitude axis (deg), with array input.
+    depth : ndarray, optional
+        ``(n_lat, n_lon)`` depths (m, positive down; ``NaN`` is land), with
+        array input.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
     transect : ((lat, lon), (lat, lon)), optional
         An A→B line to draw.
     basemap : bool, optional
@@ -186,8 +214,6 @@ def plot_bathymetry_map(
         Isobaths to draw (see above).
     figsize : tuple, optional
         Size (inches) of the new figure. Default ``(9, 7.5)``.
-    ax : matplotlib.axes.Axes, optional
-        Existing axes; a new figure is made when omitted.
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
     aspect : float or str, optional
@@ -196,9 +222,20 @@ def plot_bathymetry_map(
         Mark the source.
     show_data_credit : bool, Environment, Result or sequence, optional
         The data-source credit footnote of a standalone figure (see above).
+    show_colorbar : bool, optional
+        Draw the water-depth colorbar. Default True.
     """
     from uacpy.visualization.basemap import land_polygons
 
+    provenance = None
+    if lons is None and depth is None and hasattr(lats, 'depths'):
+        # A BathyGrid: its arrays, and the dataset record its credit names.
+        provenance = getattr(lats, 'provenance', None)
+        lats, lons, depth = lats.lats, lats.lons, lats.depths
+    elif lons is None or depth is None:
+        raise ConfigurationError(
+            "plot_bathymetry_map: pass the BathyGrid fetch_bathy_grid "
+            "returns, or all three arrays (lats, lons, depth).")
     lats = np.asarray(lats, dtype=float)
     lons, lon_wrapped = _unwrap_lon_axis(lons)
     dm = np.ma.masked_invalid(depth)
@@ -234,10 +271,7 @@ def plot_bathymetry_map(
         # open sea. Both turns are laid down and the axes clip to the window.
         turns = (-360.0, 0.0, 360.0) if lon_wrapped else (0.0,)
         if rings is not None:                              # land OVER the depth: covers
-            for ring in rings:                             # coastal grid-cell bleed + crisp border
-                for turn in turns:
-                    ax.fill(ring[:, 0] + turn, ring[:, 1], facecolor='#e9e3d4',
-                            edgecolor='0.3', lw=0.6, zorder=2)
+            _draw_land(ax, rings, turns, lon_rng, lat_rng) # coastal grid-cell bleed + crisp border
         ax.set_xlim(*lon_rng)
         ax.set_ylim(*lat_rng)
         _draw_graticule(ax, lon_rng, lat_rng, graticule, graticule_minor, proj)
@@ -293,10 +327,13 @@ def plot_bathymetry_map(
         sp = proj(s_lat, s_lon)
         ax.plot(sp[0], sp[1], zorder=7, **SOURCE_MARKER_STYLE)
 
-    fig.colorbar(pc, ax=ax, label="Water depth (m)")
+    if show_colorbar:
+        fig.colorbar(pc, ax=ax, label="Water depth (m)")
     ax.set_title(_title_or(title, "Bathymetry"), fontsize='large', fontweight='bold')
     if own_fig:
-        credit = _credit_attributions(show_data_credit)
+        credit = _credit_attributions(
+            [provenance] if show_data_credit is True and provenance is not None
+            else show_data_credit)
         fig.tight_layout(rect=(0, 0.05, 1, 1) if credit else (0, 0, 1, 1))
         _draw_credit(fig, credit, reserve=False)
     return fig, ax
@@ -494,12 +531,13 @@ def _map_positional_args(map_data, map_fn) -> tuple:
 
 
 @typed_plot_error
-def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
-                     cmap='Blues_r', graticule: float = 5.0, zoom: bool = True,
+def plot_sea_ice_map(grid, ax=None, *, hemi: str = 'N', transect=None,
+                     source=None, cmap='Blues_r', graticule: float = 5.0,
+                     zoom: bool = True,
                      concentration_label='Sea-ice concentration (fraction)',
-                     title=None, ax=None,
+                     title=None,
                      figsize: Tuple[float, float] = (6.5, 6.5),
-                     show_data_credit=True):
+                     show_data_credit=True, show_colorbar: bool = True):
     """Plot a sea-ice concentration grid (0–1, ``NaN`` = land) as a polar map.
 
     The sibling of :func:`plot_bathymetry_map` for sea ice: ``grid`` is a 2-D
@@ -546,6 +584,8 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
         Size (inches) of the new figure. Default ``(6.5, 6.5)``.
     show_data_credit : bool, Environment, Result or sequence, optional
         The data-source credit footnote of a standalone figure (see above).
+    show_colorbar : bool, optional
+        Draw the concentration colorbar. Default True.
     """
     from uacpy.data.seaice_local import sea_ice_pixel
     if hemi not in _SEA_ICE_HEMISPHERES:
@@ -655,8 +695,9 @@ def plot_sea_ice_map(grid, *, hemi: str = 'N', transect=None, source=None,
     fraction, pad = 0.15, 0.05
     drawn_h = min(slot.height, slot.width * (1.0 - fraction - pad)
                   * abs(y1 - y0) / abs(x1 - x0))
-    fig.colorbar(im, ax=ax, label=concentration_label, fraction=fraction,
-                 pad=pad, shrink=drawn_h / slot.height)
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label=concentration_label, fraction=fraction,
+                     pad=pad, shrink=drawn_h / slot.height)
     ax.set_title(_title_or(title, "Sea-ice concentration"), fontsize='large',
                  fontweight='bold')
     ax.set_xticks([])

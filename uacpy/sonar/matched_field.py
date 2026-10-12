@@ -34,7 +34,7 @@ Field. They differ from the array functions' defaults in two stated ways:
 
 * normalisation: Bartlett here is ``normalize='trace'`` (a perfect match to
   a rank-one CSDM scores 1) and MVDR ``normalize='max'``; the array
-  functions default to ``'none'``;
+  functions default to ``None`` (the power in the covariance's units);
 * MVDR loading: ``diagonal_loading=0.01`` here, ``1e-06`` there.
 
 The loading defaults differ on purpose and are **not** aligned: a replica bank
@@ -193,42 +193,6 @@ def replica_bank(
                     model=getattr(modes, 'model', ''))
 
 
-def _slab_pressure(slab, array_depths) -> np.ndarray:
-    """Complex pressure of a single ``{depth, range}`` Field as ``(N, R)``.
-
-    ``depth`` is the array (receiver) axis. Optionally verifies the depth axis
-    against ``array_depths``.
-    """
-    # Matched-field processing correlates phase, so the requirement is on the
-    # dtype axis, not the quantity: a real TL slab is the same ``kind`` and
-    # would pass a kind check having already thrown its phase away.
-    if getattr(slab, "kind", None) != "pressure" or not slab.is_complex:
-        raise ConfigurationError(
-            "replica_bank_from_field: slab must be complex narrowband pressure "
-            f"(kind='pressure', complex dtype); got "
-            f"kind={getattr(slab, 'kind', None)!r}, unit={slab.unit!r}, "
-            f"dtype={slab.data.dtype}."
-        )
-    coords = list(slab.coords)
-    if coords != ["depth", "range"]:
-        raise ConfigurationError(
-            "replica_bank_from_field: each slab needs canonical "
-            f"['depth', 'range'] coords (depth = array elements); got {coords}."
-        )
-    if array_depths is not None:
-        want = np.atleast_1d(np.asarray(array_depths, dtype=float))
-        got = slab.coords["depth"]
-        if got.shape != want.shape or not np.allclose(got, want):
-            raise ConfigurationError(
-                "replica_bank_from_field: slab 'depth' axis does not match "
-                "array_depths — resample receivers to the element depths first "
-                "(field.eval / field.resample_to). Got a slab 'depth' axis of "
-                f"shape {got.shape} against array_depths of shape "
-                f"{want.shape}."
-            )
-    return np.asarray(slab.p, dtype=np.complex128)
-
-
 def replica_bank_from_field(field, *, array_depths=None):
     """MFP replica bank from a coherent ``Field`` produced by *any* model.
 
@@ -241,15 +205,13 @@ def replica_bank_from_field(field, *, array_depths=None):
     the **receivers at the array element depths** and the **source swept over the
     candidate grid**, then feed the result here.
 
-    Accepts either (duck-typed, like :func:`replica_bank`'s ``modes``):
-
-    * a single coherent pressure :class:`~uacpy.core.results.Field` whose axes
-      are a subset of ``{source_depth, depth, range}`` (``depth`` = array). A
-      ``{depth, range}`` field gives a range-only bank at one source depth; a
-      ``{source_depth, depth, range}`` field gives the full depth-range grid.
-    * a :class:`~uacpy.core.results.ResultStack` of ``{depth, range}`` pressure
-      fields over ``source_depth`` — what a multi-source model run returns; the
-      stack axis becomes the candidate-depth axis.
+    Accepts a coherent pressure :class:`~uacpy.core.results.Field` whose axes
+    are a subset of ``{source_depth, depth, range}`` (``depth`` = array). A
+    ``{depth, range}`` field gives a range-only bank at one source depth; a
+    ``{source_depth, depth, range}`` field — what a run over a multi-depth
+    ``Source`` returns — gives the full depth-range grid, its source-depth
+    axis the candidate-depth axis. The bank is built from each source's
+    unit-amplitude field, whatever weights the ``Source`` carried.
 
     The ``depth`` (receiver) axis becomes the element axis, last; every
     remaining axis is a candidate-grid axis kept in canonical order, named
@@ -273,7 +235,7 @@ def replica_bank_from_field(field, *, array_depths=None):
 
     Parameters
     ----------
-    field : Field or ResultStack
+    field : Field
         Coherent narrowband pressure (see above). Slice to one frequency first
         (``field.at(frequency=…)``) — MFP is single-frequency.
     array_depths : array_like, optional
@@ -289,44 +251,14 @@ def replica_bank_from_field(field, *, array_depths=None):
         element axis last, and ``receiver_positions`` the vertical array
         at the field's ``depth`` axis.
     """
-    from uacpy.core.results import Replicas
-    # ResultStack over source_depth → stack slab pressures into a new
-    # candidate-depth axis, giving (1, n_cand_depths, n_ranges, N).
-    if hasattr(field, "slabs") and hasattr(field, "coordinate_name"):
-        if field.coordinate_name != "source_depth":
-            raise ConfigurationError(
-                "replica_bank_from_field: a ResultStack must stack over "
-                "'source_depth' (the candidate-depth axis); got "
-                f"{field.coordinate_name!r}."
-            )
-        ref = field.slabs[0]
-        cols = []
-        for slab in field.slabs:
-            cols.append(_slab_pressure(slab, array_depths).T)
-            # Same (array, range) shape is necessary but not sufficient: two
-            # slabs sampled on *different* depth or range vectors of equal
-            # length would stack into a bank with an undefined candidate axis
-            # and silently mislocalize. Require identical axes across the stack.
-            if (not np.array_equal(slab.coords["depth"], ref.coords["depth"])
-                    or not np.array_equal(slab.coords["range"], ref.coords["range"])):
-                raise ConfigurationError(
-                    "replica_bank_from_field: every slab must share the same "
-                    "depth (array) and range (candidate) axes — the stack mixes "
-                    "different receiver geometries or range grids. Got slab "
-                    f"{len(cols) - 1} on a "
-                    f"{slab.coords['depth'].size}-depth x "
-                    f"{slab.coords['range'].size}-range grid against slab 0 "
-                    f"on {ref.coords['depth'].size} x "
-                    f"{ref.coords['range'].size}."
-                )
-        return Replicas(
-            replicas=np.stack(cols, axis=0)[None],
-            candidates={'depth': field.coordinate,
-                        'range': ref.coords['range']},
-            receiver_positions=_vertical_array(ref.coords['depth']),
-            frequencies=ref.frequencies, model=ref.model)
-
-    # Single Field.
+    from uacpy.core.results import Field, Replicas
+    if not isinstance(field, Field):
+        raise ConfigurationError(
+            f"replica_bank_from_field: takes a coherent pressure Field; got "
+            f"a {type(field).__name__}.",
+            remediation="Pass the Field a COHERENT_TL run returns: a run "
+                        "over a multi-depth Source returns one Field with a "
+                        "source_depth axis, which this takes whole.")
     if getattr(field, "kind", None) != "pressure" or not field.is_complex:
         raise ConfigurationError(
             "replica_bank_from_field: needs complex narrowband pressure "
@@ -361,7 +293,9 @@ def replica_bank_from_field(field, *, array_depths=None):
                 f"{want.shape}."
             )
     sensor_pos = coords.index("depth")
-    bank = np.moveaxis(np.asarray(field.p, dtype=np.complex128),
+    # ``data``, not ``p``: the bank is each source's unit-amplitude field,
+    # so the Source weights a multi-depth run records are not applied.
+    bank = np.moveaxis(np.asarray(field.data, dtype=np.complex128),
                        sensor_pos, -1)
     candidates = {('depth' if name == 'source_depth' else name):
                   field.coords[name] for name in coords if name != 'depth'}

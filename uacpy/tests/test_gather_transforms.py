@@ -936,3 +936,32 @@ def test_a_gather_shaped_like_space_by_time_warns(name, shape, warns):
     msgs = warning_messages(lambda: fn(data, 1000.0, 1.0, *extra),
                             'looks like a (traces, time) array')
     assert len(msgs) == (1 if warns else 0)
+
+
+class TestTheGatherTransformsShareTheirGuards:
+    """The linear Radon transform is the slant stack ``taup_transform``
+    computes, so it warns about slowness aliasing on the same bound; and
+    ``fk_transform`` refuses a NaN that would fill its whole panel."""
+
+    FS, DX, NT, NXX = 2000.0, 2.0, 1024, 24
+
+    def _tone(self, f, p0=4e-4):
+        t = np.arange(self.NT) / self.FS
+        x = np.arange(self.NXX) * self.DX
+        return np.cos(2 * np.pi * f * (t[:, None] - p0 * x[None, :]))
+
+    @pytest.mark.parametrize('f, aliased', [(900.0, True), (200.0, False)])
+    def test_a_linear_radon_scan_warns_where_taup_does(self, f, aliased):
+        moveout = np.linspace(-1e-3, 1e-3, 41)
+        with recorded_warnings() as caught:
+            radon_transform(self._tone(f), self.FS, self.DX, moveout)
+        radon = [str(w.message) for w in caught
+                 if 'aliases beyond' in str(w.message)]
+        assert bool(radon) is aliased
+        assert all(m.startswith('radon_transform:') for m in radon)
+
+    def test_a_nan_sample_is_refused_by_fk_transform(self):
+        d = self._tone(200.0)
+        d[10, 3] = np.nan
+        with pytest.raises(ConfigurationError, match='fk_transform: .*NaN'):
+            fk_transform(d, self.FS, self.DX)

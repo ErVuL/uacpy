@@ -20,7 +20,7 @@ from uacpy.data import _http
 from uacpy.tests._cache_builders import _write_gebco, _write_sediment, _write_woa
 
 
-def _write_glodap(cache):
+def _write_glodap(cache, *, ph_var='pHtsinsitutp'):
     """Synthetic GLODAP pH grid on the mapped product's 20.5°→379.5° lon axis.
 
     One populated column at (30.5, -40.5) with a NaN-masked deepest level (a
@@ -44,7 +44,7 @@ def _write_glodap(cache):
     ds.createVariable('Depth', 'f8', ('depth',))[:] = depth
     ds.createVariable('lat', 'f8', ('lat',))[:] = lat
     ds.createVariable('lon', 'f8', ('lon',))[:] = lon
-    ds.createVariable('pHtsinsitutp', 'f4', ('depth', 'lat', 'lon'))[:] = ph
+    ds.createVariable(ph_var, 'f4', ('depth', 'lat', 'lon'))[:] = ph
     ds.close()
 
 
@@ -107,6 +107,18 @@ def test_ph_reference_depth_picks_the_nearest_level(glodap_cache):
                                  reference_depth=500.0) == pytest.approx(8.05)
 
 
+def test_a_file_holding_only_ph_at_25_degrees_is_an_unreadable_cache(
+        tmp_path, monkeypatch):
+    """``pHts25p0`` is pH at 25 °C and 0 dbar, not the in-situ pH the reader
+    serves, so a file holding only it is refused as unreadable."""
+    root = tmp_path / 'ph25_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    _write_glodap(root, ph_var='pHts25p0')
+    with pytest.raises(_cache.UnreadableCacheError, match='missing an expected'):
+        glodap_local.fetch_ph_profile((31.5, -40.5))
+
+
 def test_ph_land_raises(glodap_cache):
     with pytest.raises(DataFetchError, match='land or unmapped'):
         glodap_local.fetch_ph_profile((0.0, 0.0))
@@ -122,16 +134,17 @@ def test_ph_missing_cache_names_install_flag(tmp_path, monkeypatch):
 # ── absorption integration ────────────────────────────────────────────────────
 
 def test_with_absorption_uses_glodap_ph(full_cache):
-    # A cached GLODAP grid replaces the default pH with its column, as
-    # (depth, pH) pairs on its own levels (0 m 8.10, 500 m 8.05 here, the
-    # column trimmed at the seafloor), on the total scale, and stamps
-    # 'glodap' provenance.
+    # A cached GLODAP grid replaces the default pH with its column, (depth,
+    # pH) pairs on its own levels (0 m 8.10, 500 m 8.05 here, the column
+    # trimmed at the seafloor) that the law keeps as its profile record, on
+    # the total scale, and stamps 'glodap' provenance.
+    from uacpy.core._water import WaterProfile
     env = data.fetch_environment((30.5, -40.5), ssp_sources='local',
                                  bottom_sources='grainsize',
                                  with_absorption=True)
-    pairs = env.absorption.pH
-    assert pairs.shape[1] == 2 and pairs[0, 0] == 0.0
-    assert pairs[:2, 1] == pytest.approx([8.10, 8.05], abs=1e-6)
+    column = env.absorption.pH
+    assert isinstance(column, WaterProfile) and column.depths[0] == 0.0
+    assert column.values[:2] == pytest.approx([8.10, 8.05], abs=1e-6)
     assert env.absorption.ph_scale == 'total'
     assert 'glodap' in [s.source.id for s in env.data_sources]
 

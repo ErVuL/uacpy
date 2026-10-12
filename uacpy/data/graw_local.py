@@ -130,8 +130,8 @@ def fetch_seabed_density(point, *, max_distance_km=None):
     a non-finite cell raises ``DataFetchError``.
 
     The value is raw and carries no provenance;
-    :func:`fetch_bottom_graw` returns the carrier that records
-    it in ``.data_sources``.
+    :func:`uacpy.data.fetch_bottom` with ``source='graw'`` returns the
+    carrier that records it in ``.data_sources``.
 
     Parameters
     ----------

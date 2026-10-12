@@ -10,6 +10,8 @@ close those too.
 """
 
 import warnings
+from decimal import Decimal
+from fractions import Fraction
 
 import numpy as np
 from uacpy.core.units import ms_to_knots
@@ -142,12 +144,17 @@ class TestReverberation:
         assert tot[0] == pytest.approx(4000.0 + 10.0 * np.log10(2.0))
 
     def test_bottom_scattering_is_an_attribute_but_not_listed(self):
-        """``apl_uw_bottom_backscatter``'s docstring names
-        ``bottom_scattering.TABLE_WATER_SOUND_SPEED``; the submodule is
-        reachable as ``sonar.bottom_scattering`` as written, while
+        """The submodule is reachable as ``sonar.bottom_scattering``, while
         ``__all__`` lists functions, classes and constants only."""
         assert 'bottom_scattering' not in sonar.__all__
         assert sonar.bottom_scattering.TABLE_WATER_SOUND_SPEED > 0
+
+    def test_the_table_water_speed_is_exported_beside_the_sediments(self):
+        """``apl_uw_bottom_backscatter``'s docstring tells the caller to pass
+        ``TABLE_WATER_SOUND_SPEED`` to reproduce TR 9407's Table 3, so the
+        package exports it beside ``APL_UW_SEDIMENTS``."""
+        assert 'TABLE_WATER_SOUND_SPEED' in sonar.__all__
+        assert sonar.TABLE_WATER_SOUND_SPEED == 1528.0
 
     def test_bad_pulse_raises(self):
         with pytest.raises(
@@ -411,7 +418,7 @@ class TestDetection:
 
     def test_the_default_threshold_is_the_exact_one_at_the_guide_anchors(self):
         """The guide's DT_PASSIVE / DT_ACTIVE at (0.5, 1e-4) and w*t = 500 /
-        50: 10*log10(S), S = Ginv(1-Pf; M)/Ginv(1-Pd; M) - 1 (Abraham 2.76),
+        50: 10*log10(S), S = Ginv(1-Pf; M)/Ginv(1-Pd; M) - 1 (Abraham 2.81),
         -7.5519 and -2.0482 dB, 0.24 and 0.74 dB above the large-M form."""
         from scipy.stats import gamma
         for (bw, t, m, want) in ((50.0, 10.0, 500.0, -7.5519),
@@ -766,7 +773,7 @@ class TestSignalExcessField:
 
     def test_a_field_stamped_incoherent_is_silent_whatever_its_run_mode(
             self):
-        # An incoherent superpose of COHERENT_TL slabs is an intensity sum
+        # An incoherent superpose of COHERENT_TL fields is an intensity sum
         # that inherits run_mode='coherent_tl' and stamps coherent=False.
         field, _ = self._tl_field()
         summed = type(field)(data=field.data, coords=dict(field.coords),
@@ -804,6 +811,59 @@ class TestSignalExcessField:
         fig, _ = plot_detection_probability(
             sonar.transition_probability_field(se, sigma_dB=5.6))
         plt.close(fig)
+
+
+class TestASignalExcessMapCarriesTheLevelItWasComputedAt:
+    """One source level per map: the budget's. ``source_level_dB=None``
+    takes the TL field's own, and a budget with no finite level to apply is
+    refused rather than returned as a NaN map."""
+
+    @staticmethod
+    def _tl_field(source_level_dB):
+        field, tl = TestSignalExcessField._tl_field()
+        return field.replace(source_level_dB=source_level_dB), tl
+
+    @pytest.mark.parametrize('evaluate', [
+        lambda f, **kw: sonar.passive_signal_excess_field(
+            f, noise_level_dB=60.0, detection_threshold_dB=0.0, **kw),
+        lambda f, **kw: sonar.active_signal_excess_field(
+            f, target_strength_dB=10.0, noise_level_dB=60.0,
+            detection_threshold_dB=0.0, **kw),
+    ], ids=['passive', 'active'])
+    def test_the_map_records_the_budgets_level(self, evaluate):
+        field, _ = self._tl_field(150.0)
+        se = evaluate(field, source_level_dB=170.0)
+        assert se.source_level_dB == 170.0
+        assert se.sonar_budget['source_level_dB'] == 170.0
+        pd = sonar.transition_probability_field(se, sigma_dB=5.0)
+        assert pd.source_level_dB == 170.0
+
+    def test_no_level_given_takes_the_fields_own(self):
+        field, tl = self._tl_field(150.0)
+        se = sonar.passive_signal_excess_field(
+            field, noise_level_dB=60.0, detection_threshold_dB=0.0)
+        np.testing.assert_allclose(se.data, 150.0 - tl - 60.0)
+        assert se.source_level_dB == 150.0
+
+    def test_no_level_anywhere_is_refused(self):
+        field, _ = self._tl_field(None)
+        for given in ({}, {'source_level_dB': None}):
+            with pytest.raises(ConfigurationError,
+                               match='tl_field carries none'):
+                sonar.passive_signal_excess_field(
+                    field, noise_level_dB=60.0, detection_threshold_dB=0.0,
+                    **given)
+
+    @pytest.mark.parametrize('term', ['source_level_dB', 'noise_level_dB',
+                                      'detection_threshold_dB'])
+    def test_a_term_that_is_not_finite_is_refused(self, term):
+        field, _ = self._tl_field(150.0)
+        terms = dict(source_level_dB=150.0, noise_level_dB=60.0,
+                     detection_threshold_dB=0.0)
+        terms[term] = float('nan')
+        with pytest.raises(ConfigurationError,
+                           match=f'{term} must be a finite dB level'):
+            sonar.passive_signal_excess_field(field, **terms)
 
 
 class TestBudgetKnobs:
@@ -1332,8 +1392,9 @@ class TestDetectionThresholdReference:
 
 
 class TestDetectionThresholdLargeMEnvelope:
-    """``DT = 5*log10(d/M)`` is Abraham eq. (2.77), the large-``M`` limit of
-    (2.76), and it is optimistic at every operating point.
+    """``DT = 5*log10(d/M)`` is Abraham eq. (2.77), the central-limit
+    approximation (2.76) without its ``1/sqrt(M)`` term, and it is optimistic
+    at every operating point against the exact threshold (2.81).
 
     The exact noise-normalised energy detector has ``T ~ Gamma(M, 1)`` under
     ``H0`` and ``(1+S)*Gamma(M, 1)`` under ``H1``, so the required per-cell
@@ -1935,7 +1996,7 @@ class TestCsdmAndSampleCovarianceShareOneCore:
     ``(d dH)/L`` average, so they accept and refuse the same snapshots.
 
     A NaN snapshot is realistic: every engine NaNs the ``r <= 0`` columns of a
-    point-source field and Bellhop NaNs shadow-zone cells, so snapshots
+    point-source field and the below-seafloor cells it does not model, so snapshots
     assembled from modelled pressure carry them. One NaN makes every entry of
     ``K`` NaN, and ``bartlett`` scores an all-NaN ambiguity surface without
     raising anything at all.
@@ -2121,7 +2182,8 @@ class TestSonarPositivityGuardsRefuseNaN:
         converted to Python scalars". The sibling guard in ``acoustic_signal``
         already typed this case; both now say which argument."""
         with pytest.raises(ConfigurationError,
-                           match="radius_m must be a scalar number"):
+                           match="radius_m must be a (scalar number|number, "
+                                 "not text)"):
             ts.ts_sphere(bad)
 
     def test_probability_of_detection_nan_pf_raises(self):
@@ -2171,6 +2233,11 @@ class TestThePositiveScalarGuardsAgreeAcrossLayers:
         ('numpy int', np.int64(1)),
         ('0-d array', np.array(1.0)), ('0-d array zero', np.array(0.0)),
         ('True', True), ('False', False),
+        ('0-d bool array', np.array(True)),
+        ('0-d complex array', np.array(1.0 + 1.0j)),
+        ('numpy complex', np.complex128(1.0 + 1.0j)),
+        ('numpy complex, no imaginary part', np.complex128(1.0 + 0.0j)),
+        ('fraction', Fraction(3, 2)), ('decimal', Decimal('1.5')),
         ('numeric string', '1.0'), ('non-numeric string', 'abc'),
         ('None', None), ('object', object()),
     ]
@@ -2198,48 +2265,32 @@ class TestThePositiveScalarGuardsAgreeAcrossLayers:
                 verdicts[name] = 'reject'
         assert len(set(verdicts.values())) == 1, verdicts
 
-    @pytest.mark.parametrize('value', [0, -1.0, NAN, INF, -INF, None],
+    @pytest.mark.parametrize('value', [0, -1.0, NAN, INF, -INF, None,
+                                       np.array(True), np.array(1.0 + 1.0j),
+                                       np.complex128(1.0 + 1.0j)],
                              ids=['zero', 'negative', 'nan', 'inf', '-inf',
-                                  'None'])
+                                  'None', '0-d bool array',
+                                  '0-d complex array', 'numpy complex'])
     def test_a_numeric_rejection_is_typed_in_all_three(self, value):
         """Agreeing on the verdict is not enough if one layer answers with an
         untyped exception: a caller writing ``except ConfigurationError``
-        around a uacpy call would catch two of the three.
-
-        ``None`` belongs here rather than with the non-numeric arguments
-        below, and only measurement says so: ``np.asarray(None, dtype=float)``
-        is ``array(nan)``, so the carrier guard refuses it as a NaN and types
-        it like any other number."""
+        around a uacpy call would catch two of the three."""
         for name, guard in self._guards().items():
             with pytest.raises(ConfigurationError, match='x must be'):
                 guard(value)
 
-    @pytest.mark.parametrize('value', ['abc', object()],
-                             ids=['str', 'object'])
-    def test_a_non_numeric_argument_is_typed_by_the_two_scalar_guards(
-            self, value):
-        """All three *reject* a non-numeric argument — the verdict agrees —
-        but only the two scalar guards name it. ``sonar``'s used to leak the
-        raw ``TypeError`` / ``ValueError`` that ``float()`` raises, and now
-        wraps it as its sibling always did.
-
-        The carrier guard deliberately still lets its conversion's own error
-        through, and is excluded here rather than silently expected to change:
-        it converts with ``np.asarray(..., dtype=float)``, where a failure is a
-        dtype or ragged-shape problem rather than this guard's positivity
-        verdict, and a carrier test already pins the ``ValueError`` a
-        non-numeric ``SedimentLayer`` field raises. Making it typed is a
-        deliberate breaking change, not a tidy-up, so it is recorded here and
-        left."""
-        from uacpy.core._validate import require_positive as carrier
-        for name in ('acoustic_signal', 'sonar'):
+    @pytest.mark.parametrize('value, what', [
+        ('1.0', 'a number, not text'), (b'1.0', 'a number, not text'),
+        ('abc', 'a number, not text'), (object(), 'a scalar number')],
+        ids=['numeric string', 'bytes', 'str', 'object'])
+    def test_a_non_numeric_argument_is_typed_by_all_three(self, value, what):
+        """All three read a scalar by the package's one rule
+        (``require_real_scalar``) and name what it is not: text, numeric or
+        not, is no number — read as one it would be whatever it spells."""
+        for name, guard in self._guards().items():
             with pytest.raises(ConfigurationError,
-                               match='x must be a scalar number'):
-                self._guards()[name](value)
-        with pytest.raises(
-                (TypeError, ValueError),
-                match=r'float\(\) argument must be|could not convert string to float'):
-            carrier(value, 'x')
+                               match=f'x must be {what}'):
+                guard(value)
 
     def test_the_scalar_guards_return_the_value_as_a_float(self):
         """The two scalar guards are used as ``x = guard(x)``; the carrier one
@@ -3282,51 +3333,32 @@ class TestRayleighRoughnessParameter:
         with pytest.raises(ConfigurationError, match='cannot be negative'):
             rayleigh_parameter(250.0, -0.5, 10.0)
 
-    def test_warning_fires_only_past_the_limit_and_names_the_angle(self):
-        from uacpy.sonar.scattering import warn_if_roughness_is_not_perturbative
-        with recorded_warnings() as w:
-            warn_if_roughness_is_not_perturbative('T', 250.0, 0.05)
-        assert not [x for x in w if 'Rayleigh' in str(x.message)]
+    def test_the_notice_comes_only_past_the_limit_and_names_the_angle(self):
+        from uacpy.sonar.scattering import non_perturbative_roughness_notice
+        assert non_perturbative_roughness_notice('T', 250.0, 0.05) is None
+        notice = non_perturbative_roughness_notice('T', 250.0, 0.5)
+        assert 'Rayleigh' in notice and '72.7 deg' in notice
 
-        with recorded_warnings() as w:
-            warn_if_roughness_is_not_perturbative('T', 250.0, 0.5)
-        hit = [x for x in w if 'Rayleigh' in str(x.message)]
-        assert len(hit) == 1
-        assert '72.7 deg' in str(hit[0].message)
-
-    def test_warning_uses_the_requested_angles_when_given(self):
-        from uacpy.sonar.scattering import warn_if_roughness_is_not_perturbative
-        # Shallow grazing on the same interface stays inside the theory even
-        # though normal incidence would not.
-        with recorded_warnings() as w:
-            warn_if_roughness_is_not_perturbative(
-                'T', 250.0, 0.5, grazing_deg=[5.0, 10.0, 20.0])
-        assert not [x for x in w if 'Rayleigh' in str(x.message)]
-
-        with recorded_warnings() as w:
-            warn_if_roughness_is_not_perturbative(
-                'T', 250.0, 0.5, grazing_deg=[5.0, 85.0])
-        assert len([x for x in w if 'Rayleigh' in str(x.message)]) == 1
+    def test_the_notice_uses_the_requested_angles_when_given(self):
+        """Shallow grazing on the same interface stays inside the theory even
+        though normal incidence would not."""
+        from uacpy.sonar.scattering import non_perturbative_roughness_notice
+        assert non_perturbative_roughness_notice(
+            'T', 250.0, 0.5, grazing_deg=[5.0, 10.0, 20.0]) is None
+        assert non_perturbative_roughness_notice(
+            'T', 250.0, 0.5, grazing_deg=[5.0, 85.0]) is not None
 
     @pytest.mark.parametrize('rms, grazing', [
         (0.05, None), (0.5, None), (0.5, [5.0, 10.0, 20.0]),
         (0.5, [5.0, 85.0])])
-    def test_the_notice_is_the_text_the_warning_says(self, rms, grazing):
-        """``non_perturbative_roughness_notice`` (what a stage-3 resolver
-        records) is the warning's text past the limit and ``None`` inside
-        it, and says nothing itself."""
-        from uacpy.sonar.scattering import (
-            non_perturbative_roughness_notice,
-            warn_if_roughness_is_not_perturbative)
+    def test_the_notice_says_nothing_itself(self, rms, grazing):
+        """``non_perturbative_roughness_notice`` returns the text a stage-3
+        resolver records and warns nothing."""
+        from uacpy.sonar.scattering import non_perturbative_roughness_notice
         with recorded_warnings() as w:
             notice = non_perturbative_roughness_notice(
                 'T', 250.0, rms, grazing_deg=grazing)
         assert w == []
-        with recorded_warnings() as w:
-            warn_if_roughness_is_not_perturbative(
-                'T', 250.0, rms, grazing_deg=grazing)
-        assert [str(x.message) for x in w] == (
-            [] if notice is None else [notice])
         assert (notice is None) == (rms == 0.05 or grazing == [5.0, 10.0,
                                                                20.0])
 

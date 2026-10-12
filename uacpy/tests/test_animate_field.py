@@ -408,3 +408,82 @@ def test_the_snapshot_grid_draws_into_a_given_figure():
         assert fig is parent and axes.shape == (1, 2)
     finally:
         plt.close(parent)
+
+
+def test_both_time_doors_default_to_the_shared_signed_colormap():
+    """A still frame, the animation and the snapshot grid draw signed
+    pressure on one map, ``style.LINEAR_VIEW_COLORMAP``."""
+    import matplotlib.pyplot as plt
+    from uacpy.visualization.plots import animate_field, plot_time_snapshots
+    from uacpy.visualization.style import LINEAR_VIEW_COLORMAP
+
+    def colormaps(ax):
+        return {artist.get_cmap().name for artist in ax.get_children()
+                if getattr(artist, 'get_cmap', None) is not None
+                and getattr(artist, 'get_array', lambda: None)() is not None}
+
+    field = _make_synthetic_field(n_t=20)
+    ani = animate_field(field)
+    assert colormaps(ani._fig.axes[0]) == {LINEAR_VIEW_COLORMAP}
+    fig, axes = plot_time_snapshots(field, [0.5, 1.0])
+    assert colormaps(axes[0, 0]) == {LINEAR_VIEW_COLORMAP}
+    plt.close('all')
+
+
+def test_animate_field_sizes_its_own_figure():
+    import matplotlib.pyplot as plt
+    from uacpy.visualization.plots import animate_field
+
+    ani = animate_field(_make_synthetic_field(n_t=20), figsize=(5.0, 3.0))
+    assert tuple(ani._fig.get_size_inches()) == (5.0, 3.0)
+    plt.close('all')
+
+
+@pytest.mark.parametrize('show_colorbar, n_bars', [(True, 2), (False, 0)])
+def test_the_snapshot_grid_can_leave_out_its_row_colorbars(show_colorbar,
+                                                           n_bars):
+    import matplotlib.pyplot as plt
+    from uacpy.visualization.plots import plot_time_snapshots
+
+    fig, axes = plot_time_snapshots(
+        {'a': _make_synthetic_field(n_t=20), 'b': _make_synthetic_field(n_t=20)},
+        [1.0], show_colorbar=show_colorbar)
+    # Each row's bar is inset beside its last panel.
+    assert sum(len(ax.child_axes) for ax in axes.ravel()) == n_bars
+    plt.close(fig)
+
+
+def test_snapshot_rows_of_a_multi_depth_field_are_captioned_with_their_unit():
+    import matplotlib.pyplot as plt
+    from uacpy.core.results import stack_fields
+    from uacpy.visualization.plots import plot_time_snapshots
+
+    field = stack_fields([_make_synthetic_field(n_t=20).replace(
+                              source_depths=[z]) for z in (20.0, 40.0)],
+                         [20.0, 40.0])
+    fig, axes = plot_time_snapshots(field, [1.0])
+    assert [row[0].get_ylabel().split('\n')[0] for row in axes] == [
+        'Source depth = 20 m', 'Source depth = 40 m']
+    plt.close(fig)
+
+
+def test_animating_a_multi_depth_field_names_one_source_or_the_sum():
+    """One (depth, range) frame cannot show a source_depth axis: the
+    refusal is typed and names the selection, the sum and the snapshot grid;
+    one plane animates."""
+    import matplotlib.pyplot as plt
+    from uacpy.core.results import stack_fields
+    from uacpy.visualization.plots import animate_field
+
+    field = stack_fields([_make_synthetic_field(n_t=20).replace(
+                              source_depths=[z]) for z in (20.0, 40.0)],
+                         [20.0, 40.0])
+    before = plt.get_fignums()
+    with pytest.raises(ConfigurationError,
+                       match=r"animate_field: .*not \['source_depth'\]") as err:
+        animate_field(field)
+    for remedy in ('at(source_depth=', 'superpose()', 'plot_time_snapshots'):
+        assert remedy in str(err.value)
+    assert plt.get_fignums() == before
+    ani = animate_field(field.at(source_depth=20.0))
+    plt.close(ani._fig)

@@ -10,7 +10,9 @@ from it takes each derived value as an explicit knob, so a later change of
 the rule that derives it cannot change the re-run. A value the run derived
 per launch — one per range segment or per frequency — is not one knob; the
 model keeps the recorded values and, when its first run re-derives them,
-warns naming each that differs.
+warns naming each that differs. The model also records which knobs it took
+from values the run derived (``_pinned_from_record``), so a rule that tells a
+caller's choice from a derived value reads the re-run as the recorded run.
 """
 
 import dataclasses
@@ -72,6 +74,7 @@ def model_from_run_settings(cls, run_settings):
                          f"takes: {', '.join(params)}."))
     fields = {f.name for f in dataclasses.fields(engine)}
     kwargs = {}
+    pinned = set()
     for name in params:
         if name not in engine.knobs:
             continue
@@ -87,6 +90,8 @@ def model_from_run_settings(cls, run_settings):
         elif (given is None and name in fields
               and name not in target._UNPINNED_FIELDS):
             kwargs[name] = value
+            if value is not None:
+                pinned.add(name)
         else:
             kwargs[name] = given
     per_launch = {}
@@ -96,10 +101,12 @@ def model_from_run_settings(cls, run_settings):
         plain = [_plain(v) for v in values]
         if plain and all(v == plain[0] for v in plain):
             kwargs[name] = values[0]
+            pinned.add(name)
         else:
             per_launch[name] = plain
     model = target(**kwargs)
     model._recorded_per_launch = per_launch
+    model._pinned_from_record = frozenset(pinned)
     return model
 
 

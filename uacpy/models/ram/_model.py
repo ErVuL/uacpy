@@ -8,13 +8,17 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Dict, NamedTuple, Optional, Union
 from uacpy.models.base import (
-    DEFAULT_RUN_TIMEOUT_S, PropagationModel, StageInputs,
+    DEFAULT_RUN_TIMEOUT_S, PropagationModel, StageInputs, _host_options,
 )
-from uacpy.models._launch import Launch, openmp_thread_env
+from uacpy.models._launch import (
+    BinarySearch, Launch, openmp_thread_env, require_output, run_launch,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._band import BandResolution, broadband_band
 from uacpy.models._notices import give_notice
-from uacpy.models._knobs import positive_finite, whole_count
+from uacpy.models._knobs import (
+    is_real_number, is_whole_number, positive_finite, whole_count,
+)
 from uacpy.models._spec import EngineTraits, ModelSpec
 from uacpy.core.run_settings import OutputSpec, RunMode
 from uacpy.core.environment import (
@@ -28,6 +32,9 @@ from uacpy.core.exceptions import (
 )
 from uacpy.io.mpirams_reader import read_psif
 from uacpy.models.ram._settings import RamKnobs, RamSettings
+from uacpy.models.ram._band import (
+    sweep_on_the_pins, warn_if_band_pins_unused_on_tl,
+)
 from uacpy.models.ram._domain import (
     collapse_surface_to_pressure_release,
     launch_grid,
@@ -35,6 +42,9 @@ from uacpy.models.ram._domain import (
     water_alpha_band,
 )
 from uacpy.models.ram.grid import (
+    warn_if_pinned_accuracy_is_unused,
+    warn_if_pinned_angle_max_is_below_the_slope,
+    warn_if_pinned_rams_dr_factor_is_unused,
     warn_if_pinned_dz_misplaces_the_seafloor,
     warn_if_ramsurf_surface_unresolved,
     warn_if_receivers_see_paths_steeper_than_the_band,
@@ -57,12 +67,13 @@ from uacpy.models.ram.collins import (
     assemble_collins_band_field,
     assemble_collins_tl_field,
     collins_deck_base,
-    raise_on_collins_stop,
+    raise_on_ram_stop,
     read_collins_output,
     resolve_collins_band,
     resolve_collins_tl,
     write_collins_deck,
 )
+from uacpy.models._extract import finish_broadband
 
 
 # Lytaev grid-accuracy target used when the caller does not pin one.
@@ -130,7 +141,7 @@ class RAM(PropagationModel):
     -----------
     - The lower boundary at ``zmax`` is an absorbing layer, not a rigid
       Neumann floor — true rigid bottoms are not supported.
-    - Collins backends (rams0.5, ramsurf1.5) are single-frequency at the
+    - Collins backends (rams0.5, ramsurf1.5, ramgeo1.5) are single-frequency at the
       Fortran level. uacpy's local patch dumps the complex envelope (see
       ``third_party/MODIFICATIONS.md``); the wrapper drives the binary
       in a Python-side frequency loop to produce ``BROADBAND`` /
@@ -169,11 +180,14 @@ class RAM(PropagationModel):
 
     - ``dr=None`` / ``dz=None`` → Lytaev (2023) Padé-error optimizer
       picks the coarsest grid that meets ``accuracy``.
-    - ``zmax=None`` → ``_domain.compute_zmax`` (water + absorbing layer).
+    - ``zmax=None`` → ``_domain.compute_zmax`` (water, sediment stack, a
+      pad of real seabed and the absorbing layer).
     - ``c0=None`` → Lytaev Eq. (15) from speed spectrum.
     - ``q_factor`` / ``record_duration`` → narrowband ``(1e6, 1.0)`` for
-      ``COHERENT_TL``, pinned or not; on ``BROADBAND`` / ``TIME_SERIES``
-      resolved from the source (their entries in ``__init__``).
+      ``COHERENT_TL``, which marches the source frequency alone (a pinned
+      value is not used there, and the run says so); on ``BROADBAND`` /
+      ``TIME_SERIES`` resolved from the source (their entries in
+      ``__init__``).
     - Backend (mpiramS / ramgeo / rams0.5 / ramsurf1.5) picked by
       :meth:`select_backend` from ``env`` shape.
 
@@ -207,6 +221,17 @@ class RAM(PropagationModel):
 
     provenance_id = 'collins_ram'
 
+    #: The binary of each backend. ram1.5 (Collins fluid PE) is not built:
+    #: mpiramS runs fluid + flat (broadband and range-dependent bottom).
+    #: ramgeo lives in its own vendor dir; rams0.5 and ramsurf1.5 share the
+    #: ramsurf/ tree.
+    _BINARIES = MappingProxyType({
+        'mpirams': BinarySearch(('s_mpiram',), ('mpirams',), 'mpiramS'),
+        'ramgeo': BinarySearch(('ramgeo',), ('ramgeo',), 'ramgeo'),
+        'rams': BinarySearch(('rams0.5',), ('ramsurf',), 'ramsurf'),
+        'ramsurf': BinarySearch(('ramsurf1.5',), ('ramsurf',), 'ramsurf'),
+    })
+
     # Complex pressure in the travelling-wave convention for the TL and H(f)
     # modes (``models/ram/_pe_phase.py`` converts every backend's envelope); the
     # synthesised p(t) is real.
@@ -224,18 +249,24 @@ class RAM(PropagationModel):
             phase_reference=PhaseReference.TIME_DOMAIN_NATIVE.value),
     })
 
-    # The stability range defaults to the farthest receiver: the call's.
-    _UNPINNED_FIELDS = frozenset({'stability_range_m'})
+    # The stability range defaults to the farthest receiver: the call's. The
+    # (Q, T) sweep is derived from the call's frequencies, and a pinned pair
+    # replaces the call's band with the full sweep.
+    _UNPINNED_FIELDS = frozenset({'stability_range_m', 'q_factor',
+                                  'record_duration'})
 
     @classmethod
     def _per_launch_knob_values(cls, engine):
-        """``dr``, ``dz``, ``zmax`` and ``rams_rotation_angle`` (the Padé angle a
-        rams grid marched) over the frequencies marched."""
+        """``dr``, ``dz`` and ``zmax`` over the frequencies marched, and on
+        rams0.5 ``rams_rotation_angle`` (the Padé angle each grid marched;
+        the other backends' decks do not read it)."""
         grids = engine.grids
-        return {'dr': [grid.dr for grid in grids],
-                'dz': [grid.dz for grid in grids],
-                'zmax': [grid.zmax for grid in grids],
-                'rams_rotation_angle': [grid.theta for grid in grids]}
+        values = {'dr': [grid.dr for grid in grids],
+                  'dz': [grid.dz for grid in grids],
+                  'zmax': [grid.zmax for grid in grids]}
+        if engine.backend == 'rams':
+            values['rams_rotation_angle'] = [grid.theta for grid in grids]
+        return values
 
     def __init__(
         self,
@@ -244,8 +275,8 @@ class RAM(PropagationModel):
         dr: Optional[float] = None,
         dz: Optional[float] = None,
         zmax: Optional[float] = None,
-        n_pade: int = 6,
-        n_stability: int = 1,
+        n_pade: int = 8,
+        n_stability: Optional[int] = None,
         stability_range_m: Optional[float] = None,
         q_factor: Optional[float] = None,
         record_duration: Optional[float] = None,
@@ -253,26 +284,24 @@ class RAM(PropagationModel):
         earth_curvature: bool = False,
         absorber_width_wavelengths: float = 20.0,
         absorber_attenuation: float = 10.0,
-        n_sediment_points: int = 1000,
+        n_sediment_points: Optional[int] = None,
         c0: Optional[float] = None,
         timeout: float = DEFAULT_RUN_TIMEOUT_S,
         # ``dr`` / ``dz`` are picked by the Lytaev (2023) Padé-error
         # optimizer when not set explicitly. ``accuracy`` is the per-run
         # error budget; ``angle_max`` (degrees) bounds the PE spectrum.
         accuracy: Optional[float] = None,
-        angle_max: float = 30.0,
+        angle_max: Optional[float] = None,
         # Collins backends only — ignored when the dispatcher picks mpiramS.
         # `theta` is the Padé rotation angle (degrees, 0–90) used by RAMS
         # for elastic stability; defaults are tuned against Kraken on the
         # Pekeris-elastic problem. ``irot`` is the rotation flag (1 = on).
         rams_rotation_angle: Optional[Union[float, Callable[[float], float]]] = None,
         rams_rotation: bool = True,
-        # Multiplicative tightening of the Lytaev-optimised ``dr`` for
-        # the ``rams`` backend. Independent of the ``c_min/(5·f)`` λ cap
-        # also applied by ``grid.compute_grid_lytaev``; the tighter of the
-        # two wins. Default 5.0 is empirically validated; raise for very
-        # long-range or unusually noisy runs.
-        rams_dr_factor: float = 5.0,
+        # Divisor of the Lytaev-optimised ``dr`` for the ``rams`` backend,
+        # beside the ``c_min/(5·f)`` λ cap ``grid.tighten_rams_dr`` applies;
+        # the tighter of the two wins.
+        rams_dr_factor: Optional[float] = None,
         backend: Optional[str] = None,
         use_tmpfs: bool = False,
         verbose: Union[bool, str] = False,
@@ -296,14 +325,20 @@ class RAM(PropagationModel):
             (2023) Padé-error optimizer; see ``accuracy`` / ``angle_max``).
             On mpiramS this is the *longest* step the march takes: mpiramS
             lands exactly on each requested output range, so a leg shorter
-            than ``dr`` is marched in one step of that leg's length.
+            than ``dr`` is marched in one step of that leg's length. The
+            Collins codes take at most one profile section, bathymetry node
+            and altimetry node per step (``ramgeo1.5.f:348, :359``) and
+            the manual bounds ``dr`` by the smallest region (``ram.pdf``
+            p.8), so a pinned ``dr`` wider than a region of the environment
+            is refused (:func:`collins.regions_the_march_cannot_take`), and
+            uacpy's own intermediate SSP sections are thinned to fit it.
             **[all backends]**
         dz : float, optional
             Depth step in meters. Default: None (selected by the Lytaev
             optimizer, then snapped so the shallowest bathymetry point sits
             ``SEAFLOOR_CELL_OFFSET`` (a quarter) of a cell below a depth grid
             node on the fluid backends and on a node on rams, capped at
-            ``MAX_DEPTH_POINTS`` grid points, floored at c_min/(16·freq), and
+            ``MAX_DEPTH_POINTS`` grid points, floored at c_min/(15·freq), and
             capped at λ_s/14 on rams). A pinned ``dz`` is used as given; on the
             fluid backends (mpiramS, ramgeo, ramsurf) one that puts the
             shallowest seafloor more than ``SEAFLOOR_QUARTER_TOLERANCE`` of a
@@ -311,8 +346,8 @@ class RAM(PropagationModel):
             such as 1, 0.5 or 0.25 m do on a 100 m channel, or anywhere from
             mid-cell to the next node — warns and names the aligned value
             ``h/(n + SEAFLOOR_CELL_OFFSET)``, which the automatic grid would
-            use: measured 2-9x its rms error against Kraken at 0.25-0.5 of a
-            cell from it. On ramsurf the automatic ``dz`` also puts the
+            use (the placement and its tolerance are uacpy's guidance,
+            measured in docs/models/ram.md). On ramsurf the automatic ``dz`` also puts the
             depressed surface at ``r = 0`` on a depth node: ramsurf1.5 zeroes
             every row down to ``int(1 + zsrf/dz)``, so its pressure-release
             surface sits at ``floor(zsrf/dz)·dz``, up to one cell above the one
@@ -321,16 +356,37 @@ class RAM(PropagationModel):
             PE domain depth (m). None = auto (seafloor + absorbing layer).
             Default: None.
         n_pade : int, optional
-            Number of Pade coefficients (2-10). Default: 6. **[all backends]**
+            Number of Padé terms (2-10). Default: 8 — Collins' sample deck
+            (``np = 8``, ram.pdf p.12 Fig. 2;
+            ``third_party/mpiramS/doc/RAM.ORIG/ram.in``), the ``[7/8]``
+            order of every table in Lytaev (2023), and the Acoustics
+            Toolbox's RAM writer (``Matlab/Slicer/write_ram_in.m:82``,
+            ``np = 8``). Every binary finds the Padé roots with a Laguerre
+            iteration that stops when it does not converge
+            (``ramgeo1.5.f:767-771``, ``mpiramS/src/epade.f90:296-301``);
+            at order 8 that happened on a few small ``k0·dr`` steps a pinned
+            ``dr`` marched (36.5 Hz at 0.5 m and 75 Hz at 1 m on ramgeo, a
+            36.5 Hz bin at 2 m on mpiramS, where order 6 ran), and the run
+            raises naming the order and the step; two fewer terms ran every
+            such stop measured. **[all backends]**
         n_stability : int, optional
-            Number of stability terms. Default: 1 (use 0 for short ranges).
+            Number of stability terms, written as given (``0`` turns the
+            constraints off). Default ``None``: 1 — Collins' guide, "We
+            have found that ns = 1 or 2 is effective for most problems"
+            (ram.pdf p.3), and his sample deck's ``ns = 1``.
             **[mpiramS, ramgeo1.5, ramsurf1.5]** — rams0.5's row 5 carries
-            (rams_rotation, rams_rotation_angle) in these two slots instead.
+            (rams_rotation, rams_rotation_angle) in these two slots instead
+            and its ``epade`` call takes ``ns = 1`` itself
+            (``rams0.5.f:176``), so a pinned value there gives a notice.
         stability_range_m : float, optional
             Stability range in meters — the range past which the ``n_stability``
             terms are switched off. Default: max output range on mpiramS;
             on the Collins fluid codes ``None`` writes 0, which the binary
             then expands to ``2 × rmax`` (``if(rs.lt.dr) rs = 2.0*rmax``).
+            Either way the constraints act at every range, the RAM guide's
+            default: "When rs is set to 0, the stability constraints are used
+            for all ranges" (``ram.pdf`` p.7); on mpiramS ``rs = rmax`` makes
+            ``rsc = rmax − rs = 0`` (``mpiramS/src/ram.f90:68-69``).
             **[mpiramS, ramgeo1.5, ramsurf1.5]**
 
             The Collins codes test it against the absolute range
@@ -346,53 +402,57 @@ class RAM(PropagationModel):
             ``q_factor = 2/bandwidth_factor``. Default: ``None``, resolved by
             :func:`_band.resolve_broadband_grid` from what the source carries:
 
-            * a multi-frequency source — the array's own half-width,
-              ``fc / ((n//2 + ½)·Δf)``; a ``q_factor`` pinned without ``record_duration`` is then
-              ignored with a warning, since the array fixes the band;
+            * a multi-frequency source or ``run(frequencies=…)`` — the
+              array's own half-width, ``fc / ((n//2 + ½)·Δf)``; a pinned
+              ``q_factor`` there must give the same sweep around the
+              array's centre bin (the run refuses one that does not, the
+              two settings contradicting each other);
+            * a TIME_SERIES grid derived from the pulse — the grid's own
+              half-width, which a pinned ``q_factor`` replaces;
             * a single frequency with ``record_duration`` pinned —
               ``2/DEFAULT_BROADBAND_BANDWIDTH_FACTOR`` (4), the half-width of the
               default band every engine shares, ``fc·(1 ± 1/4)``;
             * a single-frequency Source on BROADBAND / TIME_SERIES with neither
               pinned — ``run()`` first expands it to the default band shared by
-              every engine (``DEFAULT_BROADBAND_N_FREQS`` bins over
+              every engine (``DEFAULT_BROADBAND_N_FREQUENCIES`` bins over
               ``fc·(1 ± DEFAULT_BROADBAND_BANDWIDTH_FACTOR/2)``), then derives
               ``q_factor`` from that array as above;
             * an explicit ``run(frequencies=[fc])``, and every COHERENT_TL
-              run whatever ``q_factor`` holds — ``1e6``, which collapses the band to one bin so mpiramS
+              run — ``1e6``, which collapses the band to one bin so mpiramS
               doesn't sweep ~500 frequencies per call: a band narrower than one
               bin (``fc/q_factor < 1/record_duration``) marches ``fc`` alone (``peramx.f90:362-370``,
               a UACPY patch; :func:`_band.broadband_frequencies` applies the same
-              rule to the Collins loop).
+              rule to the Collins loop). A COHERENT_TL run marches the source
+              frequency alone, so a pinned ``q_factor`` / ``record_duration``
+              is not used there and the run gives a notice naming it.
 
             Used by every backend's broadband mode to derive the frequency
             vector — mpiramS internally, Collins backends as the Python-side
             frequency-loop grid.
-            Default: ``None``, which resolves to the array's own half-width for
-            a multi-frequency source (a lone Source frequency is first expanded
-            to the default broadband band), to ``4.0`` — the default band's
-            half-width — for a single frequency with ``record_duration``
-            pinned, and to ``1e6`` (band collapsed to one bin — literally one
-            on mpiramS since the ``peramx.f90:370`` sub-bin patch) for an
-            explicit ``run(frequencies=[fc])`` and for every COHERENT_TL run,
-            pinned or not.
         record_duration : float, optional
             Time window width in seconds (broadband resolution df = 1/record_duration).
             Default: ``None``, resolved alongside ``q_factor`` above: ``1/Δf`` for a
-            multi-frequency source (a ``record_duration`` pinned without ``q_factor`` is then
-            ignored with a warning), for a single frequency with ``q_factor`` pinned
+            frequency array (a pinned ``record_duration`` there must equal
+            it — the run refuses one that does not) and for a pulse-derived
+            TIME_SERIES grid (which a pinned value replaces), for a single
+            frequency with ``q_factor`` pinned
             the default band's own bin spacing,
-            ``(DEFAULT_BROADBAND_N_FREQS - 1) / (fc·DEFAULT_BROADBAND_BANDWIDTH_FACTOR)``,
+            ``(DEFAULT_BROADBAND_N_FREQUENCIES - 1) / (fc·DEFAULT_BROADBAND_BANDWIDTH_FACTOR)``,
             and ``1.0`` for the collapsed single-bin band and every
             COHERENT_TL run.
         depth_decimation : int, optional
-            Output depth decimation factor. Default: 1 (no decimation).
+            Output depth decimation factor. Default: 1 (no decimation), as
+            Collins' sample deck (``ram.pdf`` p.12-13: "ndz depth decimation
+            factor for tl.grid (1=no decimation)").
             **[all backends]**
         earth_curvature : bool, optional
             Apply the flat-earth transformation (Earth-curvature correction of
             the water column's depths and speeds, the bathymetry, altimetry and
             source depth before the PE marches in range). Default: False —
             off by default so RAM models the flat Earth every other uacpy engine
-            models, and cross-model comparisons compare one ocean. Earth
+            models, and cross-model comparisons compare one ocean (uacpy
+            guidance; the vendored mpiramS sample deck also runs flat,
+            ``mpiramS/in.pe``: "0 ! flat earth transform"). Earth
             curvature is real physics: it matters beyond about 56 km and moves the
             first convergence zone about 1 % closer, in better agreement with
             measured data (Etter, *Underwater Acoustic Modeling and Simulation*,
@@ -407,7 +467,12 @@ class RAM(PropagationModel):
             the modelled sediment stack and a pad of real seabed), in
             wavelengths ``c0/f`` of the PE reference speed — at ``freq_min`` on
             the broadband paths, the longest wavelength in the band.
-            Default: 20.0. **[all backends]**
+            Default: 20.0, uacpy guidance, measured on lossless seabeds
+            (:func:`_domain.adequate_zmax`); far thicker than the RAM guide's
+            "the attenuation is increased over the lower few wavelengths of
+            the grid" (``ram.pdf`` p.7; about 3 wavelengths in Collins' sample
+            deck) or Jensen et al.'s H/3 (*Computational Ocean Acoustics*,
+            Sect. 6.5.3). **[all backends]**
         absorber_attenuation : float, optional
             Attenuation at the floor of the absorbing layer
             (dB/wavelength). The seabed keeps its own attenuation down to
@@ -415,17 +480,25 @@ class RAM(PropagationModel):
             pad of real seabed — and only the deepest
             ``absorber_width_wavelengths`` wavelengths are ramped
             linearly from it to this value at the domain floor.
-            Default: 10.0.
+            Default: 10.0, the floor of Collins' sample ramp ``900.0 0.5`` /
+            ``1000.0 10.0`` (``ram.pdf`` p.12, Fig. 2); upstream mpiramS used
+            5 (``third_party/MODIFICATIONS.md:2431-2432``).
         n_sediment_points : int, optional
-            Number of sediment-profile control points. Default: 1000, minimum 4.
-            **[mpiramS]** — ``profl`` lays them out as [sea surface, seafloor,
+            Number of sediment-profile control points (at least 4), written
+            to the deck as given. Default ``None``: enough points to hold
+            the interval below to one depth cell, ``ceil(sedlayer/dz) + 3``,
+            and at least :data:`mpirams.DEFAULT_N_SEDIMENT_POINTS` (1000,
+            uacpy guidance). **[mpiramS]** — ``profl`` lays them out as [sea surface, seafloor,
             ``n_sediment_points-3`` interior points spanning the seabed down to the top
             of the absorbing layer, domain floor] and interpolates linearly between
             them (``mpiramS/src/ram.f90:334-350``), so a material step is resolved
             to ``sedlayer/(n_sediment_points-3)`` where ``sedlayer`` is that span
             (:func:`_domain.absorber_span`). The default keeps that interval far
             below an acoustic wavelength for ordinary geometries: at 50 points a
-            200 m span resolves its steps only to 4.3 m. Collins backends ignore
+            200 m span resolves its steps only to 4.3 m (measured: on a 100 m
+            guide over a 60 m layer at 800 Hz, 1000 points moved the field
+            1.04 dB rms between zmax=700 m and 400 m, one point per depth
+            cell 0.16 dB). Collins backends ignore
             this — they consume the layered bottom as Collins-style ``(depth,
             value)`` breakpoints (see ``_seabed.piecewise_breakpoints``).
         c0 : float, optional
@@ -434,8 +507,10 @@ class RAM(PropagationModel):
             out as ``exp(ik₀x)``), **not** a physical input. ``None``
             (default) → uacpy resolves it via Lytaev Eq. (15), the c₀
             that centres the spectrum ``[ξ_min, ξ_max]`` around 0 to
-            minimise the Padé approximation error. All four backends
-            (mpiramS, ramgeo, rams, ramsurf) honour the resolved value.
+            minimise the Padé approximation error (Collins' own sample uses
+            1600 m/s "to obtain an accurate rational approximation for phase
+            speeds between 1500 and 1700 m/s", ``ram.pdf`` p.8). All four
+            backends (mpiramS, ramgeo, rams, ramsurf) honour the resolved value.
             Pass an explicit float to override.
         timeout : float, optional
             Subprocess timeout (s) for each binary launch, on every
@@ -444,63 +519,87 @@ class RAM(PropagationModel):
             Standard plumbing (see :class:`PropagationModel`).
         accuracy : float, optional
             Lytaev optimiser's per-run accuracy budget (max
-            ``|τ · n_steps|``). Default 1e-3. **Advisory, not binding**: the
-            depth step the optimiser returns is where a per-backend cost
-            floor (``λ_p/16``, :data:`LAMBDA_PER_DZ_FLOOR`) STARTS the depth
-            search — it sits above the optimiser's own ``dz`` for most
-            ordinary frequencies — and the search refines ``dz`` from there
-            only as far as the seabed's trapped modes require
-            (:data:`TRAPPED_MODE_SCORE_LIMIT`, within
-            :data:`MAX_DEPTH_POINTS`), not down to ``accuracy``. So a
-            tighter budget usually selects the same grid and is reported as
-            not met rather than delivered. Naming an ``accuracy`` explicitly
-            is what promotes that report from a log line to a warning. To
-            actually march a finer grid, pin ``dz`` — on the fluid backends
-            keeping the seafloor a quarter cell below a node,
-            ``h/dz = n + 1/4`` — and compare it with the grid the default
-            marches, which ``run_settings(...).engine.grids`` shows before
-            anything runs.
+            ``|τ · n_steps|``, the accumulated error bound of the steepest
+            scored component). Default ``None``: the default chooser
+            targets 1e-3 (uacpy guidance) and treats it as a target, not a
+            bound — it relaxes ``ε`` when no grid meets it, starts the depth
+            search at a cost floor (``λ_p/15``, :data:`LAMBDA_PER_DZ_FLOOR`)
+            that sits above the optimiser's own ``dz`` for most ordinary
+            frequencies, refines from there only as far as the seabed's
+            trapped modes require (:data:`TRAPPED_MODE_SCORE_LIMIT`), and
+            stops at :data:`MAX_DEPTH_POINTS` — each reported as a log line.
+            A pinned ``accuracy`` is met as given
+            (:func:`grid.grid_for_pinned_accuracy`): the coarsest grid on
+            the Lytaev ladders whose score stays under it, a pinned ``dr``
+            or ``dz`` held while the other is searched, with no relaxation,
+            floor or cap (a grid past :data:`MAX_DEPTH_POINTS` is marched
+            with a cost notice; a Collins depth grid past the binary's
+            ``mz`` is refused). The run refuses an ``accuracy`` no grid on
+            the ladders meets, and says so when ``dr`` and ``dz`` are both
+            pinned, which leaves ``accuracy`` nothing to choose.
         angle_max : float, optional
-            Source-side maximum propagation angle (degrees) bounding the
-            PE spectrum for the Lytaev optimiser and for Eq. (15)'s ``c₀``.
-            30° is the standard wide-angle PE assumption. Default 30. The
-            seabed term of Lytaev's ``θ_max = max(θ_max^src, θ_max^bottom)``
-            is measured from ``env.bathymetry``, so a slope steeper than this
-            widens the spectrum on its own (:func:`_domain.resolve_angle_max`).
+            Maximum propagation angle (degrees, within (0, 90)) bounding the
+            PE spectrum for the Lytaev optimiser and for Eq. (15)'s ``c₀``,
+            used as given. Default ``None``: Lytaev (2023) §5.5's
+            ``θ_max = max(θ_max^src, θ_max^bottom)`` with the source term
+            30° (:data:`_domain.DEFAULT_ANGLE_MAX_DEG`, the aperture of
+            Lytaev's §5.1 example)
+            and the seabed term the steepest slope of ``env.bathymetry``
+            (:func:`_domain.resolve_angle_max`); when no grid meets the
+            default accuracy target the default chooser may narrow it to
+            20° and then 15°, with a warning. A pinned value narrower than
+            the steepest slope gives a notice citing §5.5, and is never
+            narrowed.
         rams_rotation_angle : float or callable, optional
             Padé rotation angle in degrees for elastic stability (0 <= theta
             <= 90). ``None`` (default) takes :data:`RAMS_DEFAULT_THETA_DEG`
-            (45°, tuned against Kraken on the Pekeris-elastic scenario in
-            tests/test_cross_model_agreement.py) unless that angle's own growth
+            (45°, tuned at order 6 against Kraken on the Pekeris-elastic
+            scenario in tests/test_cross_model_agreement.py — at the default
+            order 8 that scenario's default grid reads 0.528 dB rms from
+            Kraken over 1-8 km, against 0.526 at 6; Milinazzo, Zala & Brooke
+            (1997) Fig. 11 find 45° in line with their reference from four
+            Padé terms up) unless that angle's own growth
             on the steepest propagating components outruns what the seabed leaks
             (``pe_grid.rams_growth_margin``) — then the widest angle on
             :data:`~uacpy.models.pe_grid.RAMS_THETA_LADDER_DEG` that is
-            stable is taken, per frequency, with a ``FallbackWarning`` naming it. A
-            float pins the angle for every frequency and is refused when it is
-            unstable; a callable ``theta_fn(freq_hz) -> float`` varies it across
-            a broadband run. **[rams0.5]**
+            stable is taken, per frequency, with a ``FallbackWarning`` naming it;
+            when no angle on the ladder is stable the run is refused. A
+            float pins the angle for every frequency and is marched as
+            given — an angle the rule finds unstable gives a
+            ``NumericsWarning`` naming the stable one; a callable
+            ``theta_fn(freq_hz) -> float`` varies it across a broadband
+            run. The run record holds a callable as its repr, so
+            :meth:`from_run_settings` refuses that record: rebuild the model
+            with the callable. **[rams0.5]**
         rams_rotation : bool, optional
-            Rotate the Padé branch cut (rams0.5's ``irot``). Default: True.
+            Rotate the Padé branch cut (rams0.5's ``irot``). Default: True,
+            uacpy guidance: no source prefers the rotated coefficients
+            (Milinazzo et al. 1997 take Collins' complex coefficients as
+            their reference); the 45° tuning and the rams stability rule
+            were measured with rotation on.
             **[rams0.5]**
         rams_dr_factor : float, optional
-            Tightening factor on the Lytaev-optimised ``dr`` for the
-            rams backend (rotated Padé, Milinazzo-Zala-Brooke 1997).
-            Applied alongside an independent ``dr ≤ c_min/(5·f)`` λ
-            cap; the tighter of the two wins. Default 5.0 — set to 1.0
-            to disable, raise for unusually noisy long-range runs.
+            Divisor (≥ 1) of the Lytaev-optimised ``dr`` for the rams
+            backend (rotated Padé, Milinazzo-Zala-Brooke 1997), applied
+            with an independent ``dr ≤ c_min/(5·f)`` λ cap and the
+            stability rule; the tightest wins (:func:`grid.tighten_rams_dr`).
+            Default ``None``: 5.0 (:data:`grid.DEFAULT_RAMS_DR_FACTOR`, uacpy
+            guidance). A set value is used as given; ``1.0`` leaves the cap
+            and the rule alone. It divides the automatic ``dr`` only, so
+            beside a pinned ``dr`` — or on another backend — it gives a
+            notice that it is not used. **[rams0.5]**
         backend : str, optional
             Force a specific RAM-family backend instead of automatic
             dispatch: ``'mpirams'``, ``'ramgeo'``, ``'rams'`` or
             ``'ramsurf'``. ``None`` (default) auto-selects from the
-            environment (see :meth:`select_backend`). A forced backend
+            environment (see :meth:`select_backend`; uacpy guidance, routing
+            by what each code can represent — ``ramgeo1.5.f:3-4``,
+            ``ramsurf1.5.f:3-11``). A forced backend
             that cannot represent the environment (e.g. a fluid backend
             for an elastic bottom) raises ``ConfigurationError`` at run
             time.
         """
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            timeout=timeout, cleanup=cleanup, collapse=collapse
-        )
+        super().__init__(**_host_options(locals()))
 
         # Run modes, capability flags and collapse defaults come from the
         # class-level ``spec`` (applied by PropagationModel.__init__).
@@ -525,16 +624,27 @@ class RAM(PropagationModel):
         self.rams_rotation_angle = rams_rotation_angle
         self.rams_rotation = rams_rotation
         self.rams_dr_factor = rams_dr_factor
+        # Kept unset when not given so ``copy()`` round-trips: materialising
+        # the default here would make every copy look caller-pinned.
+        # Resolved on use via ``_accuracy`` / ``_accuracy_explicit``.
+        self.accuracy = accuracy
+        self.angle_max = angle_max
         self._check_knobs()
 
-        # Kept raw so ``copy()`` round-trips: materialising the default
-        # here would make every copy look caller-pinned. Resolved on use
-        # via ``_accuracy`` / ``_accuracy_explicit``.
-        self.accuracy = None if accuracy is None else float(accuracy)
-        self.angle_max = float(angle_max)
+        if accuracy is not None:
+            self.accuracy = float(accuracy)
+        if angle_max is not None:
+            self.angle_max = float(angle_max)
         if rams_rotation_angle is not None and not callable(rams_rotation_angle):
             self.rams_rotation_angle = float(rams_rotation_angle)
-        self.rams_dr_factor = float(rams_dr_factor)
+        if rams_dr_factor is not None:
+            self.rams_dr_factor = float(rams_dr_factor)
+        # A NumPy integer passes the checks; the decks and the run record
+        # carry the Python int.
+        for name in ('n_pade', 'n_stability', 'depth_decimation',
+                     'n_sediment_points'):
+            if getattr(self, name) is not None:
+                setattr(self, name, int(getattr(self, name)))
 
         # The backend name is checked (:meth:`_check_knobs`) before any
         # binary is looked up, and the lookup follows it: a forced Collins
@@ -547,16 +657,17 @@ class RAM(PropagationModel):
             lambda: (
                 self._collins_binary(backend)
                 if backend is not None and backend != 'mpirams'
-                else self._find_executable_in_paths(
-                    's_mpiram', bin_subdirs=['mpirams'], dev_subdir='mpiramS',
-                )
+                else self._find_binary('mpirams')
             ),
             label=f"RAM:{backend or 'mpirams'}",
         )
 
         # Warn on low absorbing-layer attenuation: values < 1 dB/wavelength
         # let bottom reflections leak back into the PE domain and contaminate
-        # the field (see Collins, JASA 1996 and mpiramS doc).
+        # the field. The 1 dB/wavelength threshold is uacpy guidance; the
+        # "5-10" the message names are upstream mpiramS's 5
+        # (third_party/MODIFICATIONS.md:2431-2432) and the floor of Collins'
+        # sample ramp, 10 (ram.pdf p.12, Fig. 2).
         if self.absorber_attenuation < 1.0:
             warnings.warn(
                 f"RAM absorber_attenuation={self.absorber_attenuation} "
@@ -570,10 +681,11 @@ class RAM(PropagationModel):
     def _check_knobs(self) -> None:
         """Refuse a constructor knob no run could use: an unknown backend,
         a Padé order outside the binaries' bound, a non-positive or
-        non-finite grid step, window, timeout or absorbing layer, a sediment
+        non-finite grid step, window, timeout, absorbing layer or
+        ``accuracy``, an ``angle_max`` outside (0, 90) degrees, a sediment
         grid too small to lay out, a ``rams_rotation_angle`` outside [0, 90] degrees,
         a ``rams_rotation`` that is not a bool and a ``rams_dr_factor``
-        below 1.
+        below 1. A count may be a Python or a NumPy integer.
 
         Run at construction and again by every run (stage 2,
         :meth:`_check_carriers`), since the attributes can be reassigned in
@@ -593,25 +705,48 @@ class RAM(PropagationModel):
         # n_pade=9 and 10 — legal, and the widest-angle operators available —
         # are accepted rather than refused by a margin inside it.
         n_pade = self.n_pade
-        if not isinstance(n_pade, int) or not (2 <= n_pade <= 10):
+        if not is_whole_number(n_pade) or not (2 <= n_pade <= 10):
             raise ConfigurationError(
                 f"n_pade must be an integer in [2, 10] (Collins mp=10, "
                 f"ramgeo1.5.f:142-145); got {n_pade!r}."
             )
         for name in ('dr', 'dz', 'zmax', 'stability_range_m', 'c0', 'q_factor',
-                     'record_duration'):
+                     'record_duration', 'accuracy'):
             positive_finite(name, getattr(self, name), optional=True)
+        # The source aperture θ bounds the Padé spectrum at ξ = -sin²θ: the
+        # bracket is undefined at 90° (``_domain.resolve_angle_max`` caps the
+        # seabed term at 89°) and empty at 0°.
+        angle_max = self.angle_max
+        positive_finite('angle_max', angle_max, optional=True)
+        if angle_max is not None and not angle_max < 90.0:
+            raise ConfigurationError(
+                f"angle_max is the source's maximum propagation angle in "
+                f"degrees from the horizontal, within (0, 90); got "
+                f"{angle_max!r}.")
         for name in ('timeout', 'absorber_width_wavelengths',
                      'absorber_attenuation'):
             positive_finite(name, getattr(self, name))
         # ``profl`` lays out the sub-bottom as [surface, seafloor, nzs-3
         # interior points, domain floor] and only builds interior points when
         # nzs > 3 (mpiramS/src/ram.f90:334-342).
-        whole_count('n_sediment_points', self.n_sediment_points, 4)
+        if self.n_sediment_points is not None:
+            whole_count('n_sediment_points', self.n_sediment_points, 4)
         whole_count('depth_decimation', self.depth_decimation, 1)
-        whole_count('n_stability', self.n_stability, 0)
+        if self.n_stability is not None:
+            whole_count('n_stability', self.n_stability, 0)
         rams_rotation_angle = self.rams_rotation_angle
         if rams_rotation_angle is not None and not callable(rams_rotation_angle):
+            if not is_real_number(rams_rotation_angle):
+                raise ConfigurationError(
+                    f"rams_rotation_angle must be an angle in degrees or a "
+                    f"callable theta_fn(freq_hz) -> degrees; got "
+                    f"{rams_rotation_angle!r}.",
+                    remediation=(
+                        "A run record holds a callable rams_rotation_angle "
+                        "as its repr, which no run can call, so "
+                        "RAM.from_run_settings cannot rebuild it: build "
+                        "the model with the callable itself, "
+                        "RAM(..., rams_rotation_angle=theta_fn)."))
             theta_val = float(rams_rotation_angle)
             if not (0.0 <= theta_val <= 90.0):
                 raise ConfigurationError(f"rams_rotation_angle must be in [0, 90] degrees; "
@@ -621,7 +756,9 @@ class RAM(PropagationModel):
                 f"rams_rotation must be True or False; got "
                 f"{self.rams_rotation!r}.")
         factor = self.rams_dr_factor
-        if not np.isfinite(factor) or factor < 1.0:
+        if factor is not None and (not is_real_number(factor)
+                                   or not np.isfinite(factor)
+                                   or factor < 1.0):
             raise ConfigurationError(
                 f"rams_dr_factor must be ≥ 1.0; got "
                 f"{factor!r}. Use 1.0 to disable the "
@@ -638,8 +775,9 @@ class RAM(PropagationModel):
     def _accuracy_explicit(self) -> bool:
         """True when the caller pinned ``accuracy``.
 
-        A grid cap that misses uacpy's own default target is a status
-        fact; missing a target the caller asked for is a warning.
+        A pinned accuracy is met as given
+        (:func:`grid.grid_for_pinned_accuracy`); left unset, the default
+        chooser may relax uacpy's own target and reports it.
         """
         return self.accuracy is not None
 
@@ -680,9 +818,13 @@ class RAM(PropagationModel):
         stays ``[fc]`` — the centre of the ``(fc, q_factor,
         record_duration)`` sweep those knobs describe
         (:func:`_band.resolve_broadband_grid`), whose bins
-        ``settings.engine.marched_frequencies`` lists. An empty
+        ``settings.engine.marched_frequencies`` lists, and that the grid a
+        TIME_SERIES pulse implies — a default — is rebuilt on those pins
+        (:func:`_band.sweep_on_the_pins`: a pinned knob replaces what it
+        names, the pulse's grid supplies the other). An empty
         ``frequencies=`` is refused. The shared rule's notice is kept
-        whichever grid is returned."""
+        whichever grid is returned, except the pulse grid's, which
+        describes a grid the pins replaced."""
         if (frequencies is not None
                 and np.atleast_1d(np.asarray(frequencies, dtype=float)).size
                 == 0):
@@ -694,10 +836,17 @@ class RAM(PropagationModel):
                                               time)
         if mode not in _BAND_MODES or frequencies is not None:
             return band
-        if mode == RunMode.TIME_SERIES and band.frequencies is not None:
-            return band
         src = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
-        if src.size == 1 and (self.q_factor is not None or self.record_duration is not None):
+        pinned = (self.q_factor is not None
+                  or self.record_duration is not None)
+        if mode == RunMode.TIME_SERIES and band.frequencies is not None:
+            if src.size == 1 and pinned:
+                # The grid the pulse implies is a default: the pins
+                # replace what they name, the pulse's grid the rest.
+                return BandResolution(sweep_on_the_pins(
+                    band.frequencies, knobs=self._knob_record()))
+            return band
+        if src.size == 1 and pinned:
             return BandResolution(src, band.notice)
         if mode == RunMode.TIME_SERIES:
             # A pulse too short to imply a grid runs on the source's own
@@ -789,15 +938,24 @@ class RAM(PropagationModel):
         warn_if_pinned_dz_misplaces_the_seafloor(env, backend,
                                                  notices=notices,
                                                  knobs=self._knob_record())
+        warn_if_pinned_accuracy_is_unused(notices=notices,
+                                          knobs=self._knob_record())
+        warn_if_pinned_rams_dr_factor_is_unused(backend, notices=notices,
+                                                knobs=self._knob_record())
+        warn_if_pinned_angle_max_is_below_the_slope(
+            env, notices=notices, knobs=self._knob_record())
         band = mode in _BAND_MODES
         if band:
             source = dataclasses.replace(
                 source, frequencies=np.array(settings.frequencies, dtype=float))
+        else:
+            warn_if_band_pins_unused_on_tl(notices=notices,
+                                           knobs=self._knob_record())
         parts = steps_of(backend).resolve(self, env, source, receiver, mode,
                                           backend, notices=notices)
         warn_if_receivers_see_paths_steeper_than_the_band(
             env, source, receiver, notices=notices,
-            knobs=self._knob_record(), speed_bounds=self._speed_bounds)
+            knobs=self._knob_record())
         if backend == 'ramsurf':
             warn_if_ramsurf_surface_unresolved(env, parts['grids'][0].dz,
                                                notices=notices,
@@ -806,12 +964,27 @@ class RAM(PropagationModel):
             backend=backend,
             backend_origin=backend_origin(env, backend,
                                           knobs=self._knob_record()),
-            c0=resolve_c0(env, knobs=self._knob_record(),
-                          speed_bounds=self._speed_bounds),
+            c0=resolve_c0(env, knobs=self._knob_record()),
             c0_origin=('RAM(c0=…)' if self.c0 is not None
                        else 'Lytaev (2023) Eq. (15)'),
             **parts,
         )
+
+    def _check_source_depths(self, env, source) -> float:
+        """The seafloor (:meth:`_max_receiver_depth`), below which receivers
+        warn and come back NaN; ``Source`` itself refuses a negative depth.
+
+        A source below the seafloor is not refused here: every RAM
+        self-starter plants the delta at ``si = 1 + zs/dz`` on any row of
+        the depth grid and solves the full depth operator, sediment rows
+        included (``ramgeo1.5.f:389-393``, ``ramsurf1.5.f:396-400``,
+        ``rams0.5.f:357-361``, ``mpiramS/src/ram.f90:110-114``), so the PE
+        computes a buried source's field. Stage 3 sizes the automatic
+        domain to hold it (:func:`_domain.adequate_zmax`) and refuses only
+        a source past the grid the binary marches
+        (:func:`_domain.check_source_inside_the_domain`).
+        """
+        return self._max_receiver_depth(env)
 
     def _max_receiver_depth(self, env) -> float:
         """The seafloor — the deepest depth RAM returns a sample at.
@@ -819,36 +992,17 @@ class RAM(PropagationModel):
         Declared here rather than inherited because the inherited default is
         the ray-model one and RAM is not a ray model: it declares
         ``layered_bottom`` and its PE marches through the sediment, so a rule
-        derived from that flag would return ``_total_media_depth`` and quietly
+        derived from that flag would return ``total_media_depth`` and quietly
         move the cut. The cut belongs at the seafloor because that is where
         :func:`uacpy.core.bathymetry.mask_below_seafloor` stops returning
         samples (see its docstring for the measurement and the reason).
 
-        One number gates both sides in ``_validate_geometry``: receivers
-        below it warn and come back NaN, and a source below it raises. The
-        source half is a consequence of the output convention, not of what
-        the PE can compute — :meth:`_source_below_domain_note` says so in the
-        error.
+        Receivers below it warn and come back NaN (``_validate_geometry``);
+        a source below it is computed (:meth:`_check_source_depths`).
         """
         return float(env.depth)
 
-    def _source_below_domain_note(self, env, resolvable_depth: float):
-        """Name the sediment column RAM meshes but does not return, so the
-        refusal is not read as an engine limit."""
-        total = self._total_media_depth(env)
-        if total <= resolvable_depth:
-            return None
-        return (
-            f"RAM's PE meshes down to the absorbing layer, well past the "
-            f"{resolvable_depth:.1f} m seafloor, and this environment's media "
-            f"column reaches {total:.1f} m — the limit is uacpy's output "
-            f"convention (RAM returns NaN below the seafloor on every "
-            f"backend), not something the solver cannot compute. For a source "
-            f"inside the sediment use Kraken, Scooter, SPARC or an OASES "
-            f"model, which resolve the whole media column."
-        )
-
-    _BACKENDS = ('mpirams', 'ramgeo', 'rams', 'ramsurf')
+    _BACKENDS = tuple(_BINARIES)
 
     def select_backend(self, env: Environment, run_mode=None) -> str:
         """Inspect which RAM-family binary will run for a given environment.
@@ -938,22 +1092,9 @@ class RAM(PropagationModel):
                     f"the {kind} build, or drop executable= to auto-detect."
                 )
             return self._exe
-        # ram1.5 (Collins fluid PE) is intentionally not built — uacpy
-        # uses mpiramS for fluid+flat (broadband + RD bottom support).
-        # ramgeo (range-dependent layered fluid) lives in its own vendor
-        # dir; rams0.5 / ramsurf1.5 share the ramsurf/ tree.
-        if kind == 'ramgeo':
-            return self._find_executable_in_paths(
-                'ramgeo', bin_subdirs=['ramgeo'], dev_subdir='ramgeo'
-            )
-        names = {'rams': 'rams0.5', 'ramsurf': 'ramsurf1.5'}
-        if kind not in names:
+        if kind == 'mpirams' or kind not in self._BINARIES:
             raise ConfigurationError(f"Unknown Collins kind {kind!r}.")
-        return self._find_executable_in_paths(
-            names[kind],
-            bin_subdirs=['ramsurf'],
-            dev_subdir='ramsurf'
-        )
+        return self._find_binary(kind)
 
     # ── stages 4-5: write, launch, read, build the result ─────────────────
 
@@ -1010,7 +1151,7 @@ class RAM(PropagationModel):
         raw = raw if self._n_launches(settings) > 1 else [raw]
         field = steps_of(settings.engine.backend).assemble(self, inputs, raw)
         if settings.mode == RunMode.TIME_SERIES:
-            field = self._finish_broadband(field, settings)
+            field = finish_broadband(self.model_name, field, settings)
         return field
 
     # ── the backend families' steps (_BACKEND_STEPS) ────────────────────
@@ -1023,11 +1164,9 @@ class RAM(PropagationModel):
         if mode in _BAND_MODES:
             return resolve_mpirams_band(
                 env, source, receiver, notices=notices,
-                knobs=self._knob_record(), log=self._log,
-                speed_bounds=self._speed_bounds)
+                knobs=self._knob_record(), log=self._log)
         return resolve_mpirams_tl(env, source, receiver, notices=notices,
-                                  knobs=self._knob_record(), log=self._log,
-                                  speed_bounds=self._speed_bounds)
+                                  knobs=self._knob_record(), log=self._log)
 
     def _resolve_collins_grids(self, env, source, receiver, mode, backend, *,
                                notices):
@@ -1039,12 +1178,10 @@ class RAM(PropagationModel):
             return resolve_collins_band(
                 env, source, receiver, backend,
                 require_uniform=mode == RunMode.TIME_SERIES, notices=notices,
-                knobs=self._knob_record(), log=self._log,
-                speed_bounds=self._speed_bounds)
+                knobs=self._knob_record(), log=self._log)
         return resolve_collins_tl(env, source, receiver, backend,
                                   notices=notices, knobs=self._knob_record(),
-                                  log=self._log,
-                                  speed_bounds=self._speed_bounds)
+                                  log=self._log)
 
     def _prepare_collins_band(self, env, settings) -> Optional[dict]:
         """Collins step: the deck every bin of a band shares, with the
@@ -1063,19 +1200,17 @@ class RAM(PropagationModel):
         """mpiramS step: ``in.pe`` and the files it names
         (:func:`mpirams.write_mpirams_deck`)."""
         return write_mpirams_deck(inputs, knobs=self._knob_record(),
-                                  log=self._log,
-                                  speed_bounds=self._speed_bounds)
+                                  log=self._log)
 
     def _write_collins(self, inputs: StageInputs) -> Path:
         """Collins step: the launch's ``ram.in``
         (:func:`collins.write_collins_deck`)."""
-        return write_collins_deck(inputs, knobs=self._knob_record(),
-                                  speed_bounds=self._speed_bounds)
+        return write_collins_deck(inputs, knobs=self._knob_record())
 
     def _launch_mpirams(self, inputs: StageInputs) -> None:
         """mpiramS step: s_mpiram in the launch's work directory
         (:meth:`_run_binary`)."""
-        self._run_binary(inputs.work_dir)
+        self._run_binary(inputs.work_dir, dr=launch_grid(inputs).dr)
 
     def _launch_collins(self, inputs: StageInputs) -> None:
         """Collins step: the launch's binary
@@ -1090,8 +1225,7 @@ class RAM(PropagationModel):
     def _read_collins(self, inputs: StageInputs):
         """Collins step: the launch's envelope on the receiver grid
         (:func:`collins.read_collins_output`)."""
-        return read_collins_output(inputs, knobs=self._knob_record(),
-                                   speed_bounds=self._speed_bounds)
+        return read_collins_output(inputs, knobs=self._knob_record())
 
     def _assemble_mpirams(self, inputs: StageInputs, raw):
         """mpiramS step: the band's Field from its one sweep
@@ -1103,17 +1237,14 @@ class RAM(PropagationModel):
         if settings.mode in _BAND_MODES:
             return assemble_broadband_field(
                 raw[0], inputs.env, inputs.source, inputs.receiver,
-                inputs.work_dir, engine, grid,
-                attach_output_paths=self._attach_output_paths,
-                log=self._log, mask_source_axis=self._mask_source_axis,
-                result_kwargs=self._result_kwargs)
+                inputs.work_dir, engine, grid, log=self._log,
+                model_name=self.model_name, provenance=self.provenance,
+                cleanup=self.cleanup)
         return assemble_tl_field(
             raw[0], inputs.env, inputs.source, inputs.receiver,
             inputs.work_dir, grid.frequency, grid.dr,
-            attach_output_paths=self._attach_output_paths,
-            knobs=self._knob_record(),
-            mask_source_axis=self._mask_source_axis,
-            result_kwargs=self._result_kwargs)
+            knobs=self._knob_record(), model_name=self.model_name,
+            provenance=self.provenance, cleanup=self.cleanup)
 
     def _assemble_collins(self, inputs: StageInputs, raw):
         """Collins step: the band's Field stacked from its launches
@@ -1121,13 +1252,11 @@ class RAM(PropagationModel):
         (:func:`collins.assemble_collins_tl_field`)."""
         if inputs.settings.mode in _BAND_MODES:
             return assemble_collins_band_field(
-                inputs, raw, attach_output_paths=self._attach_output_paths,
-                mask_source_axis=self._mask_source_axis,
-                result_kwargs=self._result_kwargs)
+                inputs, raw, model_name=self.model_name,
+                provenance=self.provenance, cleanup=self.cleanup)
         return assemble_collins_tl_field(
-            inputs, raw[0], attach_output_paths=self._attach_output_paths,
-            mask_source_axis=self._mask_source_axis,
-            result_kwargs=self._result_kwargs)
+            inputs, raw[0], model_name=self.model_name,
+            provenance=self.provenance, cleanup=self.cleanup)
 
     def _run_collins_binary(self, inputs: StageInputs) -> None:
         """Stage 4 of one Collins launch: run the binary in the work
@@ -1149,27 +1278,27 @@ class RAM(PropagationModel):
         binary = self._collins_binary(kind)
         work_dir = inputs.work_dir
         self._log(f"Executing: {binary} (cwd={work_dir})")
-        self._launch_binary(Launch(
+        run_launch(self._launch_context(), Launch(
             argv=(str(binary),), cwd=work_dir, timeout=self.timeout,
             stale_outputs=_COLLINS_OUTPUTS,
             # rams0.5 echoes every march step to stdout (rams0.5.f:254), so
             # the text is formatted only when it will be printed (DEBUG).
             stdout_label=kind,
             checks=(
-                lambda result: raise_on_collins_stop(
+                lambda result: raise_on_ram_stop(
                     kind, binary, result, dr=grid.dr,
                     knobs=self._knob_record()),
                 # A missing or empty tl.grid means the binary died
                 # silently; the raised error quotes the subprocess streams
                 # (the Collins codes write no print file).
-                lambda result: self._require_output(
-                    [work_dir / 'tl.grid'],
+                lambda result: require_output(
+                    self.model_name, [work_dir / 'tl.grid'],
                     what=f'a TL grid ({kind} tl.grid)', process=result),
                 # The patched outpt (third_party/ramsurf/{rams0.5,
                 # ramsurf1.5}.f + MODIFICATIONS.md) writes pcomplex.bin
                 # alongside tl.grid.
-                lambda result: self._require_output(
-                    [work_dir / 'pcomplex.bin'],
+                lambda result: require_output(
+                    self.model_name, [work_dir / 'pcomplex.bin'],
                     what=f'a complex-envelope grid ({kind} pcomplex.bin)',
                     process=result,
                     hint=('Rebuild the binaries via install.sh so the '
@@ -1187,7 +1316,7 @@ class RAM(PropagationModel):
     # too — the first sizes zmax in ``_domain.compute_zmax``, both drive the
     # attenuation ramp in ``collins.ramp_absorbing_attenuation``.
     _MPIRAMS_ONLY_SETTINGS = (
-        ('n_sediment_points', 1000),
+        ('n_sediment_points', None),
     )
 
     # rams0.5's row 5 is ``c0 np irot theta`` (rams0.5.f:109) where the fluid
@@ -1198,10 +1327,11 @@ class RAM(PropagationModel):
     _RAMS_ONLY_SETTINGS = (
         ('rams_rotation_angle', None),
         ('rams_rotation', True),
+        ('rams_dr_factor', None),
     )
 
     _NOT_RAMS_SETTINGS = (
-        ('n_stability', 1),
+        ('n_stability', None),
         ('stability_range_m', None),
     )
 
@@ -1235,14 +1365,7 @@ class RAM(PropagationModel):
                     FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP
                 )
 
-    # Narrowest source aperture the auto-loosening below will fall back to.
-    # 30° is the aperture of the worked example in Lytaev (2023) §5.1, and the
-    # default here; the 15° floor is uacpy's own choice: under 15° the
-    # operator is essentially paraxial and "wide-angle" stops meaning
-    # anything, so a caller who genuinely wants narrow-angle physics has to
-    # say so via ``angle_max=`` rather than reach it by relaxation.
-
-    def _run_binary(self, work_dir: Path):
+    def _run_binary(self, work_dir: Path, *, dr: float):
         """Execute s_mpiram in ``work_dir``, requiring the ``psif.dat`` it
         writes.
 
@@ -1260,21 +1383,30 @@ class RAM(PropagationModel):
         (third_party/MODIFICATIONS.md). Measured bit-identical at 1, 2 and 4
         threads on a flat and a range-dependent BROADBAND run and a
         TIME_SERIES run.
+
+        A stop the binary diagnoses itself (its Padé root finder, at the
+        ``dr`` it marched with) is raised naming it (:func:`collins.
+        raise_on_ram_stop`) before the missing-output check.
         """
         env, threads = openmp_thread_env()
         self._log(f"Executing mpiramS: {self._exe} (cwd={work_dir}, "
                   f"{threads})")
-        self._launch_binary(Launch(
+        run_launch(self._launch_context(), Launch(
             argv=(str(self._exe),), cwd=work_dir, env=env,
             timeout=self.timeout, stale_outputs=_MPIRAMS_OUTPUTS,
             stdout_label='mpirams',
-            # A missing or empty psif.dat means the binary died silently;
-            # the raised error quotes the subprocess streams (mpiramS
-            # writes no print file).
-            checks=(lambda result: self._require_output(
-                [work_dir / 'psif.dat'],
-                what='an output field (psif.dat)', process=result,
-                hint='Check input parameters.'),)))
+            checks=(
+                lambda result: raise_on_ram_stop(
+                    'mpirams', self._exe, result, dr=dr,
+                    knobs=self._knob_record()),
+                # A missing or empty psif.dat means the binary died
+                # silently; the raised error quotes the subprocess streams
+                # (mpiramS writes no print file).
+                lambda result: require_output(
+                    self.model_name, [work_dir / 'psif.dat'],
+                    what='an output field (psif.dat)', process=result,
+                    hint='Check input parameters.'),
+            )))
 
 
 class _BackendSteps(NamedTuple):
@@ -1290,7 +1422,7 @@ class _BackendSteps(NamedTuple):
     assemble: Callable
 
 
-#: M-22: mpiramS marches a band in one launch of its own frequency loop; the
+#: mpiramS marches a band in one launch of its own frequency loop; the
 #: three Collins codes (rams0.5, ramsurf1.5, ramgeo1.5) run one launch per
 #: bin from one shared deck.
 _BACKEND_STEPS = MappingProxyType({

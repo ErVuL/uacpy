@@ -13,13 +13,15 @@ the next, and nothing reconciles them. Registering
 a quantity here is what makes a new Field kind a *data* edit rather than a
 hunt through the plotters.
 
-Deliberately **not** modelled: unit conversion, dimensional analysis, or a
-per-unit "which way is louder" flag. Two of the registered quantities are
-inverted —
-transmission loss (``pressure`` in dB) and OASS reverberation, both *losses*,
-so less of either is louder — and the two documented cases in
-:meth:`Field.max` are cheaper than a field that would read ``+1`` in every row
-but two.
+Deliberately **not** modelled: unit conversion or dimensional analysis.
+
+Which way is louder has one declaration, :data:`LOSS_KINDS`, read through
+:func:`is_loss`. Linear data is louder where its magnitude is larger; for dB
+data two of the registered quantities are inverted — transmission loss
+(``pressure`` in dB) and OASS reverberation, both *losses*, so less of either
+is louder — and every other dB quantity is a level. :meth:`Field.max`, the
+incoherent :meth:`Field.superpose` and the plotters ask :func:`is_loss`
+for dB data, never ``unit`` alone.
 
 The reverberation direction is not a convention uacpy chose. OASS's
 ``kind='reverberation'`` data is -10*log10 E[|p_scat|^2], REVINT's dB
@@ -160,16 +162,39 @@ def quantity(kind: str) -> Quantity:
         ) from None
 
 
-def label(kind: str, unit: str) -> str:
-    """Axis / colorbar label for a ``(kind, unit)`` pairing."""
+#: The dB quantities whose reference pressure the caller chooses
+#: (``Field.sound_exposure_level(ref=)``, ``peak_sound_pressure_level(ref=)``),
+#: each with the label naming a reference other than the registry's 1 µPa.
+#: The Field records the squared reference (``Field.reference``).
+_PRESSURE_REFERENCED_LABELS: Mapping[str, str] = MappingProxyType({
+    'sound_exposure': 'SEL (dB re ({})²·s)',
+    'peak_pressure': 'Peak SPL (dB re {})',
+})
+
+
+def label(kind: str, unit: str, *, reference=None) -> str:
+    """Axis / colorbar label for a ``(kind, unit)`` pairing.
+
+    ``reference`` is the Field's :attr:`~uacpy.core.results.Field.reference`.
+    On ``sound_exposure`` or ``peak_pressure`` in dB it is the squared
+    reference pressure (Pa²·s for an exposure, Pa² for a peak), and a
+    reference other than 1 µPa is named in the label —
+    ``'SEL (dB re (20 µPa)²·s)'`` for 20 µPa. Every other kind ignores it.
+    """
     q = quantity(kind)
     try:
-        return q.units[unit]
+        text = q.units[unit]
     except KeyError:
         raise ConfigurationError(
             f"{kind!r} is not measured in {unit!r}; "
             f"valid units: {', '.join(q.units)}."
         ) from None
+    if reference is None or unit != 'dB' or kind not in _PRESSURE_REFERENCED_LABELS:
+        return text
+    micropascals = float(reference) ** 0.5 * 1e6
+    if abs(micropascals - 1.0) <= 1e-9:
+        return text
+    return _PRESSURE_REFERENCED_LABELS[kind].format(f'{micropascals:g} µPa')
 
 
 #: The unit of each coordinate name a result uses, what the CF ``units``

@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 
 from uacpy.core._export import COMPLEX_DIM, join_complex, split_complex
-from uacpy.core.results import Field, ResultStack
+from uacpy.core.results import Field
+from uacpy.core.results import stack_fields
 
 xr = pytest.importorskip('xarray')
 
@@ -73,15 +74,16 @@ def test_each_backend_writes_it_and_a_plain_open_reads_it_back(tmp_path,
             _same_bits(field.data, Field.from_xarray(da.load()).data)
 
 
-def test_a_complex_stack_round_trips_through_a_plain_open(tmp_path):
+def test_a_complex_field_over_source_depths_round_trips_through_a_plain_open(
+        tmp_path):
     slabs = [_field(), _field()]
     for slab, depth in zip(slabs, (5.0, 15.0)):
         slab.source_depths = np.array([depth])
-    stack = ResultStack(slabs, [5.0, 15.0], coordinate_name='source_depth')
-    stack.to_netcdf(tmp_path / 's.nc')
+    pair = stack_fields(slabs, [5.0, 15.0])
+    pair.to_netcdf(tmp_path / 's.nc')
     with xr.open_dataarray(tmp_path / 's.nc') as da:
-        back = ResultStack.from_xarray(da.load())
-    _same_bits(stack.slabs[1].data, back.slabs[1].data)
+        back = Field.from_xarray(da.load())
+    _same_bits(pair.data, back.data)
 
 
 @pytest.mark.parametrize('form', ['dataarray', 'dataset'])

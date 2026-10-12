@@ -3,8 +3,9 @@
 held to (:func:`check_output_contract`), the cells no engine can fill
 (:func:`mask_source_axis`, :func:`mask_unresolvable_depths`), the output
 paths a surviving work directory leaves on it, what it records of how it
-was computed (the frequency grid the engine propagated) and an axis restored
-to the values the call asked for."""
+was computed (the frequency grid the engine propagated), an axis restored
+to the values the call asked for, and the end of every IFFT-based
+broadband route (:func:`finish_broadband`)."""
 
 import warnings
 from pathlib import Path
@@ -14,10 +15,10 @@ import numpy as np
 
 from uacpy.core._records import array_summary
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.core.exceptions import (ModelExecutionError,
+from uacpy.core.exceptions import (ModelExecutionError, NumericsWarning,
                                    OutputContractError, ValidityWarning)
 from uacpy.core.results import PhaseReference, Result
-from uacpy.core.run_settings import RunSettings
+from uacpy.core.run_settings import RunMode, RunSettings
 from uacpy.core.source import Source
 from uacpy.models._stacking import _slabs_of
 
@@ -140,9 +141,10 @@ def result_kwargs(
     ``backend`` names the engine that ran, and the default lowercases
     the class name rather than mixing conventions (``'scooter'``,
     ``'oast'``, …). A dispatcher that passes its own string keeps the
-    binary's spelling, so the stamp is not lowercase everywhere:
-    ``'mpirams'`` is the one that is not, and a caller comparing
-    ``result.backend`` must either match it exactly or fold the case.
+    binary's spelling (``'mpirams'``; Kraken stamps the stem of the
+    executable it ran, ``'kraken'`` / ``'krakenc'``, which a renamed
+    binary changes), so a caller comparing ``result.backend`` should fold
+    the case.
 
     Identification only: this stamps who produced the result, never what
     it means numerically. Nothing here — nor anywhere else in
@@ -269,6 +271,133 @@ def warn_zero_range(model_name: str, n_zero: int, singular_term: str) -> None:
     )
 
 
+#: The end of a time record measured for a response still ringing there (a
+#: fraction of the record), and the level, re the record's peak (-20 dB), at
+#: which that end counts as still ringing.
+RECORD_TAIL_FRACTION = 0.1
+RECORD_TAIL_LEVEL = 0.1
+
+
+def _peak_ignoring_nan(data: np.ndarray) -> float:
+    """``np.nanmax(data)`` as a float, returning NaN for an all-NaN input.
+
+    ``np.nanmax`` reports that case by raising a RuntimeWarning, and the only
+    way to mute one is a change to the warnings filters — a stack that is
+    process-global, so the change would also swallow warnings other threads
+    raise while it holds. Masking the NaNs decides the same thing without
+    touching global state. ``where=``/``initial=`` keep ``nanmax``'s treatment
+    of the infinities: they are values, not gaps, and propagate to the result.
+    """
+    present = ~np.isnan(data)
+    if not present.any():
+        return float('nan')
+    return float(np.max(data, where=present, initial=-np.inf))
+
+
+def record_tail_ratio(times, data) -> Optional[float]:
+    """The peak of ``|data|`` over the last :data:`RECORD_TAIL_FRACTION` of
+    a time record against its peak over the whole record (time on the last
+    axis of ``data``, NaN samples ignored). ``None`` when there is nothing
+    to measure: fewer than ten samples, a last axis that is not ``times``,
+    or an all-NaN or all-zero record."""
+    time = np.asarray(times, dtype=float)
+    magnitude = np.abs(np.asarray(data))
+    if (time.size < 10 or magnitude.ndim == 0
+            or magnitude.shape[-1] != time.size):
+        return None
+    n_tail = max(1, int(round(RECORD_TAIL_FRACTION * time.size)))
+    peak = _peak_ignoring_nan(magnitude)
+    tail = _peak_ignoring_nan(magnitude[..., -n_tail:])
+    if not (np.isfinite(peak) and np.isfinite(tail) and peak > 0.0):
+        return None
+    return tail / peak
+
+
+def warn_if_circular_record_rings(model_name: str, result, *,
+                                  late_arrival=None,
+                                  range_span=None,
+                                  record_edge=None) -> None:
+    """Warn, once, when a TIME_SERIES trace synthesised by inverse FFT has
+    folded: when it is still ringing at the end of its record
+    (:func:`record_tail_ratio` at or above :data:`RECORD_TAIL_LEVEL` on any
+    slab), when ``late_arrival`` says the record ends before an arrival,
+    when ``range_span`` says the receivers' range span outlasts the record,
+    or when ``record_edge`` says an auto-placed record holds energy at an
+    edge.
+
+    The record is one period of the inverse FFT of a transfer function
+    sampled every Δf, so it is ``1/Δf`` long and circular: the response
+    after its end lands back on its early part (JKPS §8.2.1.2, eqs.
+    (8.9)-(8.11): sampling in frequency makes the time response periodic
+    in ``T = 1/Δf``, and the last sum of (8.11) is that wrap-around). A
+    record whose end
+    still rings is the precondition of that fold; one whose end has decayed
+    holds the response, unless a late isolated echo falls past it, which
+    only the arrivals can show. ``late_arrival`` and ``range_span`` are the
+    synthesis's own findings of that kind
+    (:func:`~uacpy.core.results._field_synthesis._synthesize_time_series`'s
+    ``fold_report``): ``(start, end, arrival, speed, range)``, the record
+    ending before ``range/speed``, the arrival at the slowest stated water
+    speed; ``(span_m, span_s, record_s)``, the receivers' range span and its
+    travel time against the record; ``(level_dB, edge, start, end)``, the
+    energy at the record's ``'end'`` or ``'start'`` in dB re the trace
+    maximum. One condition, one warning: the measured ringing with the
+    findings named, or the findings alone."""
+    worst = None
+    for slab in _slabs_of(result):
+        time = np.asarray(slab.coords.get('time', ()), dtype=float)
+        ratio = record_tail_ratio(time, slab.data)
+        if ratio is not None and (worst is None or ratio > worst[0]):
+            worst = (ratio, float(time[0]), float(time[-1]))
+    findings = []
+    if late_arrival is not None:
+        start, end, arrival, speed, range_m = late_arrival
+        findings.append(
+            f"the [{start:.4g}, {end:.4g}] s record ends before r/c = "
+            f"{arrival:.4g} s, the arrival at the slowest water speed "
+            f"({speed:g} m/s) at {range_m:.0f} m")
+    if record_edge is not None:
+        level_dB, edge, start, end = record_edge
+        findings.append(
+            f"the [{start:.4g}, {end:.4g}] s record holds energy at its "
+            f"{edge}, {level_dB:.1f} dB re the trace maximum, so it cuts "
+            f"through the arrival train")
+    longest = None
+    if range_span is not None:
+        span_m, longest, record_s = range_span
+        findings.append(
+            f"the receiver range span ({span_m:.0f} m ≈ {longest:.2f}s of "
+            f"travel time) exceeds the {record_s:.2f}s record, so far-range "
+            f"arrivals wrap back into early bins")
+    at_least = (f", at least {longest:.2f}s for the range span"
+                if longest is not None else "")
+    remedy = (f"Lengthen the record (output_duration={at_least}, or a "
+              f"frequencies= grid with a finer step: the record is 1/Δf) or "
+              f"place it with t_start=.")
+    if longest is not None:
+        remedy += (" Or run BROADBAND and give each range its own record: "
+                   "Field.synthesize_time_series(..., t_start='reduced').")
+    if worst is not None and worst[0] >= RECORD_TAIL_LEVEL:
+        ratio, t0, t1 = worst
+        also = "".join(f" And {finding}." for finding in findings)
+        message = (
+            f"{model_name}.run(run_mode=TIME_SERIES): p(t) is still at "
+            f"{100.0 * ratio:.0f}% of its peak over the last "
+            f"{100.0 * RECORD_TAIL_FRACTION:.0f}% of the [{t0:.4g}, "
+            f"{t1:.4g}] s record. The record is one period of an inverse "
+            f"FFT, so the response after {t1:.4g} s has folded back onto its "
+            f"early part, where it reads as extra early arrivals.{also} "
+            f"{remedy}")
+    elif findings:
+        message = (
+            f"{model_name}.run(run_mode=TIME_SERIES): "
+            f"{'; and '.join(findings)}: the later paths fold onto the "
+            f"record's start, where they read as early arrivals. {remedy}")
+    else:
+        return
+    warnings.warn(message, NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)
+
+
 def mask_source_axis(model_name: str, field, source, *, warn: bool = True):
     """NaN the ``r = 0`` column of a point-source ``field`` and warn once.
 
@@ -326,3 +455,42 @@ def check_output_contract(model_name: str, result,
             raise OutputContractError(
                 f"{model_name}._to_result broke the output contract "
                 f"of {settings.mode.name}: {'; '.join(problems)}.")
+
+
+def finish_broadband(model_name: str, result, settings: RunSettings):
+    """Return the BROADBAND transfer function ``result`` of engine
+    ``model_name`` as computed or, for TIME_SERIES, its synthesis with the
+    pulse of ``settings.time`` (validated in stage 2,
+    :meth:`~uacpy.models.base.PropagationModel._check_time_series_keywords`).
+    Every IFFT-based wrapper ends its broadband route here.
+
+    The transfer function carries ``settings`` while it is synthesised,
+    so the synthesis reads the waveguide the run resolved
+    (``run_settings.waveguide``) as every Field does; stage 6 stamps
+    the returned result. The synthesised record is circular, so a trace
+    still ringing at its end, or a record ending before the slowest
+    arrival, warns once (:func:`warn_if_circular_record_rings`), whoever
+    chose the record.
+    """
+    if settings.mode != RunMode.TIME_SERIES:
+        return result
+    for slab in _slabs_of(result):
+        slab._run_settings = settings
+    time = settings.time
+    # Field.synthesize_time_series, its refusals and notices naming the
+    # run the user called. A record that ends before the slowest
+    # arrival, a range span longer than the record, energy at an
+    # auto-placed record's edge and a record still ringing at its end
+    # are one condition, a fold: the synthesis reports the first three
+    # and the ringing check says them as one warning.
+    fold_report: dict = {}
+    trace = result._synthesized(
+        time.source_waveform, time.sample_rate, t_start=time.t_start,
+        window=None, placement_checks=True,
+        who=f"{model_name}.run", fold_report=fold_report)
+    warn_if_circular_record_rings(
+        model_name, trace,
+        late_arrival=fold_report.get('late_arrival'),
+        range_span=fold_report.get('range_span'),
+        record_edge=fold_report.get('record_edge'))
+    return trace

@@ -13,8 +13,13 @@ One module per subject, each answering a different question:
 * ``bubbles``    — *what does a bubble do*: Minnaert resonance, bubbly-water
                    sound speed, surface bubble loss
 * ``levels``     — *what does the recording read*: volts to pascals, pressure
-                   to SPL, peak level, sound exposure level, power to dB,
-                   pressure to transmission loss, the incoherent sum of levels
+                   to SPL, peak level, sound exposure level (total,
+                   accumulated over a record, summed along a source track),
+                   power to dB, pressure to transmission loss, the
+                   incoherent sum of levels
+* ``weighting``  — *how much does each frequency count*: a frequency
+                   weighting (a hearing group's, or your own) applied to a
+                   pressure record
 * ``wavenumber`` — *how does a wavenumber integral become a field*: the
                    Hankel transform, its taper and alias period
 * ``modal``      — *how do modes become a field*: modal attenuation, mode
@@ -28,10 +33,14 @@ One module per subject, each answering a different question:
                    the biological resonance in dB/km, the pH scale they need,
                    and the conversion between attenuation units
 
-Every public name is re-exported here (and again by the root module
+Every function a user calls is re-exported here (and again by the root module
 :mod:`uacpy.acoustics`), so a caller writes
 ``uacpy.acoustics.sound_speed_mackenzie`` and never names a sub-module: those boundaries
-are for whoever maintains the package.
+are for whoever maintains the package. The submodules' ``__all__`` also list
+what stays in them: formula tables, constants and tolerances
+(``SOUND_SPEED_FORMULAS``, ``PH_SCALES``, ``BAND_EDGE_RTOL``, …), the
+``canonical_formula`` helper, and ``steering_vectors``, whose public home is
+:mod:`uacpy.acoustic_signal`.
 
 Note
 ----
@@ -104,14 +113,19 @@ from uacpy.core.acoustics.modal import (
     modal_phase_speeds,
     mode_shapes_at,
 )
+from uacpy.core.acoustics.weighting import (auditory_weighting,
+                                            frequency_weighting,
+                                            weighted_pressure)
 from uacpy.core.acoustics.levels import (
-    pressure,
+    pressure_from_recording,
     spl,
     power_to_dB,
     peak_level,
     transmission_loss_dB,
     received_level_dB,
     sound_exposure_level,
+    cumulative_sound_exposure_level,
+    track_exposure,
     no_energy_mask,
     sum_levels_dB,
     integrate_psd,
@@ -135,7 +149,7 @@ __all__ = [
     'bubble_resonance',
     'bubble_surface_loss',
     'bubble_sound_speed',
-    'pressure',
+    'pressure_from_recording',
     'spl',
     'power_to_dB',
     'peak_level',
@@ -159,6 +173,11 @@ __all__ = [
     'modal_phase_speeds',
     'mode_shapes_at',
     'sound_exposure_level',
+    'cumulative_sound_exposure_level',
+    'track_exposure',
+    'auditory_weighting',
+    'frequency_weighting',
+    'weighted_pressure',
     'pekeris_root',
     'absorption_thorp',
     'absorption_francois_garrison',

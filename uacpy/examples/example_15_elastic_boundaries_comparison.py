@@ -63,7 +63,8 @@ env = uacpy.Environment(name="Elastic bottom test", bathymetry=100.0,
 source = uacpy.Source(depths=50.0, frequencies=100.0)
 # Ranges start at 300 m: closer in, the deepest receivers see direct and
 # surface-reflected paths steeper than Kraken's 26.8° mode window carries.
-receiver = uacpy.Receiver(depths=np.linspace(5, 95, 50),
+# Depths in 1 m steps, so the 50 m cut below is a receiver depth.
+receiver = uacpy.Receiver(depths=np.linspace(5, 95, 91),
                           ranges=np.linspace(300, 10000, 98))
 
 # Approach 1: Kraken sees shear_speed > 0 and routes itself to krakenc.
@@ -129,7 +130,9 @@ axes[1, 0].text(critical + 2, 0.5, f'critical\n≈{critical:.1f}°', color='red'
                 fontsize='small')
 
 labels = ['Kraken (auto)', 'Scooter (BOUNCE)']
-mid_range = float(np.median(kraken_tl.ranges))
+# A receiver range, so both fields are cut at the same sample (Field.at picks
+# the nearest one; a label halfway between two is a tie).
+mid_range = float(receiver.ranges[receiver.ranges.size // 2])
 uacpy.plot.compare([kraken_tl.at(depth=50.0), scooter_tl.at(depth=50.0)],
                    labels, ax=axes[1, 1], linewidth=2.5, alpha=0.8,
                    title='TL vs range at 50 m')

@@ -11,7 +11,7 @@ reference.
 Each number on this page is the one its test states. The test is named next to
 the number (`test_benchmarks_<name>.py::test_…`), and
 `uacpy/tests/test_validation_page.py` fails when the named test, reference
-table or section no longer states a quoted number, or when a benchmark test
+table or section does not state a quoted number, or when a benchmark test
 has no entry here. *Measured* is the agreement the test recorded when its
 bound was set; *bound* is what the test asserts. `|dTL|` is the absolute TL
 difference from the reference over the test's cells, summarised by its
@@ -234,11 +234,13 @@ seven deep nulls over a 63-113 dB field
 |---|---|---|---|
 | RAM | 0.211 / 1.09 dB | 0.4 / 1.6 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
 | Kraken | 0.273 / 1.07 dB | 0.45 / 1.6 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
-| Scooter | 0.459 / 2.54 dB | 0.7 / 3.3 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
+| Scooter | 0.432 / 2.06 dB | 0.7 / 3.3 dB | `test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference` |
 | Bellhop | 5.37 dB median, +4.08 dB mean | pinned between 3.0 and 7.0 dB; mid-column within 1.0 dB of Kraken | `test_benchmarks_published.py::test_bellhop_loses_the_near_bed_field_of_pe_workshop_3b` |
 
-The wave engines' nulls all land within 30 m of the table's, 10 m short in
-all three, so that shift is the reference's. Null control: a lossless bottom,
+The wave engines' nulls land 0-20 m short of the table's, the same 10 m in all
+three, so that shift is the reference's — but for Scooter's 6.95 km null,
+which lands 50 m short and moves with the edges of its wavenumber window.
+Null control: a lossless bottom,
 11 dB median from the reference
 (`test_benchmarks_published.py::test_wave_engines_match_the_pe_workshop_3b_reference`).
 
@@ -340,8 +342,8 @@ shows up as a failing test rather than a silently better number.
   50 m (`test_benchmarks_published.py::test_bellhop_loses_the_near_bed_field_of_pe_workshop_3b`).
   On the stepped waveguide at 25 Hz its 1.233 dB median is the method's error
   (`test_benchmarks_coupled_mode.py::test_bellhop_stepped_waveguide_matches_coupled_mode_reference`).
-- **The PE codes on a dense stair-step.** Over the corrugation of §3.3 RAM
-  keeps the field across the vertical step faces, an amplitude error that
+- **The PE codes on a dense stair-step.** Over the square-wave corrugated
+  seafloor above, RAM keeps the field across the vertical step faces, an amplitude error that
   grows with the density contrast (Collins & Siegmann, *Parabolic Wave
   Equations with Applications*, Sect. 2.6): mpirams is +4.35 dB at density
   2.5, +0.50 at 1.5 and -0.11 at 1.0; ramgeo is +5.47 at 2.5, and rams, the
@@ -355,9 +357,9 @@ shows up as a failing test rather than a silently better number.
   `Kraken(mode_coupling='coupled')` puts the shelf 21.98 dB RMS from the
   reference, the field gaining energy; the test is a strict expected failure
   (`test_benchmarks_published.py::test_kraken_coupled_modes_keep_the_pe_workshop_4c_shelf_level`).
-  `field.exe`'s projection amplifies modes at and above the half-space speed,
-  and every coupled run also sums its own modes adiabatically and warns when
-  the two far fields differ by more than 10 dB; this run warns at 27.5 dB
+  `field.exe`'s projection amplifies modes at and above the half-space speed;
+  a run with `mode_coupling='adiabatic'` on the same track, and a RAM run,
+  show it
   ([Kraken §6.6](kraken.md#66-range-dependence-adiabatic-versus-coupled)).
 - **The coupled method's own error.** Where the projection behaves, what is
   left is pressure matching itself: COUPLE07 run with the same one-way

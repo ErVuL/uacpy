@@ -581,6 +581,87 @@ class TestWaterOnlyNormalisationIsAnnounced:
             modes.with_attenuation(0.01, bottom=bot, seafloor_depth=100.0)
 
 
+class TestTheRecordedHalfSpaceCompletesTheNormalisation:
+    """Without ``bottom=``, the fluid half-space a mode set's media table
+    records (``halfspace_sound_speed``, ``halfspace_density`` and
+    ``halfspace_attenuation``, from a Kraken ``.mod``) supplies the tail's
+    ``γ`` and ``ρ_b`` (JKPS Eq. 5.169 and the text after Eq. 5.176) and the
+    seabed-loss term when it lies directly under the water column and the
+    tabulation reaches it, so it gives the ``bottom=`` result of that
+    seabed; without such a record the water-only upper bound stays, and an
+    explicit ``bottom=`` wins."""
+
+    _KW = dict(sound_speed_z=1500.0, density_z=1.0)
+
+    @staticmethod
+    def _recorded(modes, **table):
+        from uacpy.core.results import MediaTable
+        recorded = dict(water_density=1.0, tops=[0.0], densities=[1.0],
+                        bottom_depth=100.0, halfspace_density=1.8,
+                        halfspace_sound_speed=1800.0,
+                        halfspace_attenuation=0.0)
+        recorded.update(table)
+        return Modes(k=modes.k, phi=modes.phi, depths=modes.depths,
+                     model='Test', frequencies=modes.f0,
+                     media=MediaTable(**recorded))
+
+    def _bottom_result(self, modes, attenuation=0.0):
+        bottom = BoundaryProperties(acoustic_type='half-space',
+                                    sound_speed=1800.0, density=1.8,
+                                    attenuation=attenuation)
+        return modes.with_attenuation(0.02, bottom=bottom,
+                                      seafloor_depth=100.0, **self._KW)
+
+    @pytest.mark.parametrize('bottom_depth', [100.0, 100.09])
+    @pytest.mark.parametrize('attenuation', [0.0, 0.5])
+    def test_it_gives_the_bottom_result_silently(self, bottom_depth,
+                                                 attenuation):
+        modes, *_ = _exact_pekeris()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            recorded = self._recorded(
+                modes, bottom_depth=bottom_depth,
+                halfspace_attenuation=attenuation).with_attenuation(
+                    0.02, **self._KW)
+        np.testing.assert_array_equal(
+            recorded.k, self._bottom_result(modes, attenuation).k)
+
+    @pytest.mark.parametrize('table', [
+        {'halfspace_sound_speed': None}, {'halfspace_density': None},
+        {'halfspace_attenuation': None}, {'bottom_depth': None},
+        {'tops': [0.0, 80.0], 'densities': [1.0, 1.5]},
+        {'bottom_depth': 100.2}])
+    def test_without_a_usable_record_the_upper_bound_stays(self, table):
+        modes, *_ = _exact_pekeris()
+        with pytest.warns(UserWarning, match='UPPER BOUND'):
+            got = self._recorded(modes, **table).with_attenuation(
+                0.02, **self._KW)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            water_only = modes.with_attenuation(0.02, **self._KW)
+        np.testing.assert_array_equal(got.k, water_only.k)
+
+    def test_an_explicit_bottom_overrides_it(self):
+        modes, *_ = _exact_pekeris()
+        lossy = BoundaryProperties(acoustic_type='half-space',
+                                   sound_speed=1800.0, density=1.8,
+                                   attenuation=0.5)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            recorded = self._recorded(modes).with_attenuation(
+                0.02, bottom=lossy, seafloor_depth=100.0, **self._KW)
+            given = modes.with_attenuation(0.02, bottom=lossy,
+                                           seafloor_depth=100.0, **self._KW)
+        np.testing.assert_array_equal(recorded.k, given.k)
+        assert np.all(-recorded.k.imag > -self._bottom_result(modes).k.imag)
+
+    def test_a_given_seafloor_depth_is_checked_against_the_tabulation(self):
+        modes, *_ = _exact_pekeris()
+        with pytest.raises(ConfigurationError, match='seafloor is at 90 m'):
+            self._recorded(modes).with_attenuation(0.02, seafloor_depth=90.0,
+                                                   **self._KW)
+
+
 class TestModalSumContraction:
     """``modal_pressure_field`` contracts the mode axis directly.
 

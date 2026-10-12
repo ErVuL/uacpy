@@ -80,7 +80,7 @@ class TestPekerisWaveguide:
         ``test_benchmarks_analytic.py::test_bellhop_lloyd_mirror``.
         """
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
+        result = bellhop.compute_field(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
 
         # Basic validation
         assert isinstance(result, Field)
@@ -113,7 +113,7 @@ class TestPekerisWaveguide:
         - Pattern depends on source/receiver geometry
         """
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
+        result = bellhop.compute_field(pekeris_env_soft_bottom, pekeris_source, pekeris_receiver)
 
         # Check depth variation exists (not constant)
         tl_vs_depth_at_1km = result.dB[:, 0]
@@ -134,8 +134,8 @@ class TestPekerisWaveguide:
         modes, so the ``|k.imag| < 0.1`` bound only catches a garbage
         eigenvalue, not a change in the loss model.
         """
-        kraken = Kraken(verbose=False)
-        modes = kraken.compute_modes(pekeris_env_soft_bottom, pekeris_source, n_modes=20)
+        kraken = Kraken(verbose=False, n_modes=20)
+        modes = kraken.compute_modes(pekeris_env_soft_bottom, pekeris_source)
 
         assert isinstance(modes, Modes)
         assert modes.k is not None, "Should have wavenumber data"
@@ -213,7 +213,7 @@ class TestRangeDependentPhysicalSanity:
     def test_bellhop_handles_slope(self, slope_env, slope_source, slope_receiver):
         """Bellhop should handle sloping bathymetry without crashing."""
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(slope_env, slope_source, slope_receiver)
+        result = bellhop.compute_field(slope_env, slope_source, slope_receiver)
 
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
@@ -232,7 +232,7 @@ class TestRangeDependentPhysicalSanity:
         RAM is specifically designed for range-dependent environments.
         """
         ram = RAM(verbose=False, dr=20.0, dz=2.0)
-        result = ram.compute_tl(slope_env, slope_source, slope_receiver)
+        result = ram.compute_field(slope_env, slope_source, slope_receiver)
 
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
@@ -370,7 +370,7 @@ class TestSoundSpeedEquations:
         from uacpy.core.acoustics import sound_speed_unesco, sound_speed_mackenzie
         # the two independent surface formulas agree to < 0.2 m/s
         for t, s in [(5, 35), (15, 35), (25, 36)]:
-            assert sound_speed_unesco(t, s, pressure_dbar=0.0) == pytest.approx(sound_speed_mackenzie(t, s, 0.0), abs=0.2)
+            assert sound_speed_unesco(t, s, pressure_dbar=0.0) == pytest.approx(sound_speed_mackenzie(t, s, depth=0.0), abs=0.2)
 
     def test_delgrosso_matches_unesco_within_documented_difference(self):
         from uacpy.core.acoustics import sound_speed_unesco, sound_speed_delgrosso
@@ -447,7 +447,7 @@ class TestNumericalStability:
         )
 
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env, source, receiver)
+        result = bellhop.compute_field(env, source, receiver)
         assert np.all(np.isfinite(result.data))
 
     @pytest.mark.requires_binary
@@ -472,7 +472,7 @@ class TestNumericalStability:
         )
 
         bellhop = Bellhop(verbose=False)
-        result = bellhop.compute_tl(env, source, receiver)
+        result = bellhop.compute_field(env, source, receiver)
         assert np.all(np.isfinite(result.data))
         # Geometric spreading alone exceeds 20 dB at the nearest range
         # (100 m), so this only catches a TL that came back near zero.

@@ -1,4 +1,4 @@
-"""One memory policy for what a run is about to hold in memory (M-14).
+"""One memory policy for what a run is about to hold in memory.
 
 An engine supplies only its byte estimate and the words that describe it;
 :func:`memory_budget` weighs the estimate against what the host reports free
@@ -7,7 +7,7 @@ An engine supplies only its byte estimate and the words that describe it;
 - over all of it: :class:`~uacpy.core.exceptions.ConfigurationError` before
   any file is written, since waiting cannot make it fit (an estimate that is
   only an upper bound is announced instead);
-- over half of it: a :class:`~uacpy.models._notices.Notice`, since the run
+- over half of it: a :class:`~uacpy.core.run_settings.Notice`, since the run
   should complete but leaves little headroom;
 - with the host's free memory unreadable: a notice above
   :data:`UNREADABLE_HOST_BYTES`, never a refusal, since nothing measured says

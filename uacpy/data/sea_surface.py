@@ -23,8 +23,8 @@ from uacpy.core.altimetry import SEA_SURFACE_CALM_WIND_MPS, generate_sea_surface
 from uacpy.core.units import knots_to_ms, ms_to_knots
 from uacpy._log import log_message
 from uacpy.core.geo import as_coordinate
-from uacpy.data._geo import checked_max_distance
-from uacpy.data._chain import first_answer
+from uacpy.data._geo import checked_max_days, checked_max_distance
+from uacpy.data._chain import first_answer, lower_source_spec
 from uacpy.core.geo import parse_date
 from uacpy.data.sources import SOURCES, DataProvenance
 
@@ -48,23 +48,46 @@ _AUTO_ORDER = ('waverys', 'ww3', 'nbs', 'local')
 #: (alpha 8.1e-3, beta 0.74) and taking Hs = 4·h_rms gives 0.02133.
 _PM_HS_COEFF = 0.0214
 #: Wind scaling from the 10 m observation height to the 19.5 m
-#: Pierson-Moskowitz reference height. A conventional factor: a neutral log
-#: profile over any plausible sea roughness gives 1.05-1.06 instead, so this is
-#: not one, and no source in the corpus derives it. Kept because it is the
-#: value in common use; treat a wave height built from a 10 m wind as
-#: approximate.
-_U10_TO_U195 = 1.026
+#: Pierson-Moskowitz reference height: the inverse of the approximate ratio
+#: v10/v20 ≈ 0.94 (Dobson 1981) of Ainslie, *Principles of Sonar Performance
+#: Modelling*, §8.1.1.1.2 Eq. (8.12), whose 20 m is the PM measurement height
+#: of 19.5 m rounded (§4.3.2.1, footnote 23). A neutral log profile over a
+#: plausible sea roughness gives 1.05-1.06, close to it; the ratio depends on
+#: the air-sea stability (Ainslie Fig. 4.19), so it is a neutral-stability
+#: value, and a wave height built from a 10 m wind is approximate.
+_U10_TO_U195 = 1.0 / 0.94
+
+
+def _pm_wind_ms(hs):
+    """The Pierson-Moskowitz wind (m/s, 19.5 m) of significant wave height
+    ``hs`` (m): ``U = √(Hs / _PM_HS_COEFF)``, a negative ``hs`` taken as 0."""
+    return float(np.sqrt(max(float(hs), 0.0) / _PM_HS_COEFF))
 
 
 def hs_to_pm_wind(hs):
-    """Effective Pierson-Moskowitz wind speed (m/s) reproducing wave height ``hs``.
+    """Pierson-Moskowitz wind (knots, at 19.5 m) that raises wave height ``hs``.
+
+    Inverts the fully developed ``Hs = 0.0214·U²`` (``U`` in m/s at the 19.5 m
+    PM reference height, not a 10 m wind) and returns ``U`` in knots, the unit
+    of every wind in uacpy and of
+    :func:`~uacpy.core.altimetry.generate_sea_surface`'s ``wind_speed_kn``, so
+    the answer feeds it directly::
+
+        from uacpy.core.altimetry import generate_sea_surface
+        wind_kn = uacpy.data.hs_to_pm_wind(2.0)            # 18.8 kn
+        pairs = generate_sea_surface(20000.0, wind_kn)     # Hs ≈ 2.0 m
 
     Parameters
     ----------
     hs : float
         Significant wave height (m); a negative value counts as 0.
+
+    Returns
+    -------
+    float
+        The PM reference wind in knots.
     """
-    return float(np.sqrt(max(float(hs), 0.0) / _PM_HS_COEFF))
+    return float(ms_to_knots(_pm_wind_ms(hs)))
 
 
 def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
@@ -120,11 +143,15 @@ def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
         ``source.id`` is the catalogue id that supplied it (``'waverys'`` /
         ``'ww3'`` / ``'nbs'``). Its ``data_date`` separates the backends that
         share an id: the cached NBS climatology reads ``'month MM, <period>'``
-        (the period the cache recorded); a live fetch leaves it ``None`` and
-        carries the ``requested_date``.
+        (the period the cache recorded); a live fetch records the time step
+        it read (the live NBS and WaveWatch III fields are read at 00:00 UTC
+        of ``date``), beside the ``requested_date``.
     """
     lat, lon = as_coordinate(point)            # validate before any request
     limit = checked_max_distance(max_distance_km, 'fetch_sea_surface')
+    if max_days is not None:
+        max_days = checked_max_days(max_days, 'fetch_sea_surface')
+    source = lower_source_spec(source)
     order = (_AUTO_ORDER if source == 'auto'
              else (source,) if isinstance(source, str) else tuple(source))
     unknown = [s for s in order if s not in _RUNGS]
@@ -144,7 +171,7 @@ def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
             w = fetch_waves(point, date=date, source=backend,
                             max_days=max_days, timeout=timeout,
                             verbose=verbose, max_distance_km=limit)
-            u = hs_to_pm_wind(w.hs)
+            u = _pm_wind_ms(w.hs)
             log_message('waves', f"Hs {w.hs:.2f} m "
                         f"({w.provenance.source.id}) → "
                         f"PM wind {float(ms_to_knots(u)):.1f} kn", verbose=verbose)
@@ -164,11 +191,13 @@ def fetch_sea_surface(point, *, date, rmax_m, n_points=None, rng=None,
     kind = 'climatology' if backend == 'local' else 'live'
     log_message('wind', f"U10 {answer:.1f} kn (nbs {kind}) → PM wind "
                 f"{float(ms_to_knots(u)):.1f} kn", verbose=verbose)
+    record = _provenance('nbs', lat, lon, date,
+                         climatology=(backend == 'local'))
     return _altimetry(_surface(rmax_m, u, n_points, rng),
                       dataclasses.replace(
-                          _provenance('nbs', lat, lon, date,
-                                      climatology=(backend == 'local')),
-                          data_point=wind_prov.data_point))
+                          record, data_point=wind_prov.data_point,
+                          data_date=(record.data_date if backend == 'local'
+                                     else wind_prov.data_date)))
 
 
 def _provenance(src_id, lat, lon, date, *, climatology=False):

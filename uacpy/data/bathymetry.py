@@ -46,7 +46,8 @@ from uacpy.data._geo import (
     checked_n_points, capped_n_points, require_source,
 )
 from uacpy.data import _cache
-from uacpy.data._chain import SourceChain, SourceProvider, first_answer
+from uacpy.data._chain import (SourceChain, SourceProvider, first_answer,
+                               lower_source_spec)
 from uacpy.data._http import http_get
 from uacpy._log import log_message
 from uacpy.core._export import ExportRecord
@@ -112,24 +113,55 @@ def _check_public_source(source):
                    "Caribbean), or 'local' (the installed GEBCO grid only).")
 
 
-def _cache_first(source, call, *, who, chained=True):
-    """``call(backend)`` for each backend ``source`` names, cached first,
-    raising the most substantive error — the rule ``fetch_environment``
-    resolves by. ``chained`` accepts a chain spec (``'auto'`` or a sequence
-    of ids) besides one id; ``who`` is named when the spec is refused.
+def _cache_first(source, call, *, who, chained=True,
+                 base_url=DEFAULT_BASE_URL):
+    """``(answer, (source id, backend))`` of the first backend ``source``
+    names that answers ``call(backend)``, cached first, raising the most
+    substantive error — the rule ``fetch_environment`` resolves by. Ids and
+    presets match in any case. ``chained`` accepts a chain spec (``'auto'``
+    or a sequence of ids) besides one id; ``who`` is named when the spec is
+    refused. A ``base_url`` other than the public OpenTopoData root is
+    refused when no attempt reads it (no ``'gebco'`` in the chain, or a
+    cache-only one), rather than ignored.
 
     The installed grid falls through to the live service only when it is
     absent or unreadable (:func:`uacpy.data._cache.is_cache_miss`); a grid that
     answered "land" or "no value" ends the chain, since the service holds the
     same dataset."""
+    source = lower_source_spec(source)
     if not chained or (isinstance(source, str) and source != 'auto'):
         _check_public_source(source)
     sources, cache_only = _BATHY_CHAIN.resolve(source)
-    answer, _attempt = first_answer(
+    if (str(base_url).rstrip('/') != DEFAULT_BASE_URL.rstrip('/')
+            and (cache_only or 'gebco' not in sources)):
+        raise ConfigurationError(
+            f"{who}: base_url= is the OpenTopoData service root, which only "
+            f"'gebco' reads (its online fallback); source={source!r} does "
+            f"not read it.",
+            remediation="Drop base_url=, or include 'gebco' in source=. The "
+                        "GMRT and EMODnet DTM hosts are the module constants "
+                        "uacpy.data.gmrt_live.POINT_URL / GRID_URL and "
+                        "uacpy.data.emodnet_bathy_live.ERDDAP_URL; reassign "
+                        "them to read a mirror.",
+        )
+    return first_answer(
         _BATHY_CHAIN.attempts(sources, cache_only=cache_only, who=who,
                               keyword='source='),
         lambda _source, backend: call(backend))
-    return answer
+
+
+def _bathymetry_vintage(src_id, backend, dataset=DEFAULT_DATASET):
+    """What a bathymetry provenance record cites for its ``data_date``: the
+    local grid's release (its file name), or the live service and dataset."""
+    if backend == 'local' and src_id == 'gebco':
+        from uacpy.data import gebco_local
+        try:
+            return gebco_local.grid_name()
+        except (ConfigurationError, DataFetchError, FileNotFoundError):
+            return 'local'          # a stubbed backend: no grid to name
+    if backend == 'api' and src_id == 'gebco':
+        return f"{dataset} via OpenTopoData"
+    return f"{backend} (live)" if backend else None
 
 
 def _backend_module(backend):
@@ -195,9 +227,15 @@ def fetch_bathy(
         chain: the first source that answers wins, each cached first — the
         rule ``fetch_environment(bathymetry_sources=)`` resolves by.
     dataset : str, optional
-        OpenTopoData dataset name. Default ``'gebco2020'`` (``'api'`` only).
+        OpenTopoData dataset name, read by ``'gebco'``'s online fallback
+        only. Default ``'gebco2020'``.
     base_url : str, optional
-        OpenTopoData service root (override for a self-hosted instance).
+        OpenTopoData service root (override for a self-hosted instance),
+        read by ``'gebco'``'s online fallback only: with a source that never
+        reads it (``'gmrt'``, ``'emodnet_dtm'``, ``'local'``) it is refused.
+        The GMRT and EMODnet DTM hosts are the module constants
+        ``uacpy.data.gmrt_live.POINT_URL`` / ``GRID_URL`` and
+        ``uacpy.data.emodnet_bathy_live.ERDDAP_URL``.
     timeout : float, optional
         Per-request network timeout in seconds.
     verbose : bool or str, optional
@@ -220,7 +258,8 @@ def fetch_bathy(
     """
     return _cache_first(source, lambda backend: _fetch_bathy_backend(
         point, backend=backend, dataset=dataset, base_url=base_url,
-        timeout=timeout, verbose=verbose), who='fetch_bathy')
+        timeout=timeout, verbose=verbose), who='fetch_bathy',
+        base_url=base_url)[0]
 
 
 def _fetch_bathy_transect_backend(
@@ -260,11 +299,12 @@ def _fetch_bathy_transect_backend(
     )
     if backend in _PER_POINT_BACKENDS and n > LIVE_POINT_REQUEST_WARN:
         warnings.warn(
-            f"fetch_bathy_transect: source {backend!r} serves one point per "
-            f"request, so {n} waypoints are {n} sequential requests to a "
-            f"public service (EMODnet tries a second tile where the first "
-            f"has no cell). Pass a smaller n_points, or use the installed "
-            f"GEBCO grid (backend='local').",
+            f"fetch_bathy_transect: source "
+            f"{'emodnet_dtm' if backend == 'emodnet' else backend!r} serves "
+            f"one point per request, so {n} waypoints are {n} sequential "
+            f"requests to a public service (EMODnet tries a second tile where "
+            f"the first has no cell). Pass a smaller n_points, or use the "
+            f"installed GEBCO grid (source='local').",
             IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
     if backend != 'api':
         depths = _backend_module(backend).depths_along(
@@ -329,7 +369,7 @@ def fetch_bathy_transect(
     return _cache_first(source, lambda backend: _fetch_bathy_transect_backend(
         start, end, backend=backend, n_points=n_points, max_points=max_points,
         dataset=dataset, base_url=base_url, timeout=timeout,
-        verbose=verbose), who='fetch_bathy_transect')
+        verbose=verbose), who='fetch_bathy_transect', base_url=base_url)[0]
 
 
 def _point_depth(backend, point, *, timeout, verbose, **_request):
@@ -523,14 +563,18 @@ def fetch_bathy_grid(
 
     ``lats`` is **ascending** for every source, whatever order ``lat_range``
     was given in; ``lons`` runs eastward from ``lon_range[0]`` (an end west of
-    the start crosses the antimeridian on the ``'api'``/``'local'`` paths,
-    while ``'gmrt'``/``'emodnet'`` reject such a range).
+    the start crosses the antimeridian on ``'gebco'`` and ``'local'``, while
+    ``'gmrt'``/``'emodnet_dtm'`` reject such a range).
 
-    With ``source='api'`` points are fetched in chunks of ≤100 (the OpenTopoData
-    per-call cap), so a default 50×50 grid is 25 requests; the public host allows
-    ≤1000 requests/day at ≤1/s, so very large grids need a self-hosted
-    ``base_url=`` or ``source='local'`` (the install-time GEBCO grid, which has no
-    request cap).
+    ``source='gebco'`` reads the installed GEBCO grid, else OpenTopoData's
+    GEBCO online; online, points are fetched in chunks of ≤100 (the
+    OpenTopoData per-call cap), so a default 50×50 grid is 25 requests; the
+    public host allows ≤1000 requests/day at ≤1/s, so very large grids need a
+    self-hosted ``base_url=`` or ``source='local'`` (the install-time GEBCO
+    grid, which has no request cap). The grid's ``provenance.data_date``
+    names the vintage read: the installed grid's release (e.g.
+    ``'GEBCO_2025'``) or ``'gebco2020 via OpenTopoData'``, as the GEBCO
+    citation asks.
 
     Parameters
     ----------
@@ -544,7 +588,9 @@ def fetch_bathy_grid(
     dataset : str, optional
         OpenTopoData dataset name. Default ``'gebco2020'``.
     base_url : str, optional
-        OpenTopoData service root (a self-hosted instance for large grids).
+        OpenTopoData service root (a self-hosted instance for large grids),
+        as on :func:`fetch_bathy`: refused with ``'gmrt'``,
+        ``'emodnet_dtm'`` or ``'local'``, which never read it.
     timeout : float, optional
         Per-request network timeout in seconds.
     verbose : bool or str, optional
@@ -556,15 +602,17 @@ def fetch_bathy_grid(
         ``n_lat``/``n_lon`` < 2, or the grid would need too many requests.
 
     """
-    lats, lons, depths = _cache_first(
+    (lats, lons, depths), (src_id, backend) = _cache_first(
         source, lambda backend: _fetch_bathy_grid_backend(
             lat_range, lon_range, backend=backend, n_lat=n_lat, n_lon=n_lon,
             dataset=dataset, base_url=base_url, timeout=timeout,
-            verbose=verbose), who='fetch_bathy_grid', chained=False)
+            verbose=verbose), who='fetch_bathy_grid', chained=False,
+        base_url=base_url)
     return BathyGrid(lats=lats, lons=lons, depths=depths,
                      provenance=DataProvenance(
-                         source=SOURCES['gebco' if source == 'local'
-                                        else source]))
+                         source=SOURCES[src_id],
+                         data_date=_bathymetry_vintage(src_id, backend,
+                                                       dataset)))
 
 
 def transect_length(start: Coordinate, end: Coordinate) -> float:

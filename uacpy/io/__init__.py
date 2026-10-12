@@ -78,10 +78,12 @@ from uacpy.io.modes_reader import (
     read_modes,
 )
 from uacpy.io.bathy_io import (
-    BoundaryTable, read_bathymetry, read_altimetry, read_boundary_3d,
+    BoundaryTable, Boundary3dFile, read_bathymetry, read_altimetry,
+    read_boundary_3d,
     write_bty_file, write_bty_long_format, write_bty_3d, write_ati_file,
 )
 from uacpy.io.refl_io import (
+    BeamPatternTable,
     read_reflection_coefficient,
     read_source_beam_pattern,
     write_reflection_coefficient,
@@ -110,7 +112,9 @@ from uacpy.io.ramsurf_writer import write_ramin
 from uacpy.io.ramsurf_reader import (
     PeGrid, read_tl_line, read_tl_grid, read_pcomplex_grid,
 )
-from uacpy.io.audio_io import read_wav, read_wav_metadata, write_wav
+from uacpy.io.audio_io import (
+    WavInfo, read_wav, read_wav_info, read_wav_metadata, write_wav,
+)
 from uacpy.io.env_reader import read_env
 
 __all__ = [
@@ -123,8 +127,9 @@ __all__ = [
     "read_prt",
     # Boundary auxiliary I/O
     "read_bathymetry", "read_altimetry", "read_boundary_3d", "BoundaryTable",
+    "Boundary3dFile",
     "read_reflection_coefficient",
-    "read_source_beam_pattern",
+    "read_source_beam_pattern", "BeamPatternTable",
     # Mode readers (Kraken)
     "read_modes",
     # AT .env decks back into carriers
@@ -163,5 +168,5 @@ __all__ = [
     # ramsurf writer
     "write_ramin",
     # Audio
-    "write_wav", "read_wav", "read_wav_metadata",
+    "write_wav", "read_wav", "read_wav_info", "WavInfo", "read_wav_metadata",
 ]

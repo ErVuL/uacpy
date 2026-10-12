@@ -26,7 +26,7 @@ from uacpy.core.results import Field
 from uacpy.core.results import PhaseReference
 from uacpy.core.results import ReflectionCoefficient
 from uacpy.core.results import SoundSpeeds
-from uacpy.core.results.stack import ResultStack
+from uacpy.core.results import stack_fields
 from uacpy.core.source import Source
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.tests._synthetic_fields import _field
@@ -135,6 +135,27 @@ class TestField:
             f"scalar, at depth={field.depths[3]:g} m, "
             f"range={field.ranges[7]:g} m)")
 
+    def test_the_repr_of_an_exposure_map_names_its_band_and_weighting(self):
+        """An exposure map pins the waveform's spectral centroid, a
+        frequency nobody chose; the repr states the band the map spans and
+        its weighting, and marks the pinned frequency as the centroid."""
+        f = np.arange(25.0, 20000.0, 25.0)
+        H = Field(data=np.ones((1, 2, f.size), dtype=complex),
+                  coords={'depth': [10.0], 'range': [100.0, 200.0],
+                          'frequency': f}, frequencies=f)
+        burst = np.hanning(64) * np.sin(2 * np.pi * 4000.0
+                                        * np.arange(64) / 48000.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            sel = H.sound_exposure_level(source_waveform=burst,
+                                         sample_rate=48000.0,
+                                         weighting='VHF')
+        text = repr(sel)
+        assert 'band 25–19975 Hz, VHF-weighted' in text, text
+        assert '(band centroid)' in text and 'frequency 4' not in text, text
+        plain = repr(H)
+        assert 'band' not in plain and 'weighted' not in plain, plain
+
     def test_resample_to_is_keyword_only_and_depth_first(self):
         """The two axis vectors are interchangeable in type and only
         distinguishable by name, so a positional call that swapped them would
@@ -153,6 +174,20 @@ class TestField:
         assert list(out.coords) == ['depth', 'range']
         assert out.shape == (2, 2)
         np.testing.assert_allclose(out.data, [[25.0, 25.0], [75.0, 75.0]])
+
+    @pytest.mark.parametrize('method, ok', [('cubic', True),
+                                            ('slinear', False)])
+    def test_resample_to_takes_the_methods_eval_takes(self, method, ok):
+        ranges = np.linspace(0.0, 1000.0, 5)
+        depths = np.linspace(0.0, 100.0, 5)
+        field = self._tl_field(np.ones((5, 5)), ranges, depths)
+        call = lambda: field.resample_to(depths=[25.0], ranges=[250.0],
+                                         method=method)
+        if ok:
+            np.testing.assert_allclose(call().data, [[1.0]])
+        else:
+            with pytest.raises(ConfigurationError, match="method='slinear'"):
+                call()
 
     @staticmethod
     def _coherent_field(dr, dz=1.0, f0=200.0, c=1500.0):
@@ -1197,12 +1232,28 @@ class TestMaskBelowSeafloor:
         assert masked.data[0, 0] == 1.0          # exactly on the interface
         assert np.isnan(masked.data[1, 0])       # half a metre below
 
-    def test_requires_depth_and_range_as_the_first_axes(self):
+    def test_requires_depth_and_range_axes(self):
         trace = Field(data=np.zeros(4),
                       coords={'time': np.arange(4) * 0.1}, model='Test')
         with pytest.raises(ConfigurationError,
-                           match="'depth' and 'range' as the first two axes"):
+                           match="requires 'depth' and 'range' axes"):
             trace.mask_below_seafloor([(0.0, 100.0), (1000.0, 100.0)])
+
+    def test_a_leading_source_depth_axis_takes_the_mask_of_its_cell(self):
+        """The seafloor bounds the receivers whatever the source, so each
+        plane of a multi-depth field takes the one-source mask."""
+        plane = self._field()
+        pair = Field(data=np.stack([plane.data, 2.0 * plane.data]),
+                     coords={'source_depth': np.array([10.0, 30.0]),
+                             **plane.coords},
+                     model='Test', source_depths=[10.0, 30.0])
+        seafloor = [(0.0, 100.0), (1000.0, 140.0)]
+        masked = pair.mask_below_seafloor(seafloor)
+        one = plane.mask_below_seafloor(seafloor)
+        assert list(masked.coords) == ['source_depth', 'depth', 'range']
+        np.testing.assert_array_equal(masked.data[0], one.data)
+        np.testing.assert_array_equal(masked.data[1], 2.0 * one.data)
+        assert np.isnan(one.data).any()
 
     def test_a_trailing_axis_takes_the_mask_of_its_cell(self):
         f = Field(data=np.ones((3, 2, 4)),
@@ -1430,6 +1481,131 @@ class TestSliceLabelsMustBeFiniteScalars:
     slice would propagate NaN into the result, whose own validators then
     blame the data."""
 
+    @staticmethod
+    def _doors():
+        """``{call: one-label selection}`` of every carrier and result that
+        selects along an axis by a label."""
+        from uacpy.core.results import ResultStack
+        from uacpy.tests.conftest import (layered_seabed_column,
+                                          wide_range_dependent_env)
+        from uacpy.tests.test_export_protocol import MAKERS
+        f = Field(data=np.arange(6.0).reshape(3, 2),
+                  coords={'depth': np.array([0.0, 10.0, 20.0]),
+                          'range': np.array([100.0, 200.0])})
+        profile = SoundSpeedProfile.from_pairs([[0.0, 1500.0],
+                                                [100.0, 1490.0]])
+        bottom = wide_range_dependent_env().bottom
+        column = layered_seabed_column(4.0, 1600.0)
+        surface = uacpy.Surface(nodes=[BoundaryProperties(),
+                                       BoundaryProperties()],
+                                ranges=[0.0, 5000.0])
+        rc = MAKERS['ReflectionCoefficient']()
+        stack = ResultStack([MAKERS['Rays'](), MAKERS['Rays']()],
+                            [10.0, 20.0])
+        return {
+            'Field.at': lambda v: f.at(depth=v),
+            'Field.eval': lambda v: f.eval(depth=v),
+            'SoundSpeedProfile.at': lambda v: profile.at(depth=v),
+            'SoundSpeedProfile.eval': lambda v: profile.eval(depth=v),
+            'Bottom.at': lambda v: bottom.at(range=v),
+            'Bottom.column_index_at': lambda v: bottom.column_index_at(
+                range=v),
+            'Bottom.halfspace_at': lambda v: bottom.halfspace_at(
+                range=v, interp='linear'),
+            'SeabedColumn.layer_at': lambda v: column.layer_at(v),
+            'Surface.at': lambda v: surface.at(range=v),
+            'ReflectionCoefficient.at': lambda v: rc.at(angle=v),
+            'ReflectionCoefficient.eval': lambda v: rc.eval(angle=v),
+            'ResultStack.at': lambda v: stack.at(source_depth=v),
+        }
+
+    @pytest.mark.parametrize('call', [
+        'Field.at', 'Field.eval', 'SoundSpeedProfile.at',
+        'SoundSpeedProfile.eval', 'Bottom.at', 'Bottom.column_index_at',
+        'Bottom.halfspace_at', 'SeabedColumn.layer_at', 'Surface.at',
+        'ReflectionCoefficient.at', 'ReflectionCoefficient.eval',
+        'ResultStack.at'])
+    @pytest.mark.parametrize('value', [np.array(True), True, '5', b'5',
+                                       np.complex128(5.0), [5.0]])
+    def test_every_selection_refuses_what_is_not_one_real_number_by_name(
+            self, call, value):
+        """One label rule on every door: a bool (bare or a 0-d array), text,
+        a complex value or a list is not one real number, refused by the
+        call's own name with what to do. (``None`` leaves an axis of the
+        profile and the reflection table unselected.)"""
+        with pytest.raises(ConfigurationError,
+                           match=rf"(?s)^{re.escape(call)}: \w+=.* is not one "
+                                 rf"value.*How to fix:.*Call "
+                                 rf"{re.escape(call)} once per value"):
+            self._doors()[call](value)
+
+    @pytest.mark.parametrize('call', [
+        'Field.at', 'Field.eval', 'SoundSpeedProfile.at',
+        'SoundSpeedProfile.eval', 'Bottom.at', 'Bottom.column_index_at',
+        'Bottom.halfspace_at', 'SeabedColumn.layer_at', 'Surface.at',
+        'ReflectionCoefficient.at', 'ReflectionCoefficient.eval',
+        'ResultStack.at'])
+    @pytest.mark.parametrize('value', [np.nan, -np.inf])
+    def test_every_selection_refuses_a_non_finite_label_by_name(self, call,
+                                                               value):
+        with pytest.raises(ConfigurationError,
+                           match=rf"(?s)^{re.escape(call)}: \w+=.* is not a "
+                                 rf"finite label.*How to fix:.*Pass a finite"):
+            self._doors()[call](value)
+
+    def test_a_label_too_large_to_rank_is_refused_by_name(self):
+        # 1e300 absorbs every depth: each |z - 1e300| rounds to 1e300, so no
+        # sample is nearer than another.
+        f = Field(data=np.arange(6.0).reshape(3, 2),
+                  coords={'depth': np.array([0.0, 10.0, 20.0]),
+                          'range': np.array([100.0, 200.0])})
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^Field\.at: depth=1e\+300 is so far "
+                                 r"outside.*How to fix:.*\[0, 20\]"):
+            f.at(depth=1e300)
+
+    @pytest.mark.parametrize('value', [True, '1e6', b'5', np.complex128(1e6),
+                                       1e6 + 0j, [5.0], np.nan, np.inf])
+    @pytest.mark.parametrize('call', ['ReflectionCoefficient.at',
+                                      'ReflectionCoefficient.eval',
+                                      'Field.to_time_trace'])
+    def test_a_label_is_refused_before_any_warning_speaks_of_it(self, call,
+                                                                value):
+        """The past-the-table and off-the-grid warnings read the label as a
+        number: it is refused first, typed, by the call's name — never
+        warned about as a place, nor met with a raw TypeError."""
+        from uacpy.tests.test_export_protocol import MAKERS
+        rc = MAKERS['ReflectionCoefficient']()
+        tf = _two_path_grid()
+        calls = {
+            'ReflectionCoefficient.at': lambda: rc.at(angle=value),
+            'ReflectionCoefficient.eval': lambda: rc.eval(angle=value),
+            'Field.to_time_trace': lambda: tf.to_time_trace(
+                depth=value, range=150.0, sample_rate=2000.0)}
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            with pytest.raises(ConfigurationError,
+                               match=rf"^{re.escape(call)}: \w+="):
+                calls[call]()
+
+    def test_an_interpolating_call_names_itself_with_any_method(self):
+        profile = SoundSpeedProfile.from_pairs([[0.0, 1500.0],
+                                                [100.0, 1490.0]])
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^SoundSpeedProfile\.eval: depth='5' "
+                                 r"is not one value.*Call "
+                                 r"SoundSpeedProfile\.eval once"):
+            profile.eval(depth='5', method='nearest')
+
+    def test_a_field_label_refusal_quotes_the_axis_span(self):
+        f = Field(data=np.arange(6.0).reshape(3, 2),
+                  coords={'depth': np.array([0.0, 10.0, 20.0]),
+                          'range': np.array([100.0, 200.0])})
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)How to fix:.*Pass a finite depth \(the "
+                                 r"axis spans \[0, 20\]\)\."):
+            f.at(depth=np.nan)
+
     def test_ssp_at_nan_depth_raises_a_typed_label_error(self):
         with pytest.raises(ConfigurationError,
                            match="depth=nan is not a finite label"):
@@ -1444,7 +1620,8 @@ class TestSliceLabelsMustBeFiniteScalars:
 
     def test_ssp_eval_array_depth_raises_a_typed_scalar_label_error(self):
         with pytest.raises(ConfigurationError,
-                           match="is not a scalar label"):
+                           match=r"^SoundSpeedProfile\.eval: depth=.* is not "
+                                 r"one value"):
             _profile_1d().eval(depth=[10.0, 20.0])
 
     def test_ssp_eval_nan_range_on_a_1d_profile_raises(self):
@@ -1459,6 +1636,45 @@ class TestSliceLabelsMustBeFiniteScalars:
         with pytest.raises(ConfigurationError,
                            match="depth=inf is not a finite label"):
             f.eval(depth=np.inf)
+
+    def test_field_eval_of_several_values_is_refused_naming_the_contract(self):
+        """eval interpolates at one real number per axis: a list, None, a
+        bool (bare or a 0-d array), a complex value of any precision or a
+        string (float() would read True as 1, drop the imaginary part, or
+        read what the string spells) is refused typed; a 0-d array of a
+        number is one value."""
+        f = Field(data=np.arange(6.0).reshape(3, 2),
+                  coords={'depth': np.array([0.0, 10.0, 20.0]),
+                          'range': np.array([100.0, 200.0])})
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^Field\.eval: depth=\[5\.0, 15\.0\] "
+                                 r"is not one value.*window"):
+            f.eval(depth=[5.0, 15.0])
+        for value in (None, True, np.array(True), 5.0 + 1.0j,
+                      np.complex128(5.0 + 1.0j), np.complex64(5.0 + 1.0j),
+                      np.array(5.0 + 0.0j), '5', b'5'):
+            with pytest.raises(ConfigurationError,
+                               match=r"^Field\.eval: depth=.* is not one "
+                                     r"value"):
+                f.eval(depth=value)
+        assert f.eval(depth=np.array(5.0)).pinned['depth'] == 5.0
+        assert f.eval(depth=np.int64(5)).pinned['depth'] == 5.0
+
+    @pytest.mark.parametrize('value', [np.nan, np.inf, -np.inf])
+    def test_field_eval_of_a_non_finite_label_is_refused_before_any_warning(
+            self, value):
+        """A NaN or infinite label is refused by eval's name with what to
+        pass, before the past-the-axis warning, which would claim an edge
+        value held."""
+        f = Field(data=np.arange(6.0).reshape(3, 2),
+                  coords={'depth': np.array([0.0, 10.0, 20.0]),
+                          'range': np.array([100.0, 200.0])})
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            with pytest.raises(ConfigurationError,
+                               match=r"(?s)^Field\.eval: depth=.* is not a "
+                                     r"finite label.*How to fix.*\[0, 20\]"):
+                f.eval(depth=value)
 
     def test_reflection_at_nan_angle_raises_a_typed_label_error(self):
         rc = ReflectionCoefficient(
@@ -1693,14 +1909,13 @@ class TestDbRefusalOffersAnActionableRoute:
         f = _field(data=np.full((4, 3), -60.0), unit='dB')
         assert np.allclose(f.dB, -60.0)
 
-    def test_the_stack_message_names_an_operation_that_changes_the_values(self):
+    def test_a_field_over_source_depths_gives_the_same_refusal(self):
         slab = self._dimensionless()
-        stack = ResultStack([slab, slab], np.array([5.0, 10.0]),
-                            coordinate_name='source_depth')
+        pair = stack_fields([slab, slab], np.array([5.0, 10.0]))
         with pytest.raises(
-                ConfigurationError,
-                match='not dB, so their values are not a level') as excinfo:
-            stack.dB
+                AttributeError,
+                match='not dB, so its values are not a level') as excinfo:
+            pair.dB
         message = str(excinfo.value)
         assert 'not dB' in message
         assert 'log10' in message
@@ -1744,21 +1959,17 @@ class TestTlIsTheDbViewRestrictedToPressureFields:
         with pytest.raises(AttributeError, match="'reverberation'.*\\.dB"):
             self._reverberation_field().tl
 
-    def test_stack_tl_matches_stack_dB_on_pressure_slabs(self):
-        from uacpy.core.results.stack import ResultStack
+    def test_tl_of_a_field_over_source_depths_matches_its_dB(self):
         f = self._pressure_field()
-        st = ResultStack(slabs=[f, f], coordinate=np.array([10.0, 20.0]),
-                         coordinate_name='source_depth')
-        assert np.array_equal(st.tl, st.dB)
-        assert st.tl.shape == (2, 1, 2)
+        pair = stack_fields([f, f], np.array([10.0, 20.0]))
+        assert np.array_equal(pair.tl, pair.dB)
+        assert pair.tl.shape == (2, 1, 2)
 
-    def test_stack_tl_of_reverberation_slabs_refuses_and_names_stack_dB(self):
-        from uacpy.core.results.stack import ResultStack
+    def test_tl_of_a_reverberation_field_over_source_depths_names_dB(self):
         rl = self._reverberation_field()
-        st = ResultStack(slabs=[rl, rl], coordinate=np.array([10.0, 20.0]),
-                         coordinate_name='source_depth')
-        with pytest.raises(ConfigurationError, match='stack\\.dB'):
-            st.tl
+        pair = stack_fields([rl, rl], np.array([10.0, 20.0]))
+        with pytest.raises(AttributeError, match="'reverberation'.*\\.dB"):
+            pair.tl
 
 
 def test_the_dB_docstring_contrasts_itself_against_tl_not_against_itself():
@@ -2282,15 +2493,6 @@ class TestAFieldRoundTripsThroughXarray:
                 for name in ('depth', 'range', 'frequency')} == \
             {'depth': 'm', 'range': 'm', 'frequency': 'Hz'}
 
-    def test_a_dataarray_with_a_unit_attr_reads_that_unit(self):
-        # A unit other than the kind's default, so a read that dropped the
-        # attr would answer the default instead.
-        pytest.importorskip('xarray')
-        f = Field(data=np.full(3, 60.0), coords={'time': [0.0, 0.1, 0.2]},
-                  kind='pressure', unit='dB')
-        da = f.to_xarray()
-        da.attrs['unit'] = da.attrs.pop('units')
-        assert Field.from_xarray(da).unit == 'dB'
 
     def test_it_round_trips_in_memory_and_through_netcdf(self, tmp_path):
         xr = pytest.importorskip('xarray')
@@ -2323,7 +2525,8 @@ class TestAFieldRoundTripsThroughXarray:
 def _pressure_trace():
     """A real ``(depth, range, time)`` pressure trace, synthesised."""
     burst = np.sin(2 * np.pi * 200.0 * np.arange(0.0, 0.02, 1 / 2000.0))
-    return _two_path_grid().synthesize_time_series(burst, 2000.0,
+    return _two_path_grid().synthesize_time_series(source_waveform=burst,
+                                                   sample_rate=2000.0,
                                                    t_start=0.0)
 
 
@@ -2380,58 +2583,6 @@ class TestTheUnitIsFixedAtConstruction:
         assert Field.from_dict(trace_dict).unit == 'Pa'
 
 
-class TestAFileThatKeepsTheQuantityInMetadataLoads:
-    """An ``np.savez`` of a Field's dict whose metadata holds the quantity
-    tags (the layout files written with them there have) loads, the tags
-    restored as the Field's own attributes."""
-
-    @staticmethod
-    def _metadata_layout(field):
-        d = field.to_dict()
-        meta = dict(d['metadata'])
-        for tag in ('kind', 'unit', 'coherent', 'reference', 'reference_unit'):
-            value = d.pop(tag)
-            if tag in ('kind', 'unit'):
-                d[tag] = value
-            if value is not None:
-                meta[tag] = value
-        d['metadata'] = meta
-        return d
-
-    @pytest.mark.parametrize('make', [
-        lambda: _pressure_trace().at(time=0.1),
-        lambda: _two_path_grid().at(frequency=200.0).to_dB(),
-    ])
-    def test_it_loads_through_savez(self, make, tmp_path):
-        field = make()
-        path = tmp_path / 'field.npz'
-        np.savez(path, **self._metadata_layout(field))
-        back = Field.from_dict(np.load(path, allow_pickle=True))
-        assert (back.kind, back.unit, back.coherent) == \
-            (field.kind, field.unit, field.coherent)
-        assert not set(back.metadata) & {'kind', 'unit', 'coherent'}
-        assert np.array_equal(back.data, field.data)
-
-    def test_an_ambiguity_surface_keeps_its_reference(self):
-        from uacpy.core.results import ambiguity_field
-        surface = ambiguity_field(np.array([[1.0, 4.0]]),
-                                  {'depth': [10.0], 'range': [1.0, 2.0]},
-                                  reference_unit='Pa²/Hz')
-        back = Field.from_dict(self._metadata_layout(surface))
-        assert (back.kind, back.reference, back.reference_unit) == \
-            ('ambiguity', 4.0, 'Pa²/Hz')
-
-    def test_the_quantity_round_trips_through_xarray(self):
-        pytest.importorskip('xarray')
-        from uacpy.core.results import ambiguity_field
-        surface = ambiguity_field(np.array([[1.0, 4.0]]),
-                                  {'depth': [10.0], 'range': [1.0, 2.0]},
-                                  reference_unit='Pa²/Hz')
-        back = Field.from_xarray(surface.to_xarray())
-        assert (back.kind, back.unit, back.reference, back.reference_unit) \
-            == ('ambiguity', 'dB', 4.0, 'Pa²/Hz')
-        stated = _two_path_grid().at(frequency=200.0).replace(coherent=False)
-        assert Field.from_xarray(stated.to_xarray()).coherent is False
 
 
 class TestCoherenceIsOneDecisionOnTheField:
@@ -2458,10 +2609,11 @@ class TestCoherenceIsOneDecisionOnTheField:
         tl.run_mode = 'coherent_tl'
         assert tl.coherent is False
 
-    def test_an_intensity_sum_is_incoherent_whatever_run_made_its_slabs(self):
+    def test_an_intensity_sum_is_incoherent_whatever_run_made_its_fields(self):
         p = _two_path_grid().at(frequency=200.0)
         p.run_mode = 'coherent_tl'
-        total = ResultStack([p, p], [1.0, 2.0]).superpose(coherent=False)
+        total = stack_fields([p, p], [1.0, 2.0]).superpose(
+            coherent=False)
         assert total.coherent is False
 
     def test_a_derived_field_keeps_a_stated_coherence(self):
@@ -2527,12 +2679,34 @@ class TestASlicedCellSynthesisesLikeItsGridCell:
     def test_a_row_sliced_by_depth_synthesises_along_range(self):
         H = _two_path_grid()
         burst = np.sin(2 * np.pi * 200.0 * np.arange(0.0, 0.02, 1 / 2000.0))
-        row = H.at(depth=20.0).synthesize_time_series(burst, 2000.0,
+        row = H.at(depth=20.0).synthesize_time_series(source_waveform=burst,
+                                                      sample_rate=2000.0,
                                                       t_start=0.0)
-        whole = H.synthesize_time_series(burst, 2000.0, t_start=0.0)
+        whole = H.synthesize_time_series(source_waveform=burst,
+                                         sample_rate=2000.0, t_start=0.0)
         assert list(row.coords) == ['range', 'time']
         np.testing.assert_array_equal(row.data, whole.data[1])
         assert row.pinned == {'depth': 20.0}
+
+    def test_a_multi_depth_grid_traces_each_source_on_its_axis(self):
+        """A field over source depths gives each source's trace at the
+        receiver on the leading source_depth axis, as
+        synthesize_time_series keeps it; each is that plane's trace, and
+        the weights ride along for superpose."""
+        H = _two_path_grid()
+        pair = stack_fields([H, H.replace(data=2.0 * H.data)], [30.0, 60.0])
+        pair.source_weights = np.array([1.0, -1.0])
+        trace = pair.to_time_trace(depth=10.0, range=300.0, window=None,
+                                   t_start=0.0)
+        one = H.to_time_trace(depth=10.0, range=300.0, window=None,
+                              t_start=0.0)
+        assert list(trace.coords) == ['source_depth', 'time']
+        np.testing.assert_array_equal(trace.coords['time'],
+                                      one.coords['time'])
+        np.testing.assert_array_equal(trace.data[0], one.data)
+        np.testing.assert_allclose(trace.data[1], 2.0 * one.data)
+        np.testing.assert_array_equal(trace.source_weights, [1.0, -1.0])
+        np.testing.assert_allclose(trace.superpose().data, -one.data)
 
     def test_a_cell_with_no_range_anywhere_is_refused(self):
         f = np.arange(100.0, 300.0, 1.0)
@@ -2568,8 +2742,10 @@ class TestTheSynthesisWindowIsAnchoredOnTheNearestRange:
         up = up.replace(speeds=SoundSpeeds(water_max=1500.0))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            t_up = up.synthesize_time_series(burst, 2000.0).times[0]
-            t_down = down.synthesize_time_series(burst, 2000.0).times[0]
+            t_up = up.synthesize_time_series(source_waveform=burst,
+                                             sample_rate=2000.0).times[0]
+            t_down = down.synthesize_time_series(source_waveform=burst,
+                                                 sample_rate=2000.0).times[0]
         assert t_up == t_down == 0.0
 
 
@@ -2629,10 +2805,16 @@ class TestTheSynthesisReadsTheWaveguideTheRunResolved:
         H = _two_path_grid(ranges=(150.0, 1640.0))
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            H.synthesize_time_series(burst, 2000.0, t_start=0.0)
+            # The square-cut burst's sidelobes run past the band (its peak,
+            # band-limited, moves 0.82 dB); this test is about the timing.
+            warnings.filterwarnings('ignore', message='.*cuts the source '
+                                                      'waveform')
+            H.synthesize_time_series(source_waveform=burst, sample_rate=2000.0,
+                                     t_start=0.0)
         H._run_settings = self._settings()
         with pytest.warns(UserWarning, match='far-range arrivals wrap'):
-            H.synthesize_time_series(burst, 2000.0, t_start=0.0)
+            H.synthesize_time_series(source_waveform=burst, sample_rate=2000.0,
+                                     t_start=0.0)
 
 
 class TestAZeroHertzBinIsCountedOnce:
@@ -2705,11 +2887,11 @@ class TestCountsAndIndicesAreIntegers:
             _field().isel(range=1.7)
         assert _field().isel(range=np.int64(1)).pinned == {'range': 200.0}
 
-    def test_a_stack_position_must_be_an_integer(self):
+    def test_a_source_depth_position_must_be_an_integer(self):
         p = _field()
-        stack = ResultStack([p, p], [1.0, 2.0])
+        pair = stack_fields([p, p], [1.0, 2.0])
         with pytest.raises(ConfigurationError, match='not an integer index'):
-            stack.isel(source_depth=0.5)
+            pair.isel(source_depth=0.5)
 
     @pytest.mark.parametrize('n', [0, -1])
     def test_a_count_below_one_is_refused(self, n):
@@ -2748,8 +2930,8 @@ class TestCountsAndIndicesAreIntegers:
 class TestMetadataSurvivesXarray:
     """Complex metadata (the Source weights), tuples (``span_m``) and the
     collapsed band (``band_hz``) are
-    written in a form a NetCDF attribute holds and restored (RES-4), and a
-    stack reads back whole (RES-5)."""
+    written in a form a NetCDF attribute holds and restored, and the field
+    of several sources reads back whole."""
 
     @staticmethod
     def _stack():
@@ -2762,12 +2944,12 @@ class TestMetadataSurvivesXarray:
                        metadata={'span_m': (100.0, 300.0)},
                        band_hz=(100.0, 300.0))
                  for z in (5.0, 15.0)]
-        return ResultStack(slabs, [5.0, 15.0])
+        return stack_fields(slabs, [5.0, 15.0])
 
     def test_complex_weights_and_a_band_come_back(self):
         pytest.importorskip('xarray')
-        slab = self._stack()[0]
-        back = Field.from_xarray(slab.to_xarray())
+        pair = self._stack()
+        back = Field.from_xarray(pair.to_xarray())
         np.testing.assert_array_equal(back.source_weights, [1.0, 2.0 + 0j])
         assert back.metadata['span_m'] == (100.0, 300.0)
         assert back.band_hz == (100.0, 300.0)
@@ -2789,16 +2971,16 @@ class TestMetadataSurvivesXarray:
         assert back.metadata['span_m'] == (100.0, 300.0)
         assert back.band_hz == (100.0, 300.0)
 
-    def test_a_stack_superposes_the_same_after_the_round_trip(self):
+    def test_the_field_of_several_sources_sums_the_same_after_the_round_trip(
+            self):
         pytest.importorskip('xarray')
-        stack = self._stack()
-        back = ResultStack.from_xarray(stack.to_xarray())
-        assert back.coordinate_name == 'source_depth'
+        pair = self._stack()
+        back = Field.from_xarray(pair.to_xarray())
+        assert list(back.coords)[0] == 'source_depth'
         np.testing.assert_array_equal(back.superpose().data,
-                                      stack.superpose().data)
+                                      pair.superpose().data)
         assert abs(back.superpose().data[0, 0]) == pytest.approx(3.0)
-        np.testing.assert_array_equal(back[1].source_depths, [15.0])
-        assert 'source_depth' not in back[1].pinned
+        np.testing.assert_array_equal(back.source_depths, [5.0, 15.0])
 
     def test_a_slab_read_alone_narrows_its_identity_to_the_pinned_depth(self):
         pytest.importorskip('xarray')
@@ -2934,6 +3116,86 @@ class TestReindexWidensAnAxis:
                                       [10.0, 20.0, 30.0, 40.0])
         assert np.isnan(depths[1])
 
+    def test_labels_read_back_at_float32_match_the_labels_asked_for(self):
+        """An engine's output file stores the deck's depths at float32
+        (Kraken's sit 2.5e-6 m off), and reindexing to the requested depths
+        restores them; the result is labelled with the labels given."""
+        asked = np.linspace(0.0, 100.0, 7)
+        stored = asked[1:-1].astype(np.float32).astype(float)
+        assert not np.array_equal(stored, asked[1:-1])
+        f = Field(data=np.arange(5.0)[:, None],
+                  coords={'depth': stored, 'range': [1000.0]})
+        g = f.reindex(depth=asked)
+        np.testing.assert_array_equal(g.depths, asked)
+        np.testing.assert_array_equal(g.data[1:-1, 0], np.arange(5.0))
+        assert np.isnan(g.data[[0, -1], 0]).all()
+
+    def test_a_label_off_by_more_than_the_tolerance_is_refused(self):
+        """``axis_match_tolerance`` is 1e-6 of the 100 m span here, 1e-4 m:
+        a stored label 0.9e-4 m off a requested one matches it, 1.1e-4 m
+        off does not."""
+        f = Field(data=np.ones((1, 1)),
+                  coords={'depth': [50.0 + 0.9e-4], 'range': [1000.0]})
+        assert f.reindex(depth=[0.0, 50.0, 100.0]).depths[1] == 50.0
+        g = Field(data=np.ones((1, 1)),
+                  coords={'depth': [50.0 + 1.1e-4], 'range': [1000.0]})
+        with pytest.raises(ConfigurationError, match='never drops a stored'):
+            g.reindex(depth=[0.0, 50.0, 100.0])
+
+    def test_a_label_far_from_zero_matches_within_its_own_magnitude(self):
+        """On an axis narrower than its labels the tolerance is 1e-6 of the
+        label, 1e-2 m at 10 km: a stored range 0.9e-2 m off a requested one
+        matches it, 1.1e-2 m off does not."""
+        asked = [10000.0, 10001.0, 10002.0]
+        f = Field(data=np.ones((1, 1)),
+                  coords={'depth': [50.0], 'range': [10001.0 + 0.9e-2]})
+        assert f.reindex(range=asked).ranges[1] == 10001.0
+        g = Field(data=np.ones((1, 1)),
+                  coords={'depth': [50.0], 'range': [10001.0 + 1.1e-2]})
+        with pytest.raises(ConfigurationError, match='never drops a stored'):
+            g.reindex(range=asked)
+
+    def test_the_axis_is_matched_in_one_tolerance_call(self, monkeypatch):
+        """Every stored label's tolerance comes from one call over the
+        requested axis, so its span is measured once, not once per stored
+        label (N x M work: 100 000 labels into 200 000 took seconds)."""
+        import uacpy.core.results.field as field_module
+        from uacpy.core.results._base import axis_match_tolerance
+        sizes = []
+
+        def counted(axis_values, value):
+            sizes.append(np.size(value))
+            return axis_match_tolerance(axis_values, value)
+
+        monkeypatch.setattr(field_module, 'axis_match_tolerance', counted)
+        f = _field()
+        f.reindex(range=np.append(f.ranges, f.ranges[-1] + 1.0))
+        assert sizes == [f.ranges.size]
+
+    def test_one_label_for_two_stored_samples_is_refused(self):
+        f = Field(data=np.ones((2, 1)),
+                  coords={'depth': [50.0, 50.0 + 1e-5], 'range': [1000.0]})
+        with pytest.raises(ConfigurationError, match='one label for two'):
+            f.reindex(depth=[0.0, 50.0, 100.0])
+
+
+class TestAPinnedCoordinateIsNotAnAxis:
+    """A pinned coordinate is an axis collapsed to one value, so a name is
+    either an axis or pinned: both would overwrite the axis labels with the
+    scalar on export."""
+
+    def test_a_pinned_name_that_is_also_an_axis_is_refused(self):
+        with pytest.raises(ConfigurationError, match=r"\['depth'\] also name"):
+            Field(data=np.ones((2, 2)),
+                  coords={'depth': [1.0, 2.0], 'range': [1.0, 2.0]},
+                  pinned={'depth': 5.0})
+
+    def test_a_pinned_name_beside_the_axes_is_kept(self):
+        f = Field(data=np.ones((2, 2)),
+                  coords={'depth': [1.0, 2.0], 'range': [1.0, 2.0]},
+                  pinned={'frequency': 100.0})
+        assert f.pinned == {'frequency': 100.0}
+
 
 class TestAuxCoordsFollowTheirAxis:
     """An auxiliary coordinate is a label per sample of one axis: it is
@@ -3047,15 +3309,6 @@ class TestTheSourceIdentityIsAttributes:
         np.testing.assert_array_equal(back.source_weights, [1.0, -1.0j])
         assert not set(back.metadata) & {'source_level_dB', 'source_weights'}
 
-    def test_a_dict_that_keeps_them_in_metadata_loads_them(self):
-        d = self._levelled().to_dict()
-        d['metadata'] = {**d['metadata'],
-                         'source_level_dB': d.pop('source_level_dB'),
-                         'source_weights': d.pop('source_weights')}
-        back = Field.from_dict(d)
-        assert back.source_level_dB == 180.0
-        np.testing.assert_array_equal(back.source_weights, [1.0, -1.0j])
-        assert not set(back.metadata) & {'source_level_dB', 'source_weights'}
 
     def test_both_round_trip_through_xarray(self):
         pytest.importorskip('xarray')
@@ -3068,7 +3321,7 @@ class TestTheSourceIdentityIsAttributes:
                                           source_weights=np.array([1.0, -1.0]))
                  for z in (10.0, 20.0)]
         for coherent in (True, False):
-            summed = ResultStack(slabs, [10.0, 20.0]).superpose(
+            summed = stack_fields(slabs, [10.0, 20.0]).superpose(
                 coherent=coherent)
             assert summed.source_weights is None
             assert summed.source_level_dB == 180.0
@@ -3124,19 +3377,6 @@ class TestTheSynthesisInputsAreAttributes:
         assert back.speeds == field.speeds
         assert back.synthesis_floor == 512
 
-    def test_a_dict_that_keeps_them_in_metadata_loads_them(self):
-        d = self._stated().to_dict()
-        del d['speeds'], d['synthesis_floor']
-        d['metadata'] = {'c0': 1490.0, 'c_max': 1520.0,
-                         'tdelay_speed': 1480.0, 'waveguide_c_min': 1450.0,
-                         'waveguide_c_max': 1700.0, 'n_time_samples': 512,
-                         'dr': 5.0}
-        back = Field.from_dict(d)
-        assert back.speeds == SoundSpeeds(
-            surface=1490.0, water_max=1520.0, water_min=1480.0,
-            waveguide_min=1450.0, waveguide_max=1700.0)
-        assert back.synthesis_floor == 512
-        assert back.metadata == {'dr': 5.0}
 
     def test_both_round_trip_through_xarray(self):
         pytest.importorskip('xarray')
@@ -3146,15 +3386,6 @@ class TestTheSynthesisInputsAreAttributes:
         assert back.synthesis_floor == 512
         assert not set(back.metadata) & {'speeds_surface', 'synthesis_floor'}
 
-    def test_an_xarray_that_keeps_them_as_metadata_attrs_loads_them(self):
-        pytest.importorskip('xarray')
-        da = _two_path_grid().to_xarray()
-        da.attrs.update({'c0': 1490.0, 'waveguide_c_min': 1450.0,
-                         'waveguide_c_max': 1700.0, 'n_time_samples': 512})
-        back = Field.from_xarray(da)
-        assert back.speeds == SoundSpeeds(surface=1490.0, waveguide_min=1450.0,
-                                          waveguide_max=1700.0)
-        assert back.synthesis_floor == 512
 
 
 @pytest.mark.parametrize('reported, stored', [

@@ -53,6 +53,11 @@ _LONG_TIMEOUT_STEMS = {
     # measurement, as the note above says — it is not a contended run being
     # waved through.
     "example_45_broadband_and_exposure_maps",
+    # Two Bellhop broadband runs over 3923 frequencies (a 9 x 160 map and the
+    # 61 distances one receiver hears) plus the synthesis of each: measured
+    # 58 s standalone with two worker threads busy elsewhere, so a loaded
+    # session overruns the 120 s tier.
+    "example_47_moving_source_exposure",
 }
 
 # The heaviest examples: GIF encoding across five solvers, and a broadband
@@ -934,7 +939,7 @@ _HAND_ROLLED = {
     ".k.real": "Modes.phase_speeds",
     "record['delay']": "Arrivals.delays",
     "marker='*'": "plot_field(source=)",
-    "np.asarray(f.data)": "ResultStack.p",
+    "np.asarray(f.data)": "Field.p",
 }
 
 #: example_34 refers its SNR to the clean beacon rather than to the echo-laden
@@ -952,8 +957,8 @@ def test_the_examples_call_the_package_for_what_it_exports():
     examples 15 and 41 spelled ``arccos(c/v)``, which the package keeps in one
     home; 06 rebuilt ``phase_speeds`` and ``excitation``; 11 rebuilt
     ``Arrivals.delays``; 04 and 06 drew source stars that
-    ``plot_field(source=)`` draws; 42, 43 and 44 stacked slab pressure by
-    hand where ``ResultStack.p`` returns it.
+    ``plot_field(source=)`` draws; 42, 43 and 44 stacked each source's
+    pressure by hand where the multi-depth run's ``Field.p`` returns it.
     """
     offences = []
     for path in sorted(EXAMPLES_DIR.glob("example_*.py")):

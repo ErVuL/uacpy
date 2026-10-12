@@ -5,12 +5,11 @@ interface checks OASS and OASSP both make."""
 
 import re
 import warnings
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-from uacpy.models.base import PropagationModel
+from uacpy.models._launch import BinarySearch
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.models._spec import EngineTraits
 from uacpy.core.source import Source
@@ -21,6 +20,7 @@ from uacpy.io.oases_writer import (
     MIN_SPECTRAL_EXPONENT, oass_bottom_interfaces, _OASES_MAX_WAVENUMBERS,
 )
 from uacpy.core.absorption import warn_if_band_absorption_frozen
+from uacpy.core.engine_defaults import OASSP_SPECTRAL_EXPONENT
 from uacpy.models._knobs import whole_count
 from uacpy.models._notices import message_notice
 
@@ -168,22 +168,43 @@ def _reject_unintegrable_spectral_exponent(model_name, spectral_exponent):
         f"is not integrable "
         f"(oassp.tex:356-362; the exponent reaches amod(m)=fac(3+…) at "
         f"oaseun31.f:99).",
-        remediation=f"Pass spectral_exponent > {MIN_SPECTRAL_EXPONENT:g} "
-                    f"(2.0 is the default).",
+        remediation=f"Pass spectral_exponent > {MIN_SPECTRAL_EXPONENT:g}, "
+                    f"or leave it unset for "
+                    f"{OASSP_SPECTRAL_EXPONENT:g}.",
     )
 
 
-def _oases_find_executable(model: PropagationModel, name: str) -> Path:
-    """Locate an OASES binary, preferring the ``<name>_bash`` wrapper.
+#: The settings fields of OASS and OASSP that ``from_run_settings`` does not
+#: pin: the option line (composed from the other knobs) and the deck's
+#: ``spectral_exponent``, OASES' own 2.5 when unset, which as a pin under the
+#: Gaussian spectrum would draw the notice that the run does not use it.
+SCATTERING_UNPINNED_FIELDS = frozenset({'options', 'spectral_exponent'})
 
-    Searches ``uacpy/bin/oases``, ``uacpy/bin/oalib``, and
-    ``uacpy/third_party/oases/bin``.
-    """
-    return model._find_executable_in_paths(
-        [f'{name}_bash', name],
-        bin_subdirs=['oases', 'oalib'],
-        dev_subdir='oases',
-    )
+
+def resolve_spectral_exponent(model_name, spectral_exponent, *, goff):
+    """``(M, notice)``: the roughness power-spectrum exponent the deck
+    carries — the pinned value, else
+    :data:`~uacpy.core.engine_defaults.OASSP_SPECTRAL_EXPONENT` — and, when
+    one is pinned under the Gaussian spectrum (``goff`` False), the notice
+    that the run does not use it: the Gaussian ``P`` reads only the
+    correlation length (``oaseun31.f:3689-3692``; oassp.tex:364-366
+    "Insignificant for Gaussian spectrum (option g not specified) but a value
+    must be given")."""
+    if spectral_exponent is None:
+        return OASSP_SPECTRAL_EXPONENT, None
+    notice = None if goff else (
+        f"{model_name}(spectral_exponent={float(spectral_exponent):g}) is "
+        f"not used: the Gaussian roughness spectrum reads only the "
+        f"correlation length (oaseun31.f:3689-3692). "
+        f"roughness_spectrum='goff-jordan' is the spectrum that takes it.")
+    return float(spectral_exponent), notice
+
+
+def _oases_binary(name: str) -> BinarySearch:
+    """Where an OASES binary is looked for: the ``<name>_bash`` wrapper
+    first, then ``name``, under ``uacpy/bin/oases``, ``uacpy/bin/oalib``
+    and ``uacpy/third_party/oases``."""
+    return BinarySearch((f'{name}_bash', name), ('oases', 'oalib'), 'oases')
 
 
 #: OASP echoes the count it settled on before the frequency loop

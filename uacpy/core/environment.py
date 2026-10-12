@@ -16,10 +16,10 @@ import numpy as np
 import warnings
 
 from uacpy.core.exceptions import (
-    ConfigurationError, ProvenanceWarning, ValidityWarning)
+    ConfigurationError, FallbackWarning, ProvenanceWarning, ValidityWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._plotting import plotter
-from uacpy.core._validate import sanitize_title
+from uacpy.core._validate import real_scalar_or_none, sanitize_title
 from uacpy.core._provenance import (
     coerce_data_sources, dedupe_provenance, dedupe_records)
 from uacpy.core._carrier import (
@@ -121,8 +121,8 @@ def _warn_if_reference_water_replaces(old, new) -> None:
         f"{t_gap:.3g} °C and {s_gap:.3g} psu away. Francois-Garrison follows "
         f"the temperature and salinity, so the run absorbs as in water this "
         f"environment does not hold. Keep the law it had, or build one from "
-        f"the column: Environment(absorption=FrancoisGarrison("
-        f"temperature=T, salinity=S, pH=8.0, depths=z)).",
+        f"the column: Environment(absorption=FrancoisGarrison."
+        f"from_temperature_salinity(z, T, S)).",
         ProvenanceWarning, skip_file_prefixes=USER_FRAME_SKIP)
 
 
@@ -131,9 +131,8 @@ def _coerce_water_density(value) -> float:
     default); refused outside 0.9-1.1, where a kg/m³ slip lands."""
     if value is None:
         value = DEFAULT_WATER_DENSITY_G_CM3
-    try:
-        rho_w = float(value)
-    except (TypeError, ValueError):
+    rho_w = real_scalar_or_none(value)
+    if rho_w is None:
         raise ConfigurationError(
             f"Environment: water_density must be a number in g/cm³; "
             f"got {value!r}.")
@@ -176,12 +175,48 @@ def _coerce_location(value, transect):
     return None if transect is None else great_circle_midpoint(*transect)
 
 
+#: m/s per m: the depth term of Mackenzie's (1981) sound-speed equation
+#: (:func:`~uacpy.core.acoustics.seawater.sound_speed_mackenzie`), how fast
+#: water below a cast speeds up from pressure alone.
+_PRESSURE_SPEED_GRADIENT = 1.630e-2
+
+#: m/s. A threshold choice: a profile held constant below its deepest sample
+#: is announced when the pressure term alone would raise the speed by more
+#: than this over the held span (306.7 m). Water shallower than that, and
+#: the few metres a cast routinely stops above the bed, stay silent; the
+#: deep-water holds that drop tens of m/s are announced.
+_SSP_HOLD_WARN_SPEED = 5.0
+
+
 def _spanning(ssp, depth):
     """``ssp`` extended down to ``depth`` when it ends above it. Extend only,
     never truncate: the profile has to span the water column, but one that
     already reaches past the seabed is kept whole (each writer calls
-    ``extend_to`` again with its own deep-end depth)."""
-    return ssp.extend_to(depth) if depth > ssp.depths[-1] else ssp
+    ``extend_to`` again with its own deep-end depth).
+
+    The extension holds the deepest speed constant. A ``FallbackWarning``
+    names the hold when the pressure term alone would raise the speed by
+    more than :data:`_SSP_HOLD_WARN_SPEED` over it (an isovelocity profile
+    is constant by definition and stays silent)."""
+    last = float(ssp.depths[-1])
+    if not depth > last:
+        return ssp
+    gap = float(depth) - last
+    missed = _PRESSURE_SPEED_GRADIENT * gap
+    if ssp.kind != 'isovelocity' and missed > _SSP_HOLD_WARN_SPEED:
+        warnings.warn(
+            f"Environment: the sound-speed profile ends at {last:g} m above "
+            f"a {float(depth):g} m seafloor, so its deepest speed is held "
+            f"constant over the bottom {gap:g} m. Below a cast the water "
+            f"speeds up by about {_PRESSURE_SPEED_GRADIENT:g} m/s per m from "
+            f"pressure alone (Mackenzie 1981), so the held water is about "
+            f"{missed:.0f} m/s slow at the seafloor. Extend the profile "
+            f"along its deep gradient (uacpy.data.extend_ssp_below_data, "
+            f"which holds once the cast reaches the deep isothermal layer) "
+            f"or build it from T/S down to the seafloor "
+            f"(SoundSpeedProfile.from_temperature_salinity).",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return ssp.extend_to(depth)
 
 
 #: Each field an assignment checks alone: the value as the constructor
@@ -482,7 +517,8 @@ class Environment(DeepCopyMixin, CarrierExport):
             Keywords of xarray's ``to_netcdf``.
         """
         import json
-        from uacpy.core._export import require_extra, _to_json
+        from uacpy.core._export import (
+            require_extra, _to_json, write_netcdf_groups)
         xarray = require_extra('xarray', 'Environment.to_netcdf')
         rest = self.to_dict()
         for name in self._GROUPS:
@@ -490,11 +526,12 @@ class Environment(DeepCopyMixin, CarrierExport):
         groups = [name for name in self._GROUPS
                   if getattr(self, name) is not None]
         rest['__groups__'] = groups
-        xarray.Dataset(attrs={self._FIELDS_ATTR: json.dumps(_to_json(rest))}
-                       ).to_netcdf(path, mode='w', **kwargs)
-        for name in groups:
-            getattr(self, name).to_xarray().to_netcdf(
-                path, mode='a', group=name, **kwargs)
+        root = xarray.Dataset(
+            attrs={self._FIELDS_ATTR: json.dumps(_to_json(rest))})
+        write_netcdf_groups(
+            [(None, root),
+             *((name, getattr(self, name).to_xarray()) for name in groups)],
+            path, who='Environment.to_netcdf', **kwargs)
 
     @classmethod
     def from_netcdf(cls, path, **kwargs) -> 'Environment':
@@ -507,13 +544,28 @@ class Environment(DeepCopyMixin, CarrierExport):
             A file :meth:`to_netcdf` wrote.
         **kwargs
             Keywords of ``xarray.open_dataset``.
+
+        Raises
+        ------
+        ConfigurationError
+            The file holds something other than an Environment (a result,
+            another carrier); the refusal names it and the call that reads
+            it.
         """
         import json
         from uacpy.core._export import (CarrierExport, _from_json,
-                                        require_extra, _resolve_class)
+                                        netcdf_holding, require_extra,
+                                        _resolve_class)
         xarray = require_extra('xarray', 'Environment.from_netcdf')
         with xarray.open_dataset(path, **kwargs) as root:
-            fields = _from_json(json.loads(root.attrs[cls._FIELDS_ATTR]))
+            saved = root.attrs.get(cls._FIELDS_ATTR)
+            fields = None if saved is None else _from_json(json.loads(saved))
+            if not (isinstance(fields, dict) and '__groups__' in fields):
+                what, reader = netcdf_holding(root)
+                raise ConfigurationError(
+                    f"Environment.from_netcdf: {str(path)!r} holds {what}, "
+                    f"not an Environment.",
+                    remediation=f"Read it with {reader}.")
         for name in fields.pop('__groups__'):
             with xarray.open_dataset(path, group=name, **kwargs) as group:
                 group = group.load()
@@ -583,6 +635,9 @@ class Environment(DeepCopyMixin, CarrierExport):
                                self.surface))
             + self.extra_data_sources
             + dedupe_provenance((self.altimetry,)))
+
+    #: The plotter :func:`uacpy.plot.plot_carrier` draws this environment with.
+    _plotter = 'plot_environment'
 
     def plot(self, ax=None, **kwargs):
         """Plot the water column + seafloor cross-section.

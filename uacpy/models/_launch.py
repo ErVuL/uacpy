@@ -1,6 +1,8 @@
 """Launching an engine binary: where the package keeps its builds, finding
 one, the :class:`Launch` record of one launch and its runner
-(:func:`run_launch`, through :func:`run_subprocess`), reading what a binary
+(:func:`run_launch`, through the engine's seam a :class:`LaunchContext`
+carries), the launch of a binary that writes a ``.prt``
+(:func:`run_prt_binary`), reading what a binary
 reports on failure — the fatal and warning lines of its ``.prt``, the tail
 of a captured stream — and the one thread rule: whether this process
 launches its engines single-threaded (:func:`_launch_single_threaded`) and
@@ -16,7 +18,7 @@ import warnings
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional, Tuple
 
 from uacpy._log import log_message
 from uacpy._stack import parent_death_prefix, stack_limit_prefix
@@ -136,6 +138,26 @@ def openmp_thread_env(env: Optional[dict] = None):
         env['OMP_NUM_THREADS'] = '1'
         return env, 'OMP_NUM_THREADS=1 (a run_parallel worker)'
     return env, 'OMP_NUM_THREADS unset (one thread per CPU)'
+
+
+class BinarySearch(NamedTuple):
+    """Where :func:`find_executable_in_paths` looks for one engine binary:
+    ``names`` in preference order, under ``uacpy/bin/<bin_subdirs>``, then
+    the development tree ``third_party/<dev_subdir>``, then ``PATH``. An
+    engine declares one per backend
+    (:attr:`~uacpy.models.base.PropagationModel._BINARIES`); its own lookup
+    and :func:`uacpy.models.engine_status` both read that declaration."""
+
+    names: Tuple[str, ...]
+    bin_subdirs: Tuple[str, ...]
+    dev_subdir: Optional[str] = None
+
+    def find(self, model_name: str) -> Path:
+        """The first runnable match; :class:`ExecutableNotFoundError`
+        naming ``model_name`` when there is none."""
+        return find_executable_in_paths(
+            list(self.names), list(self.bin_subdirs), self.dev_subdir,
+            model_name=model_name)
 
 
 def find_executable_in_paths(
@@ -300,10 +322,16 @@ def run_subprocess(
                         f"deleted, moved or made inaccessible while the "
                         f"run was in progress."),
             ) from e
+        # A binary gone since the model resolved it (a rebuild in another
+        # shell) is the missing-binary case the constructor raises.
+        if (isinstance(e, FileNotFoundError)
+                and (e.filename is None or str(e.filename) == argv[0])):
+            raise ExecutableNotFoundError(model_name, str(cmd[0])) from e
         if isinstance(e, FileNotFoundError):
             raise ModelExecutionError(
                 model_name, return_code=-1,
-                stdout=None, stderr=f"Executable not found: {e}.",
+                stdout=None,
+                stderr=f"A program the launch runs is missing: {e}.",
             ) from e
         # A binary that is present but will not exec — permission denied,
         # or ENOEXEC from an unexpanded LFS pointer, a wrong-architecture
@@ -392,33 +420,106 @@ class Launch:
     stdout_label: Optional[str] = None
 
 
-def run_launch(launch: Launch, *, run, log=None):
-    """Run ``launch`` and return its ``CompletedProcess`` (``None`` after a
-    tolerated exit): the stale outputs and the ``.prt`` removed, the binary
-    run through ``run`` (a model's ``_run_subprocess``, the one seam every
-    launch passes), a failure raised with the ``.prt`` tail attached unless
-    ``tolerate_exit`` accepts it, the stdout logged through ``log`` (a
-    ``log(message, level=...)`` callable, passed only when the ``debug``
-    level prints), then the checks in order."""
+class LaunchContext(NamedTuple):
+    """The engine side of a binary launch, built by
+    :meth:`~uacpy.models.base.PropagationModel._launch_context`.
+
+    Attributes
+    ----------
+    model_name : str
+        The engine's name, which every message of the launch carries.
+    run : callable
+        The engine's ``_run_subprocess``, the one seam every launch passes
+        (a test or a timeout stops a run there):
+        ``run(argv, *, cwd, timeout, env)``.
+    log : callable or None
+        ``log(message, level=...)`` for the child's stdout, ``None`` unless
+        the ``debug`` level prints.
+    benign_fatals : tuple of str
+        The ERROUT messages the engine's traits call benign
+        (``spec.traits.benign_fortran_fatals``).
+    """
+    model_name: str
+    run: Callable
+    log: Optional[Callable] = None
+    benign_fatals: Tuple[str, ...] = ()
+
+
+def run_launch(context: LaunchContext, launch: Launch):
+    """Run ``launch`` for the engine of ``context`` and return its
+    ``CompletedProcess`` (``None`` after a tolerated exit): the stale outputs
+    and the ``.prt`` removed, the binary run through ``context.run``, a
+    failure raised with the ``.prt`` tail attached unless ``tolerate_exit``
+    accepts it, the stdout logged through ``context.log``, then the checks
+    in order."""
     cwd = Path(launch.cwd)
     prt = () if launch.prt_root is None else (f'{launch.prt_root}.prt',)
     for name in tuple(launch.stale_outputs) + prt:
         cwd.joinpath(name).unlink(missing_ok=True)
     try:
-        result = run(list(launch.argv), cwd=launch.cwd,
-                     timeout=launch.timeout, env=launch.env)
+        result = context.run(list(launch.argv), cwd=launch.cwd,
+                             timeout=launch.timeout, env=launch.env)
     except ModelExecutionError as exc:
         if launch.tolerate_exit is None or not launch.tolerate_exit(exc):
             if launch.prt_root is not None:
                 attach_prt_tail(exc, launch.cwd, launch.prt_root)
             raise
         result = None
-    if (log is not None and launch.stdout_label is not None
+    if (context.log is not None and launch.stdout_label is not None
             and result is not None and result.stdout):
-        log(f"{launch.stdout_label} output:\n{result.stdout}", level='debug')
+        context.log(f"{launch.stdout_label} output:\n{result.stdout}",
+                    level='debug')
     for check in launch.checks:
         check(result)
     return result
+
+
+def prt_launch(context: LaunchContext, cmd, work_dir, base_name, *,
+               timeout: Optional[float] = None, env: Optional[dict] = None,
+               stale_outputs: tuple = ()) -> Launch:
+    """The :class:`Launch` of a binary that writes ``<base_name>.prt`` (the
+    Acoustics Toolbox, OASES): its outputs ``<base_name><suffix>`` for each
+    of ``stale_outputs`` and its ``.prt`` cleared first, the ``.prt`` tail
+    attached to a failure, then :func:`raise_on_fortran_fatal` (with the
+    engine's benign messages) and :func:`warn_on_prt_warnings`. See
+    :func:`run_prt_binary`."""
+    def fatal(result):
+        raise_on_fortran_fatal(context.model_name, result, work_dir,
+                               base_name, benign=context.benign_fatals)
+
+    def warned(result):
+        warn_on_prt_warnings(context.model_name, work_dir, base_name)
+
+    return Launch(
+        argv=tuple(cmd), cwd=work_dir, env=env, timeout=timeout,
+        stale_outputs=tuple(f"{base_name}{suffix}"
+                            for suffix in stale_outputs),
+        prt_root=base_name, checks=(fatal, warned),
+        stdout_label=context.model_name)
+
+
+def run_prt_binary(context: LaunchContext, cmd, work_dir, base_name, *,
+                   timeout: Optional[float] = None,
+                   env: Optional[dict] = None, stale_outputs: tuple = ()):
+    """Run a Fortran/AT binary as :func:`prt_launch` describes it
+    (:func:`run_launch`), appending the ``<base>.prt`` tail to a
+    :class:`ModelExecutionError` on failure and logging stdout when
+    verbose. Returns the ``CompletedProcess``. Shared by every engine whose
+    binary writes a ``.prt``.
+
+    The AT engines hold the file root in ``CHARACTER(LEN=80)`` buffers,
+    so a root longer than 80 characters is silently truncated; launching
+    with ``work_dir`` as cwd and a short relative ``base_name`` keeps
+    every root far inside that limit.
+
+    ``stale_outputs`` lists the suffixes (``'.shd'``, ``'.arr'``, …) this
+    binary may write under ``base_name``. They are removed before launch
+    so a pinned work dir cannot hand an earlier run's output back as this
+    run's answer — the same reason the ``.prt`` is cleared.
+    """
+    return run_launch(context, prt_launch(
+        context, cmd, work_dir, base_name, timeout=timeout, env=env,
+        stale_outputs=stale_outputs))
 
 
 def require_output(model_name: str, candidates, *, what: str, process=None,
@@ -507,8 +608,8 @@ def raise_on_fortran_fatal(model_name: str, result, work_dir, base_name, *,
     ``STOP 'Fatal Error: …'`` via ``ERROUT`` but also stops directly with
     ``STOP 'ERROR IN KRAKENC: …'`` and ``STOP 'FATAL ERROR in BandPass: …'``,
     while OASES uses 46 distinct banners of which only 19 carry ``***`` —
-    26 use ``>>> … <<<`` and one is bare ``'INVALID INPATCH'``. Matching
-    ``***`` caught well under half of them, and a missed stop is read as
+    26 use ``>>> … <<<`` and one is bare ``'INVALID INPATCH'``. A ``***``
+    match would catch under half of them, and a missed stop is read as
     success off whatever output file happens to be on disk.
     """
     stderr = result.stderr or ''
@@ -558,19 +659,31 @@ def terminate_process_group(proc) -> None:
                 pipe.close()
 
 
+#: Notes appended to a forwarded ``.prt`` line that uacpy's result
+#: overrides. ``ReadSzRz`` (``misc/SourceReceiverPositions.f90:135-138``)
+#: moves a receiver below the deck's bottom boundary onto it, and Bellhop and
+#: Scooter, the binaries that print it, return NaN at receivers below the
+#: seafloor (``mask_unresolvable_depths``), not the moved receiver's field.
+_PRT_LINE_NOTES = {
+    'Receiver below or too near the bottom bdry has been moved up':
+        ' [uacpy returns NaN at receivers below the seafloor, not the moved '
+        'receiver\'s field]',
+}
+
+
 def warn_on_prt_warnings(model_name: str, work_dir, base_name) -> None:
     """Surface the binary's own non-fatal ``Warning in ...`` lines.
 
     The AT binaries write both fatals and *non-fatal* diagnoses to the
-    ``.prt``. Only the fatals were read (``_attach_prt_tail``, on the
-    exception path), so a run the solver itself diagnosed came back at
-    exit 0 with a full-size result and nothing said — measured, BELLHOP
-    writes ``Warning in BELLHOP : Too few beams`` and uacpy emitted zero
-    warnings while returning a TL field the binary had just called
-    under-sampled.
+    ``.prt``. The fatals alone are read on the exception path
+    (:func:`attach_prt_tail`), so without this a run the solver itself
+    diagnoses returns at exit 0 with a full-size result and nothing said —
+    BELLHOP writes ``Warning in BELLHOP : Too few beams`` over a TL field
+    it has just called under-sampled.
 
     These are the solver's words, not uacpy's, so they are passed through
-    verbatim rather than reinterpreted.
+    verbatim rather than reinterpreted; a line uacpy's own handling
+    overrides carries a note saying so (:data:`_PRT_LINE_NOTES`).
     """
     text = read_prt(Path(work_dir) / f"{base_name}.prt", tail_bytes=200000)
     if not text:
@@ -580,7 +693,9 @@ def warn_on_prt_warnings(model_name: str, work_dir, base_name) -> None:
         line = raw.strip()
         if line.lower().startswith('warning in') and line not in seen:
             seen.add(line)
-            lines.append(line)
+            lines.append(line + next((note for key, note
+                                      in _PRT_LINE_NOTES.items()
+                                      if key in line), ''))
     if lines:
         joined = "\n  ".join(lines)
         warnings.warn(

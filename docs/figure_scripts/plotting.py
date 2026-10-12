@@ -45,7 +45,8 @@ def _time_series():
                                       run_mode=RunMode.BROADBAND)
     # Δf = 0.5 Hz makes the record 1/Δf = 2 s long; opened at 0.5 s it holds
     # every arrival, from the first at 1 km (0.67 s) to the 3 km tail (2.29 s).
-    return H.synthesize_time_series(waveform, 4000.0, t_start=0.5)
+    return H.synthesize_time_series(source_waveform=waveform,
+                                    sample_rate=4000.0, t_start=0.5)
 
 
 def dispatch():

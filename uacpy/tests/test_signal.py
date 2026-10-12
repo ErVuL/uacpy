@@ -948,99 +948,6 @@ class TestMakeMseqProbe:
             self._probe(duration=1.0)
 
 
-class TestSynthesizeTimeSeriesOnArrays:
-    """``acoustic_signal.synthesize_time_series``: a waveform through
-    ``H(f)`` on plain arrays, the density route ``Field.synthesize_time_series``
-    runs."""
-
-    FS = 8000.0
-
-    def _setup(self, f0):
-        from uacpy.acoustic_signal import tone_burst
-        _, s = tone_burst(1000.0, 10, sample_rate=self.FS)
-        f = np.arange(f0, 3000.0, 1.0)
-        return s, f
-
-    @pytest.mark.parametrize('f0', [25.0, 25.3])
-    def test_a_delayed_arrival_lands_at_its_delay_with_its_amplitude(self, f0):
-        """``H = A·exp(-2πifτ)`` returns ``A·s(t - τ)``: the continuous
-        Hann-burst evaluated at ``t - τ`` matches to 1e-3, on a band that
-        starts on a multiple of Δf and on one that does not."""
-        from uacpy.acoustic_signal import synthesize_time_series
-        s, f = self._setup(f0)
-        n = s.size
-        tau, amp = 0.5, 0.01
-        t, p = synthesize_time_series(amp * np.exp(-2j * np.pi * f * tau), frequencies=f,
-                                      source_waveform=s, sample_rate=self.FS)
-        tq = t - tau
-        w = np.where((tq >= 0) & (tq <= (n - 1) / self.FS),
-                     0.5 - 0.5 * np.cos(2 * np.pi * tq * self.FS / (n - 1)),
-                     0.0)
-        ideal = amp * np.sin(2 * np.pi * 1000.0 * tq) * w
-        assert np.linalg.norm(p - ideal) / np.linalg.norm(ideal) < 1e-3
-
-    def test_it_is_the_core_the_field_method_runs(self):
-        """The Field method adds a start time and a re-wrap, nothing to the
-        trace: at the same ``t_start`` the two are bit-identical."""
-        from uacpy.acoustic_signal import synthesize_time_series
-        from uacpy.core.results import Field, SoundSpeeds
-        s, f = self._setup(25.3)
-        H = 0.01 * np.exp(-2j * np.pi * f * 0.5)
-        field = Field(data=H[None, None, :],
-                      coords={'depth': np.array([10.0]),
-                              'range': np.array([750.0]), 'frequency': f},
-                      speeds=SoundSpeeds(water_max=1500.0))
-        trace = field.synthesize_time_series(s, self.FS, t_start=0.0)
-        t, p = synthesize_time_series(H, frequencies=f, source_waveform=s, sample_rate=self.FS)
-        assert np.array_equal(trace.coords['time'], t)
-        assert np.array_equal(trace.data[0, 0], p)
-
-    def test_the_frequency_axis_can_be_any_axis(self):
-        from uacpy.acoustic_signal import synthesize_time_series
-        s, f = self._setup(25.0)
-        H = np.exp(-2j * np.pi * f * 0.3)
-        _, one = synthesize_time_series(H, frequencies=f, source_waveform=s, sample_rate=self.FS)
-        _, last = synthesize_time_series(np.stack([H, 2 * H]), frequencies=f, source_waveform=s, sample_rate=self.FS)
-        _, first = synthesize_time_series(np.stack([H, 2 * H]).T, frequencies=f, source_waveform=s,
-                                          sample_rate=self.FS, axis=0)
-        assert last.shape == (2, one.size) and first.shape == (one.size, 2)
-        np.testing.assert_array_equal(last[1], 2 * one)
-        np.testing.assert_array_equal(first[:, 0], one)
-
-    def test_t_start_moves_the_record(self):
-        from uacpy.acoustic_signal import synthesize_time_series
-        s, f = self._setup(25.0)
-        H = np.exp(-2j * np.pi * f * 0.3)
-        t, _ = synthesize_time_series(H, frequencies=f, source_waveform=s, sample_rate=self.FS, t_start=0.25)
-        assert t[0] == 0.25
-
-    @pytest.mark.parametrize('bad,match', [
-        ('complex', 'must be a real pressure pulse'),
-        ('2d', 'must be a 1-D signal')])
-    def test_the_waveform_is_a_real_one_dimensional_signal(self, bad, match):
-        from uacpy.acoustic_signal import synthesize_time_series
-        s, f = self._setup(25.0)
-        wf = s.astype(complex) if bad == 'complex' else np.stack([s, s])
-        with pytest.raises(ConfigurationError, match=match):
-            synthesize_time_series(np.ones(f.size, complex), frequencies=f, source_waveform=wf, sample_rate=self.FS)
-
-    def test_a_mismatched_axis_is_refused(self):
-        from uacpy.acoustic_signal import synthesize_time_series
-        s, f = self._setup(25.0)
-        with pytest.raises(ConfigurationError, match='frequencies has'):
-            synthesize_time_series(np.ones(f.size - 1, complex), frequencies=f, source_waveform=s,
-                                   sample_rate=self.FS)
-
-    def test_a_nan_bin_makes_the_trace_nan_and_warns(self):
-        from uacpy.acoustic_signal import synthesize_time_series
-        s, f = self._setup(25.0)
-        H = np.ones((2, f.size), complex)
-        H[1, 10] = np.nan
-        with pytest.warns(UserWarning, match='1 of 2 cell'):
-            _, p = synthesize_time_series(H, frequencies=f, source_waveform=s, sample_rate=self.FS)
-        assert np.all(np.isfinite(p[0])) and np.all(np.isnan(p[1]))
-
-
 class TestLfmChirpRefusesNegativeSweepBounds:
     @pytest.mark.parametrize("freq_start,freq_end", [(-500.0, 1000.0), (1000.0, -500.0),
                                            (NAN, 1000.0)])
@@ -1483,9 +1390,10 @@ class TestScalarArgumentsAreRefusedByName:
 
     @pytest.mark.parametrize('method', ['welch', 'etfe', 'ls_fir', 'p_etfe'])
     def test_frf_refuses_records_of_different_lengths(self, method):
+        period = {'period': 100} if method == 'p_etfe' else {}
         with pytest.raises(ConfigurationError, match='same length'):
-            FRF(method=method, order=4).compute(self.X[:1000], self.X[:900],
-                                            1000.0)
+            FRF(method=method, order=4, **period).compute(
+                self.X[:1000], self.X[:900], 1000.0)
 
     @pytest.mark.parametrize('bad', [0.0, -1000.0, np.nan])
     def test_frf_names_its_sample_rate(self, bad):
@@ -1508,7 +1416,8 @@ class TestScalarArgumentsAreRefusedByName:
         fs = 48000.0
         x = np.random.default_rng(1).standard_normal(9600)
         amps, delays = [1.0, 0.5, 0.25], [0.01, 0.3, 1.0]
-        _, y = simulate_reception(x, amps, delays, fs)
+        _, y = simulate_reception(amps, delays, source_waveform=x,
+                                  sample_rate=fs)
         _, h = impulse_response(amps, delays, sample_rate=fs)
         np.testing.assert_allclose(y, np.convolve(x, h), rtol=0, atol=1e-12)
 
@@ -1840,13 +1749,22 @@ def _signal_results():
     )
     from uacpy.comms.janus import JanusReception
     from uacpy.comms.link import BerCurve
+    from uacpy.comms.sync import DopplerEstimate
     from uacpy.acoustic_signal.cqt import CQSpectrogramResult, CQTResult
     from uacpy.acoustic_signal.spectral import (
         ProbabilisticSpectralEstimate, SpectralEstimate,
     )
     from uacpy.noise.ambient import NoiseComponents
+    from uacpy.acoustic_signal.bands import BandLevels
+    from uacpy.acoustic_signal.frf import FRFResult
+    from uacpy.comms.channel import ChannelTaps
     x = np.arange(4.0)
     return {
+        'BandLevels': BandLevels(x + 1.0, x, lower=x, upper=x + 2.0,
+                                 band_type='octave', ref=1.0),
+        'FRFResult': FRFResult(x, x + 1j, method='etfe'),
+        'ChannelTaps': ChannelTaps(taps=x + 0j, delays_s=x, symbol_rate=10.0,
+                                   fc=None, sps=2, first_arrival_s=0.0),
         'SpectralEstimate': SpectralEstimate(
             x, x, scaling='exposure', method='constant_q',
             bands=[(1.0, 2.0, 3.0)], band_type='octave'),
@@ -1864,6 +1782,7 @@ def _signal_results():
                                          statistic=x),
         'BerCurve': BerCurve(x, x, scheme='16qam', n_bits=10,
                              channel=[1.0, 0.5], n_train=7),
+        'DopplerEstimate': DopplerEstimate(1e-3, x * 1e-3, x / 4.0),
         'SpectrogramResult': SpectrogramResult(x, x, x, scaling='spectrum',
                                                mode='phase'),
         'ComplexCepstrum': ComplexCepstrum(x, 2),
@@ -1941,3 +1860,147 @@ class TestSignalResultsShareOneBehaviour:
         assert not hasattr(r['Snapshots'], 'plot')
         assert not hasattr(r['NoiseComponents'], 'plot')
         assert hasattr(r['FKResult'], 'plot')
+
+
+def _result_tuple_classes():
+    """Every ResultTuple subclass that is a result (has fields)."""
+    import importlib
+    import pkgutil
+    import uacpy
+    from uacpy.acoustic_signal._results import ResultTuple
+    for info in pkgutil.walk_packages(uacpy.__path__, 'uacpy.'):
+        if not any(part in info.name for part in
+                   ('.tests', '.examples', 'third_party')):
+            importlib.import_module(info.name)
+    found, todo = set(), [ResultTuple]
+    while todo:
+        for sub in todo.pop().__subclasses__():
+            todo.append(sub)
+            if hasattr(sub, '_fields'):
+                found.add(sub.__name__)
+    return found
+
+
+def _same_fields(a, b):
+    assert type(a) is type(b)
+    for name, mine, theirs in zip(a._fields, a, b):
+        if mine is None:
+            assert theirs is None, name
+        else:
+            np.testing.assert_array_equal(np.asarray(theirs),
+                                          np.asarray(mine), err_msg=name)
+
+
+def test_the_round_trip_fixture_holds_every_result_tuple():
+    assert set(_signal_results()) == _result_tuple_classes()
+
+
+class TestEveryResultTupleRoundTrips:
+    """Each signal result reads back from what ``to_dict``, ``np.savez`` and
+    ``to_xarray`` wrote, field for field, a ``None`` field included."""
+
+    @pytest.mark.parametrize('name', _RESULT_NAMES)
+    def test_the_dict_and_npz_round_trips(self, name, tmp_path):
+        r = _signal_results()[name]
+        _same_fields(r, type(r).from_dict(r.to_dict()))
+        np.savez(tmp_path / 'r.npz', **r.to_dict())
+        with np.load(tmp_path / 'r.npz', allow_pickle=True) as f:
+            _same_fields(r, type(r).from_dict(dict(f)))
+
+    @pytest.mark.parametrize('name', _RESULT_NAMES)
+    def test_the_xarray_round_trip(self, name):
+        pytest.importorskip('xarray')
+        r = _signal_results()[name]
+        with warnings.catch_warnings():
+            # An attribute a NetCDF attribute cannot hold is announced.
+            warnings.simplefilter('ignore')
+            ds = r.to_xarray()
+        assert ds.attrs['uacpy_result_fields'] == ','.join(r._fields)
+        _same_fields(r, type(r).from_xarray(ds))
+
+
+class TestASavedResultNamesWhatItLacks:
+    """A saved result that lacks a field is refused naming it — a field
+    read back as ``None`` would load silently and fail far from the file;
+    only a field the listing names and the file does not hold is ``None``."""
+
+    @staticmethod
+    def _bands():
+        return _signal_results()['BandLevels']
+
+    def test_a_dict_without_a_field_is_refused_naming_it(self):
+        from uacpy.acoustic_signal.bands import BandLevels
+        d = self._bands().to_dict()
+        BandLevels.from_dict(d)
+        del d['levels']
+        with pytest.raises(ConfigurationError,
+                           match=r"^BandLevels\.from_dict: the saved result "
+                                 r"holds no 'levels' field"):
+            BandLevels.from_dict(d)
+
+    def test_a_dict_with_a_none_field_loads_it(self):
+        r = _signal_results()['ChannelTaps']
+        assert r.fc is None
+        assert type(r).from_dict(r.to_dict()).fc is None
+
+    def test_an_xarray_object_lacking_a_field_it_does_not_list_is_refused(self):
+        pytest.importorskip('xarray')
+        from uacpy.acoustic_signal.bands import BandLevels
+        ds = self._bands().to_xarray().rename({'levels': 'band_levels'})
+        ds.attrs['uacpy_result_fields'] = 'centers,band_levels'
+        with pytest.raises(ConfigurationError,
+                           match=r"^BandLevels\.from_xarray: the saved "
+                                 r"result holds no 'levels' field"):
+            BandLevels.from_xarray(ds)
+
+    def test_an_xarray_field_listed_and_not_written_was_none(self):
+        pytest.importorskip('xarray')
+        r = _signal_results()['ChannelTaps']
+        ds = r.to_xarray()
+        assert 'fc' not in ds.variables
+        assert type(r).from_xarray(ds).fc is None
+
+    def test_an_xarray_object_without_the_listing_lacking_a_field_is_refused(
+            self):
+        pytest.importorskip('xarray')
+        from uacpy.acoustic_signal.bands import BandLevels
+        ds = self._bands().to_xarray()
+        del ds.attrs['uacpy_result_fields']
+        _same_fields(self._bands(), BandLevels.from_xarray(ds))
+        with pytest.raises(ConfigurationError,
+                           match=r"^BandLevels\.from_xarray: the saved "
+                                 r"result holds no 'levels' field"):
+            BandLevels.from_xarray(ds.drop_vars('levels'))
+
+
+
+@pytest.mark.parametrize('call', [
+    lambda rng: synthesize_noise_from_psd(np.ones(8), np.linspace(0, 400, 8),
+                                          duration=0.1, sample_rate=1000.0,
+                                          rng=rng),
+    lambda rng: make_bandlimited_noise(100.0, 50.0, 0.5, sample_rate=1000.0,
+                                       rng=rng)])
+def test_rng_takes_a_generator_and_refuses_a_seed(call):
+    call(np.random.default_rng(0))
+    with pytest.raises(ConfigurationError,
+                       match=r'rng must be a numpy.random.Generator or None; '
+                             r'got int\.'):
+        call(0)
+
+
+@pytest.mark.parametrize('name', ['sound_exposure',
+                                  'probabilistic_sound_exposure'])
+def test_an_exposure_names_the_first_non_finite_sample(name):
+    """The band exposures refuse a NaN or inf as the level functions do,
+    naming the first sample and, of several records, its channel."""
+    import uacpy.acoustic_signal as signal
+    call = getattr(signal, name)
+    x = np.random.default_rng(0).standard_normal(48000)
+    x[30000] = np.inf
+    with pytest.raises(ConfigurationError,
+                       match=rf'^{name}: the record holds NaN or inf, the '
+                             rf'first at sample 30000;'):
+        call(x, 48000.0)
+    with pytest.raises(ConfigurationError,
+                       match=r'the first at sample 30000 of channel 1 '):
+        call(np.vstack([np.ones(48000), x]), 48000.0)

@@ -141,6 +141,33 @@ def test_require_missing_names_install_flag(tmp_path, monkeypatch):
         _cache.require('gebco')
 
 
+@pytest.mark.parametrize('name, downloader', [
+    ('emodnet', 'uacpy.data.download_emodnet_db()'), ('gebco', None)])
+def test_a_cache_miss_names_the_python_downloader_where_one_exists(
+        tmp_path, monkeypatch, name, downloader):
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path / 'empty'))
+    with pytest.raises(ConfigurationError,
+                       match=f'Offline {name} data not found') as excinfo:
+        _cache.require(name)
+    remediation = excinfo.value.remediation
+    assert f'install.sh --data {name}` from the uacpy repository root' \
+        in remediation
+    if downloader is None:
+        assert 'download_' not in remediation
+    else:
+        assert f'or call {downloader} in Python' in remediation
+
+
+def test_every_named_downloader_is_a_public_function():
+    import importlib
+    named = {name: ds.downloader for name, ds in _cache.DATASETS.items()
+             if ds.downloader is not None}
+    assert set(_cache.DATASETS) - set(named) == {'gebco', 'woa23'}
+    for name, call in named.items():
+        module, _, function = call.removesuffix('()').rpartition('.')
+        assert callable(getattr(importlib.import_module(module), function)), name
+
+
 # ── GEBCO local ─────────────────────────────────────────────────────────────
 
 def test_gebco_point_depth_and_land(cache):

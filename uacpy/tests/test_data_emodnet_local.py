@@ -22,14 +22,31 @@ def _poly_feature(folk, box):
             'geometry': {'type': 'Polygon', 'coordinates': [ring]}}
 
 
-def _fc(features):
-    return json.dumps({'type': 'FeatureCollection', 'features': features})
+def _wfs(features, *, page_cap=None, matched=True):
+    """A WFS ``http_get`` stub serving ``features`` page by page from the
+    request's ``startIndex``/``count``, capped at ``page_cap`` per page;
+    ``matched`` reports ``numberMatched`` (``True`` the real count, an int a
+    given one, ``False`` none)."""
+    import urllib.parse
+
+    def get(url, **kw):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        start, count = int(q['startIndex'][0]), int(q['count'][0])
+        if page_cap is not None:
+            count = min(count, page_cap)
+        body = {'type': 'FeatureCollection',
+                'features': features[start:start + count]}
+        if matched is not False:
+            body['numberMatched'] = (len(features) if matched is True
+                                     else matched)
+        return json.dumps(body)
+    return get
 
 
 def test_download_builds_wkb_index(tmp_path, monkeypatch):
     feats = [_poly_feature(2, (-41, 30, -40, 31)),
              _poly_feature(5, (2, 50, 3, 51))]
-    monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
+    monkeypatch.setattr(emodnet_local, 'http_get', _wfs(feats))
     out = emodnet_local.download_emodnet_db(cache_dir=str(tmp_path))
     assert out.exists()
     with np.load(out, allow_pickle=False) as z:
@@ -38,11 +55,37 @@ def test_download_builds_wkb_index(tmp_path, monkeypatch):
         assert z['offsets'].tolist() == [0, z['offsets'][1], z['wkb'].size]
 
 
+def _three_polygons():
+    return [_poly_feature(2, (-41, 30, -40, 31)),
+            _poly_feature(1, (-41, 31, -40, 32)),
+            _poly_feature(5, (2, 50, 3, 51))]
+
+
+@pytest.mark.parametrize('matched', [True, False],
+                         ids=['count-reported', 'no-count'])
+def test_a_server_page_cap_below_the_request_downloads_every_polygon(
+        tmp_path, monkeypatch, matched):
+    monkeypatch.setattr(emodnet_local, 'http_get',
+                        _wfs(_three_polygons(), page_cap=1, matched=matched))
+    out = emodnet_local.download_emodnet_db(cache_dir=str(tmp_path))
+    with np.load(out, allow_pickle=False) as z:
+        assert z['codes'].tolist() == [2, 1, 5]
+
+
+def test_paging_that_ends_short_of_the_reported_count_writes_no_index(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(emodnet_local, 'http_get',
+                        _wfs(_three_polygons(), page_cap=1, matched=5))
+    with pytest.raises(DataFetchError, match='3 of the 5 polygons'):
+        emodnet_local.download_emodnet_db(cache_dir=str(tmp_path))
+    assert not (tmp_path / emodnet_local.INDEX_FILE).exists()
+
+
 def test_query_after_download(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
     emodnet_local._index.memo.clear()
     feats = [_poly_feature(2, (-41, 30, -40, 31))]      # Sand
-    monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
+    monkeypatch.setattr(emodnet_local, 'http_get', _wfs(feats))
     emodnet_local.download_emodnet_db()                 # → <cache>/emodnet/
 
     bp = emodnet_local.fetch_bottom_emodnet_local((30.5, -40.5))
@@ -56,7 +99,7 @@ def test_transect_holds_and_varies(tmp_path, monkeypatch):
     emodnet_local._index.memo.clear()
     feats = [_poly_feature(2, (-41, 30, -40, 31)),
              _poly_feature(1, (-41, 31, -40, 32))]      # Sand then Mud band
-    monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
+    monkeypatch.setattr(emodnet_local, 'http_get', _wfs(feats))
     emodnet_local.download_emodnet_db()
     rdb = fetch_bottom_transect(
         (30.5, -40.5), (31.5, -40.5), source='emodnet', n_points=3)
@@ -74,7 +117,7 @@ def test_unknown_folk_class_refuses_default(tmp_path, monkeypatch):
     monkeypatch.setenv('UACPY_DATA_CACHE', str(tmp_path))
     emodnet_local._index.memo.clear()
     feats = [_poly_feature(99, (-41, 30, -40, 31))]     # bogus class
-    monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: _fc(feats))
+    monkeypatch.setattr(emodnet_local, 'http_get', _wfs(feats))
     emodnet_local.download_emodnet_db()
     with pytest.raises(DataFetchError, match='unrecognised Folk-5'):
         emodnet_local.fetch_bottom_emodnet_local((30.5, -40.5))
@@ -95,8 +138,7 @@ def test_a_shared_boundary_point_resolves_to_the_lowest_polygon_index(
     emodnet_local._index.memo.clear()
     feats = [_poly_feature(2, (-41, 30, -40, 31)),
              _poly_feature(1, (-41, 31, -40, 32))]   # share the lat=31 edge
-    fc = json.dumps({'type': 'FeatureCollection', 'features': feats})
-    monkeypatch.setattr(emodnet_local, 'http_get', lambda url, **kw: fc)
+    monkeypatch.setattr(emodnet_local, 'http_get', _wfs(feats))
     emodnet_local.download_emodnet_db()
     sub = emodnet_local.fetch_emodnet_substrate_local((31.0, -40.5))  # on the shared edge
     assert sub.folk_class == 2                            # polygon index 0

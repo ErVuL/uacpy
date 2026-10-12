@@ -8,7 +8,7 @@ A single :class:`Kraken` wraps the AT Kraken pipeline, mirroring
   or ``'krakenc'`` (complex: elastic media / attenuation / leaky modes);
   ``None`` (default) auto-picks krakenc when the env carries shear/leaky.
 - ``field.exe`` runs only when the requested run mode produces a field:
-  ``compute_modes`` stops after the modes binary; ``compute_tl`` /
+  ``compute_modes`` stops after the modes binary; ``compute_field`` /
   ``compute_transfer_function`` / ``compute_time_series`` chain field.exe.
 - Range-dependence (bathy / SSP) is handled natively for field modes via
   ``field.exe`` adiabatic / coupled modes (``mode_coupling=``); the
@@ -35,14 +35,14 @@ from uacpy.models import Kraken, RunMode
 
 kraken = Kraken()
 modes = kraken.compute_modes(env, source)   # Modes (k, phi)
-tl    = kraken.compute_tl(env, source, receiver)       # Field (TL)
+field = kraken.compute_field(env, source, receiver)       # Field (complex pressure)
 
 # Complex modes for elastic bottom (auto, or force backend)
 modes = Kraken(backend='krakenc').compute_modes(env_elastic, source)
 
 # Range-dependent field via coupled modes
 kraken = Kraken(mode_coupling='coupled', n_segments=10)
-tl = kraken.compute_tl(env_rd, source, receiver)
+field = kraken.compute_field(env_rd, source, receiver)
 ```
 """
 

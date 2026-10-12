@@ -485,6 +485,51 @@ def test_a_refusal_names_the_live_thread_that_holds_the_work_dir(tmp_path):
         holder.join(timeout=5.0)
 
 
+@pytest.mark.parametrize('held, held_cleans_up, asked, asked_cleans_up, '
+                         'refused', [
+    ('shared/source_depth_30m', False, 'shared', True, True),
+    ('shared/source_depth_30m', False, 'shared', False, False),
+    ('shared', True, 'shared/source_depth_30m', False, True),
+    ('shared', False, 'shared/source_depth_30m', True, False),
+    ('shared/source_depth_30m', True, 'shared/source_depth_60m', True, False),
+])
+def test_a_directory_around_a_claimed_one_collides_when_it_is_cleaned(
+        tmp_path, held, held_cleans_up, asked, asked_cleans_up, refused):
+    """A cleanup of the outer of two nested directories removes what
+    another thread's run created in the inner one meanwhile, so a claim on
+    either collides with another thread's live claim on the other when the
+    run on the OUTER directory cleans up. Without that cleanup the two hold
+    disjoint scratch files (a multi-depth run writes into a subdirectory of
+    its pinned directory), and siblings never collide."""
+    claimed = threading.Event()
+    may_finish = threading.Event()
+
+    def hold():
+        fm = _StubModel(tmp_path / held,
+                        cleanup=held_cleans_up)._setup_file_manager()
+        fm.get_path('in.pe').write_text('deck')
+        claimed.set()
+        may_finish.wait(timeout=5.0)
+        fm.cleanup_work_dir()
+
+    holder = threading.Thread(target=hold, name='depth-loop')
+    holder.start()
+    try:
+        assert claimed.wait(timeout=5.0)
+        stub = _StubModel(tmp_path / asked, cleanup=asked_cleans_up)
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match="already in use by thread 'depth-loop' "
+                                     "\\(through"):
+                stub._setup_file_manager()
+        else:
+            stub._setup_file_manager().cleanup_work_dir()
+        assert (tmp_path / held / 'in.pe').read_text() == 'deck'
+    finally:
+        may_finish.set()
+        holder.join(timeout=5.0)
+
+
 def test_a_work_dir_reachable_only_through_a_reference_cycle_is_reclaimed(
         tmp_path):
     """A manager stranded in a reference cycle outlives the run that made it.

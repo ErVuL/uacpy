@@ -23,8 +23,8 @@ from uacpy.comms.phy import (
     downconvert, pulse_shape, rrc_matched_filter, upconvert,
 )
 from uacpy.comms.sync import (
-    compensate_doppler, detect_preamble, estimate_doppler_scale,
-    symbol_sync,
+    _doppler_scan_stretch, compensate_doppler, detect_preamble,
+    estimate_doppler_scale, symbol_sync,
 )
 from uacpy.core._export import ExportRecord
 from uacpy.core._warn_frames import USER_FRAME_SKIP
@@ -515,7 +515,11 @@ class OFDMReceiver(SettingsRepr):
         pb = np.asarray(samples, dtype=float)
         if doppler_scale is None:
             probe = upconvert(resample_poly(self.preamble, factor, 1), sample_rate, fc)
-            doppler_scale, _, _ = estimate_doppler_scale(pb, probe, scales)
+            # The default scan reads the stretch around the probe, not the
+            # whole capture; an explicit ``scales`` grid is scanned as given.
+            doppler_scale, _, _ = estimate_doppler_scale(
+                pb if scales is not None else _doppler_scan_stretch(pb, probe),
+                probe, scales)
         if abs(doppler_scale) > 1e-9:
             # doppler_scale is a = v/c; compensate_doppler(pb, a) removes it.
             pb = np.real(compensate_doppler(pb, doppler_scale))

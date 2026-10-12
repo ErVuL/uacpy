@@ -17,6 +17,7 @@ readers. Three defects it found are pinned as skipped repros (see the
 """
 
 import io
+import struct
 
 import numpy as np
 import pytest
@@ -303,8 +304,8 @@ class TestWriterReaderRoundTrips:
             p = tmp_path / f'c{case}.sbp'
             write_source_beam_pattern(p, ang, lvl)
             back = read_source_beam_pattern(p)
-            assert np.max(np.abs(back[:, 0] - ang)) <= 5.1e-7   # %12.6f
-            assert np.max(np.abs(back[:, 1] - lvl)) <= 5.1e-7
+            assert np.max(np.abs(back.angles - ang)) <= 5.1e-7   # %12.6f
+            assert np.max(np.abs(back.levels_dB - lvl)) <= 5.1e-7
 
     def test_reflection_table_any_layout(self, tmp_path):
         """RefCoef.f90:53 reads the whole (theta, R, phi) table with ONE
@@ -861,6 +862,58 @@ class TestDetectEndianUnitMarkers:
             fh._ENDIAN_WARN_EMITTED = False
             with pytest.warns(UserWarning, match="big-endian"):
                 assert fh.detect_endian(struct.pack('>i', 1)) == '>'
+        finally:
+            fh._ENDIAN_WARN_EMITTED = emitted
+
+
+class TestDirectAccessByteOrderIsConfirmedByTheHeader:
+    """A direct-access record length that reads plausibly both ways —
+    65536 words little-endian is ``00 00 01 00``, 256 big-endian — is
+    settled by the header's counts: the order under which they lie in
+    ``1..file_size`` is kept, in either byte order; with no counts to
+    consult the smaller reading still wins."""
+
+    WORDS = 65536
+
+    def _file(self, tmp_path, order):
+        # Record 1: the word count; record 3 (byte 2 * 4 * WORDS): seven
+        # counts, as a .shd header holds them.
+        rec = 4 * self.WORDS
+        data = bytearray(3 * rec)
+        data[0:4] = struct.pack(order + 'i', self.WORDS)
+        data[2 * rec:2 * rec + 28] = struct.pack(order + '7i',
+                                                 1, 1, 1, 1, 1, 2, 3)
+        path = tmp_path / f'header{"LE" if order == "<" else "BE"}.bin'
+        path.write_bytes(bytes(data))
+        return path
+
+    @staticmethod
+    def _counts(daf):
+        daf.seek(2)
+        return [daf.integer() for _ in range(7)]
+
+    @pytest.mark.parametrize('order', ['<', '>'])
+    def test_the_order_whose_counts_fit_is_kept(self, tmp_path, order):
+        import uacpy.io._fortran_helpers as fh
+        emitted = fh._ENDIAN_WARN_EMITTED
+        try:
+            fh._ENDIAN_WARN_EMITTED = True
+            with open(self._file(tmp_path, order), 'rb') as fid:
+                daf = fh.DirectAccessFile(fid, 'test',
+                                          header_counts=self._counts)
+                assert daf.endian == order
+                assert daf.record_words == self.WORDS
+        finally:
+            fh._ENDIAN_WARN_EMITTED = emitted
+
+    def test_without_counts_the_smaller_reading_wins(self, tmp_path):
+        import uacpy.io._fortran_helpers as fh
+        emitted = fh._ENDIAN_WARN_EMITTED
+        try:
+            fh._ENDIAN_WARN_EMITTED = True
+            with open(self._file(tmp_path, '<'), 'rb') as fid:
+                daf = fh.DirectAccessFile(fid, 'test')
+                assert (daf.endian, daf.record_words) == ('>', 256)
         finally:
             fh._ENDIAN_WARN_EMITTED = emitted
 

@@ -9,7 +9,8 @@ import numpy as np
 
 from uacpy.core.results import Field
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
+    ConfigurationError, FallbackWarning, NumericsWarning,
+    UnsupportedFeatureError,
 )
 from uacpy.models import SPARC
 from uacpy.io.oalib_writer import write_sparc_source_time_series
@@ -19,11 +20,13 @@ from uacpy.models.sparc._extract import (
 )
 from uacpy.models.sparc._plan import (
     checked_n_mesh, profile_speed_bounds, reject_halfspace_bottom,
+    default_n_time_samples, refuse_band_pass_overflow,
     reject_oversized_snapshot, resolve_n_mesh, resolve_n_time_samples,
-    resolve_rmax_factor,
+    resolve_rmax_m, SPARC_C_HIGH_UNBOUNDED,
 )
 from uacpy.models.sparc._pulse import (
-    multi_frequency_notice, resolve_pulse_type, source_series_rows,
+    multi_frequency_notice, resolve_pulse_type, short_series_notice,
+    source_series_rows,
 )
 from uacpy.core.run_settings import RunMode
 from uacpy.core import Environment, Source, Receiver, BoundaryProperties
@@ -55,8 +58,8 @@ class TestSPARCBasic:
         )
         with pytest.raises(
                 UnsupportedFeatureError,
-                match='does not support: transmission loss computation') as ei:
-            SPARC(verbose=False).compute_tl(
+                match='does not support: pressure field computation') as ei:
+            SPARC(verbose=False).compute_field(
                 env=env,
                 source=Source(depths=50.0, frequencies=50.0),
                 receiver=Receiver(depths=np.linspace(10, 90, 5),
@@ -206,10 +209,11 @@ def test_sparc_rejects_geometry_outside_snapshot_mode():
 def test_time_series_warns_when_the_output_grid_aliases():
     """A TIME_SERIES grid whose Nyquist is below the source band must warn.
 
-    SPARC keeps the caller's ``n_time_samples`` for TIME_SERIES by contract, but the
-    default (512 samples over a ~10 s window => fs ~51 Hz) puts a 100 Hz source
-    well above Nyquist. The returned p(t) is plausible-looking and at the wrong
-    frequency, so silence is the wrong behaviour.
+    SPARC keeps the caller's ``n_time_samples`` for TIME_SERIES by contract:
+    512 samples over the ~3.3 s auto window (fs ~153 Hz) put a 100 Hz
+    source's [0, 300] Hz band well above Nyquist. The returned p(t) is
+    plausible-looking and at the wrong frequency, so silence is the wrong
+    behaviour; the remedy names the count an unset ``n_time_samples`` takes.
     """
     env = Environment(name='p', bathymetry=200.0, ssp=1500.0,
                       bottom=BoundaryProperties(acoustic_type='rigid'))
@@ -217,10 +221,50 @@ def test_time_series_warns_when_the_output_grid_aliases():
     rcv = Receiver(depths=100.0, ranges=np.array([2000.0]))
 
     with recorded_warnings() as w:
-        SPARC(verbose=False).run(env, src, rcv, run_mode=RunMode.TIME_SERIES)
+        settings = SPARC(verbose=False, n_time_samples=512).run_settings(
+            env, src, rcv, run_mode=RunMode.TIME_SERIES)
+    assert settings.engine.n_time_samples == 512
     alias = [x for x in w if 'alias' in str(x.message)]
     assert alias, "aliased TIME_SERIES grid did not warn"
-    assert 'n_time_samples>=' in str(alias[0].message), "warning must name the fix"
+    n_default = default_n_time_samples(300.0, settings.engine.time_max)
+    assert f'n_time_samples>={n_default} ' in str(alias[0].message), (
+        "warning must name the fix")
+
+
+def test_unset_n_time_samples_is_the_least_count_over_eight_per_period():
+    """JKPS Sect. 8.2.1.3: "Δt = T/N < 1/(8 f max)". On the [0, time_max]
+    grid the deck writes, the step is time_max/(n - 1): the default is the
+    least n with that step below 1/(8 freq_max), so one sample fewer fails
+    the inequality. The same call never warns of aliasing."""
+    env = Environment(name='p', bathymetry=200.0, ssp=1500.0,
+                      bottom=BoundaryProperties(acoustic_type='rigid'))
+    with recorded_warnings() as w:
+        engine = SPARC(verbose=False).run_settings(
+            env, Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=100.0, ranges=np.array([2000.0])),
+            run_mode=RunMode.TIME_SERIES).engine
+    n, t, f = engine.n_time_samples, engine.time_max, engine.freq_max
+    assert t / (n - 1) < 1.0 / (8.0 * f)
+    assert not t / (n - 2) < 1.0 / (8.0 * f)
+    assert not [x for x in w if 'alias' in str(x.message)]
+    assert default_n_time_samples(f, t) == n
+
+
+@pytest.mark.parametrize('freq_max, time_max, expected', [
+    (100.0, 1.0, 802), (100.0, 1.25, 1002), (37.5, 4.0, 1202),
+    # the auto window at 250 m, (250/1500)·2.5 = 0.41666666666666663: at
+    # 4.5 Hz, 8·f·T evaluates to 14.999999999999998, floor alone gives 16,
+    # and the step T/15 is not below 1/36 in floating point
+    (4.5, (250.0 / 1500.0) * 2.5, 17)])
+def test_default_n_time_samples_counts_past_an_exact_multiple(
+        freq_max, time_max, expected):
+    """8·f·T an exact integer K: n = K + 2 gives the step T/(K + 1), strictly
+    below 1/(8 f); K + 1 samples would sit exactly on it — also where the
+    product rounds just under K."""
+    n = default_n_time_samples(freq_max, time_max)
+    assert n == expected
+    assert time_max / (n - 1) < 1.0 / (8.0 * freq_max)
+    assert not time_max / (n - 2) < 1.0 / (8.0 * freq_max)
 
 
 def test_time_series_does_not_warn_when_adequately_sampled():
@@ -307,9 +351,10 @@ class TestOnlyFirstSourceFrequencyIsUsed:
         deck = tmp_path / 'model.env'
         _write_deck(SPARC(verbose=False), deck, env, source, receiver)
         lines = deck.read_text().splitlines()
-        # Line 2 is the deck frequency; the octave pulse band derives from it.
+        # Line 2 is the deck frequency; the canned pulse's band, [0, 3F]
+        # (tslib/cans.f90:27), derives from it.
         assert float(lines[1]) == pytest.approx(30.0)
-        assert '15.000000 60.000000' in lines, lines
+        assert '0.000000 90.000000' in lines, lines
 
     @pytest.mark.requires_binary
     @pytest.mark.slow
@@ -325,8 +370,8 @@ class TestOnlyFirstSourceFrequencyIsUsed:
                                           run_mode=RunMode.TIME_SERIES)
         assert np.asarray(result.frequencies) == pytest.approx([30.0])
         assert result.f0 == pytest.approx(30.0)
-        assert result.band_hz == pytest.approx((15.0, 60.0))
-        assert 'center_frequency' not in result.metadata
+        assert result.band_hz == pytest.approx((0.0, 90.0))
+        assert 'fc' not in result.metadata
         assert result.run_settings.engine.deck_frequency == 30.0
         assert list(result.run_settings.frequencies) == [30.0]
         assert not [n for n in result.run_settings.notes
@@ -343,12 +388,30 @@ class TestOnlyFirstSourceFrequencyIsUsed:
             settings = model.run_settings(env, source, receiver)
         assert settings.engine.deck_frequency == 30.0
 
+    def test_the_notice_says_a_derived_canned_band_is_the_pulse_support(
+            self):
+        """The canned band derived from source.frequencies[0] is named as
+        such; a pinned band is not."""
+        env, source, receiver = self._rig(np.array([30.0, 300.0]))
+        derived = [n.message for n in SPARC(verbose=False).run_settings(
+            env, source, receiver).engine.notices
+            if 'frequencies[0] = 30' in n.message]
+        pinned = [n.message for n in SPARC(
+            verbose=False, freq_min=10.0, freq_max=90.0).run_settings(
+                env, source, receiver).engine.notices
+            if 'frequencies[0] = 30' in n.message]
+        assert len(derived) == 1 and len(pinned) == 1
+        assert "canned pulse's spectral support" in derived[0]
+        assert "canned pulse's spectral support" not in pinned[0]
 
-class TestPulseBandDefaultsToOneOctave:
-    """For a canned pulse, ``freq_min``/``freq_max`` default to one octave around
-    the source frequency (``max(f/2, 0.1)`` .. ``2f``,
-    ``docs/models/sparc.md`` §5); the deck's band line sits directly after
-    the quoted pulse-type line."""
+
+class TestPulseBandDefaultsToTheCannedSupport:
+    """For a canned pulse, ``freq_min``/``freq_max`` default to the spectral
+    support ``tslib/cans.f90`` states for its shape on the source frequency
+    ``F`` — ``[0, 3F]`` for the default 'P' (:27), ``[0, 2F]`` 'R' (:32),
+    ``[0, 2.5F]`` 'A' (:38), ``[0, 3F]`` 'N' (:57 "[0,3F] OK") — and to the
+    toolbox decks' ``[0, 3F]`` for a shape stated unbounded; the deck's band
+    line sits directly after the quoted pulse-type line."""
 
     @staticmethod
     def _deck_lines(tmp_path, **kw):
@@ -362,10 +425,33 @@ class TestPulseBandDefaultsToOneOctave:
             Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
         return deck.read_text().splitlines()
 
-    def test_default_band_is_half_to_double_the_centre(self, tmp_path):
+    def test_default_band_is_zero_to_three_times_the_frequency(self, tmp_path):
         lines = self._deck_lines(tmp_path)
         i = lines.index("'PN+B'")
-        assert lines[i + 1] == '50.000000 200.000000'
+        assert lines[i + 1] == '0.000000 300.000000'
+
+    @pytest.mark.parametrize('pulse, band', [
+        ('PN+B', '0.000000 300.000000'), ('RN+B', '0.000000 200.000000'),
+        ('AN+B', '0.000000 250.000000'), ('NN+B', '0.000000 300.000000'),
+        ('SN+B', '0.000000 300.000000'), ('GN+B', '0.000000 300.000000')])
+    def test_a_pinned_canned_shape_takes_its_stated_support(
+            self, tmp_path, pulse, band):
+        lines = self._deck_lines(tmp_path, pulse_type=pulse)
+        assert lines[lines.index(repr(pulse)) + 1] == band
+
+    def test_the_settings_name_the_support_they_came_from(self):
+        settings = SPARC(verbose=False).run_settings(
+            _rigid_env(), Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=[50.0], ranges=[1000.0])).engine
+        assert (settings.freq_min, settings.freq_max) == (0.0, 300.0)
+        assert settings.freq_max_origin == (
+            "[0, 3 × source.frequencies[0]], the canned 'P' pulse's spectral "
+            "support (tslib/cans.f90)")
+        unstated = SPARC(verbose=False, pulse_type='SN+B').run_settings(
+            _rigid_env(), Source(depths=50.0, frequencies=100.0),
+            Receiver(depths=[50.0], ranges=[1000.0])).engine
+        assert 'toolbox' in unstated.freq_min_origin
+        assert '[0, infinity]' in unstated.freq_min_origin
 
     def test_explicit_band_wins(self, tmp_path):
         lines = self._deck_lines(tmp_path, freq_min=40.0, freq_max=90.0)
@@ -438,14 +524,43 @@ class TestThePulseBandComesFromTheBaseBandResolver:
         assert settings.engine.freq_min_origin == 'the span of run(frequencies=...)'
         assert not [w for w in caught if 'ignoring' in str(w.message)]
 
-    def test_pinned_edges_win_and_the_frequencies_are_then_ignored(self):
+    def test_frequencies_are_said_to_set_the_band_edges_only(self):
+        """SPARC marches one pulse: the three values set the band, and the
+        result's frequency axis is source.frequencies[0]."""
+        env, source, receiver, _kw = self._call()
+        with recorded_warnings() as caught:
+            SPARC(verbose=False).run_settings(
+                env, source, receiver, frequencies=[80.0, 100.0, 120.0])
+        said = [str(w.message) for w in caught
+                if 'set only the pulse band' in str(w.message)]
+        assert len(said) == 1, said
+        deck = float(np.atleast_1d(source.frequencies)[0])
+        assert f'source.frequencies[0] = {deck:g} Hz' in said[0]
+        assert 'band_hz' in said[0]
+
+    def test_a_band_without_frequencies_is_not_said_to_come_from_them(self):
         env, source, receiver, kw = self._call()
-        with pytest.warns(UserWarning, match=r'ignoring frequencies='):
-            settings = SPARC(verbose=False, freq_min=20.0, freq_max=150.0
-                             ).run_settings(env, source, receiver,
-                                            frequencies=[80.0, 120.0], **kw)
-        assert self._band(settings) == (20.0, 150.0)
-        assert settings.engine.freq_max_origin == 'SPARC(freq_max=…)'
+        with recorded_warnings() as caught:
+            SPARC(verbose=False).run_settings(env, source, receiver, **kw)
+        assert not [w for w in caught
+                    if 'set only the pulse band' in str(w.message)]
+
+    def test_frequencies_beside_both_pinned_edges_are_refused(self):
+        env, source, receiver, kw = self._call()
+        with pytest.raises(ConfigurationError,
+                           match='contradict each other') as exc:
+            SPARC(verbose=False, freq_min=20.0, freq_max=150.0
+                  ).run_settings(env, source, receiver,
+                                 frequencies=[80.0, 120.0], **kw)
+        text = str(exc.value)
+        assert 'SPARC(freq_min=20, freq_max=150)' in text
+        assert 'run(frequencies=)' in text
+
+    def test_frequencies_beside_one_pinned_edge_set_the_other(self):
+        env, source, receiver, kw = self._call()
+        settings = SPARC(verbose=False, freq_max=300.0).run_settings(
+            env, source, receiver, frequencies=[80.0, 120.0], **kw)
+        assert self._band(settings) == (80.0, 300.0)
 
     def test_one_pinned_edge_keeps_the_other_derived(self):
         env, source, receiver, kw = self._call()
@@ -550,7 +665,8 @@ class TestOutputTimeGridContract:
             Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])),
             run_mode=RunMode.TIME_SERIES)
         times = np.asarray(result.coords['time'], dtype=float)
-        assert times.size == 512
+        # floor(8 × 150 Hz × 1.0 s) + 2: the canned band's top is 3 × 50 Hz.
+        assert times.size == 1202
         assert times[0] == pytest.approx(0.0, abs=1e-6)
         assert times[-1] == pytest.approx(1.0, rel=1e-4)
 
@@ -1015,16 +1131,56 @@ class TestSparcRangeAlias:
     r = 1000 m: the trace peaks at 0.0014 near t = 1.333 s where a converged
     margin-12 run has 0.0008."""
 
-    def test_default_margin_clears_the_auto_window(self):
-        margin = resolve_rmax_factor(
-            rmax_factor=SPARC(verbose=False).rmax_factor)
-        assert margin > 3.5, (
-            f"default rmax_factor={margin} leaves the range replica "
-            f"at (margin-1)*r/c inside the 2.5*r/c auto window")
-        # The same statement in arrival times, at the measured geometry:
-        # r = 1000 m in an isovelocity 1500 m/s guide.
+    def test_default_rmax_puts_the_replica_past_the_record(self):
+        """Unpinned, RMax = r + 1.2·c_fast·time_max: the mirrored replica
+        reaches the farthest receiver at (RMax − r)/c_fast = 1.2·time_max,
+        past the record whatever the window; on the auto window (2.5 r/c) it
+        is 4 r."""
         r, c = 1000.0, 1500.0
-        assert (margin - 1.0) * r / c > 2.5 * r / c
+        for time_max in (2.5 * r / c, 5.0 * r / c, 0.3):
+            rmax, margin, origin = resolve_rmax_m(r, c, time_max,
+                                                  rmax_factor=None)
+            assert (rmax - r) / c == pytest.approx(1.2 * time_max)
+            assert margin == pytest.approx(rmax / r)
+            assert 'Sect. 8.3.2' in origin
+        assert resolve_rmax_m(r, c, 2.5 * r / c, rmax_factor=None)[0] == \
+            pytest.approx(4.0 * r)
+
+    def test_the_default_rmax_reads_the_fastest_speed_of_the_deck(self):
+        """The replica crosses the fold distance at the fastest speed in any
+        medium (``profile_speed_bounds``), not the window's slowest one."""
+        env = Environment(name='sparc_two_speeds', bathymetry=100.0,
+                          ssp=np.array([[0.0, 1480.0], [100.0, 1520.0]]),
+                          bottom=BoundaryProperties(acoustic_type='rigid'))
+        engine = SPARC(verbose=False).run_settings(
+            env, Source(depths=50.0, frequencies=20.0),
+            Receiver(depths=[50.0], ranges=[2000.0])).engine
+        assert engine.time_max == pytest.approx(2.5 * 2000.0 / 1480.0)
+        assert engine.rmax_m == pytest.approx(
+            2000.0 + 1.2 * 1520.0 * engine.time_max)
+
+    def test_a_pinned_margin_is_used_exactly(self):
+        assert resolve_rmax_m(1000.0, 1500.0, 9.0, rmax_factor=3.0) == (
+            3000.0, 3.0, 'SPARC(rmax_factor=…)')
+
+    @pytest.mark.parametrize('window', [dict(time_max=4.0),
+                                        dict(output_duration=4.0)])
+    def test_a_long_pinned_window_keeps_the_default_silent(self, window):
+        """The default RMax follows the window it is written with, so a
+        record pinned past the auto one (3.3 s at 2 km) still has no
+        replica in it; a fixed 4 r would put it at 4 s."""
+        env = _rigid_env()
+        knob = {k: v for k, v in window.items() if k == 'time_max'}
+        call = {k: v for k, v in window.items() if k == 'output_duration'}
+        with recorded_warnings() as caught:
+            settings = SPARC(verbose=False, **knob).run_settings(
+                env, Source(depths=50.0, frequencies=20.0),
+                Receiver(depths=[50.0], ranges=[2000.0]),
+                run_mode=RunMode.TIME_SERIES, **call)
+        assert settings.engine.rmax_m == pytest.approx(2000.0 + 1.2 * 1500.0 * 4.0)
+        assert not [w for w in caught if 'range alias' in str(w.message)]
+        assert not [n for n in settings.engine.notices
+                    if 'range alias' in n.message]
 
     def test_tight_pinned_margin_warns(self, tmp_path):
         env = _rigid_env()
@@ -1063,11 +1219,12 @@ class TestSparcRangeAliasReadsEveryMedium:
     ``cMax = MAX(cpR, cMax)`` over ``DO medium = 1, SSP%NMedia``, and
     ``write_layer_sections`` writes each sediment layer as one more medium.
 
-    At the default margin 4 and r = 1000 m in a 1500 m/s column the replica
+    At a pinned margin 4 and r = 1000 m in a 1500 m/s column the replica
     lands at ``3000 / c_fast`` against a ``2.5 * 1000 / 1500 = 1.667 s``
     window, so the alias enters the window at exactly ``c_fast = 1800`` m/s —
     a 1.2 speed ratio, which an ordinary 1650 m/s sand seabed does not reach
-    but a coarse 1900 m/s sediment does.
+    but a coarse 1900 m/s sediment does. The unpinned RMax reads the same
+    fastest speed (``r + 1.2·c_fast·time_max``) and stays silent over it.
     """
 
     def test_the_fastest_sediment_layer_sets_the_fast_bound(self):
@@ -1096,21 +1253,28 @@ class TestSparcRangeAliasReadsEveryMedium:
             env, window_sound_speed=SPARC(verbose=False).window_sound_speed)
         assert c_fast == 1900.0
 
-    def test_a_fast_sediment_layer_warns_at_the_default_margin(self, tmp_path):
-        found = _alias_warnings(_sediment_layer_env(1900.0), tmp_path, 'fast')
+    def test_a_fast_sediment_layer_warns_at_a_pinned_margin_4(self, tmp_path):
+        found = _alias_warnings(_sediment_layer_env(1900.0), tmp_path, 'fast',
+                                rmax_factor=4.0)
         assert len(found) == 1
         assert '1.579' in str(found[0].message), str(found[0].message)
 
+    def test_the_default_rmax_is_silent_over_a_fast_sediment_layer(
+            self, tmp_path):
+        assert not _alias_warnings(_sediment_layer_env(1900.0), tmp_path,
+                                   'fast_default')
+
     def test_a_layer_just_over_the_threshold_warns(self, tmp_path):
-        assert _alias_warnings(_sediment_layer_env(1810.0), tmp_path, 'over')
+        assert _alias_warnings(_sediment_layer_env(1810.0), tmp_path, 'over',
+                               rmax_factor=4.0)
 
     def test_a_layer_just_under_the_threshold_is_silent(self, tmp_path):
         assert not _alias_warnings(_sediment_layer_env(1790.0),
-                                   tmp_path, 'under')
+                                   tmp_path, 'under', rmax_factor=4.0)
 
     def test_a_sand_speed_layer_is_silent(self, tmp_path):
         assert not _alias_warnings(_sediment_layer_env(1650.0),
-                                   tmp_path, 'sand')
+                                   tmp_path, 'sand', rmax_factor=4.0)
 
     def test_a_rigid_floor_contributes_no_speed(self, tmp_path):
         """A rigid floor leaves the deck with the water column as its only
@@ -1244,7 +1408,7 @@ class TestSparcWindowTruncation:
     def test_the_peak_helper_masks_nan_and_keeps_infinity(self):
         """``_peak_ignoring_nan`` stands in for ``np.nanmax``: NaN is a gap,
         infinity is a value, an all-NaN input is NaN."""
-        from uacpy.models.sparc._extract import _peak_ignoring_nan
+        from uacpy.models._extract import _peak_ignoring_nan
         assert _peak_ignoring_nan(np.array([1.0, np.nan, 3.0])) == 3.0
         assert _peak_ignoring_nan(np.array([1.0, np.nan, np.inf])) == np.inf
         assert np.isnan(_peak_ignoring_nan(np.full(4, np.nan)))
@@ -1283,7 +1447,8 @@ class TestSparcDeckContracts:
         # 10 Hz band aliases. Counting samples would read 20 Hz and stay
         # silent on exactly this case.
         n_time_samples, notice = resolve_n_time_samples(
-            10.0, 1.0, n_time_samples=SPARC(verbose=False, n_time_samples=20).n_time_samples)
+            10.0, 1.0,
+            n_time_samples=SPARC(verbose=False, n_time_samples=20).n_time_samples)
         assert n_time_samples == 20 and '19.0 Hz' in notice[1]
         assert resolve_n_time_samples(
             10.0, 1.0,
@@ -1292,22 +1457,22 @@ class TestSparcDeckContracts:
     def test_multi_frequency_source_names_what_it_reads(self):
         source = Source(depths=50.0, frequencies=np.array([30.0, 300.0]))
         note, message, category = multi_frequency_notice(
-            source, octave_band=True)
+            source, canned_band=True)
         assert 'source.frequencies[0] = 30' in message
         assert category is FallbackWarning
-        assert 'one octave' in message
+        assert "canned pulse's spectral support" in message
 
-    def test_the_notice_names_the_band_source_when_it_is_not_the_octave(
+    def test_the_notice_names_the_band_source_when_it_is_not_the_canned_band(
             self):
         source = Source(depths=50.0, frequencies=np.array([30.0, 300.0]))
         _note, message, _category = multi_frequency_notice(
-            source, octave_band=False)
-        assert 'one octave' not in message
+            source, canned_band=False)
+        assert 'spectral support' not in message
         assert 'attenuation' in message
 
     def test_single_frequency_source_is_silent(self):
         assert multi_frequency_notice(
-            Source(depths=50.0, frequencies=30.0), octave_band=True) is None
+            Source(depths=50.0, frequencies=30.0), canned_band=True) is None
 
     @staticmethod
     def _with_free(monkeypatch, nbytes):
@@ -1416,9 +1581,32 @@ class TestSparcSizesItsMeshPerMediumAtTheBandTop:
         assert len(counts) == 2
         assert counts[1] < counts[0]
 
-    def test_a_pinned_count_is_passed_through(self):
-        n_mesh = SPARC(n_mesh=333, verbose=False).n_mesh
-        assert resolve_n_mesh(self._layered(), 120.0, n_mesh=n_mesh) == 333
+    @pytest.mark.parametrize('pinned', [333, 0])
+    def test_a_pinned_count_is_passed_through(self, pinned):
+        """0 included: AT's own automatic mesh at the deck frequency
+        (ReadEnvironmentMod.f90:101-106), which a caller may ask for."""
+        n_mesh = SPARC(n_mesh=pinned, verbose=False).n_mesh
+        assert resolve_n_mesh(self._layered(), 120.0,
+                              n_mesh=n_mesh) == pinned
+
+    def test_the_default_is_the_derived_count(self):
+        assert SPARC(verbose=False).n_mesh is None
+        assert isinstance(resolve_n_mesh(self._layered(), 120.0,
+                                         n_mesh=None), list)
+
+    def test_without_a_positive_band_top_the_deck_asks_for_ats_mesh(self):
+        assert resolve_n_mesh(self._layered(), 0.0, n_mesh=None) == 0
+
+    def test_a_pinned_zero_leaves_the_storage_check_to_the_binary(self):
+        """sparc.f90:205-208 sizes AT's automatic mesh and stops on its own
+        storage; uacpy sends the 0."""
+        assert checked_n_mesh(self._layered(), 120.0,
+                              pinned_n_mesh=0) == (0, 0)
+
+    @pytest.mark.parametrize('bad', [2.5, -1])
+    def test_a_count_that_is_not_a_whole_number_is_refused(self, bad):
+        with pytest.raises(ConfigurationError, match='SPARC: n_mesh'):
+            SPARC(n_mesh=bad, verbose=False)
 
 
 class TestSourceTimeSeriesFromFile:
@@ -1448,8 +1636,7 @@ class TestSourceTimeSeriesFromFile:
         waveform = np.array([0.0, 0.5, -0.25])
         # 180 Hz: the 4 padded rows then span the 1/45 s the 15-60 Hz
         # band-pass needs (the resolution guard has its own tests below).
-        assert source_series_rows(
-            'FN+B', waveform, 180.0, 1, 15.0, 60.0) == (3, 4)
+        assert source_series_rows('FN+B', waveform, 1) == (3, 4)
         write_sparc_source_time_series(
             path, Source(depths=50.0, frequencies=30.0), waveform,
             180.0, 4)
@@ -1512,19 +1699,29 @@ class TestSourceTimeSeriesFromFile:
                 Receiver(depths=[50.0], ranges=[500.0]),
                 source_waveform=self._pulse())
 
-    def test_a_canned_pulse_warns_that_the_waveform_pair_is_ignored(
+    def test_a_waveform_beside_a_pinned_canned_pulse_is_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match='pins a canned pulse') as exc:
+            SPARC(pulse_type='PN+B', verbose=False).run_settings(
+                self._env(), Source(depths=50.0, frequencies=30.0),
+                Receiver(depths=[50.0], ranges=[500.0]),
+                source_waveform=self._pulse(), sample_rate=1000.0)
+        assert "SPARC(pulse_type='PN+B')" in str(exc.value)
+        assert 'run(source_waveform=)' in str(exc.value)
+
+    def test_a_canned_pulse_warns_that_a_lone_sample_rate_is_ignored(
             self, monkeypatch):
         model = SPARC(pulse_type='PN+B', verbose=False)
 
         def no_work_dir():
             raise RuntimeError('stop before the work directory')
         monkeypatch.setattr(model, '_setup_file_manager', no_work_dir)
-        with pytest.warns(UserWarning, match=r"ignoring source_waveform="):
+        with pytest.warns(UserWarning, match=r"ignoring sample_rate="):
             with pytest.raises(RuntimeError,
                                match='stop before the work directory'):
                 model.run(self._env(), Source(depths=50.0, frequencies=30.0),
                           Receiver(depths=[50.0], ranges=[500.0]),
-                          source_waveform=self._pulse(), sample_rate=1000.0)
+                          sample_rate=1000.0)
 
     def test_fewer_than_two_samples_is_refused(self):
         with pytest.raises(ConfigurationError, match=r"TF\(2\) - TF\(1\)"):
@@ -1536,20 +1733,40 @@ class TestSourceTimeSeriesFromFile:
                      verbose=False)._require_source_time_series(
             np.array([1.0, 0.0]), 1000.0) is None
 
-    def test_a_padded_series_shorter_than_the_band_resolution_is_refused(
-            self, tmp_path):
+    def test_a_padded_series_shorter_than_the_band_resolution_is_noticed(
+            self):
         # Band 15-60 Hz needs 1/45 s; 4 samples at 1 kHz span 4 ms.
-        with pytest.raises(ConfigurationError,
-                           match=r"bandpassc\.f90:14-16") as ei:
-            source_series_rows(
-                'FN+B', np.array([0.0, 1.0, 0.0]), 1000.0, 1, 15.0, 60.0)
-        assert 'np.pad(source_waveform, (0, 20))' in str(ei.value)
-
-    def test_a_padded_series_exactly_at_the_band_resolution_is_written(
-            self, tmp_path):
-        # 32 samples at 32*45 Hz span exactly 1/45 s.
+        notice = short_series_notice(
+            'FN+B', np.array([0.0, 1.0, 0.0]), 1000.0, 15.0, 60.0)
+        assert notice.category is NumericsWarning
+        assert 'bandpassc.f90:14-16' in notice.message
+        assert 'np.pad(source_waveform, (0, 20))' in notice.message
         assert source_series_rows(
-            'FN+B', np.zeros(32), 32.0 * 45.0, 1, 15.0, 60.0) == (32, 32)
+            'FN+B', np.array([0.0, 1.0, 0.0]), 1) == (3, 4)
+
+    def test_a_padded_series_exactly_at_the_band_resolution_is_silent(self):
+        # 32 samples at 32*45 Hz span exactly 1/45 s.
+        assert short_series_notice(
+            'FN+B', np.zeros(32), 32.0 * 45.0, 15.0, 60.0) is None
+
+    def test_an_unfiltered_series_is_silent_at_any_length(self):
+        assert short_series_notice(
+            'FN+N', np.array([0.0, 1.0, 0.0]), 1000.0, 15.0, 60.0) is None
+
+    @pytest.mark.requires_binary
+    def test_a_short_series_runs_with_its_notice(self, tmp_path):
+        model = SPARC(pulse_type='FN+B', freq_min=15.0, freq_max=60.0,
+                      verbose=False, work_dir=tmp_path)
+        with recorded_warnings() as caught:
+            result = model.run(
+                self._env(), Source(depths=50.0, frequencies=30.0),
+                Receiver(depths=[50.0], ranges=[500.0]),
+                run_mode=RunMode.TIME_SERIES,
+                source_waveform=np.array([0.0, 1.0, 0.0]),
+                sample_rate=1000.0)
+        assert [w for w in caught if 'bandpassc.f90:14-16'
+                in str(w.message)]
+        assert np.isfinite(np.asarray(result.data)).any()
 
     def test_a_series_over_the_binarys_point_cap_is_refused(
             self, tmp_path, monkeypatch):
@@ -1558,15 +1775,13 @@ class TestSourceTimeSeriesFromFile:
         monkeypatch.setattr(sparc_pulse, '_MAX_STS_POINTS', 8)
         with pytest.raises(ConfigurationError,
                            match=r"sourceMod\.f90:7,105-120") as ei:
-            source_series_rows('FN+N', np.zeros(9), 1000.0, 1,
-                               15.0, 60.0)
+            source_series_rows('FN+N', np.zeros(9), 1)
         assert 'at most 8 samples' in str(ei.value)
 
     def test_a_series_exactly_at_the_point_cap_is_written(
             self, tmp_path, monkeypatch):
         monkeypatch.setattr(sparc_pulse, '_MAX_STS_POINTS', 8)
-        assert source_series_rows('FN+N', np.zeros(8), 1000.0, 1,
-                                  15.0, 60.0) == (8, 8)
+        assert source_series_rows('FN+N', np.zeros(8), 1) == (8, 8)
         write_sparc_source_time_series(
             tmp_path / 'STSFIL', Source(depths=50.0, frequencies=30.0),
             np.zeros(8), 1000.0, 8)
@@ -1579,20 +1794,16 @@ class TestSourceTimeSeriesFromFile:
         # bound is lowered so the boundary is reachable without allocating it.
         monkeypatch.setattr(sparc_pulse, '_MAX_STS_ROWS', 8)
         with pytest.raises(ConfigurationError, match='at most 7 samples'):
-            source_series_rows('FN+N', np.zeros(8), 1000.0, 1,
-                               15.0, 60.0)
+            source_series_rows('FN+N', np.zeros(8), 1)
 
     def test_a_series_one_row_under_maxnt_is_written(self, tmp_path,
                                                      monkeypatch):
         monkeypatch.setattr(sparc_pulse, '_MAX_STS_ROWS', 8)
-        assert source_series_rows(
-            'FN+N', np.zeros(7), 1000.0, 1, 15.0, 60.0) == (7, 7)
+        assert source_series_rows('FN+N', np.zeros(7), 1) == (7, 7)
 
-    def test_the_unfiltered_letter_skips_the_band_resolution_guard(
-            self, tmp_path):
+    def test_the_unfiltered_letter_writes_the_series_unpadded(self):
         assert source_series_rows(
-            'FN+N', np.array([0.0, 1.0, 0.0]), 1000.0, 1, 15.0,
-            60.0) == (3, 3)
+            'FN+N', np.array([0.0, 1.0, 0.0]), 1) == (3, 3)
 
 
 
@@ -1620,8 +1831,9 @@ class TestSparcMarchesTheWaveformItIsHanded:
     def test_each_source_depth_marches_its_waveform_in_its_own_subdirectory(
             self, tmp_path):
         """A two-depth waveform run in a pinned ``work_dir`` gives each depth
-        its own ``source_depth_<z>m`` scratch directory, so each slab's
-        ``rts_file`` is the file its own launch wrote."""
+        its own ``source_depth_<z>m`` scratch directory, so each depth's
+        ``rts_file`` (one entry per depth in the field's metadata) is the
+        file its own launch wrote."""
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             stack = SPARC(verbose=False, work_dir=tmp_path,
@@ -1631,19 +1843,30 @@ class TestSparcMarchesTheWaveformItIsHanded:
                 source_waveform=np.hanning(40) * np.sin(
                     2 * np.pi * 100.0 * np.arange(40) / 400.0),
                 sample_rate=400.0, output_duration=0.1)
-        paths = [slab.metadata['rts_file'] for slab in stack.slabs]
+        paths = stack.metadata['rts_file']
         assert 'source_depth_30m' in paths[0], paths
         assert 'source_depth_60m' in paths[1], paths
         for depth in ('30', '60'):
             assert (tmp_path / f'source_depth_{depth}m' / 'STSFIL').exists()
 
-    def test_a_pinned_time_max_wins_and_output_duration_is_ignored(self):
-        with pytest.warns(UserWarning, match=r'ignoring output_duration='):
-            settings = SPARC(time_max=0.5, verbose=False).run_settings(
+    def test_output_duration_beside_a_pinned_time_max_is_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match='contradict each other') as exc:
+            SPARC(time_max=0.5, verbose=False).run_settings(
                 _rigid_env(), Source(depths=10.0, frequencies=200.0),
                 Receiver(depths=[20.0], ranges=[500.0]),
                 source_waveform=np.hanning(64), sample_rate=8000.0,
                 output_duration=0.8)
+        assert 'SPARC(time_max=0.5)' in str(exc.value)
+        assert 'run(output_duration=)' in str(exc.value)
+
+    def test_a_pinned_time_max_alone_sets_the_record(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = SPARC(time_max=0.5, verbose=False).run_settings(
+                _rigid_env(), Source(depths=10.0, frequencies=200.0),
+                Receiver(depths=[20.0], ranges=[500.0]),
+                source_waveform=np.hanning(64), sample_rate=8000.0)
         assert settings.engine.time_max == 0.5
 
     def test_a_pinned_pulse_is_kept(self):
@@ -1675,7 +1898,6 @@ class TestSparcMeshFitsItsStaticStorage:
             raise AssertionError("a binary was launched past the guard")
 
         monkeypatch.setattr(model, '_run_subprocess', _no_launch)
-        monkeypatch.setattr(model, '_run_and_attach_prt', _no_launch)
         with pytest.raises(ConfigurationError, match='freq_max'):
             model.run(_rigid_env(depth=500.0),
                       Source(depths=250.0, frequencies=2000.0),
@@ -1701,11 +1923,6 @@ class TestTheThreeEntryPointsRefuseAlike:
         'an STSFIL pulse without a waveform':
             (dict(pulse_type='FN+B'), dict(), 'rigid', None,
              (ConfigurationError, 'sourceMod.f90:44-46')),
-        'an STSFIL series too short for the band-pass':
-            (dict(pulse_type='FN+B', freq_min=15.0, freq_max=60.0),
-             dict(source_waveform=np.array([0.0, 1.0, 0.0]),
-                  sample_rate=1000.0), 'rigid', None,
-             (ConfigurationError, 'bandpassc.f90:14-16')),
         'a looped axis over max_launches':
             (dict(max_launches=2), dict(), 'rigid', [20.0, 50.0, 80.0],
              (UnsupportedFeatureError, 'max_launches=2')),
@@ -1847,12 +2064,208 @@ class TestSparcSaysItsMarchIsLossless:
 
 
 
+class TestRtsToPressureDividesByThePulseTheRunMarched:
+    """The canned pulse is shaped by the run's deck frequency F; projecting
+    the record at another frequency must divide by THAT pulse's spectrum,
+    which ``pulse_frequency=`` names (the .rts does not record F)."""
+
+    @staticmethod
+    def _record(pulse_frequency, fs=1000.0, nt=1024):
+        from uacpy.acoustic_signal.generate import sparc_pulse as canned
+        from uacpy.io import RtsFile
+        t = np.arange(nt) / fs
+        freqs = np.fft.rfftfreq(nt, 1.0 / fs)
+
+        def channel(f):
+            return sum(a * np.exp(-2j * np.pi * f * tau)
+                       for a, tau in ((1.0, 0.0), (0.6, 0.021),
+                                      (0.35, 0.060)))
+        s_t, _ = canned(t, pulse_frequency, 'P')
+        p = np.fft.irfft(np.fft.rfft(s_t) * channel(freqs), n=nt)
+        return RtsFile(title='', positions=np.array([1e3]), times=t,
+                       pressure=p[:, None]), channel
+
+    def test_a_projection_off_the_pulse_frequency_recovers_the_channel(self):
+        from uacpy.models.sparc import rts_to_pressure
+        rts, channel = self._record(50.0)
+        got, _ = rts_to_pressure(rts, 40.0, pulse_type='P',
+                                 pulse_frequency=50.0)
+        ratio = np.asarray(got).ravel()[0] / channel(40.0)
+        assert abs(20 * np.log10(abs(ratio))) < 1e-6
+        assert abs(np.degrees(np.angle(ratio))) < 1e-6
+        # Without it the pulse is rebuilt at 40 Hz: another spectrum.
+        unnamed, _ = rts_to_pressure(rts, 40.0, pulse_type='P')
+        assert abs(np.asarray(unnamed).ravel()[0] / channel(40.0) - 1) > 0.01
+
+    def test_a_non_positive_pulse_frequency_is_refused(self):
+        from uacpy.models.sparc import rts_to_pressure
+        rts, _ = self._record(50.0)
+        with pytest.raises(ConfigurationError, match='pulse_frequency'):
+            rts_to_pressure(rts, 40.0, pulse_type='P', pulse_frequency=0.0)
+
+
+class TestTheSourceGeometriesFollowTheOutputMode:
+    """Only the snapshot ('S') runs a Hankel transform, so only it honours a
+    line source; the geometries are read off ``output_mode`` at the run, so
+    a reassigned mode takes its own set (frozen at construction, 'S' -> 'R'
+    ran a line source on a mode that cannot honour it, and 'R' -> 'S'
+    refused one it can)."""
+
+    @staticmethod
+    def _call():
+        env = Environment(bathymetry=100.0, ssp=1500.0,
+                          bottom=BoundaryProperties(acoustic_type='rigid'))
+        return (env, Source(depths=25.0, frequencies=50.0,
+                            source_type='line'),
+                Receiver(depths=np.array([30.0]), ranges=np.array([500.0])))
+
+    @pytest.mark.parametrize('built, reassigned, takes_a_line', [
+        ('S', 'R', False), ('R', 'S', True), ('S', 'S', True),
+        ('D', 'D', False)])
+    def test_the_mode_at_the_run_decides(self, built, reassigned,
+                                         takes_a_line):
+        model = SPARC(output_mode=built)
+        model.output_mode = reassigned
+        if takes_a_line:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                model.validate_inputs(*self._call())
+        else:
+            with pytest.raises(UnsupportedFeatureError, match="'line'"):
+                model.validate_inputs(*self._call())
+
+
+class TestSparcRefusesAKnobNoMarchCanUse:
+    """Each was accepted and failed later or silently: a Courant factor
+    past 1 marched a field that was 100 % non-finite at exit 0, an rmax
+    factor under 1 reached sparc.f90:152-155's stop, and the rest went to
+    the deck as given."""
+
+    @pytest.mark.parametrize('kw, match', [
+        (dict(courant_factor=1.5), 'stability limit of 1'),
+        (dict(courant_factor=0.0), 'courant_factor must be positive'),
+        (dict(max_launches=0), 'max_launches must be an integer >= 1'),
+        (dict(rmax_factor=0.5), 'inside the receiver ranges'),
+        (dict(time_max=-1.0), 'time_max'),
+        (dict(window_sound_speed=0.0), 'window_sound_speed'),
+    ])
+    def test_the_constructor_refuses_it(self, kw, match):
+        with pytest.raises(ConfigurationError, match=match):
+            SPARC(**kw)
+
+    @pytest.mark.parametrize('kw', [
+        dict(courant_factor=1.0), dict(rmax_factor=1.0),
+        dict(max_launches=np.int64(3)), dict(time_max=0.5)])
+    def test_the_values_at_the_bounds_are_taken(self, kw):
+        SPARC(**kw)
+
+
+class TestSparcUnboundedCHighIsTheToolboxDecksValue:
+    """Unpinned, SPARC's c_high is 1e7 m/s — k_min = 0 (JKPS ch. 4 App. 1),
+    written as every toolbox SPARC deck writes it (tests/iso.env:9) — and a
+    pinned one is written as given. A deck whose per-wavenumber band-pass
+    index ``INT(k·c_high/2π / deltaf)`` (sparc.f90:398,
+    tslib/bandpassc.f90:16) passes the INTEGER range is refused: the binary
+    zeroes every weight there and the source falls silent at exit 0
+    (measured: a 16 s series at c_high 1e9 came back 78 % rms off the 1e7
+    trace, which a 1e8 run matched bit for bit)."""
+
+    _FS = 2000.0
+    _C_LOW = 1350.0
+    _F_MAX = 800.0
+
+    @classmethod
+    def _call(cls, **knobs):
+        from uacpy.core import BoundaryProperties, Environment
+        env = Environment(bathymetry=20.0, ssp=1500.0,
+                          bottom=BoundaryProperties(acoustic_type='rigid'))
+        t = np.arange(int(16.0 * cls._FS)) / cls._FS
+        wave = np.exp(-((t - 0.005) * 900.0) ** 2)
+        return SPARC(verbose=False, c_low=cls._C_LOW, freq_min=0.0,
+                     freq_max=cls._F_MAX, time_max=0.15,
+                     **knobs).run_settings(
+            env, Source(depths=10.0, frequencies=300.0),
+            Receiver(depths=[10.0], ranges=[50.0]),
+            run_mode=RunMode.TIME_SERIES, source_waveform=wave,
+            sample_rate=cls._FS)
+
+    @classmethod
+    def _limit(cls):
+        """The c_high at which the top wavenumber's index reaches 2^31 − 1
+        on the 32768-row (16.384 s) series STSFIL carries."""
+        return (2 ** 31 - 1) * cls._C_LOW / (cls._F_MAX * 32768 / cls._FS)
+
+    def test_unset_c_high_is_the_toolbox_decks_value(self):
+        engine = self._call().engine
+        assert engine.c_high == SPARC_C_HIGH_UNBOUNDED == 1.0e7
+        assert engine.sts_rows == 32768
+
+    def test_a_pinned_c_high_under_the_limit_is_written_as_given(self):
+        c_high = 0.99 * self._limit()
+        assert self._call(c_high=c_high).engine.c_high == c_high
+
+    @pytest.mark.requires_binary
+    def test_just_under_the_limit_the_binary_returns_the_default_trace(self):
+        """Under the limit every band-pass index holds, so a c_high 22 x
+        the default passes the same frequencies at every wavenumber and the
+        trace is the default's."""
+        from uacpy.core import BoundaryProperties, Environment
+        env = Environment(bathymetry=20.0, ssp=1500.0, water_density=1.0,
+                          bottom=BoundaryProperties(acoustic_type='rigid'))
+        t = np.arange(int(16.0 * self._FS)) / self._FS
+        a = (np.pi * 300.0 * (t - 0.005)) ** 2
+        wave = (1.0 - 2.0 * a) * np.exp(-a)
+        traces = []
+        for knobs in ({}, dict(c_high=0.99 * self._limit())):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                result = SPARC(verbose=False, c_low=self._C_LOW, freq_min=0.0,
+                               freq_max=self._F_MAX, time_max=0.15,
+                               n_time_samples=1202, **knobs).run(
+                    env, Source(depths=10.0, frequencies=300.0),
+                    Receiver(depths=[10.0], ranges=[50.0]),
+                    run_mode=RunMode.TIME_SERIES, source_waveform=wave,
+                    sample_rate=self._FS)
+            traces.append(np.asarray(result.data, dtype=float)[0, 0])
+        assert np.abs(traces[0]).max() > 0.0
+        np.testing.assert_array_equal(traces[1], traces[0])
+
+    def test_a_pinned_c_high_over_the_limit_is_refused(self):
+        with pytest.raises(ConfigurationError,
+                           match='cannot band-pass this pulse') as err:
+            self._call(c_high=1.01 * self._limit())
+        message = str(err.value)
+        assert 'sparc.f90:398' in message
+        assert 'tslib/bandpassc.f90:16' in message
+        assert 'Lower c_high' in message
+
+    def test_a_pulse_without_an_upper_band_pass_edge_is_not_checked(self):
+        assert refuse_band_pass_overflow(
+            'FN+L', freq_max=800.0, c_low=1350.0, c_high=1e12,
+            deck_frequency=300.0, sts_rows=32768, sample_rate=2000.0) is None
+
+    def test_a_canned_pulse_reads_its_own_series(self):
+        """sourceMod.f90:53-55: a canned pulse is 1024 samples at
+        0.2/omega, i.e. 1024·0.2/(2πF) s — 0.326 s at 100 Hz, so even 1e9
+        stays far inside the range; the limit sits either side of the
+        c_high that series puts at 2^31 − 1."""
+        duration = 1024 * 0.2 / (2.0 * np.pi * 100.0)
+        limit = (2 ** 31 - 1) * 1350.0 / (300.0 * duration)
+        kw = dict(freq_max=300.0, c_low=1350.0, deck_frequency=100.0,
+                  sts_rows=0, sample_rate=None)
+        assert refuse_band_pass_overflow('PN+B', c_high=1e9, **kw) is None
+        assert refuse_band_pass_overflow(
+            'PN+B', c_high=0.99 * limit, **kw) is None
+        with pytest.raises(ConfigurationError, match='band-pass'):
+            refuse_band_pass_overflow('PN+B', c_high=1.01 * limit, **kw)
+
+
 class TestSparcRefusesAnInvertedWindowBeforeTheDeck:
     """One pinned bound past the other's derived value is refused while the
     settings resolve, naming the pinned bound, as Scooter does
     (``models/_window.resolve_window``); the binary would otherwise stop at
     ReadEnvironmentMod.f90:135 after the deck was written. Over a rigid
-    seabed of 1500 m/s water the derived c_low is 0.95 x 1500 = 1425 m/s."""
+    seabed of 1500 m/s water the derived c_low is 0.9 x 1500 = 1350 m/s."""
 
     @staticmethod
     def _settings(**kw):
@@ -1867,9 +2280,20 @@ class TestSparcRefusesAnInvertedWindowBeforeTheDeck:
 
     def test_a_pinned_c_high_at_the_derived_c_low_is_refused(self):
         with pytest.raises(ConfigurationError,
-                           match=r'pinned c_high=1425\.0 m/s is at or below'):
-            self._settings(c_high=1425.0)
+                           match=r'pinned c_high=1350\.0 m/s is at or below'):
+            self._settings(c_high=1350.0)
 
     def test_a_pinned_c_high_above_the_derived_c_low_resolves(self):
-        engine = self._settings(c_high=1425.5).engine
-        assert (engine.c_low, engine.c_high) == (1425.0, 1425.5)
+        engine = self._settings(c_high=1350.5).engine
+        assert (engine.c_low, engine.c_high) == (1350.0, 1350.5)
+
+    def test_the_record_states_where_each_bound_came_from(self):
+        """The record carries the origin of each bound, as Scooter's does: a
+        pinned bound names the constructor, a derived one the rule that
+        derived it from this environment."""
+        derived = self._settings().engine
+        assert derived.c_low_origin == '0.9 × min(env.ssp)'
+        assert derived.c_high_origin.startswith('unbounded (1e+07 m/s): k_min = 0')
+        pinned = self._settings(c_low=1400.0, c_high=1600.0).engine
+        assert (pinned.c_low_origin, pinned.c_high_origin) == (
+            'SPARC(c_low=…)', 'SPARC(c_high=…)')

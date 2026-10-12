@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Union
+from typing import NamedTuple, Optional, Union
 
 import numpy as np
 
@@ -30,7 +30,7 @@ from uacpy._log import log_message
 
 __all__ = ['http_get', 'curl_download', 'fetch_file', 'download_grid_file',
            'download_member', 'extract_member', 'erddap_griddap_url',
-           'erddap_last_value', 'erddap_point', 'checked_member_size',
+           'ErddapPoint', 'erddap_point', 'checked_member_size',
            'MAX_MEMBER_BYTES']
 
 
@@ -283,7 +283,9 @@ def http_get(
     Raises
     ------
     DataFetchError
-        On any HTTP or transport-level failure (after retries are exhausted).
+        On any HTTP or transport-level failure (after retries are exhausted),
+        including one raised while the response is read (a TLS error, a
+        malformed status line), which is not retried.
     """
     _require_http_scheme(url)
     request = urllib.request.Request(url, headers={'User-Agent': user_agent})
@@ -352,6 +354,19 @@ def http_get(
                 f"Could not reach {url}: {reason} (after {retries} retries).",
                 remediation="Check network connectivity, or pass base_url= for "
                             "a reachable service instance.",
+            ) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # Raised by getresponse()/read() after the request went out, which
+            # urllib does not wrap in URLError: a TLS failure mid-body
+            # (ssl.SSLError), a malformed status line or header (BadStatusLine,
+            # LineTooLong). Typed so a source chain moves to its next source;
+            # a protocol error is not retried.
+            raise DataFetchError(
+                f"Could not read the response from {url}: "
+                f"{type(exc).__name__}: {exc}.",
+                remediation="Retry later; if it repeats, check the network "
+                            "path (a TLS-intercepting proxy), or pass "
+                            "base_url= for another service instance.",
             ) from exc
 
 
@@ -481,42 +496,40 @@ def curl_download(url: str, out, *, timeout: float, verbose: bool) -> bool:
     return True
 
 
-def erddap_last_value(body: str) -> float:
-    """Last numeric field of an ERDDAP griddap ``.csv`` point response.
+class ErddapPoint(NamedTuple):
+    """One ERDDAP griddap ``.csv`` point response: the node the nearest-node
+    selectors landed on (``lat``/``lon``, ``None`` when the body names no
+    such column), the time step read (``time``, its ISO 8601 UTC stamp, e.g.
+    ``'2020-01-01T00:00:00Z'``; ``None`` for a grid with no time axis), and
+    the requested variable there (``value``, the last column; ``NaN`` when
+    missing or when the service returned no data row)."""
 
-    The body is a header row, a units row, then one data row whose final column
-    is the requested variable. Returns ``NaN`` when the value is missing or the
-    service returned no data row.
-    """
+    lat: Optional[float]
+    lon: Optional[float]
+    time: Optional[str]
+    value: float
+
+
+def erddap_point(body: str) -> ErddapPoint:
+    """Parse an ERDDAP griddap ``.csv`` point response (a header row, a units
+    row, then one data row) into an :class:`ErddapPoint`."""
     rows = [ln for ln in body.splitlines() if ln.strip()]
     if len(rows) < 3:
-        return np.nan
-    try:
-        return float(rows[-1].split(',')[-1])
-    except (ValueError, IndexError):
-        return np.nan
-
-
-def erddap_point(body: str):
-    """``(lat, lon, value)`` of an ERDDAP griddap ``.csv`` point response:
-    the node the nearest-node selectors landed on and the requested variable
-    there (the last column). ``value`` is ``NaN`` when it is missing; the
-    node is ``None`` when the body names no latitude/longitude column."""
-    rows = [ln for ln in body.splitlines() if ln.strip()]
-    if len(rows) < 3:
-        return None, None, np.nan
+        return ErddapPoint(None, None, None, np.nan)
     head = [h.strip().lower() for h in rows[0].split(',')]
-    cells = rows[-1].split(',')
+    cells = [c.strip() for c in rows[-1].split(',')]
     try:
         value = float(cells[-1])
     except (ValueError, IndexError):
         value = np.nan
+    time = (cells[head.index('time')] or None
+            if 'time' in head and head.index('time') < len(cells) else None)
     try:
         lat = float(cells[head.index('latitude')])
         lon = float(cells[head.index('longitude')])
     except (ValueError, IndexError):
-        return None, None, value
-    return lat, ((lon + 180.0) % 360.0) - 180.0, value
+        return ErddapPoint(None, None, time, value)
+    return ErddapPoint(lat, ((lon + 180.0) % 360.0) - 180.0, time, value)
 
 
 def checked_member_size(

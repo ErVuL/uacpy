@@ -48,7 +48,7 @@ from uacpy.core.results import (
 )
 from uacpy.core.ssp import SoundSpeedProfile
 from uacpy.io._fortran_helpers import (
-    DirectAccessFile, _bound_counts,
+    DirectAccessFile, _bound_counts, detect_endian, read_fortran_record,
     read_vector as _read_vector, require_model_output,
     require_user_input,
     typed_format_error,
@@ -71,8 +71,9 @@ def read_shd_file(filepath: Union[str, Path]):
         narrowband field; a multi-frequency file (a broadband Kraken
         ``field.exe`` or Bellhop run) gives a broadband one with
         ``'frequency'`` as the last axis, in the file's frequency order.
-      * :class:`ResultStack` of single-source :class:`Field` slabs when
-        multiple source depths are present.
+      * one :class:`Field` with a leading ``'source_depth'`` axis when the
+        file carries several source depths (``source_depths`` lists them),
+        as a multi-depth model run returns it.
 
     **The pressure is the engine's own normalisation, not the package's.**
     The models bridge each binary onto the package convention (unit point
@@ -202,28 +203,30 @@ def read_shd_file(filepath: Union[str, Path]):
     else:
         freq_coords = {}
 
-    def _slab(isz: int) -> Field:
-        if irregular:
-            return Field(
-                data=pressure[0, isz, 0, ...],
-                coords={'range': receiver_ranges, **freq_coords},
-                model='', backend='',
-                source_depths=np.array([float(source_depths[isz])]),
-                frequencies=freqs,
-                aux_coords={'receiver_depth': ('range', receiver_depths)},
-            )
+    # (Nsz, ...) with the bearing plane dropped; one source depth keeps no
+    # axis for it.
+    data = pressure[0, :, 0, ...] if irregular else pressure[0]
+    source_axis = ({'source_depth': source_depths}
+                   if source_depths.size > 1 else {})
+    if source_depths.size == 1:
+        data = data[0]
+    if irregular:
         return Field(
-            data=pressure[0, isz, ...],
-            coords={'depth': receiver_depths, 'range': receiver_ranges,
-                    **freq_coords},
+            data=data,
+            coords={**source_axis, 'range': receiver_ranges, **freq_coords},
             model='', backend='',
-            source_depths=np.array([float(source_depths[isz])]),
+            source_depths=source_depths,
             frequencies=freqs,
+            aux_coords={'receiver_depth': ('range', receiver_depths)},
         )
-
-    return ResultStack.from_slabs(
-        [_slab(i) for i in range(len(source_depths))], source_depths,
-        coordinate_name='source_depth')
+    return Field(
+        data=data,
+        coords={**source_axis, 'depth': receiver_depths,
+                'range': receiver_ranges, **freq_coords},
+        model='', backend='',
+        source_depths=source_depths,
+        frequencies=freqs,
+    )
 
 
 #: How much record padding a strided ``.shd`` pressure read may transfer
@@ -365,8 +368,8 @@ class ShdFile(ExportRecord):
     pressure : ndarray, complex
         Shape ``(n_bearings, n_source_depths, n_rows, n_ranges)``: ``n_rows``
         is the number of receiver depths on a rectilinear file and 1 on a
-        2-D irregular one. Cells the engine never wrote (exact zeros on
-        disk) are NaN.
+        2-D irregular one. The file's values as written, exact zeros
+        included.
     pressure_frequency : float or None
         The frequency ``pressure`` holds (Hz); ``None`` for a file that
         declares no frequency.
@@ -396,7 +399,8 @@ class ShdFile(ExportRecord):
                      'pressure')
     _XARRAY_FIELDS = {'pressure': 'pressure', 'bearing': 'bearings',
                       'source_depth': 'source_depths',
-                      'range': 'receiver_ranges'}
+                      'range': 'receiver_ranges',
+                      'receiver_depth': 'receiver_depths'}
 
     def _payload(self):
         return {'pressure': (self.pressure,
@@ -404,9 +408,21 @@ class ShdFile(ExportRecord):
                              '')}
 
     def _coords(self):
-        return {'bearing': (self.bearings, 'deg'),
-                'source_depth': (self.source_depths, 'm'),
-                'range': (self.receiver_ranges, 'm')}
+        coords = {'bearing': (self.bearings, 'deg'),
+                  'source_depth': (self.source_depths, 'm'),
+                  'range': (self.receiver_ranges, 'm')}
+        # The receiver depths label the 'row' axis of a rectilinear file
+        # and pair with the ranges of an irregular one (one row); a file
+        # whose depths match neither keeps them on an axis of their own.
+        depths = np.asarray(self.receiver_depths)
+        n_rows, n_ranges = np.shape(self.pressure)[2:4]
+        if depths.size == n_rows:
+            coords['receiver_depth'] = (depths, 'm', 'row')
+        elif depths.size == n_ranges:
+            coords['receiver_depth'] = (depths, 'm', 'range')
+        else:
+            coords['receiver_depth'] = (depths, 'm')
+        return coords
 
 
 def read_shd_header(daf: DirectAccessFile) -> ShdHeader:
@@ -422,6 +438,12 @@ def read_shd_header(daf: DirectAccessFile) -> ShdHeader:
     daf.seek(2)
     counts = tuple(daf.integer() for _ in range(7))
     return ShdHeader(title, plot_type, counts, daf.real8(), daf.real8())
+
+
+def _shd_header_counts(daf: DirectAccessFile) -> Tuple[int, ...]:
+    """The seven record-3 counts of a ``.shd``-layout header, which confirm
+    the byte order :class:`DirectAccessFile` reads its record length in."""
+    return read_shd_header(daf).counts
 
 
 @typed_format_error
@@ -469,11 +491,18 @@ def read_shd_bin(
         ``(Ntheta, Nsz, Nrz, Nrr)`` on a rectilinear file and
         ``(Ntheta, Nsz, 1, Nrr)`` on a 2-D irregular one. For a broadband
         file, pass ``frequency=`` once per entry of ``frequencies``.
-        Cells the engine never wrote (exact zeros on disk — Bellhop's r=0
-        column and ray shadow zones, an empty KRAKEN modal sum) are NaN,
-        uacpy's no-data convention. A receiver on a pressure-release
-        boundary, where Scooter's ``fields.exe`` writes an exact 0, reads
-        as NaN as well.
+        The pressure is the file's values as written, exact zeros
+        included. A writer's zero is usually its own answer: an empty
+        beam sum where no Bellhop beam reaches (``bellhop.f90:240-241``
+        zeroes the grid before the sum), an empty KRAKEN modal sum
+        (``KrakenField/EvaluateMod.f90:27-31``), a receiver on a
+        pressure-release boundary in Scooter's ``fields.exe``
+        (``Scooter/scooter.f90:635-638``). A few zeros at ``r = 0`` are
+        not a field value, and a model wrapper that knows the run says so
+        with NaN there: Bellhop's point-source scale factor is set to 0 at
+        ``r = 0`` (``Bellhop/influence.f90:786-787``) and KRAKEN's
+        adiabatic evaluation zeroes it the same way
+        (``KrakenField/EvaluateADMod.f90:91-92``).
 
     Notes
     -----
@@ -490,24 +519,28 @@ def read_shd_bin(
 
     Examples
     --------
-    >>> # Read first source
-    >>> shd = read_shd_bin('pekeris.shd')
-    >>> print(f"Title: {shd.title}")
-    >>> print(f"Pressure shape: {shd.pressure.shape}")
-    >>> print(f"Ranges: {shd.receiver_ranges} m")
+    The files are a run's own output, so these lines show the calls and
+    do not run here::
 
-    >>> # Read specific source location
-    >>> shd = read_shd_bin('field3d.shd', xs_m=5000.0, ys_m=10000.0)
-    >>> # Pressure at first bearing, first source depth, first rcvr depth
-    >>> p = shd.pressure[0, 0, 0, :]
+        # Read first source
+        shd = read_shd_bin('pekeris.shd')
+        print(f"Title: {shd.title}")
+        print(f"Pressure shape: {shd.pressure.shape}")
+        print(f"Ranges: {shd.receiver_ranges} m")
 
-    >>> # Read specific frequency for broadband run
-    >>> shd = read_shd_bin('broadband.shd', frequency=100.0)
+        # Read specific source location
+        shd = read_shd_bin('field3d.shd', xs_m=5000.0, ys_m=10000.0)
+        # Pressure at first bearing, first source depth, first rcvr depth
+        p = shd.pressure[0, 0, 0, :]
+
+        # Read specific frequency for broadband run
+        shd = read_shd_bin('broadband.shd', frequency=100.0)
     """
     require_model_output(filepath, 'read_shd_bin')
 
     with open(filepath, "rb") as fid:
-        daf = DirectAccessFile(fid, source=f'read_shd_bin:{filepath}')
+        daf = DirectAccessFile(fid, source=f'read_shd_bin:{filepath}',
+                               header_counts=_shd_header_counts)
         f4, f8 = daf.f4, daf.f8
 
         # .shd is a Fortran DIRECT-access file whose logical record length is
@@ -647,18 +680,6 @@ def read_shd_bin(
                 rows_per_slab, recl, Nrr, f4,
             ).reshape(Ntheta, Nsz, Nrcvrs_per_range, Nrr)
             freq_label = float(freqVec[0]) if len(freqVec) else None
-
-    # AT engines zero-initialise the pressure grid and never touch cells no
-    # energy reached (Bellhop: the r=0 column and ray shadow zones; an empty
-    # KRAKEN modal sum below cutoff), so an exact complex zero on disk is
-    # read as "not written". Those cells become NaN, uacpy's no-data
-    # convention (RAM uses the same for absorbing-layer / outside-PE-grid
-    # cells), so TL reductions and metrics exclude them via np.isfinite
-    # instead of reading a huge pressure-floor dB level as real. One written
-    # value is also exactly 0: a receiver ON a pressure-release boundary,
-    # where Scooter's fields.exe writes 0+0j (KRAKEN's modal sum gives
-    # ~1e-16 there); such a row reads as NaN too.
-    pressure[pressure == 0] = np.nan
 
     return ShdFile(
         title=title, plot_type=PlotType, frequencies=freqVec,
@@ -926,11 +947,108 @@ def _arrival_cell(values, narr: int, *, merge: bool, omega: float) -> dict:
     return cell
 
 
+class _AsciiArrivals:
+    """The ``.arr`` written by RunType ``'A'`` as the reader walks it: a
+    token stream, since ``WriteArrivalsASCII`` (``Bellhop/ArrMod.f90:
+    95-127``) writes every record list-directed and Fortran runtimes wrap
+    those at different widths. Every value goes through ``fortran_float``
+    like the other AT text readers."""
+
+    def __init__(self, filepath: Path):
+        with open(filepath, 'r') as f:
+            f.readline()  # skip the '2D' flag line
+            tokens = []
+            for line in f:
+                tokens.extend(line.split())
+        self._tokens = expand_repeat_counts(tokens)
+
+    def count(self) -> int:
+        """One count; some writers emit counts as floats."""
+        return int(fortran_float(next(self._tokens)))
+
+    def values(self, n: int) -> list:
+        return [fortran_float(next(self._tokens)) for _ in range(n)]
+
+    def frequency(self) -> float:
+        return self.values(1)[0]
+
+    def axis(self) -> np.ndarray:
+        """A count followed by that many values."""
+        return np.array(self.values(self.count()))
+
+    def arrivals(self, narr: int) -> list:
+        """``narr`` arrivals of eight values each."""
+        return self.values(8 * narr)
+
+
+class _BinaryArrivals:
+    """The ``.arr`` written by RunType ``'a'``: Fortran sequential records
+    (``Bellhop/ReadEnvironmentBell.f90:597-617`` for the header,
+    ``Bellhop/ArrMod.f90:136-178`` ``WriteArrivalsBinary`` for the body):
+    the flag, ``SNGL(freq)``, ``NSz, Sz`` and ``NRz, Rz`` (REAL*4), ``NRr,
+    Rr`` (REAL*8); then per source a ``MAXVAL(NArr)`` record, and per
+    receiver a ``NArr`` record and ``NArr`` records of eight REAL*4 — the
+    eight columns of the ASCII file, the complex delay as two reals and the
+    bounce counts as reals (``Matlab/ReadWrite/read_arrivals_bin.m``)."""
+
+    def __init__(self, fid, endian: str, source: str):
+        self._fid, self._endian, self._source = fid, endian, source
+
+    def _record(self) -> bytes:
+        return read_fortran_record(self._fid, raw=True, endian=self._endian)
+
+    def count(self) -> int:
+        payload = self._record()
+        if len(payload) != 4:
+            raise FileFormatError(
+                f"{self._source}: a count record holds {len(payload)} bytes, "
+                f"not one 4-byte integer.")
+        return int(np.frombuffer(payload, dtype=self._endian + 'i4')[0])
+
+    def frequency(self) -> float:
+        payload = self._record()
+        if len(payload) != 4:
+            raise FileFormatError(
+                f"{self._source}: the frequency record holds {len(payload)} "
+                f"bytes, not one REAL*4.")
+        return float(np.frombuffer(payload, dtype=self._endian + 'f4')[0])
+
+    def axis(self, kind: str = 'f4') -> np.ndarray:
+        """A record of a count followed by that many ``kind`` values."""
+        payload = self._record()
+        n = int(np.frombuffer(payload[:4], dtype=self._endian + 'i4')[0])
+        width = np.dtype(kind).itemsize
+        if n < 0 or len(payload) != 4 + n * width:
+            raise FileFormatError(
+                f"{self._source}: an axis record of {len(payload)} bytes "
+                f"does not hold the count {n} and {n} {kind} values it "
+                f"declares.")
+        return np.frombuffer(payload[4:], dtype=self._endian + kind).astype(
+            float)
+
+    def arrivals(self, narr: int) -> list:
+        """``narr`` records of eight REAL*4, flattened."""
+        values = []
+        for _ in range(max(narr, 0)):
+            payload = self._record()
+            if len(payload) != 32:
+                raise FileFormatError(
+                    f"{self._source}: an arrival record holds "
+                    f"{len(payload)} bytes, not eight REAL*4 values.")
+            values.extend(np.frombuffer(payload, dtype=self._endian + 'f4')
+                          .astype(float).tolist())
+        return values
+
+
 @typed_format_error
 def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
                   merge: bool = False):
     """
     Read arrivals file (.arr) from Bellhop
+
+    Both 2-D layouts read: the ASCII file of RunType ``'A'`` and the binary
+    one of RunType ``'a'`` (Fortran sequential records, either byte order;
+    ``Bellhop/ArrMod.f90:136-178``), into the same result.
 
     Parameters
     ----------
@@ -1017,74 +1135,71 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
             f"(rectilinear) or 'I' (irregular), matching Bellhop's "
             f"RunType(5:5).")
 
-    # Check if binary or ASCII format. The ASCII arrivals file always begins
-    # with a quoted "'2D'" or "'3D'" tag at the very start of the first line.
-    # The binary format is a Fortran unformatted stream whose first bytes are a
-    # 4-byte record marker (typically \x04\x00\x00\x00 for a 4-byte record, but
-    # compilers may emit other marker lengths). Prefer the positive ASCII test
-    # and fall back to binary otherwise.
+    # The ASCII file opens with the quoted '2D'/'3D' tag (RunType 'A'); the
+    # binary one (RunType 'a') with the 4-byte marker of a record holding it.
     with open(filepath, "rb") as f:
         head = f.read(16)
     try:
         head_text = head.decode('ascii')
     except UnicodeDecodeError:
         head_text = ''
+    binary = not head_text.lstrip().startswith(("'2D'", "'3D'"))
+    fid = open(filepath, 'rb') if binary else None
+    try:
+        if binary:
+            endian = detect_endian(head[:4],
+                                   source=f'read_arr_file:{filepath.name}')
+            flag = read_fortran_record(fid, raw=True, endian=endian)
+            if flag not in (b"'2D'", b"'3D'"):
+                raise FileFormatError(
+                    f"read_arr_file: {filepath} is neither the ASCII arrivals "
+                    f"layout (RunType 'A', opening with '2D') nor the binary "
+                    f"one (RunType 'a', whose first record is '2D'); its "
+                    f"first record holds {flag[:16]!r}.",
+                    remediation="Check the path; a .arr is written by "
+                                "Bellhop with RunType 'A' or 'a'.")
+            flag_text = flag.decode('ascii')
+            stream = _BinaryArrivals(fid, endian, f'read_arr_file: {filepath}')
+        else:
+            flag_text = head_text.lstrip()[:4]
+            stream = _AsciiArrivals(filepath)
+        if flag_text == "'3D'":
+            raise FileFormatError(
+                "3-D arrivals format (the '3D' tag written by BELLHOP3D) is "
+                "not yet available in uacpy: its records carry ten values per "
+                "arrival plus a receiver-bearing loop (Bellhop/ArrMod.f90:"
+                "256-302), and this parser has no axis for either. The "
+                "BELLHOP3D / FIELD3D file readers uacpy already ships — "
+                "uacpy.io.read_boundary_3d, read_ssp_3d and read_flp3d — are "
+                "what a 3-D arrivals reader would be built beside when 3-D "
+                "support lands.",
+                remediation="Re-run in 2-D (bellhop.exe), which writes the "
+                            "eight-value '2D' arrivals file this reader "
+                            "parses.",
+            )
+        return _read_arrivals_body(stream, binary, filepath, grid_type, merge)
+    finally:
+        if fid is not None:
+            fid.close()
 
-    if not head_text.lstrip().startswith(("'2D'", "'3D'")):
-        raise FileFormatError(
-            "Binary arrivals format (.arr written by RunType 'a') is not "
-            "supported; see ArrMod.f90:WriteArrivalsBinary for the record "
-            "layout.",
-            remediation="Re-run Bellhop with RunType 'A' (ASCII), which is "
-                        "what uacpy's own runs emit.",
-        )
-    if head_text.lstrip().startswith("'3D'"):
-        raise FileFormatError(
-            "3-D arrivals format (the '3D' tag written by BELLHOP3D) is not "
-            "yet available in uacpy: its records carry ten values per arrival "
-            "plus a receiver-bearing loop (Bellhop/ArrMod.f90:256-302), and "
-            "this parser has no axis for either. The BELLHOP3D / FIELD3D file "
-            "readers uacpy already ships — uacpy.io.read_boundary_3d, "
-            "read_ssp_3d and read_flp3d — are what a 3-D arrivals reader "
-            "would be built beside when 3-D support lands.",
-            remediation="Re-run in 2-D (bellhop.exe), which writes the "
-                        "eight-value '2D' arrivals file this reader parses.",
-        )
 
-    # ArrMod.f90 writes each Fortran record (freq, nsd+sz, nrd+rz,
-    # nrr+rr, max-narr, narr, and each 8-tuple arrival) via
-    # list-directed WRITE, which different Fortran runtimes may wrap
-    # at different column widths. Walk the file as a token stream so
-    # the parser is independent of how those records are line-broken.
-    with open(filepath, 'r') as f:
-        f.readline()  # skip the '2D' flag line
-        tokens = []
-        for line in f:
-            tokens.extend(line.split())
-
-    # Every value is a list-directed Fortran REAL write (ArrMod.f90:113-127),
-    # so the tokens go through fortran_float like the other AT text readers.
-    def _next_floats(t_iter, n):
-        return [fortran_float(next(t_iter)) for _ in range(n)]
-
-    def _next_int(t_iter):
-        # Some writers emit counts as floats; tolerate either.
-        return int(fortran_float(next(t_iter)))
-
-    t_iter = expand_repeat_counts(tokens)
-    freq = fortran_float(next(t_iter))
+def _read_arrivals_body(stream, binary: bool, filepath: Path, grid_type: str,
+                        merge: bool):
+    """The header axes and receiver cells of a 2-D ``.arr``, read from
+    ``stream`` (:class:`_AsciiArrivals` or :class:`_BinaryArrivals`), as
+    :func:`read_arr_file` returns them."""
+    freq = stream.frequency()
     # AddArr's delay tolerance scales with omega = 2π·freq (ArrMod.f90:44);
     # the .arr header carries the run frequency this rule used.
     omega = 2.0 * np.pi * freq
 
-    nsd = _next_int(t_iter)
-    sz = np.array(_next_floats(t_iter, nsd))
-
-    nrd = _next_int(t_iter)
-    rz = np.array(_next_floats(t_iter, nrd))
-
-    nrr = _next_int(t_iter)
-    rr = np.array(_next_floats(t_iter, nrr))
+    sz = stream.axis()
+    nsd = sz.size
+    rz = stream.axis()
+    nrd = rz.size
+    # Rr is REAL(KIND=8) (misc/SourceReceiverPositions.f90), the one f8 axis.
+    rr = stream.axis('f8') if binary else stream.axis()
+    nrr = rr.size
 
     # Body bound: WriteArrivalsASCII loops DO id = 1, Nrd with Nrd bound to
     # NRz_per_range (Bellhop/ArrMod.f90:101-102, Bellhop/bellhop.f90:329),
@@ -1112,15 +1227,14 @@ def read_arr_file(filepath: Union[str, Path], *, grid_type: str = 'R',
         # (Bellhop/bellhop.f90:329, inside the source loop) and opens each call
         # with MAXVAL( NArr ) over the whole receiver grid
         # (Bellhop/ArrMod.f90:99) — a storage hint, not part of the data.
-        _next_int(t_iter)
+        stream.count()
 
         for irz in range(n_depth_blocks):
             rd_list = []
             for irr in range(nrr):
-                narr = _next_int(t_iter)
+                narr = stream.count()
                 rcv_arrivals = _arrival_cell(
-                    _next_floats(t_iter, 8 * narr), narr, merge=merge,
-                    omega=omega)
+                    stream.arrivals(narr), narr, merge=merge, omega=omega)
                 rd_list.append(rcv_arrivals)
             sd_list.append(rd_list)
         arrivals_by_receiver.append(sd_list)
@@ -1322,7 +1436,7 @@ def read_prt(filepath: Union[str, Path], *, tail_bytes: Optional[int] = None) ->
     try:
         # Inside the try because ``Path.exists()`` re-raises anything but
         # ENOENT/ENOTDIR/EBADF/ELOOP — an unreadable directory gives EACCES.
-        # This runs from ``_attach_prt_tail`` with a ModelExecutionError in
+        # This runs from ``attach_prt_tail`` with a ModelExecutionError in
         # flight but not yet raised, so an escape here loses it outright.
         if not path.exists():
             return None
@@ -1464,11 +1578,14 @@ def read_ssp_2d(filepath: Union[str, Path]) -> SspTable:
 
     Examples
     --------
-    >>> ssp = read_ssp_2d('range_dependent.ssp')
-    >>> print(f"Ranges: {ssp.ranges} m")
-    >>> print(f"SSP matrix shape: {ssp.sound_speed.shape}")
-    >>> # Sound speed at depth index 10, range index 5
-    >>> c = ssp.sound_speed[10, 5]
+    The files are a run's own output, so these lines show the calls and
+    do not run here::
+
+        ssp = read_ssp_2d('range_dependent.ssp')
+        print(f"Ranges: {ssp.ranges} m")
+        print(f"SSP matrix shape: {ssp.sound_speed.shape}")
+        # Sound speed at depth index 10, range index 5
+        c = ssp.sound_speed[10, 5]
     """
     parsed = _parse_ssp_2d(filepath)
     return SspTable(path=str(filepath), ranges=parsed['r_prof'],
@@ -1708,7 +1825,21 @@ def _parse_flp(filepath: Union[str, Path], verbose: Union[bool, str] = False) ->
     with open(filepath, "r", encoding='utf-8', errors='replace') as f:
         title = _strip_fortran_quotes(f.readline())
         log_message('oalib_reader', f"Title: {title}", verbose=verbose)
-        opt = _strip_fortran_quotes(f.readline())
+        option_record = f.readline()
+        # field.exe's .flp quotes its option on the second record
+        # (KrakenField/field.f90:64-152); Scooter's fields.exe .flp opens
+        # with the option and follows it with a range count
+        # (Scooter/fields.f90:61-97).
+        if option_record.lstrip()[:1] not in ("'", '"'):
+            raise FileFormatError(
+                f"read_flp: {filepath} is in the Scooter fields.exe layout "
+                f"(option, then the receiver ranges in km; Scooter/"
+                f"fields.f90:61-97), not the field.exe layout this reads "
+                f"(title, quoted option, MLimit, profiles, receivers).",
+                remediation="read_env reads it beside its Scooter .env, and "
+                            "a Scooter run's ranges are applied by "
+                            "GreensFunction.to_field.")
+        opt = _strip_fortran_quotes(option_record)
         log_message('oalib_reader', f"Options: {opt}", verbose=verbose)
 
         # Fill missing option columns with reasonable placeholders:
@@ -1811,6 +1942,10 @@ def read_flp(filepath: Union[str, Path],
 
     Notes
     -----
+    This reads KRAKEN ``field.exe``'s layout. Scooter's ``fields.exe``
+    ``.flp`` (option, then ranges in km) is refused by name, with a
+    ``FileFormatError``.
+
     File format (.flp):
     - Line 1: Title
     - Line 2: Options (quoted string)
@@ -1827,10 +1962,13 @@ def read_flp(filepath: Union[str, Path],
 
     Examples
     --------
-    >>> flp = read_flp('test')
-    >>> print(f"Options: {flp.option}")
-    >>> print(f"Receiver depths: {flp.receiver_depths}")
-    >>> print(f"Receiver ranges: {flp.receiver_ranges}")
+    The files are a run's own output, so these lines show the calls and
+    do not run here::
+
+        flp = read_flp('test')
+        print(f"Options: {flp.option}")
+        print(f"Receiver depths: {flp.receiver_depths}")
+        print(f"Receiver ranges: {flp.receiver_ranges}")
 
     See Also
     --------
@@ -2291,17 +2429,20 @@ def read_ts(filepath: Union[str, Path]) -> RtsFile:
 
     Examples
     --------
-    >>> ts = read_ts('timeseries.txt')
-    >>> print(f"Time range: {ts.times[0]:.3f} to {ts.times[-1]:.3f} s")
-    >>> print(f"Receiver depths: {ts.positions}")
-    >>> print(f"Time series shape: {ts.pressure.shape}")
+    The files are a run's own output, so these lines show the calls and
+    do not run here::
 
-    >>> # Plot time series at first depth
-    >>> import matplotlib.pyplot as plt
-    >>> plt.plot(ts.times, ts.pressure[:, 0])
-    >>> plt.xlabel('Time (s)')
-    >>> plt.ylabel('Pressure')
-    >>> plt.title(f"Depth = {ts.positions[0]} m")
+        ts = read_ts('timeseries.txt')
+        print(f"Time range: {ts.times[0]:.3f} to {ts.times[-1]:.3f} s")
+        print(f"Receiver depths: {ts.positions}")
+        print(f"Time series shape: {ts.pressure.shape}")
+
+        # Plot time series at first depth
+        import matplotlib.pyplot as plt
+        plt.plot(ts.times, ts.pressure[:, 0])
+        plt.xlabel('Time (s)')
+        plt.ylabel('Pressure')
+        plt.title(f"Depth = {ts.positions[0]} m")
 
     See Also
     --------

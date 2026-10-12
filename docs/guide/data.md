@@ -1,6 +1,6 @@
 # External data — building an Environment from the real ocean
 
-> `uacpy.data` · 78 public names · GPS coordinates (and a date) in, a
+> `uacpy.data` · 82 public names · GPS coordinates (and a date) in, a
 > ready-to-run [`Environment`](environment.md) out
 
 [Environment](environment.md) tells you how to *describe* the ocean. This page
@@ -130,15 +130,17 @@ environment with no `bottom_sources=` has a *made-up* seabed, and
 | Argument | Default | Meaning |
 |---|---|---|
 | `bottom_model` | `'hamilton'` | grain-size → geoacoustics relations behind every seabed that arrives as a ϕ (all sources but `crust1`, and a ϕ literal): `'apl-uw'` for 10–100 kHz work, see [§5](#the-grain-size-conversion) |
+| `bottom_hamilton_fit` | `None` | which Hamilton & Bachman fit `'hamilton'` evaluates (the per-layer fetchers' `hamilton_fit=`): `'continental-terrace'` when `None`, `'abyssal-hill'` or `'abyssal-plain'`; a deep-ocean site wants an abyssal fit, which nothing infers; refused beside `bottom_model='apl-uw'` |
 | `with_absorption` | `False` | build a `FrancoisGarrison` profile from the site's T/S column (and GLODAP pH) |
 | `max_distance_km` | `None` | refuse data whose point (cast, sample, or cell centre) stands farther than this from the site, on every fetched axis; see [the offset rule](#the-offset-rule) |
 | `max_days` | `None` | staleness guard for the **time-specific** SSP sources (`argo`, `copernicus`); ignored by climatologies |
-| `formula` | `'teos10'` | sound-speed equation; `'unesco'` (Chen–Millero 1977, ≈ 0.6 m/s high in deep water), `'delgrosso'` (open-ocean salinity only) and `'mackenzie'` (the nine-term equation behind `SoundSpeedProfile.from_temperature_salinity`) also available, see [utilities](utilities.md) |
+| `formula` | `'teos10'` | sound-speed equation; `'unesco'` (Chen–Millero 1977, ≈ 0.6 m/s high in deep water), `'delgrosso'` (open-ocean salinity only) and `'mackenzie'` (Mackenzie 1981's nine-term equation, also `formula='mackenzie'` on `SoundSpeedProfile.from_temperature_salinity`) also available, see [utilities](utilities.md) |
 | `resolution` | `'1.00'` | WOA23 grid spacing in degrees (`'0.25'` for the fine grid) |
 | `timeout`, `verbose` | `120.0`, `False` | forwarded to the fetchers |
 
-The named choices `bottom_model`, `bottom_environment`, `formula` and every
-`*_sources` id match in any case (`'Hamilton'`, `'TEOS10'`, `'WOA23'`); unit
+The named choices `bottom_model`, `bottom_hamilton_fit`, `formula` and every
+`*_sources` id match in any case (`'Hamilton'`, `'TEOS10'`, `'WOA23'`), as do
+the ids and presets the per-layer fetchers take as `source=`; unit
 strings stay exact, since there case carries meaning (`dB`).
 
 ---
@@ -268,22 +270,25 @@ only.
 
 A fetched profile stops where its source stops, which is rarely the seafloor:
 WOA23's deepest standard level is 5500 m, and a shelf cast can end hundreds of
-metres above the bottom. Two public helpers close that gap, and they are what
-`fetch_environment` uses itself, so driving them by hand gives the same column:
+metres above the bottom. Three public helpers close that gap, and they are
+what `fetch_environment` uses itself (the third on a fetched Argo cast), so
+driving them by hand gives the same column:
 
 | Call | What it does |
 |---|---|
 | `extend_ssp_below_data(ssp, depth_max)` | Extend one profile down to `depth_max` along its own deep gradient, rather than holding the last value flat |
 | `extend_column_to_seafloor(...)` | The transect form: one column extended to the seafloor under a given range |
+| `deepen_with_climatology(ssp, point, *, date, month, source)` | A cast of your own continued below its last level by the WOA23 column at that point and month, blended over its deepest 500 m (§7) |
 
 A model needs sound speed *at* the seabed — an SSP that stops short leaves the
 bottom boundary interpolating over a gap it cannot see.
 
-The first three feed `ssp`; the last two supply the **pH** that Francois–Garrison
+Of the sources in the table above, `woa23`, `copernicus` and `argo` feed `ssp`;
+`glodap` and `copernicus_bgc` supply the **pH** that Francois–Garrison
 absorption needs and WOA23 does not carry. T and S come from WOA23 (or whichever
 SSP source resolved), and sound speed is computed from them with TEOS-10 by
 default (`formula='unesco'`, `'delgrosso'` or `'mackenzie'` choose another
-equation) from [`uacpy.core.acoustics`](utilities.md) — the fetchers return
+equation) from [`uacpy.acoustics`](utilities.md) — the fetchers return
 physics, not a stored `c` field.
 
 ```python
@@ -419,9 +424,13 @@ your result, run two of them and look at the spread.
 ### The grain-size conversion
 
 Most of those sources report a **mean grain size** on the Wentworth ϕ scale, not
-geoacoustics. `uacpy.core.sediment.grain_size_to_geoacoustics` is the
-conversion, and it is public so you can drive it yourself. Its inverse,
-`uacpy.core.sediment.grain_size_from_density`, recovers
+geoacoustics. `uacpy.data.grain_size_to_geoacoustics` is the
+conversion — `uacpy.data.bottom_from_grain_size` wraps it into a half-space
+`BoundaryProperties` — and
+you can call it yourself, on one ϕ or on an array of them (a grain-size map,
+the samples of a survey), which returns arrays of the same shape and reports
+every substituted value in one warning. Its inverse,
+`uacpy.data.grain_size_from_density`, recovers
 ϕ from a measured bulk density — which is how a density-only source (`graw`)
 enters a model that wants a grain size:
 
@@ -430,9 +439,8 @@ phi = np.linspace(-0.5, 9.0, 381)
 water_c, water_rho = 1490.0, 1.03           # near-seabed seawater
 
 for model in ('hamilton', 'apl-uw'):
-    rows = [uacpy.core.sediment.grain_size_to_geoacoustics(
-        p, model=model, water_sound_speed=water_c, water_density=water_rho)
-        for p in phi]
+    geo = uacpy.data.grain_size_to_geoacoustics(
+        phi, model=model, water_sound_speed=water_c, water_density=water_rho)
 ```
 
 ![Grain size to geoacoustics](figures/data_grain_size.png)
@@ -494,6 +502,28 @@ Three things worth reading off the plot:
 Two shortcuts wrap the conversion: `bottom_from_grain_size(phi)` and
 `bottom_from_class('sand')`, both returning a ready `BoundaryProperties`.
 
+**Your own samples along a transect.** Cores, grabs or a survey's mean grain
+sizes become a range-dependent bottom with `bottom_from_samples`: each
+waypoint of the geodesic takes its nearest sample (the great-circle nearest,
+the lookup the NCEI sample fetcher uses), converted once per distinct sample:
+
+```python
+bottom = uacpy.data.bottom_from_samples(
+    survey.lat, survey.lon, survey.phi, A, B, max_distance_km=25.0,
+    water_sound_speed=1490.0)
+env = uacpy.data.fetch_environment(A, transect_to=B, bottom=bottom,
+                                   ssp_sources='local')
+```
+
+With the default `n_points='auto'` the track is probed at `max_points`
+waypoints and each run that took one sample keeps its edge columns, so a
+change of seabed lands within one probe step of where the nearest sample
+changes. A waypoint with no sample within `max_distance_km` is a gap, filled
+from the nearest covered waypoint with a warning; without a limit every
+waypoint takes its nearest sample and one warning counts those farther than
+10 km. `model=`, `hamilton_fit=` and `water_sound_speed=` (a speed, or a
+`(lat, lon)` callable read at each waypoint) reach the conversion.
+
 **Choosing the conversion for a fetched seabed.** Every seabed source that
 reports a ϕ goes through this conversion, so the choice is one keyword away:
 
@@ -541,6 +571,9 @@ consolidated sediment over basement — and the shear speed is 550 m/s at the to
 of the column and 2700 m/s in the basement, a loss channel a fluid half-space
 simply does not have. Which models can take that honestly is the
 [shear table in environment §4](environment.md#what-shear_speed-changes).
+The raw column is `uacpy.data.fetch_crust1_profile(point)`, a `Crust1Profile`
+record (`water_depth`, `sediment_thickness`, and per layer `layer_names`,
+`thickness`, `sound_speed`, `shear_speed`, `density`, with its `provenance`).
 
 Three caveats, all real:
 
@@ -572,14 +605,12 @@ describes: `surface` is the boundary's *properties*, `altimetry` is its *shape*.
 ### Ice — a different top boundary
 
 ```python
-from uacpy.data import seaice_local
-
 fram = ((81.0, -2.0), (76.5, 2.0))          # Fram Strait, marginal ice zone
 
 for month, label in ((3, 'March — winter maximum'),
                      (9, 'September — summer minimum')):
     uacpy.plot.plot_sea_ice_map(
-        seaice_local.sea_ice_grid(month, hemi='N'), hemi='N',
+        uacpy.data.sea_ice_grid(month, hemi='N'), hemi='N',
         transect=fram, title=label)
 ```
 
@@ -591,6 +622,14 @@ homogeneous **elastic ice canopy** — c_p 3500 m/s, c_s 1800 m/s, ρ 0.9 g/cm³
 α_p/α_s 0.4/1.0 dB/λ (*Computational Ocean Acoustics*). Below the ice edge it
 returns nothing and the free surface stands, with no provenance recorded: an
 ice-free point is not silently given an "ice" source.
+
+The canopy is an elastic **half-space**, infinitely thick ice with no air above
+it. *Computational Ocean Acoustics* §4.10.4 gives these values to a 4 m plate,
+and the half-space stands for that plate only where the ice is many shear
+wavelengths thick: well above c_s/h, about 450 Hz for 4 m of ice and 600 Hz for
+3 m. Below that the ice is a fraction of a wavelength thick (Medwin & Clay
+§2.6.5), and the half-space does not reflect as the plate does. The model
+writers carry no top-layer thickness, so a plate cannot be given.
 
 On this transect A (81 °N) is 91 % ice in March and still 53 % in September, so
 it is canopy in both; B (76.5 °N) is open water year-round. On a transect,
@@ -611,10 +650,12 @@ env = uacpy.data.fetch_environment(
     altimetry_sources='local', altimetry_rng=np.random.default_rng(11))
 ```
 
-`'waves'` inverts an observed significant wave height to the effective PM wind
-with `hs_to_pm_wind(hs)` (`U = √(Hs/0.0214)`), which is public so you can apply
+`'waverys'` (Copernicus WAVERYS) and `'ww3'` (NOAA WaveWatch III) invert an
+observed significant wave height to the effective PM wind with `hs_to_pm_wind(hs)` (`U = √(Hs/0.0214)`, U in m/s, returned in knots at the
+19.5 m PM height so it goes straight into
+`generate_sea_surface(rmax_m, wind_speed_kn)`), which is public so you can apply
 the same inversion to a wave height of your own, so the realisation reproduces
-the observed `Hs` whether or not the sea is fully developed; `'wind'` uses the live 10 m NBS wind under a
+the observed `Hs` whether or not the sea is fully developed; `'nbs'` uses the live 10 m NBS wind under a
 fully-developed assumption; `'local'` uses the cached NBS monthly climatology —
 network-free, but a *mean state*, which understates a storm. `'auto'` tries them
 in that order. Sea state is the one axis where the cached product is the last
@@ -689,6 +730,27 @@ z = my_grid.interp(lat=xr.DataArray(lats), lon=xr.DataArray(lons)).values
 env = uacpy.data.fetch_environment(
     A, transect_to=B, bathymetry=np.column_stack([r, z]), ssp_sources='local')
 ```
+
+A cast of your own passed as `ssp=` is used as given, not deepened the way a
+fetched profile is: if it stops above the seafloor, `Environment` holds its
+deepest speed to the bottom and warns. `extend_ssp_below_data` continues it
+along the pressure term, which holds once the cast reaches the deep isothermal
+layer; a cast cut in the thermocline extends fast (30 m/s at 4.8 km for a
+1000 m cast in the Bay of Biscay). `deepen_with_climatology` continues it with
+the WOA23 column at the same point and month instead — the treatment a
+fetched Argo cast gets — blending the two over the cast's deepest 500 m so the
+join has no step and no kink, and citing both:
+
+```python
+deep = uacpy.data.deepen_with_climatology(my_cast, A, date='2026-07-15',
+                                          source='local')
+env = uacpy.data.fetch_environment(A, date='2026-07-15', ssp=deep)
+```
+
+The column is computed with the cast's own `formula` when the cast records
+one, so both sides of the join share one equation. Below the WOA23 cell's
+seafloor `fetch_environment` extends the result as it extends any fetched
+profile.
 
 Which models take a range-dependent environment natively, and which collapse
 it, is [environment §7](environment.md#7-collapse-policy). A fetched
@@ -803,7 +865,8 @@ threshold of its own:
 The warning is a `ProvenanceWarning` naming the source, the data's date, the
 gap and the threshold; `max_days=` on the fetcher turns a gap past it into a
 refusal, as `max_distance_km=` does for distance. The km thresholds above and
-these day thresholds are defined together in `uacpy.data._offset_policy`.
+these day thresholds are the package's stated policy for "far", not physical
+bounds, and the warning quotes the one it crossed.
 
 **One call, one notice.** A transect samples its point fetcher at every
 waypoint, and each sample past a threshold has its own notice. One call of
@@ -876,8 +939,9 @@ EMODnet Geology — seabed substrate  [CC-BY 4.0]
   Fetched:     at 45.60 N, 6.20 W, 0.0 km from requested
 ```
 
-`citations()` takes an `Environment`, a carrier, a list of ids or `DataSource`s,
-or nothing at all — in which case it renders the whole catalogue, which is the
+`citations()` takes an `Environment`, a carrier, a record a fetcher returned
+(a `TSProfile`, a `BathyGrid`, ...; its `.provenance`), a list of ids or
+`DataSource`s, or nothing at all — in which case it renders the whole catalogue, which is the
 quickest way to see what uacpy can pull and under what terms.
 `provenance_table(env, result)` gives the same records as a DataFrame, one row
 per record (per column on a transect) and one for the engine that produced
@@ -895,12 +959,13 @@ bathymetry map and under the environment cross-section:
 | `env.plot()` | `Data:` from `env.data_sources` |
 | `tl.plot(env=env)` | `Model:` from the result, above `Data:` from the env |
 | `plot_bottom_properties(env)` | `Data:` from `env.data_sources` |
-| `plot_bathymetry_map(..., show_data_credit=...)` | whatever you hand it |
+| `plot_bathymetry_map(grid)` | `Data:` from the `BathyGrid`'s `.provenance`; bare arrays: whatever `show_data_credit=` hands it |
 | `plot_overview(env, ...)` | both, centred under the map panel |
 
 The map is the exception that shows the rule: a bare `(lats, lons, depth)` grid
-carries no provenance of its own, which is why the figure in §3 passes
-`show_data_credit=[SOURCES['gebco']]` explicitly. Only footnotes on standalone
+carries no provenance of its own, which is why the figure in §3, drawn from the
+grid's arrays, passes `show_data_credit=[SOURCES['gebco']]` explicitly; the
+`BathyGrid` `fetch_bathy_grid` returns, passed whole, credits itself. Only footnotes on standalone
 figures are drawn — a plotter given `ax=` leaves the composition to its caller.
 
 Pass `show_data_credit=False` to suppress it, an `Environment` / `Result` / list of
@@ -984,6 +1049,15 @@ before failing, and verifies all four grids against their md5 before writing
 any, so what decides whether a download is CRUST1.0 is the data rather than the
 host it came from.
 
+The live services that take no address keyword read their host from an
+exported module constant, so a mirror is one assignment: GMRT
+(`uacpy.data.gmrt_live.POINT_URL`, `GRID_URL`), the EMODnet DTM
+(`uacpy.data.emodnet_bathy_live.ERDDAP_URL`), NBS wind
+(`uacpy.data.wind_live.ERDDAP_URL`) and WaveWatch III
+(`uacpy.data.ww3_live.ERDDAP_URL`). `fetch_bathy(base_url=)` is the
+OpenTopoData root that `'gebco'` falls back to online, and is refused with a
+source that never reads it.
+
 Only `http`/`https` are accepted, on both transports — a `file://` or `ftp://`
 address is refused rather than turned into a local-file read. And a dataset
 you have fetched by hand needs no download at all: drop it in the dataset's
@@ -1034,7 +1108,11 @@ the mistake to check for first.
 
 **`bottom=` is a material, `bottom_sources=` is a source.** `bottom='sand'` is a
 `uacpy.materials` preset; `bottom_sources='emodnet'` is a fetch. They are
-separate arguments precisely so a string can never mean both.
+separate arguments precisely so a string can never mean both. The preset is
+fluid, as `Environment(bottom='sand')` reads it;
+`bottom=uacpy.data.bottom_from_class('sand')` keeps its shear. A `bottom=`
+number is a grain size ϕ, not the sound speed `Environment(bottom=1800)`
+reads, and a number with |ϕ| > 20 is refused.
 
 **Climatology is a mean, not a day.** WOA23, the NSIDC ice grid and the cached
 NBS wind are all monthly climatologies. They are reproducible and they are not

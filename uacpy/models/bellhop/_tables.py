@@ -87,6 +87,30 @@ _BEAM_TYPE_REFUSED_RUN_TYPES = {
     'R': frozenset({'I', 'S'}),
 }
 
+# Beam types whose receiver loop reaches a receiver at r = 0, the range every
+# ray starts from (rA = 0). InfluenceSGB starts at ir = 1 and visits every
+# receiver short of the step end (influence.f90:672, :683). The other five
+# begin right of the first receiver: Cerveny ray-centred at ir1 + 1
+# (:71, :98, :102), Cerveny Cartesian and hat ray-centred at irA + 1 with
+# irA >= 1 (:223, :228; :334, :373), hat and Gaussian Cartesian at the first
+# Pos%Rr > rA (:419, :528). Their r = 0 column keeps the U = 0.0 the grid
+# starts from (bellhop.f90:240-241).
+_ORIGIN_EVALUATING_BEAM_TYPES = frozenset({'S'})
+
+
+def writes_origin_column(source_type, beam_type) -> bool:
+    """Whether a Bellhop TL run writes a field value at ``r = 0``.
+
+    A point source never does: ``ScalePressure`` sets its ``1/sqrt(r)``
+    factor to 0 there, "avoid /0 at origin, return pressure = 0"
+    (``influence.f90:786-787``; ``bellhopcuda/src/influence.hpp:1613-1614``).
+    A line source's factor has no ``1/sqrt(r)`` (``influence.f90:784``), so
+    its ``r = 0`` column holds a value exactly when the beam type's receiver
+    loop reaches it (:data:`_ORIGIN_EVALUATING_BEAM_TYPES`).
+    """
+    return (source_type == 'line'
+            and beam_type in _ORIGIN_EVALUATING_BEAM_TYPES)
+
 
 def grid_is_paired(grid_type) -> bool:
     """``grid_type='I'`` writes RunType(5:5)='I', where BELLHOP walks the

@@ -81,7 +81,7 @@ class _GlobSedGrid(NetcdfGrid):
             super().__init__(path)
             self._z = self.var('z')
         except KeyError as exc:
-            raise DataFetchError(
+            raise _cache.UnreadableCacheError(
                 f"GlobSed NetCDF {Path(path).name} is missing an expected "
                 f"variable ({exc}); its schema may have changed.",
                 remediation="Re-run ./install.sh --data globsed.",
@@ -100,8 +100,10 @@ def fetch_sediment_thickness(point, *, max_distance_km=None):
 
     Raises ``DataFetchError`` where GlobSed has no value (land / unmapped).
 
-    The value is raw and carries no provenance; :func:`fetch_bottom_crust1`
-    returns the carrier that records it in ``.data_sources``.
+    The value is raw and carries no provenance;
+    :func:`uacpy.data.fetch_bottom` with ``source='crust1'`` (which rescales
+    the CRUST1.0 sediment column to it) returns the carrier that records it
+    in ``.data_sources``.
 
     Parameters
     ----------

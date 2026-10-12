@@ -72,8 +72,10 @@ scan = beamform_field(p[:, 0], elements, angles, FREQ, sound_speed=C_REF,
                       weights=shading_taper(n_el, 'boxcar'))
 beam = 10.0 * np.log10(scan.power / scan.power.max())   # for the arithmetic
 theta_max = float(mode_angles.max())
-# The honest claim. This array's beamwidth (~2.5 deg over an 86 m aperture)
-# is wider than the 2 deg between neighbouring modes, so it CANNOT resolve
+# The honest claim. This array's main lobe (4.2 deg between its half-power
+# points at broadside: 24 elements at λ/2, where |sin(Nψ/2)/(N sin(ψ/2))|²
+# halves at Nψ/2 = 1.39) is wider than the 2 deg between neighbouring
+# modes, so it CANNOT resolve
 # them one by one - a peak landing near some mode angle would prove nothing
 # when 14 of them span 28 deg. What it does show is the fan: the waveguide
 # traps nothing steeper than arccos(c/v_p) of the last mode, so outside

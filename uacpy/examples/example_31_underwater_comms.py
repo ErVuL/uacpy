@@ -9,7 +9,7 @@ spreading gain, and a JANUS beacon.
 
 Uses: comms.ber_sweep (BerCurve.plot) · multipath_channel · Arrivals.channel_taps ·
 simulate_link · DFE ·
-detect_preamble · estimate_doppler_scale / compensate_doppler ·
+detect_preamble · estimate_doppler_scale (a DopplerEstimate) / compensate_doppler ·
 ofdm_modulate / ofdm_demodulate · conv_encode / viterbi_decode · m_sequence ·
 JanusPacket · plot_ber_curve · plot_scatter · plot_convergence ·
 plot_sync_metric · plot_doppler_ambiguity · plot_subcarriers
@@ -80,9 +80,12 @@ t = np.arange(4000) / fs
 probe = np.exp(1j * 2 * np.pi * (1500 * t + 0.5 * 2e5 * t ** 2))
 true_scale = 1.5e-3
 received = comms.compensate_doppler(probe, -true_scale)   # closing geometry
-scale, scales, peak = comms.estimate_doppler_scale(
+# The record here is the probe alone, so a candidate scale below the true
+# one leaves the compensated record shorter than the template, which the
+# matched-filter metric scores 0: the flat left part of the ambiguity panel.
+doppler = comms.estimate_doppler_scale(
     received, probe, np.linspace(0, 3e-3, 61))
-print(f"  Doppler scale   : estimated {scale * 1e3:.2f}e-3 "
+print(f"  Doppler scale   : estimated {doppler.best_scale * 1e3:.2f}e-3 "
       f"(true {true_scale * 1e3:.2f}e-3)")
 
 # OFDM: a cyclic prefix turns the multipath into per-subcarrier gains.
@@ -132,7 +135,7 @@ axes[0, 1].scatter(modulator.constellation.real, modulator.constellation.imag,
                    marker="x", s=80, color="k", zorder=5)
 uacpy.plot.plot_convergence(equalized.mse, ax=axes[1, 0], title="(DFE, RLS)")
 uacpy.plot.plot_sync_metric(sync_metric, threshold=0.5, ax=axes[1, 1])
-uacpy.plot.plot_doppler_ambiguity(scales, peak, ax=axes[2, 0])
+uacpy.plot.plot_doppler_ambiguity(doppler, ax=axes[2, 0])
 uacpy.plot.plot_subcarriers(ofdm_channel, 256, ax=axes[2, 1],
                             title=f"(ZF BER {ber_ofdm:.1e})")
 

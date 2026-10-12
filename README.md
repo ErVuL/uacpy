@@ -79,9 +79,9 @@ models — consistent `Environment` / `Source` / `Receiver` construction and
 - **Sonar performance** (`uacpy.sonar`) — sonar equation, scattering, reverberation, detection & range, and matched-field source localization (KRAKEN replicas, Bartlett/MVDR).
 - **Communications** (`uacpy.comms`) — digital modems (PSK/QAM/OFDM…), equalization, FEC, and the **NATO JANUS** standard.
 - **Modelled channels for modems** — `Arrivals.channel_taps(symbol_rate, fc=…)` turns a Bellhop arrivals result into symbol-spaced baseband taps (`ChannelTaps`) that `comms.simulate_link(channel=…)` runs directly, with `Arrivals.coherence_bandwidth` and `Arrivals.channel_regime` to say whether the link is flat or frequency-selective.
-- **Multi-source superposition** — a `Source(depths=[…], weights=[…])` runs on every field model and returns a `ResultStack`, one slab per depth; `ResultStack.superpose()` sums them as Σ wᵢ·pᵢ with complex weights, so a phased vertical array is one run and one call.
+- **Multi-source superposition** — a `Source(depths=[…], weights=[…])` runs on every field model and returns one `Field` with a leading `source_depth` axis; `Field.superpose()` sums it as Σ wᵢ·pᵢ with complex weights, so a phased vertical array is one run and one call.
 - **Ambient noise** (`uacpy.noise`) — Wenz spectra (wind / shipping / rain / thermal).
-- **Standards & metrics** — sound speed, decidecade bands, ship source level, marine‑mammal weighting.
+- **Standards & metrics** — sound speed, decidecade bands, a ship's monopole source level from a measured radiated noise level (ISO 17208) or, without one, the mean merchant-ship spectrum of Wales & Heitmeyer (2002, no speed term), marine‑mammal weighting.
 - **Visualization** — TL maps, rays, modes, fields, cross‑model comparisons.
 
 **Simplest example — 100 m of water, one model run, one plot.** Needs the
@@ -93,11 +93,11 @@ cache:
 ``` python
 import numpy as np
 import uacpy
-from uacpy.models import Bellhop, RunMode
+from uacpy.models import Bellhop
 
 env = uacpy.Environment(
     bathymetry=100.0,                                    # flat 100 m seabed
-    ssp=[(0.0, 1500.0), (100.0, 1490.0)],                # (depth m, speed m/s)
+    ssp=1500.0,                                          # isovelocity water, m/s
     bottom=uacpy.BoundaryProperties(
         acoustic_type='half-space',
         sound_speed=1650.0, density=1.8, attenuation=0.6,
@@ -107,18 +107,27 @@ source   = uacpy.Source(depths=25.0, frequencies=200.0)
 receiver = uacpy.Receiver(depths=np.linspace(1, 99, 100),
                           ranges=np.linspace(50, 5000, 250))
 
-tl = Bellhop().run(env, source, receiver, run_mode=RunMode.COHERENT_TL)
-tl.plot(env=env, source=source)
+field = Bellhop().run(env, source, receiver)          # complex pressure, Pa
+field.plot(env=env, source=source)
 ```
 
 Three carriers in, one result out, and the result plots itself — every model in
-the package has that shape. The values are one accessor away: `tl.tl` (or the
-general `tl.dB`) is the transmission-loss array in dB, positive loss, no sign
-juggling. Walk it line by line in the
-[documentation](./docs/README.md). The water is lossless unless you pass
+the package has that shape. The default run mode is coherent TL, which hands back
+the complex pressure field; the loss is one accessor away: `field.dB` (or
+`field.tl`) is the transmission-loss array in dB, positive loss, no sign
+juggling. A sound-speed profile is a list of `(depth m, speed m/s)` pairs,
+`ssp=[(0.0, 1500.0), (100.0, 1490.0)]`; its gradient bends the rays into
+caustics, which Bellhop's default hat-shaped beams draw as thin bright streaks
+of too little loss ([Bellhop §1](./docs/models/bellhop.md#1-what-it-solves)
+says when `beam_type='B'` is the better choice), so this first map keeps the
+water isovelocity. The documentation's [Start here](./docs/README.md#start-here) runs the
+same program and links each carrier to its guide page, and
+[DOCUMENTATION §3](./DOCUMENTATION.md#3-quick-start) lists which call to use for
+each common task. The water is lossless unless you pass
 `absorption=` (`uacpy.Thorp()`, or `uacpy.FrancoisGarrison(...)` for a given
-temperature, salinity, pH and depth); a run where that leaves out a decibel or
-more says so.
+temperature, salinity and pH, each a single value or a profile given as
+`[(depth, value), ...]` pairs); a run where that leaves out a decibel or more
+says so.
 
 <div align="center">
   <img src="./docs/readme_realworld.png" alt="Real-world environment fetched from GPS, modelled, and plotted" width="820">
@@ -323,6 +332,19 @@ pip install -e .
 > `/mnt/c/...`. Cross-filesystem I/O is 10–20× slower and the
 > Acoustics-Toolbox build does a lot of small file writes.
 
+### Check the install
+
+```bash
+python -m uacpy
+```
+
+prints the version and one row per binary each engine can launch (every
+backend, and Kraken's `field.exe`): whether it was found, where, and which
+backend a model built without `backend=` resolves. It exits 0 when every
+engine has a binary and 1 otherwise; an OASES install not made
+(`--oases no`) is named but does not fail the check. The binaries are found,
+not run. From Python the same table is `uacpy.models.engine_status()`.
+
 ### Update
 
 ```bash
@@ -330,18 +352,13 @@ cd uacpy
 git pull
 source uacpy_venv/bin/activate
 pip install -e .
-rm -rf uacpy/bin   # Optional (Required for v0.3.x -> v0.4.x)
+rm -rf uacpy/bin   # Optional
 rm -rf data_cache  # Optional
-./install.sh       # Optional (Required for v0.3.x -> v0.4.x) 
+./install.sh       # Optional
 ```
 
-Upgrading to v0.5.0 from v0.4.x: run `git submodule update --init` and
-`./install.sh` again (the C++ Bellhop submodule pin moved and the installer
-now writes a relocatable submodule link). Two calls change meaning: every
-per-arrival `'phase'` (and `Arrivals.phases`) is in **radians**, and
-`plot_fk` with bare arrays needs `scaling='density'` or `'power'` (pass the
-`FKResult` itself to skip it). Multi-depth `Source`s now run on every field
-model and return a `ResultStack` (was Bellhop only).
+The upgrade steps a version needs and every change that breaks a call are
+in [CHANGELOG.md](CHANGELOG.md).
 
 ### Uninstall
 
@@ -354,14 +371,16 @@ rm -rf uacpy
 
 Three entry points, depending on what you need:
 
-- **[`docs/`](./docs/README.md) — the guided documentation.** 21 pages (23
+- **[`docs/`](./docs/README.md) — the guided documentation.** 22 pages (24
   counting the two index READMEs) with 128
   generated figures: one per model (Bellhop, Kraken, RAM, Scooter, SPARC,
   Bounce, OASES), a [validation page](./docs/models/validation.md) with each
   engine's measured agreement with the published benchmarks, plus guides to
   environments, sources and receivers, results,
   plotting, signal processing, arrays, communications, noise, sonar, external
-  data, I/O, utilities and reproducibility. Each page covers the physics, when
+  data, I/O, utilities and reproducibility, and a
+  [broadband-products theory page](./docs/theory/broadband_products.md) with the
+  literature and measurements behind the time-domain methods. Each page covers the physics, when
   to reach for the model, its limits, and a worked example whose code is the
   code that generates the page's figures.
 - **[`DOCUMENTATION.md`](./DOCUMENTATION.md) — the API reference.** Every
@@ -506,10 +525,11 @@ Michael B. Porter --- http://oalib.hlsresearch.com/AcousticsToolbox/
 - Porter, *The BELLHOP Manual and User's Guide*, 2011
 - Porter, *The KRAKEN Normal Mode Program*, SACLANTCEN SM-245, 1991
 
-### BellhopCUDA
+### bellhopcxx / bellhopcuda
 
-C. S. Schmid, D. F. Schmidt, A. E. Hodgson --- https://github.com/A-New-BellHope/bellhopcuda
-- *BellhopCUDA: High-Performance Acoustical Ray Tracing on GPUs*, 2020
+Marine Physical Lab, Scripps Institution of Oceanography (The Regents of the
+University of California), 2021-2026 --- https://github.com/A-New-BellHope/bellhopcuda
+- C++/CUDA port of BELLHOP / BELLHOP3D (Michael B. Porter, 1983-2022)
 
 ### RAM
 
@@ -570,7 +590,7 @@ when redistributing or modifying UACPY or its outputs.
 |----------------------------|------------------------------------|--------------------------------------------------|--------------------------------------------------|
 | UACPY wrapper              | this repository                    | source + Python package                          | GPL-3.0                                          |
 | Acoustics Toolbox (Porter) | `uacpy/third_party/Acoustics-Toolbox/`   | vendored Fortran sources, **modified**           | GPL-3.0                                          |
-| bellhopcuda (Schmid et al.)| `uacpy/third_party/bellhopcuda/`         | git submodule pinned to uacpy's fork (`ErVuL/bellhopcuda`): upstream `v1.5` + the Francois-Garrison fix in `MODIFICATIONS.md` | GPL-3.0                                       |
+| bellhopcuda (Scripps MPL)  | `uacpy/third_party/bellhopcuda/`         | git submodule pinned to uacpy's fork (`ErVuL/bellhopcuda`): upstream `v1.5` + the Francois-Garrison fix in `MODIFICATIONS.md` | GPL-3.0                                       |
 | mpiramS (Dushaw)           | `uacpy/third_party/mpiramS/`             | vendored Fortran sources, **modified** (see `MODIFICATIONS.md`) | Creative Commons Attribution 4.0 International   |
 | ramsurf (Calvo / Quiet Oceans) | `uacpy/third_party/ramsurf/`         | vendored Fortran sources, **modified** (see `MODIFICATIONS.md`) | BSD-3-Clause |
 | ramgeo (Collins, NRL)      | `uacpy/third_party/ramgeo/`              | vendored Fortran source, **modified** (see `MODIFICATIONS.md`) | Public domain (U.S. Government work, no explicit licence) |
@@ -639,8 +659,8 @@ live ERDDAP requests of `fetch_wind` (NOAA NBS) and `fetch_waves`
 | **Graw 2021** predicted seabed bulk density (`bottom_sources='graw'`, `--data graw`) | seabed density (measured-density half-space) | **CC-BY 4.0** | Graw, J.H., Wood, W.T. & Phrampus, B.J. (2021). *Predicting global marine sediment density using the random forest regressor machine learning algorithm.* J. Geophys. Res. Solid Earth 126; data: Zenodo doi:[10.5281/zenodo.3762390](https://doi.org/10.5281/zenodo.3762390) |
 | **NSIDC Sea Ice Index** (`surface_sources='seaice'`) | sea-ice concentration → elastic ice surface (monthly climatology) | U.S. Government work --- public domain | Fetterer, F., Knowles, K., Meier, W.N., Savoie, M., Windnagel, A.K. & Stafford, T. (2025). *Sea Ice Index*, Version 4 (G02135), NSIDC, doi:[10.7265/a98x-0f50](https://doi.org/10.7265/a98x-0f50) |
 | **NOAA/NCEI Blended Seawinds** (`data.fetch_wind`; `--data wind` climatology) | 10 m wind → ambient noise + sea surface | U.S. Government work --- public domain | Saha, K. & Zhang, H.-M. (2022). *Hurricane and typhoon storm wind resolving NOAA NCEI Blended Sea Surface Wind (NBS) product.* Front. Mar. Sci. 9, 935549, doi:[10.3389/fmars.2022.935549](https://doi.org/10.3389/fmars.2022.935549) (NBS v2); method: Zhang, H.-M., *et al.* (2006), Geophys. Res. Lett. 33, L17714 |
-| **NOAA WaveWatch III** (`data.fetch_waves`, `altimetry_sources='waves'`) | significant wave height → sea surface (recent) | U.S. Government work --- public domain | Tolman, H.L. (2009). *User manual and system documentation of WAVEWATCH III.* NOAA/NWS/NCEP Tech. Note 276 |
-| **Copernicus WAVERYS** (`data.fetch_waves`, needs login) | significant wave height → sea surface (reanalysis, 1980→) | [Copernicus Marine License](https://marine.copernicus.eu/user-corner/service-commitments-and-licence) (free; **commercial use allowed**) | "E.U. Copernicus Marine Service Information (WAVERYS); *&lt;product DOI&gt;*"; GLOBAL_MULTIYEAR_WAV_001_032 |
+| **NOAA WaveWatch III** (`data.fetch_waves`, `altimetry_sources='ww3'`) | significant wave height → sea surface (recent) | U.S. Government work --- public domain | Tolman, H.L. (2009). *User manual and system documentation of WAVEWATCH III.* NOAA/NWS/NCEP Tech. Note 276 |
+| **Copernicus WAVERYS** (`data.fetch_waves`, `altimetry_sources='waverys'`, needs login) | significant wave height → sea surface (reanalysis, 1980→) | [Copernicus Marine License](https://marine.copernicus.eu/user-corner/service-commitments-and-licence) (free; **commercial use allowed**) | "E.U. Copernicus Marine Service Information (WAVERYS); *&lt;product DOI&gt;*"; GLOBAL_MULTIYEAR_WAV_001_032 |
 | **Natural Earth** land polygons (`uacpy.plot.plot_bathymetry_map` coastline) | map backdrop | **Public domain** | none required |
 
 > A fetched environment carries its provenance per layer: `env.data_sources` is

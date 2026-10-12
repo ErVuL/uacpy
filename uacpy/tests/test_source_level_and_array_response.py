@@ -15,6 +15,7 @@ import pytest
 import uacpy
 from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.results import Field
+from uacpy.core.results import stack_fields
 
 F0 = 100.0
 
@@ -26,6 +27,14 @@ def _complex_field(value=1.0 + 0.0j, shape=(2, 3)):
         model='Test', frequencies=F0, source_depths=[10.0],
         phase_reference='travelling_wave',
     )
+
+
+def _over_source_depth(fields, depths):
+    """The fields of several one-depth sources, each at its depth, as one
+    Field over a leading ``source_depth`` axis, as a multi-depth run returns
+    them."""
+    return stack_fields([f.replace(source_depths=[z])
+                         for f, z in zip(fields, depths)], depths)
 
 
 # ── source level → an absolute level field ──────────────────────────────
@@ -96,10 +105,9 @@ def test_at_source_level_refuses_a_time_domain_trace():
 def test_a_superposed_total_carries_its_source_level_through():
     """The multi-source level map: combine the sources, then say how hard
     they were driven."""
-    from uacpy.core.results import ResultStack
-    stack = ResultStack([_complex_field(0.01), _complex_field(0.01)],
-                        [10.0, 20.0])
-    out = stack.superpose(coherent=False).at_source_level(180.0)
+    sources = _over_source_depth([_complex_field(0.01), _complex_field(0.01)],
+                                 [10.0, 20.0])
+    out = sources.superpose(coherent=False).at_source_level(180.0)
     assert out.kind == 'level'
     # Two equal incoherent sources: 10*log10(2) louder than one.
     np.testing.assert_allclose(np.asarray(out.data),
@@ -300,40 +308,39 @@ def test_an_incoherent_sum_of_levels_adds_them_as_levels():
     """A level is not a loss: two mutually incoherent 120 dB sources make
     123.01 dB, not 116.99. Reading the stored numbers with the loss
     convention inverts the direction."""
-    from uacpy.core.results import ResultStack
-    slabs = []
+    levels = []
     for z in (10.0, 20.0):
         f = _complex_field(0.01 + 0.0j).at_source_level(180.0)   # 140 dB
         f.source_depths = np.array([z])
-        slabs.append(f)
-    out = ResultStack(slabs, [10.0, 20.0]).superpose(coherent=False)
+        levels.append(f)
+    out = _over_source_depth(levels, [10.0, 20.0]).superpose(coherent=False)
     assert out.kind == 'level'
     np.testing.assert_allclose(np.asarray(out.data),
                                140.0 + 10.0 * np.log10(2.0), atol=1e-9)
 
 
-def test_an_incoherent_sum_checks_the_grids_like_a_coherent_one():
+def test_sources_sampled_at_different_ranges_do_not_join_for_a_sum():
     """Cells sampled at different ranges must not be added and labelled
-    with one of the two axes."""
-    from uacpy.core.results import ResultStack
+    with one of the two axes: the fields of several sources join into one
+    Field only on one grid, so no sum over its ``source_depth`` axis meets
+    two."""
     a = _complex_field(0.01 + 0.0j)
     b = Field(data=np.full((2, 3), 0.01 + 0.0j),
               coords={'depth': [10.0, 20.0], 'range': [100.0, 200.0, 999.0]},
               model='Test', frequencies=F0, source_depths=[20.0],
               phase_reference='travelling_wave')
     with pytest.raises(ConfigurationError, match='different grid'):
-        ResultStack([a, b], [10.0, 20.0]).superpose(coherent=False)
+        _over_source_depth([a, b], [10.0, 20.0])
 
 
 def test_an_incoherent_sum_floors_a_null_like_every_other_dB_view():
     """A zero cell reads the package's dB floor, not ``inf`` — an infinity
     propagates into colour scales and into every statistic over the field."""
-    from uacpy.core.results import ResultStack
     a = _complex_field(0.0 + 0.0j)
     b = Field(data=np.zeros((2, 3), dtype=complex),
               coords=dict(a.coords), model='Test', frequencies=F0,
               source_depths=[20.0], phase_reference='travelling_wave')
-    out = ResultStack([a, b], [10.0, 20.0]).superpose(coherent=False)
+    out = _over_source_depth([a, b], [10.0, 20.0]).superpose(coherent=False)
     assert np.all(np.isfinite(np.asarray(out.data))), np.asarray(out.data)
     np.testing.assert_allclose(np.asarray(out.data),
                                np.asarray(a.dB), atol=1e-6)
@@ -424,12 +431,9 @@ def test_a_multi_source_total_is_not_captioned_transmission_loss():
     so the array's gain sits inside the number and it can go NEGATIVE.
     Calling that "TL" is what JKPS §1.3.4 and Porter's own guide define
     against a single source, so the caption has to say what it really is."""
-    from uacpy.core.results import ResultStack
     from uacpy.visualization.plots._common import _value_label
-    slabs = [_complex_field(0.5 + 0.0j) for _ in range(2)]
-    for i, s in enumerate(slabs):
-        s.source_depths = np.array([10.0 * (i + 1)])
-    total = ResultStack(slabs, [10.0, 20.0]).superpose()
+    fields = [_complex_field(0.5 + 0.0j) for _ in range(2)]
+    total = _over_source_depth(fields, [10.0, 20.0]).superpose()
     label = _value_label(total, 'dB')
     assert 'TL' not in label, label
     assert 'total' in label.lower(), label
@@ -440,34 +444,32 @@ def test_a_multi_source_total_is_not_captioned_transmission_loss():
 def test_a_total_that_is_louder_than_one_unit_source_reads_negative():
     """The number the caption has to be honest about: enough in-phase
     sources drive the 'loss' below zero, which no transmission loss does."""
-    from uacpy.core.results import ResultStack
-    slabs = [_complex_field(0.5 + 0.0j) for _ in range(8)]
-    for i, s in enumerate(slabs):
-        s.source_depths = np.array([10.0 * (i + 1)])
-    total = ResultStack(slabs, np.arange(1, 9) * 10.0).superpose()
+    fields = [_complex_field(0.5 + 0.0j) for _ in range(8)]
+    total = _over_source_depth(fields, np.arange(1, 9) * 10.0).superpose()
     assert np.nanmin(np.asarray(total.dB)) < 0.0, np.nanmin(total.dB)
 
 
 @pytest.mark.requires_binary
-def test_a_weighted_source_on_a_db_mode_yields_a_stack_to_combine():
+def test_a_weighted_source_on_a_db_mode_yields_a_field_to_combine():
     """A dB-only mode cannot sum coherently, but it CAN sum in intensity —
     that is the whole point of the incoherent path. Refusing the weights
-    before the stack exists closed the one route to 'N mutually incoherent
-    sources at these levels'."""
+    before the per-source fields exist would close the one route to 'N
+    mutually incoherent sources at these levels'."""
     from uacpy.models.kraken import Kraken
-    from uacpy.core.results import ResultStack
     from uacpy.tests.conftest import make_pekeris
     env = make_pekeris(name='db-weights', bathymetry=100.0)
     rcv = uacpy.Receiver(depths=[30.0, 70.0], ranges=[1000.0, 2000.0])
     src = uacpy.Source(depths=[30.0, 70.0], frequencies=F0, weights=[1.0, 2.0])
-    stack = Kraken(verbose=False).run(env, src, rcv,
+    field = Kraken(verbose=False).run(env, src, rcv,
                                       run_mode=uacpy.RunMode.INCOHERENT_TL)
-    assert isinstance(stack, ResultStack)
-    total = stack.superpose(coherent=False)        # uses the stamped weights
+    assert isinstance(field, Field)
+    assert list(field.coords)[0] == 'source_depth'
+    np.testing.assert_array_equal(field.source_weights, [1.0, 2.0])
+    total = field.superpose(coherent=False)        # uses the stamped weights
     assert total.unit == 'dB'
-    # A coherent sum of the same slabs is still undefined.
+    # A coherent sum of the same per-source fields is undefined.
     with pytest.raises(ConfigurationError, match='coherent sum'):
-        stack.superpose()
+        field.superpose()
     # A COMPLEX weight is unusable either way and is still refused up front.
     bad = uacpy.Source(depths=[30.0, 70.0], frequencies=F0, weights=[1.0, 1j])
     with pytest.raises(ConfigurationError, match='a weight cannot scale it'):
@@ -477,8 +479,8 @@ def test_a_weighted_source_on_a_db_mode_yields_a_stack_to_combine():
 
 @pytest.mark.requires_binary
 def test_one_launch_warns_once_about_the_source_axis():
-    """Kraken masks each slab of a native stack separately; the warning
-    belongs to the run, not to the slab count."""
+    """Kraken masks the plane of each source depth separately; the warning
+    belongs to the run, not to the number of source depths."""
     import warnings as _w
     from uacpy.models.kraken import Kraken
     from uacpy.tests.conftest import make_pekeris
@@ -576,14 +578,9 @@ def test_each_panel_of_a_source_depth_grid_marks_its_own_source():
     a marker (example 04 did exactly that)."""
     import matplotlib
     matplotlib.use('Agg')
-    from uacpy.core.results import ResultStack
     depths = [10.0, 20.0, 30.0]
-    slabs = []
-    for z in depths:
-        f = _complex_field(0.01 + 0.0j)
-        f.source_depths = np.array([z])
-        slabs.append(f)
-    fig, axes = ResultStack(slabs, depths).plot()
+    fields = [_complex_field(0.01 + 0.0j) for _ in depths]
+    fig, axes = _over_source_depth(fields, depths).plot()
     flat = np.asarray(axes).ravel()
     for z, ax in zip(depths, flat):
         marked = [ln.get_ydata()[0] for ln in ax.get_lines()

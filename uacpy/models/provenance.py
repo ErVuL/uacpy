@@ -4,9 +4,9 @@ The model layer wraps third-party Fortran/C programs, each with its own
 authorship and licence — exactly the kind of metadata the ``data/`` layer
 already catalogues for ocean datasets (:mod:`uacpy.data.sources`). This is the
 model-side equivalent: one :class:`ModelProvenance` per upstream program, keyed in
-:data:`MODEL_PROVENANCE`. A :class:`~uacpy.models._spec.ModelSpec` references an
-entry by ``id`` via its ``source`` field, so ``PropagationModel`` can surface
-the citation (``model.source`` / ``model.citation``) and — mirroring the
+:data:`MODEL_PROVENANCE`. A model names its entry by ``id`` in its
+``provenance_id`` class attribute, so ``PropagationModel`` can surface the
+record and the citation (``model.provenance`` / ``model.citation``) and — mirroring the
 non-commercial fetch warning in ``data/`` — emit a one-time ``ProvenanceWarning`` when
 a licence-restricted engine (OASES) is instantiated.
 

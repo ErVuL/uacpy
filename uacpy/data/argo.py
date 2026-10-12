@@ -28,8 +28,7 @@ import numpy as np
 from uacpy._log import log_message
 from uacpy.core._export import ExportRecord
 from uacpy.core.environment import SoundSpeedProfile
-from uacpy.core.exceptions import (ConfigurationError, DataFetchError,
-                                   FileFormatError)
+from uacpy.core.exceptions import DataFetchError, FileFormatError
 from uacpy.core.acoustics.seawater import (
     DEFAULT_SOUND_SPEED_FORMULA, SOUND_SPEED_FORMULAS, canonical_formula,
     pressure_dbar_to_depth,
@@ -38,7 +37,8 @@ from uacpy.core.acoustics.seawater import (
 from uacpy.core.geo import (
     Coordinate, as_coordinate, normalize_lon, great_circle_km,
 )
-from uacpy.data._geo import checked_max_distance, checked_offset
+from uacpy.data._geo import (checked_max_days, checked_max_distance,
+                             checked_offset)
 from uacpy.data._http import http_get
 from uacpy.core.geo import parse_date
 from uacpy.data.sources import SOURCES, DataProvenance
@@ -124,16 +124,10 @@ def _query_url(point, when, max_distance_km, max_days, base_url):
 
 def _checked_tolerances(max_distance_km, max_days):
     """``(max_distance_km, max_days)`` validated: ``None`` or a positive
-    finite distance, and a whole number of days ``>= 0``, else
-    ``ConfigurationError``."""
+    finite distance, and a whole number of days ``>= 0`` (an int or a
+    whole-valued float), else ``ConfigurationError``."""
     max_distance_km = checked_max_distance(max_distance_km, 'Argo')
-    if isinstance(max_days, bool) or not isinstance(
-            max_days, (int, np.integer)) or max_days < 0:
-        raise ConfigurationError(
-            f"Argo: max_days must be a whole number of days >= 0; got "
-            f"{max_days!r}.",
-            remediation="Pass e.g. max_days=15 (0 = the requested day only).")
-    return max_distance_km, int(max_days)
+    return max_distance_km, checked_max_days(max_days, 'Argo')
 
 
 def _no_profile_error(max_distance_km, max_days, lat, lon, date):

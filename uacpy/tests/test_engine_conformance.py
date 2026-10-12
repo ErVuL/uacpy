@@ -23,8 +23,8 @@ run. What an engine must satisfy:
   it declares what every mode returns and resolves its own frozen settings
   and the speed bounds of the environment it runs on;
 * what a run returns — every mode returns what it declared, stamped with
-  the engine and the source; a two-depth Source stacks the single-depth
-  runs and a weight scales one; a field keeps the requested grid and masks
+  the engine and the source; a two-depth Source returns one field over the
+  single-depth runs and a weight scales one; a field keeps the requested grid and masks
   the cells no engine can fill; a run cleans up after itself, a failed
   launch releases its directory, a timeout kills the launch and says so, a
   missing binary names the install step and an unwritable ``work_dir`` is
@@ -36,7 +36,7 @@ Engine physics (benchmarks, cross-engine agreement) stays in each engine's
 own test file.
 """
 
-import dataclasses
+import importlib
 import importlib.resources
 import inspect
 import json
@@ -47,6 +47,7 @@ import shutil
 import subprocess
 import sys
 import warnings
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -57,10 +58,100 @@ from uacpy.core.exceptions import (ExecutableNotFoundError,
                                    ModelExecutionError)
 from uacpy.models._registry import ENGINES
 from uacpy.core.run_settings import EngineSettings, RunMode, RunSettings
-from uacpy.models.base import _STAGE_HOOKS, PropagationModel
+from uacpy.models.base import _HOST_OPTIONS, _STAGE_HOOKS, PropagationModel
 from uacpy.tests.conftest import LaunchReached
+from uacpy.models._checks import speed_bounds
+from uacpy.models._launch import find_executable_in_paths
 
 _KEYS = sorted(ENGINES)
+
+
+def _numeric_knobs():
+    """``(key, knob)`` for every numeric constructor knob of every
+    registered engine."""
+    from uacpy.models._knobs import numeric_knob_names
+    return [(key, name) for key in _KEYS
+            for name in sorted(numeric_knob_names(ENGINES[key].load()))]
+
+
+_NUMERIC_KNOBS = _numeric_knobs()
+
+
+@pytest.mark.parametrize('value, what', [
+    (True, 'a number, not a bool'), (np.array(True), 'a number, not a bool'),
+    ('5', 'a number, not text'),
+    (np.complex128(5.0), 'a real number, not complex'),
+    (5.0 + 0j, 'a real number, not complex')],
+    ids=['bool', '0-d bool', 'text', 'numpy complex', 'complex'])
+@pytest.mark.parametrize('key, knob', _NUMERIC_KNOBS,
+                         ids=[f'{k}-{n}' for k, n in _NUMERIC_KNOBS])
+def test_every_numeric_knob_refuses_what_is_not_one_real_number(key, knob,
+                                                                value, what):
+    """Each numeric knob is read by the package's one rule before the
+    engine's constructor runs, so before any cast of its own: read as a
+    number, a bool would be 1, text what it spells, a complex value its
+    real part."""
+    entry = ENGINES[key]
+    cls = entry.load()
+    with pytest.raises(uacpy.ConfigurationError,
+                       match=rf"^{cls.__name__}: {knob} must be {what}"):
+        cls(**{**dict(entry.example_kwargs), knob: value})
+
+
+@pytest.mark.parametrize('value, whole, real', [
+    (6, True, True), (np.int64(6), True, True), (np.array(6), True, True),
+    (6.5, False, True), (np.array(6.5), False, True),
+    (Fraction(13, 2), False, True), (np.nan, False, False),
+    (True, False, False), (np.array(True), False, False),
+    ('6', False, False), (np.complex128(6.0), False, False)])
+def test_the_knob_checks_read_numbers_by_the_one_rule(value, whole, real):
+    """The checks a run makes again on reassigned knobs read a number as
+    the constructor does: a 0-d array of an integer is a whole number, a
+    bool, text or a complex value no number at all."""
+    from uacpy.models._knobs import is_real_number, is_whole_number
+    assert is_whole_number(value) is whole
+    assert is_real_number(value) is real
+
+
+@pytest.mark.parametrize('cls_name, knob', [
+    ('Kraken', 'c_high'), ('Kraken', 'n_modes'), ('Scooter', 'rmax_factor'),
+    ('SPARC', 'time_max'), ('Bounce', 'n_angles'), ('RAM', 'dr'),
+    ('RAM', 'accuracy'), ('Bellhop', 'r_box'), ('OAST', 'range_max'),
+    ('OASN', 'white_noise_level'), ('OASP', 'freq_max'),
+    ('OASSP', 'rms_roughness'), ('OASS', 'correlation_length'),
+    ('OASR', 'plot_angle_step')])
+def test_an_unset_numeric_knob_is_read_by_the_one_rule(cls_name, knob):
+    """A knob that defaults to None (unset) is a number by its annotation,
+    and is read as one: a bool is refused before the engine sees it."""
+    entry = next(e for e in ENGINES.values() if e.class_name == cls_name)
+    cls = entry.load()
+    assert inspect.signature(cls.__init__).parameters[knob].default is None
+    with pytest.raises(uacpy.ConfigurationError,
+                       match=rf"^{cls_name}: {knob} must be a number, not a "
+                             rf"bool"):
+        cls(**{**dict(entry.example_kwargs), knob: True})
+
+
+@pytest.mark.parametrize('key, knob', [
+    (k, n) for k, n in _NUMERIC_KNOBS
+    if not isinstance(inspect.signature(ENGINES[k].load().__init__)
+                      .parameters[n].default, type(None))],
+    ids=[f'{k}-{n}' for k, n in _NUMERIC_KNOBS
+         if not isinstance(inspect.signature(ENGINES[k].load().__init__)
+                           .parameters[n].default, type(None))])
+def test_a_numpy_number_or_a_0d_array_is_a_knob_value(key, knob):
+    """Its default as a NumPy scalar or a 0-d array is the same knob: each
+    reaches the engine as the Python number it reads as."""
+    entry = ENGINES[key]
+    cls = entry.load()
+    default = inspect.signature(cls.__init__).parameters[knob].default
+    for spelling in (np.asarray(default)[()], np.asarray(default)):
+        try:
+            model = cls(**{**dict(entry.example_kwargs), knob: spelling})
+        except ExecutableNotFoundError:
+            pytest.skip(f"{cls.__name__} binary not available")
+        assert getattr(model, knob) == default
+        assert type(getattr(model, knob)) is type(default)
 
 
 def _engine(key, **kw):
@@ -200,12 +291,11 @@ def test_the_executable_search_starts_in_the_package_bin_dir():
     The search roots itself on a path computed from a module's own
     location, which a module moved one level deeper would shift."""
     cls = ENGINES['kraken'].load()
-    model = cls.__new__(cls)        # only the search is exercised
-    model.model_name = cls.__name__
     with pytest.raises(ExecutableNotFoundError,
                        match='executable not found: uacpy-no-such-binary') as err:
-        model._find_executable_in_paths(['uacpy-no-such-binary'],
-                                        bin_subdirs=['oalib'])
+        find_executable_in_paths(['uacpy-no-such-binary'],
+                                 bin_subdirs=['oalib'],
+                                 model_name=cls.__name__)
     first = Path(err.value.search_paths[0])
     assert Path(os.path.realpath(first.parent)) == \
         _package_bin_dir() / 'oalib'
@@ -376,63 +466,63 @@ def test_run_settings_is_pure_repeatable_and_round_trips(key, tmp_path):
 
 #: Every engine's default-mode ``run_settings(...).to_dict()`` on this
 #: suite's example guide, as JSON: the record a result saved to disk
-#: carries. Each names its engine settings' class by the module path it was
-#: written with (``engine.__class__``), ``uacpy.models.<engine module>``.
-#: ``python -m uacpy.tests._save_run_settings KEY`` adds a new engine's
-#: record; a saved record is never rewritten, since it stands for the files
-#: saved before.
+#: carries, in this version's form. Each names its engine settings' class by
+#: the module path it was written with (``engine.__class__``),
+#: ``uacpy.models.<engine module>``. ``python -m uacpy.tests._save_run_settings
+#: [KEY ...]`` rewrites the records after a deliberate change of their form.
 _SAVED_SETTINGS = Path(__file__).parent / 'data' / 'run_settings_by_engine.json'
 
 
-def _plain_default(field):
-    """The plain-type value ``to_dict`` writes for ``field`` left at its
-    default."""
-    from uacpy.core._records import _plain
-    if field.default is not dataclasses.MISSING:
-        value = field.default
-    else:
-        value = field.default_factory()
-    return json.loads(json.dumps(_plain(value)))
+def _key_paths(record, path=''):
+    """Every key of the plain-type ``record`` as a path (``.engine.fc``),
+    a list's items under ``[]``: the record's form, without its values."""
+    if isinstance(record, dict):
+        paths = set()
+        for key, value in record.items():
+            paths.add(f'{path}.{key}')
+            paths |= _key_paths(value, f'{path}.{key}')
+        return paths
+    if isinstance(record, list):
+        paths = set()
+        for value in record:
+            paths |= _key_paths(value, f'{path}[]')
+        return paths
+    return set()
 
 
 @pytest.mark.parametrize('key', _KEYS)
-def test_a_saved_run_settings_loads_from_the_class_path_it_names(key):
-    """A saved record keeps loading when an engine's settings class moves:
-    its saved module path still reaches the class, and the record it
-    rebuilds writes back what was saved. A settings field renamed or
-    removed fails here too, as it fails for every file saved before.
-
-    A field added after the record was saved is absent from it: the record
-    loads with that field at its default, which therefore has to reproduce
-    what the run computed before the field existed. A new field with no
-    default fails here, as it would fail every file saved before."""
+def test_the_run_settings_record_keeps_its_saved_form(key):
+    """The record an engine writes has the fields, at every level, of the
+    one saved in ``tests/data/run_settings_by_engine.json``, and the saved
+    one reads back through the class path it names to write itself again:
+    a field added, renamed or removed — a change of the record a result
+    carries — is reported here, and recorded on purpose by rewriting the
+    saved record (``python -m uacpy.tests._save_run_settings KEY``,
+    docs/DEV.md section 3, step 5). Values are not compared: the record
+    holds the executable's path and the backend the machine offers."""
     saved_by_engine = json.loads(_SAVED_SETTINGS.read_text(encoding='utf-8'))
     if key not in saved_by_engine:
         pytest.fail(f"no saved run-settings record for {key!r}: run "
                     f"python -m uacpy.tests._save_run_settings {key} "
                     f"(docs/DEV.md section 3, step 5)")
     saved = saved_by_engine[key]
-    try:
-        settings = RunSettings.from_dict(saved)
-    except TypeError as exc:
-        pytest.fail(f"a record saved before a settings field existed no "
-                    f"longer loads ({exc}); give the new field a default "
-                    f"(docs/DEV.md section 13.1, step 3)")
-    assert type(settings.engine).__name__ == \
+    written = json.loads(json.dumps(_settings(key).to_dict()))
+    added = sorted(_key_paths(written) - _key_paths(saved))
+    removed = sorted(_key_paths(saved) - _key_paths(written))
+    assert not (added or removed), (
+        f"the {key} run-settings record changed form (added {added}, "
+        f"removed {removed}); if that is meant, rewrite it: python -m "
+        f"uacpy.tests._save_run_settings {key}")
+    back = RunSettings.from_dict(saved)
+    assert type(back.engine).__name__ == \
         saved['engine']['__class__'].rpartition('.')[2]
-    written = json.loads(json.dumps(settings.to_dict()))
-    written['engine'].pop('__class__')
-    expected = dict(saved, engine=dict(saved['engine']))
-    expected['engine'].pop('__class__')
-    for part, record in ((written, settings), (written['engine'],
-                                               settings.engine)):
-        saved_part = expected if part is written else expected['engine']
-        fields = {f.name: f for f in dataclasses.fields(record)}
-        for name in sorted(set(part) - set(saved_part)):
-            assert part.pop(name) == _plain_default(fields[name]), (
-                f"{type(record).__name__}.{name}: a record saved without "
-                f"the field must load with its default")
-    assert written == expected
+    assert json.loads(json.dumps(back.to_dict())) == saved
+
+
+def _settings(key):
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return _engine(key).run_settings(*_carriers(key))
 
 
 @pytest.mark.parametrize('key', _KEYS)
@@ -591,7 +681,7 @@ def test_a_staged_engine_resolves_its_settings_before_launching(key):
         assert isinstance(settings.engine, EngineSettings)
         assert settings.output == type(model).outputs[mode]
         assert (settings.waveguide.c_min, settings.waveguide.c_max) == \
-            model._speed_bounds(model._project_environment(env))
+            speed_bounds(model._project_environment(env))
 
 
 @pytest.mark.parametrize('key', _KEYS)
@@ -652,10 +742,17 @@ def _run(key, mode=None):
     return _RUNS[key, mode]
 
 
-def _slabs(result):
-    """The results a run returned: the slabs of a stack, or the result."""
-    from uacpy.core.results import ResultStack
-    return list(result) if isinstance(result, ResultStack) else [result]
+def _per_source_depth(result):
+    """The result of each source depth of a run: a ``ResultStack``'s
+    results, a Field's planes along its ``source_depth`` axis, or the
+    result itself for one source."""
+    from uacpy.core.results import Field, ResultStack
+    from uacpy.core.results._superposition import split_source_depths
+    if isinstance(result, ResultStack):
+        return list(result)
+    if isinstance(result, Field):
+        return split_source_depths(result)
+    return [result]
 
 
 def _relative_error(actual, reference):
@@ -696,24 +793,24 @@ def test_every_mode_returns_its_declared_output(key, mode):
     ``to_dict`` round trip keep them."""
     from uacpy.core.results import Field, PhaseReference
     declared = type(_engine(key)).outputs[mode]
-    for slab in _slabs(_run(key, mode)):
-        assert type(slab).__name__ == declared.result_type
-        if not isinstance(slab, Field):
+    for part in _per_source_depth(_run(key, mode)):
+        assert type(part).__name__ == declared.result_type
+        if not isinstance(part, Field):
             continue
         for name in ('kind', 'unit', 'coherent'):
             if getattr(declared, name) is not None:
-                assert getattr(slab, name) == getattr(declared, name), name
+                assert getattr(part, name) == getattr(declared, name), name
         if declared.phase_reference is not None:
-            assert isinstance(slab.phase_reference, PhaseReference)
-            assert slab.phase_reference.value == declared.phase_reference
+            assert isinstance(part.phase_reference, PhaseReference)
+            assert part.phase_reference.value == declared.phase_reference
         if declared.phase_reference == PhaseReference.TRAVELLING_WAVE.value:
-            assert slab.is_complex
-        if slab.unit == 'dB':
-            assert not slab.is_complex
-        first = next(iter(slab.coords))
-        for view in (slab.isel(**{first: 0}),
-                     Field.from_dict(slab.to_dict())):
-            assert _identity(view) == _identity(slab), view
+            assert part.is_complex
+        if part.unit == 'dB':
+            assert not part.is_complex
+        first = next(iter(part.coords))
+        for view in (part.isel(**{first: 0}),
+                     Field.from_dict(part.to_dict())):
+            assert _identity(view) == _identity(part), view
 
 
 @pytest.mark.parametrize('key,mode', [
@@ -730,43 +827,44 @@ def test_every_mode_stamps_the_settings_run_settings_resolves(key, mode):
 @pytest.mark.parametrize('key', _KEYS)
 def test_a_result_names_the_engine_and_the_source_it_ran(key):
     from uacpy.core.results import Field
-    for slab in _slabs(_run(key)):
-        assert slab.model == ENGINES[key].class_name
-        assert isinstance(slab.backend, str) and slab.backend
-        if isinstance(slab, Field):
-            np.testing.assert_array_equal(slab.source_depths, [50.0])
+    for part in _per_source_depth(_run(key)):
+        assert part.model == ENGINES[key].class_name
+        assert isinstance(part.backend, str) and part.backend
+        if isinstance(part, Field):
+            np.testing.assert_array_equal(part.source_depths, [50.0])
 
 
 @pytest.mark.parametrize('key', _FIELD_DEFAULT_KEYS)
-def test_a_two_depth_source_stacks_the_single_depth_runs(key):
-    """In a field mode a two-depth Source returns a stack over
-    ``source_depth`` whose every slab is the single-depth run at that depth,
-    carrying the Source's weights; a coherent stack superposes to their
-    weighted sum."""
-    from uacpy.core.results import ResultStack
+def test_a_two_depth_source_returns_one_field_over_the_single_depth_runs(key):
+    """In a field mode a two-depth Source returns one Field whose leading
+    ``source_depth`` axis holds, at each depth, the single-depth run at that
+    depth, and which carries the Source's weights; a coherent field
+    superposes to their weighted sum."""
+    from uacpy.core.results import Field
     model = _engine(key)
     mode = model._default_run_mode_for(None)
     env, _, rcv = _carriers(key)
     depths, weights = [30.0, 70.0], [1.0, -1.0]
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        stack = model.run(env, uacpy.Source(depths=depths, frequencies=100.0,
+        field = model.run(env, uacpy.Source(depths=depths, frequencies=100.0,
                                             weights=weights), rcv, mode,
                           **_mode_kwargs(mode))
         singles = [model.run(env, uacpy.Source(depths=z, frequencies=100.0),
                              rcv, mode, **_mode_kwargs(mode))
                    for z in depths]
-    assert isinstance(stack, ResultStack)
-    assert stack.coordinate_name == 'source_depth'
-    np.testing.assert_array_equal(stack.coordinate, depths)
-    np.testing.assert_array_equal(stack.source_weights, weights)
+    assert isinstance(field, Field)
+    assert list(field.coords)[0] == 'source_depth'
+    np.testing.assert_array_equal(field.coords['source_depth'], depths)
+    np.testing.assert_array_equal(field.source_depths, depths)
+    np.testing.assert_array_equal(field.source_weights, weights)
     tolerance = _RERUN_TOLERANCE.get(key, 1e-9)
     for i, single in enumerate(singles):
-        slab = stack[i]
-        assert slab.data.shape == single.data.shape
-        assert _relative_error(slab.data, single.data) < tolerance
-    if stack[0].unit != 'dB':
-        assert _relative_error(stack.superpose().data,
+        plane = np.asarray(field.data[i])
+        assert plane.shape == single.data.shape
+        assert _relative_error(plane, single.data) < tolerance
+    if field.unit != 'dB':
+        assert _relative_error(field.superpose().data,
                                singles[0].data - singles[1].data) < tolerance
 
 
@@ -1085,6 +1183,41 @@ def test_the_record_states_every_knob_as_given(key):
             assert engine.knobs[name] == _plain(getattr(model, name)), name
 
 
+@pytest.mark.parametrize('key', _KEYS)
+def test_every_constructor_repeats_the_host_options_as_declared(key):
+    """Every engine's constructor takes the host options
+    (``base._HOST_OPTIONS``, the keyword parameters of
+    ``PropagationModel.__init__``) as explicit keyword-only parameters with
+    the base's default and annotation, so ``help()`` lists them and a
+    misspelt one is a ``TypeError``."""
+    cls = ENGINES[key].load()
+    declared = inspect.signature(PropagationModel.__init__).parameters
+    own = inspect.signature(cls.__init__).parameters
+    assert _HOST_OPTIONS == ('use_tmpfs', 'verbose', 'work_dir', 'cleanup',
+                             'timeout', 'collapse')
+    for name in _HOST_OPTIONS:
+        assert name in own, f"{cls.__name__}.__init__ takes no {name}="
+        assert own[name].kind is inspect.Parameter.KEYWORD_ONLY, (
+            cls.__name__, name)
+        assert own[name].default == declared[name].default, (
+            cls.__name__, name, own[name].default)
+        assert own[name].annotation == declared[name].annotation, (
+            cls.__name__, name, own[name].annotation)
+
+
+@pytest.mark.parametrize('key', _KEYS)
+def test_every_constructor_forwards_the_host_options_as_given(key):
+    """The host options an engine is built with reach the base as given
+    (``super().__init__(**_host_options(locals()))``)."""
+    model = _engine(key, use_tmpfs=True, verbose='debug', cleanup=False,
+                    timeout=12.5, collapse={'ssp': 'median'})
+    assert model.use_tmpfs is True
+    assert model.verbose == 'debug'
+    assert model.cleanup is False
+    assert model.timeout == 12.5
+    assert model.collapse == {'ssp': 'median'}
+
+
 def test_a_recorded_knob_is_the_value_the_run_used():
     """A deck option the record held under no field before (Bellhop's
     ``beam_shift``) is in ``engine.knobs`` with the value set, and survives
@@ -1101,29 +1234,51 @@ def test_a_recorded_knob_is_the_value_the_run_used():
     assert back.engine.knobs['beam_shift'] is True
 
 
-def test_a_record_saved_with_strings_and_notes_loads():
-    """A record saved before notices carried their class: each string
-    reads as a UACPYWarning notice; notes pair with the messages when
-    every message had one, and are kept as note-only notices when they
-    do not line up; an unknown class name reads as UACPYWarning."""
+@pytest.mark.parametrize('path, imports', [
+    ('tabnanny.Anything', 'tabnanny'),
+    ('json.JSONDecoder', None),
+    ('uacpy.core.environment.Environment', None),
+    ('uacpy.no_such_module.Settings', None),
+])
+def test_a_saved_engine_class_outside_the_engine_settings_is_refused(
+        path, imports):
+    """A saved record names the engine class to rebuild; anything but an
+    EngineSettings is refused by ConfigurationError, and a module outside
+    the package that the program has not imported is never imported (one
+    it has, like ``json``, is only looked in:
+    ``test_a_saved_class_path_is_the_package_that_re_exports_the_class``
+    loads a user's engine that way)."""
+    from uacpy.core.exceptions import ConfigurationError
+    record = json.loads(_SAVED_SETTINGS.read_text(encoding='utf-8'))['scooter']
+    record['engine'] = dict(record['engine'], **{'__class__': path})
+    if imports is not None:
+        assert imports not in sys.modules
+    with pytest.raises(ConfigurationError, match='from_dict: '):
+        RunSettings.from_dict(record)
+    if imports is not None:
+        assert imports not in sys.modules
+
+
+def test_a_notice_that_is_not_the_written_record_is_refused():
+    """A notice reads back from the ``{note, message, category}`` record
+    ``to_dict`` writes, its class by name; a plain string or a class uacpy
+    does not define is not that record and is refused typed."""
+    from uacpy.core.exceptions import ConfigurationError
     from uacpy.core.run_settings import Notice
     from uacpy.models.scooter import ScooterSettings
     engine = json.loads(_SAVED_SETTINGS.read_text(
         encoding='utf-8'))['scooter']['engine']
     engine.pop('__class__')
-    paired = ScooterSettings.from_dict(
-        dict(engine, notices=['m1', 'm2'], notes=['n1', 'n2']))
-    assert paired.notices == (Notice('n1', 'm1', uacpy.UACPYWarning),
-                              Notice('n2', 'm2', uacpy.UACPYWarning))
-    unpaired = ScooterSettings.from_dict(
-        dict(engine, notices=['m1', 'm2'], notes=['n1']))
-    assert unpaired.notices == (Notice(None, 'm1', uacpy.UACPYWarning),
-                                Notice(None, 'm2', uacpy.UACPYWarning),
-                                Notice('n1', 'n1', uacpy.UACPYWarning))
-    unknown = ScooterSettings.from_dict(dict(engine, notices=[
-        {'note': None, 'message': 'm', 'category': 'NotAWarning'}]))
-    assert unknown.notices[0].category is uacpy.UACPYWarning
-
+    back = ScooterSettings.from_dict(dict(engine, notices=[
+        {'note': 'n', 'message': 'm', 'category': 'FallbackWarning'}]))
+    assert back.notices == (Notice('n', 'm', uacpy.FallbackWarning),)
+    for notice in ('m1', {'note': None, 'message': 'm',
+                          'category': 'NotAWarning'}):
+        with pytest.raises(ConfigurationError,
+                           match=r"(?s)^EngineSettings\.from_dict: the "
+                                 r"notice .* is not a \{note, message, "
+                                 r"category\} record.*re-run"):
+            ScooterSettings.from_dict(dict(engine, notices=[notice]))
 
 
 def _resolved(engine):
@@ -1269,3 +1424,28 @@ class TestAPerLaunchValueIsCheckedAgainstTheRecord:
                           match=r'recorded c_high .* re-derived as'):
             model.run_settings(*self._carriers(), run_mode=RunMode.BROADBAND,
                                frequencies=[50.0, 60.0, 70.0])
+
+    def test_validate_inputs_leaves_the_comparison_to_the_run(
+            self, monkeypatch):
+        """``validate_inputs`` gives no notice of how a run will go, so it
+        neither says nor spends the rebuilt model's one comparison: the
+        resolution after it still warns."""
+        from uacpy.core.exceptions import ProvenanceWarning
+        from uacpy.models import Kraken
+        from uacpy.models.kraken import _window
+        model = Kraken.from_run_settings(self._record())
+        real = _window.profile_c_high
+
+        def drifted(*args, **kwargs):
+            c_high, origin = real(*args, **kwargs)
+            return c_high + 1.0, origin
+        monkeypatch.setattr(_window, 'profile_c_high', drifted)
+        call = dict(run_mode=RunMode.BROADBAND,
+                    frequencies=[50.0, 60.0, 70.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            warnings.simplefilter('error', ProvenanceWarning)
+            model.validate_inputs(*self._carriers(), **call)
+        with pytest.warns(ProvenanceWarning,
+                          match=r'recorded c_high .* re-derived as'):
+            model.run_settings(*self._carriers(), **call)

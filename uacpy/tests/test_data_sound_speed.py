@@ -233,6 +233,65 @@ def test_a_point_gebco_puts_on_land_is_refused_before_any_source(
         assert len(reached) == 1
 
 
+@pytest.mark.parametrize('spelling, reaches', [
+    ('LOCAL', ('woa', 'local')), ('WOA23', ('woa', 'woa23')),
+    ('AUTO', ('chain', 'auto')), (('ARGO', 'Woa23'), ('chain', ('argo', 'woa23'))),
+])
+def test_fetch_ssp_matches_source_ids_and_presets_in_any_case(
+        monkeypatch, spelling, reaches):
+    reached = []
+    monkeypatch.setattr(ss, '_woa_cache_first',
+                        lambda source, call: reached.append(('woa', source)))
+    monkeypatch.setattr(ss, '_ssp_chain_fetch', lambda source, *a, **kw:
+                        reached.append(('chain', source)))
+    uacpy.data.fetch_ssp((45.6, -6.2), month=7, source=spelling)
+    assert reached == [reaches]
+
+
+@pytest.mark.parametrize('preset', ['auto', 'local'])
+def test_the_ssp_chain_resolves_a_preset_in_any_case(preset):
+    assert ss._SSP_CHAIN.resolve(preset.upper()) == ss._SSP_CHAIN.resolve(preset)
+
+
+@pytest.mark.parametrize('fetch', ['fetch_ssp', 'fetch_ts_profile'])
+def test_a_misspelled_ssp_source_is_refused_before_the_dry_point_check(
+        monkeypatch, fetch):
+    checked = []
+    monkeypatch.setattr(bathymetry, '_refuse_a_dry_point',
+                        lambda point, **kw: checked.append(point))
+    with pytest.raises(ConfigurationError, match='woa32'):
+        getattr(uacpy.data, fetch)((45.6, -6.2), month=7, source='woa32')
+    assert checked == []
+
+
+@pytest.mark.parametrize('fetch, where', [
+    ('fetch_ssp', ((45.6, -6.2),)),
+    ('fetch_ssp_transect', ((45.6, -6.2), (45.8, -6.0)))])
+def test_a_whole_valued_max_days_reaches_every_ssp_source_as_whole_days(
+        monkeypatch, fetch, where):
+    seen = []
+    monkeypatch.setattr(ss, '_ssp_chain_fetch', lambda source, where, call,
+                        request, **kw: seen.append(request['max_days']))
+    getattr(uacpy.data, fetch)(*where, date='2024-07-01', source='argo',
+                               max_days=15.0)
+    assert seen == [15] and type(seen[0]) is int
+
+
+@pytest.mark.parametrize('max_days', [1.5, -1, True])
+def test_a_max_days_that_is_no_whole_number_is_refused_before_any_fetch(
+        monkeypatch, max_days):
+    checked = []
+    monkeypatch.setattr(bathymetry, '_refuse_a_dry_point',
+                        lambda point, **kw: checked.append(point))
+    monkeypatch.setattr(ss, '_ssp_chain_fetch',
+                        lambda *a, **kw: checked.append('chain'))
+    with pytest.raises(ConfigurationError,
+                       match='fetch_ssp: max_days must be a whole number'):
+        uacpy.data.fetch_ssp((45.6, -6.2), date='2024-07-01', source='auto',
+                             max_days=max_days)
+    assert checked == []
+
+
 def test_seafloor_truncation(monkeypatch):
     # Valid to 100 m, filled below → profile keeps 3 levels.
     cols = {
@@ -760,3 +819,156 @@ def test_a_dry_point_check_that_cannot_run_says_so(monkeypatch, grid, live,
     if warns:
         assert ('cache-only' if cache_only else 'did not answer') in \
             str(skipped[0].message)
+
+
+# ── deepen_with_climatology: a cast continued by the WOA23 column ─────────
+
+
+#: The point the cache builder's one WOA23 column stands at, and its levels.
+_WOA_POINT = (30.5, -40.5)
+
+
+@pytest.fixture
+def woa_cache(tmp_path, monkeypatch):
+    """An installed WOA23 cache holding one column (0-1000 m) at
+    :data:`_WOA_POINT`, annual and March; no network is reachable."""
+    pytest.importorskip('netCDF4')
+    from uacpy.data import woa23_local
+    from uacpy.tests._cache_builders import _write_woa
+    root = tmp_path / 'woa_cache'
+    monkeypatch.setenv('UACPY_DATA_CACHE', str(root))
+    _cache.invalidate_grids()
+    woa23_local._DATASETS.clear()
+    _write_woa(root, periods=('00', '03'))
+    monkeypatch.setattr(ss, 'http_get', _no_network)
+    yield root
+    woa23_local._DATASETS.clear()
+    _cache.invalidate_grids()
+
+
+def _no_network(*args, **kwargs):
+    raise AssertionError('deepen_with_climatology reached the network')
+
+
+def _cast(depths, speed=1530.0, formula=None):
+    from uacpy.data.sources import SOURCES, DataProvenance
+    return SoundSpeedProfile(
+        depths=depths, sound_speed=[speed] * len(depths), formula=formula,
+        data_sources=(DataProvenance(source=SOURCES['argo']),))
+
+
+class TestDeepenWithClimatology:
+
+    def test_the_cast_hands_over_to_the_column_through_a_blend(
+            self, woa_cache):
+        """Above the blend the profile is the cast, below the cast it is the
+        column, and in between the raised-cosine weight moves from one to
+        the other; both records are cited."""
+        cast = _cast([0.0, 100.0, 200.0, 300.0, 400.0, 500.0, 600.0])
+        column = ss.fetch_ssp(_WOA_POINT, source='local')
+        deep = uacpy.data.deepen_with_climatology(cast, _WOA_POINT,
+                                                  source='local')
+        z = np.asarray(deep.depths)
+        c = np.asarray(deep.sound_speed)[:, 0]
+        top = 600.0 - ss.CAST_BLEND_M
+        assert np.all(c[z < top] == 1530.0)
+        assert z[-1] == 1000.0
+        assert c[-1] == np.asarray(column.sound_speed)[-1, 0]
+        assert c[z == 600.0][0] == pytest.approx(
+            np.interp(600.0, column.depths, np.asarray(column.sound_speed)[:, 0]))
+        blend = (z > top) & (z < 600.0)
+        under = np.interp(z[blend], column.depths,
+                          np.asarray(column.sound_speed)[:, 0])
+        assert blend.sum() >= 3
+        assert np.all((c[blend] < 1530.0) & (c[blend] > under))
+        assert [p.source.id for p in deep.data_sources] == ['argo', 'woa23']
+
+    @pytest.mark.parametrize('end', ['top', 'bottom'])
+    def test_the_blend_hands_over_without_a_gradient_kink(self, end):
+        """The raised cosine has zero slope at both ends, so the blended
+        profile leaves the cast with the cast's gradient and joins the
+        column with the column's: no false turning depth for a ray model.
+        A linear weight would add (c_col - c_cast)/span, 0.05 (m/s)/m here."""
+        z_cast = np.arange(0.0, 601.0)
+        z_col = np.arange(0.0, 1001.0)
+        cast = SoundSpeedProfile(depths=z_cast,
+                                 sound_speed=1530.0 - 0.01 * z_cast)
+        column = SoundSpeedProfile(depths=z_col,
+                                   sound_speed=1500.0 + 0.02 * z_col)
+        out = ss._blend_cast_onto_column(cast, column)
+        z = np.asarray(out.depths)
+        c = np.asarray(out.sound_speed)[:, 0]
+        top = 600.0 - ss.CAST_BLEND_M
+        if end == 'top':
+            i = int(np.flatnonzero(z == top)[0])
+            slope, wanted = (c[i + 1] - c[i]) / (z[i + 1] - z[i]), -0.01
+        else:
+            i = int(np.flatnonzero(z == 600.0)[0])
+            slope, wanted = (c[i] - c[i - 1]) / (z[i] - z[i - 1]), 0.02
+        assert slope == pytest.approx(wanted, abs=1e-3)
+
+    @pytest.mark.parametrize('cast_depth, deepened', [
+        (999.0, True),      # one metre short of the column: it continues
+        (1000.0, False),    # as deep as the column: nothing to add
+    ])
+    def test_a_cast_as_deep_as_the_column_comes_back_unchanged(
+            self, woa_cache, cast_depth, deepened):
+        cast = _cast([0.0, 500.0, cast_depth])
+        deep = uacpy.data.deepen_with_climatology(cast, _WOA_POINT,
+                                                  source='local')
+        assert (deep is not cast) is deepened
+        assert np.asarray(deep.depths)[-1] == 1000.0
+
+    @pytest.mark.parametrize('cast_formula, formula, used', [
+        (None, None, 'teos10'),              # no record: the package default
+        ('mackenzie', None, 'mackenzie'),    # the cast's own equation
+        ('mackenzie', 'unesco', 'unesco'),   # asked for explicitly
+    ])
+    def test_the_column_is_computed_with_the_casts_equation(
+            self, woa_cache, cast_formula, formula, used):
+        cast = _cast([0.0, 100.0], formula=cast_formula)
+        deep = uacpy.data.deepen_with_climatology(
+            cast, _WOA_POINT, source='local', formula=formula)
+        column = ss.fetch_ssp(_WOA_POINT, source='local', formula=used)
+        assert np.asarray(deep.sound_speed)[-1, 0] == \
+            np.asarray(column.sound_speed)[-1, 0]
+        assert deep.formula == cast.formula
+
+    def test_the_request_reaches_the_climatology_fetch(self, monkeypatch):
+        calls = []
+
+        def record(point, **kw):
+            calls.append((point, kw))
+            return _cast([0.0, 3000.0], speed=1500.0)
+        monkeypatch.setattr(ss, 'fetch_ssp', record)
+        uacpy.data.deepen_with_climatology(
+            _cast([0.0, 100.0]), (45.6, -6.2), date='2026-07-15',
+            resolution='0.25', source='woa23', timeout=5.0)
+        (point, kw), = calls
+        assert point == (45.6, -6.2)
+        assert (kw['date'], kw['month'], kw['resolution'], kw['source'],
+                kw['timeout']) == ('2026-07-15', None, '0.25', 'woa23', 5.0)
+
+    def test_a_missing_climatology_is_raised_not_skipped(self, woa_cache):
+        """Asked to deepen, a point with no installed column refuses rather
+        than handing the cast back undeepened."""
+        with pytest.raises(DataFetchError,
+                           match='WOA23 has no water-column data'):
+            uacpy.data.deepen_with_climatology(_cast([0.0, 100.0]),
+                                               (-60.0, 100.0), source='local')
+
+    @pytest.mark.parametrize('ssp, kwargs, match', [
+        ([(0.0, 1500.0), (100.0, 1490.0)], {}, 'ssp is a list, not a '
+                                               'SoundSpeedProfile'),
+        (SoundSpeedProfile(depths=[0.0, 100.0],
+                           sound_speed=[[1500.0, 1501.0], [1490.0, 1491.0]],
+                           ranges=[0.0, 1000.0]), {},
+         'ssp holds 2 range columns'),
+        (SoundSpeedProfile(depths=[0.0, 100.0], sound_speed=[1500.0, 1490.0]),
+         {'source': 'argo'}, "source='argo' is not a climatology source"),
+    ])
+    def test_what_is_not_one_cast_and_a_climatology_is_refused(
+            self, ssp, kwargs, match):
+        with pytest.raises(ConfigurationError,
+                           match=f'^deepen_with_climatology: {match}'):
+            uacpy.data.deepen_with_climatology(ssp, _WOA_POINT, **kwargs)

@@ -67,10 +67,10 @@ class TestOAST:
         )
 
     @pytest.mark.requires_binary
-    def test_oast_compute_tl(self, oast_env, source, receiver):
+    def test_oast_compute_field(self, oast_env, source, receiver):
         """Test OAST transmission loss computation."""
         oast = OAST(verbose=False)
-        result = oast.compute_tl(
+        result = oast.compute_field(
             env=oast_env,
             source=source,
             receiver=receiver
@@ -100,7 +100,7 @@ class TestOAST:
         )
 
         oast = OAST(verbose=False)
-        result = oast.compute_tl(env=env, source=source, receiver=receiver)
+        result = oast.compute_field(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
         assert np.all(np.isfinite(result.data))
 
@@ -113,7 +113,7 @@ class TestOAST:
             bottom=BoundaryProperties(
                 acoustic_type='half-space', sound_speed=1700.0,
                 density=1.8, attenuation=0.5))
-        ref = oast.compute_tl(env=fluid, source=source, receiver=receiver)
+        ref = oast.compute_field(env=fluid, source=source, receiver=receiver)
         diff = np.abs(np.asarray(result.dB) - np.asarray(ref.dB))
         assert np.nanmean(diff) > 0.5, (
             "elastic and fluid seabeds gave the same OAST field — the shear "
@@ -397,7 +397,7 @@ class TestOASP:
         """OASP collapses RD bathymetry; verify the path still produces TL."""
         oasp = OASP(verbose=False)
         with pytest.warns(UserWarning, match="does not support range-dependent bathymetry"):
-            result = oasp.compute_tl(
+            result = oasp.compute_field(
                 env=oasp_env,
                 source=source,
                 receiver=receiver
@@ -444,7 +444,7 @@ class TestOASESFactory:
     @pytest.mark.requires_binary
     @pytest.mark.filterwarnings(_OAST_INTERP_FILTER)
     def test_for_mode_default_computes_tl_like_oast(self):
-        """OASES.for_mode() returns an OAST that handles compute_tl."""
+        """OASES.for_mode() returns an OAST that handles compute_field."""
         env = Environment(
             name="oases_test", bathymetry=100.0, ssp=1500.0,
         )
@@ -453,7 +453,7 @@ class TestOASESFactory:
             depths=[25.0, 50.0, 75.0], ranges=[1000.0, 3000.0],
         )
         m = OASES.for_mode(verbose=False)
-        result = m.compute_tl(env=env, source=source, receiver=receiver)
+        result = m.compute_field(env=env, source=source, receiver=receiver)
         assert isinstance(result, Field)
 
     def test_routes_covariance_to_oasn(self):
@@ -657,7 +657,7 @@ class TestOASESWaterAttenuation:
         if writer == 'oasp':
             write_oasp_input(dat, env, Source(depths=50.0, frequencies=2500.0),
                              receiver, freq_min=1000.0, freq_max=4000.0,
-                             center_frequency=2500.0)
+                             fc=2500.0)
         else:
             write = write_oast_input if writer == 'oast' else write_oasn_input
             write(dat, env, Source(depths=50.0, frequencies=np.array(
@@ -793,63 +793,51 @@ def test_all_oases_models_importable():
 # OASR/OASP equispaced frequency-vector check + auto-resample warning
 # ---------------------------------------------------------------------
 
-class TestOASESFrequencyResample:
-    """The (freq_min, freq_max, N) triple OASES writes implies equispaced
-    frequency sampling; arbitrary user vectors must trigger a warning
-    + auto-resample."""
+class TestOASESFrequencySweep:
+    """The (freq_min, freq_max, N) triple an OASES deck carries is an
+    equispaced sweep, so a vector off it is refused with the grid that
+    fits."""
 
-    def test_helper_equispaced_no_warning(self, recwarn):
-        from uacpy.models.oases._sampling import _oases_resample_frequencies
+    def test_helper_equispaced_passes(self):
+        from uacpy.models.oases._sampling import _oases_frequency_sweep
         freqs = np.linspace(10.0, 100.0, 10)
-        freq_min, freq_max, n = _oases_resample_frequencies(freqs, 'OASR')
-        assert (freq_min, freq_max, n) == (10.0, 100.0, 10)
-        assert not any(
-            "non-equispaced" in str(w.message) for w in recwarn.list
-        )
+        assert _oases_frequency_sweep(freqs, 'OASR') == (10.0, 100.0, 10)
 
-    def test_helper_non_equispaced_warns_and_reports_resampled(self):
-        from uacpy.models.oases._sampling import _oases_resample_frequencies
+    def test_helper_non_equispaced_is_refused_naming_the_grid(self):
+        from uacpy.models.oases._sampling import _oases_frequency_sweep
         freqs = np.array([10.0, 15.0, 30.0, 100.0])
-        with recorded_warnings() as caught:
-            freq_min, freq_max, n = _oases_resample_frequencies(freqs, 'OASR')
-        assert (freq_min, freq_max, n) == (10.0, 100.0, 4)
-        msgs = [str(w.message) for w in caught
-                if issubclass(w.category, UserWarning)]
-        assert any("non-equispaced" in m for m in msgs), (
-            f"Expected non-equispaced warning; got {msgs!r}"
-        )
+        with pytest.raises(ConfigurationError,
+                           match='vector is not equispaced') as exc:
+            _oases_frequency_sweep(freqs, 'OASR')
         # The remedy names an argument run() accepts: run() takes
         # frequencies= only, so freq_min/n_frequencies advice cannot be
         # followed.
-        advice = next(m for m in msgs if "non-equispaced" in m)
-        assert "np.linspace" in advice
-        assert "n_frequencies" not in advice
+        assert 'np.linspace(10, 100, 4)' in exc.value.remediation
+        assert 'n_frequencies' not in exc.value.remediation
 
-    @pytest.mark.parametrize('freqs, n_notices', [
-        ([10.0, 15.0, 30.0, 100.0], 1), (np.linspace(10.0, 100.0, 4), 0)])
-    def test_oasp_records_and_says_the_resampling_once(self, freqs,
-                                                       n_notices):
-        """OASP's stage 3 turns a ``frequencies=`` vector into its
-        ``(freq_min, freq_max, N)`` sweep: a non-equispaced one is a notice that
-        ``run_settings`` records in ``engine.notices`` and says once; an
-        equispaced one is none."""
+    def test_oasp_refuses_a_non_equispaced_request(self):
+        env = Environment(bathymetry=100.0, ssp=1500.0)
+        with pytest.raises(ConfigurationError,
+                           match='frequencies= vector is not equispaced'):
+            OASP(verbose=False).run_settings(
+                env, Source(depths=50.0, frequencies=50.0),
+                Receiver(depths=[50.0], ranges=[1000.0]),
+                RunMode.BROADBAND, frequencies=[10.0, 15.0, 30.0, 100.0])
+
+    def test_oasp_runs_an_equispaced_request_without_a_notice(self):
         env = Environment(bathymetry=100.0, ssp=1500.0)
         with recorded_warnings() as caught:
             settings = OASP(verbose=False).run_settings(
                 env, Source(depths=50.0, frequencies=50.0),
                 Receiver(depths=[50.0], ranges=[1000.0]),
-                RunMode.BROADBAND, frequencies=freqs)
-        recorded = [n for n in (x.message for x in settings.engine.notices)
-                    if 'non-equispaced' in n]
-        said = [str(w.message) for w in caught
-                if 'non-equispaced' in str(w.message)]
-        assert len(recorded) == n_notices
-        assert said == recorded
+                RunMode.BROADBAND, frequencies=np.linspace(10.0, 100.0, 4))
+        assert not [w for w in caught if 'equispaced' in str(w.message)]
+        assert settings.engine.freq_min == 10.0
 
-    def test_helper_single_freq_no_warning(self, recwarn):
-        from uacpy.models.oases._sampling import _oases_resample_frequencies
-        freq_min, freq_max, n = _oases_resample_frequencies(np.array([50.0]), 'OASR')
-        assert (freq_min, freq_max, n) == (50.0, 50.0, 1)
+    def test_helper_single_freq_passes(self):
+        from uacpy.models.oases._sampling import _oases_frequency_sweep
+        assert _oases_frequency_sweep(np.array([50.0]), 'OASR') == (
+            50.0, 50.0, 1)
 
     @pytest.mark.requires_binary
     def test_oasr_equispaced_vector_no_warning_correct_freqs(self):
@@ -878,11 +866,8 @@ class TestOASESFrequencyResample:
             np.sort(result.frequencies), user_freqs, rtol=1e-3,
         )
 
-    @pytest.mark.requires_binary
-    def test_oasr_non_equispaced_vector_warns_and_resamples(self):
-        """A non-equispaced user vector triggers the warning and the
-        result's ``frequencies`` is the resampled equispaced grid, not
-        the user input."""
+    def test_oasr_refuses_a_non_equispaced_source_vector(self):
+        """The refusal names the argument the vector came from."""
         bottom = BoundaryProperties(
             acoustic_type='half-space',
             sound_speed=1600.0, shear_speed=400.0,
@@ -891,26 +876,13 @@ class TestOASESFrequencyResample:
         env = Environment(
             name="oasr_neq", bathymetry=100.0, ssp=1500.0, bottom=bottom,
         )
-        user_freqs = np.array([20.0, 30.0, 50.0, 80.0])  # non-equispaced
-        src = Source(depths=50.0, frequencies=user_freqs)
+        src = Source(depths=50.0, frequencies=[20.0, 30.0, 50.0, 80.0])
         rcv = Receiver(depths=[50.0], ranges=[1000.0])
         oasr = OASR(verbose=False, angles=np.linspace(0.0, 90.0, 19))
-        with recorded_warnings() as caught:
-            result = oasr.run(env=env, source=src, receiver=rcv)
-        non_eq = [w for w in caught if "non-equispaced" in str(w.message)]
-        assert len(non_eq) >= 1, (
-            "Non-equispaced vector must trigger a UserWarning"
-        )
-        # OASES-8: the warning names the argument the vector came from.
-        assert 'source.frequencies vector' in str(non_eq[0].message)
-        # Result frequencies are the resampled equispaced grid spanning
-        # the user's [min, max] with the same N — NOT the user input.
-        expected = np.linspace(
-            user_freqs.min(), user_freqs.max(), user_freqs.size,
-        )
-        np.testing.assert_allclose(
-            np.sort(result.frequencies), expected, rtol=1e-3,
-        )
+        with pytest.raises(ConfigurationError,
+                           match='source.frequencies vector is not '
+                                 'equispaced'):
+            oasr.run_settings(env=env, source=src, receiver=rcv)
 
 
 # =====================================================================
@@ -1112,6 +1084,14 @@ class TestOasnNoiseBlockGates:
         )
         return dat.read_text().splitlines()
 
+    def test_the_unpinned_window_takes_the_shared_c_low_factor(self, tmp_path):
+        """CMINS is C_LOW_FACTOR (0.9, scooter.f90:258's) x the slowest
+        water speed, the factor every wavenumber engine derives with."""
+        from uacpy.core.engine_defaults import C_LOW_FACTOR
+        assert C_LOW_FACTOR == 0.90
+        lines = self._deck_tail(tmp_path, noise=OasnNoise(surface_level=70.0))
+        assert f'{0.9 * 1500.0!r} 100000000.0' in lines
+
     def test_negative_deep_level_emits_no_deep_block(self, tmp_path):
         """A negative deep level disables the source, so OASN never reads
         the three deep lines and the next READ would consume them."""
@@ -1122,9 +1102,12 @@ class TestOasnNoiseBlockGates:
         assert len(on) - len(off) == 3
 
     def test_sub_threshold_deep_level_emits_no_deep_block(self, tmp_path):
-        """0 < level < 0.01 is below OASES' own threshold."""
-        assert (self._deck_tail(tmp_path, noise=OasnNoise(deep_level=0.005))
-                == self._deck_tail(tmp_path, noise=OasnNoise(deep_level=0.0)))
+        """0 < level < 0.01 is below OASES' own threshold; the level itself
+        still appears verbatim on the Block-VI source line."""
+        low = self._deck_tail(tmp_path, noise=OasnNoise(deep_level=0.005))
+        off = self._deck_tail(tmp_path, noise=OasnNoise(deep_level=0.0))
+        assert len(low) == len(off)
+        assert [a for a, b in zip(low, off) if a != b] == ['0.0 -200.0 0.005 0']
 
     def test_sub_threshold_surface_level_emits_no_surface_block(self, tmp_path):
         """abs(level) < 0.01 disables the surface block (oasnun22.f:276 tests
@@ -1299,9 +1282,10 @@ class TestOasnRefusesItsRecordKnobsByName:
     """A noise or replica-grid knob the OASN deck cannot carry is refused by
     OASN itself, at construction and again at stage 2 (so ``validate_inputs``
     and ``run_settings`` refuse too), naming the knob rather than the
-    writer's record field; the rules are the writer's own. The surface level
-    is tested as the deck writes it, rounded to one decimal, so -0.04 is
-    written 0.0 and -0.05 is written -0.1."""
+    writer's record field; the rules are the writer's own. The deck writes
+    the surface level as given and OASN tests it at single precision, so
+    -0.01 is a spectrum-file unit and -0.005 sits inside the 0.01 dB dead
+    band."""
 
     @staticmethod
     def _call(model, method):
@@ -1314,7 +1298,9 @@ class TestOasnRefusesItsRecordKnobsByName:
     @pytest.mark.parametrize('kw, said', [
         (dict(surface_noise_level=-5.0), 'surface_noise_level=-5 is negative'),
         (dict(surface_noise_level=-0.05),
-         'surface_noise_level=-0.1 is negative'),
+         'surface_noise_level=-0.05 is negative'),
+        (dict(surface_noise_level=-0.01),
+         'surface_noise_level=-0.01 is negative'),
         (dict(discrete_sources=[
             {'depth': 40.0, 'x': 0.0, 'y': 0.0, 'level': -3.0}]),
          "discrete_sources[0]['level']=-3 is negative"),
@@ -1341,7 +1327,7 @@ class TestOasnRefusesItsRecordKnobsByName:
             self._call(model, method)
 
     def test_the_edges_the_deck_can_carry_are_accepted(self):
-        model = OASN(verbose=False, surface_noise_level=-0.04,
+        model = OASN(verbose=False, surface_noise_level=-0.005,
                      discrete_sources=[
                          {'depth': 40.0, 'x': 0.0, 'y': 0.0, 'level': 0.0}]
                      * 201, replica_nz=201, replica_nx=201, replica_ny=201)
@@ -2103,17 +2089,50 @@ class TestOasnNoiseBlockGating:
         assert isinstance(rep, Replicas)
         assert np.isfinite(rep.replicas).all()
 
-    def test_level_is_gated_on_the_value_the_deck_carries(self, tmp_path):
-        """OASN tests the level it read back from the deck (oasnun22.f:276),
-        and the deck carries '%.1f', so 0.03 lands as 0.0 and the sub-block
-        must not be written."""
-        rounded = self._deck(tmp_path, options='N J', n_wavenumbers=512,
-                             noise=OasnNoise(surface_level=0.03)
-                             ).read_text().splitlines()
+    def test_a_level_reaches_the_deck_as_given(self, tmp_path):
+        """The deck writes the level as given, so 0.03 dB is a source OASN
+        reads (oasnun22.f:276) and its two Block-VII records follow."""
+        on = self._deck(tmp_path, options='N J', n_wavenumbers=512,
+                        noise=OasnNoise(surface_level=0.03)
+                        ).read_text().splitlines()
         off = self._deck(tmp_path, options='N J', n_wavenumbers=512,
                          noise=OasnNoise(surface_level=0.0)
                          ).read_text().splitlines()
-        assert rounded == off
+        assert '0.03 -200.0 0.0 0' in on
+        assert len(on) - len(off) == 2
+
+    @pytest.mark.parametrize('level, opens', [
+        (0.01, True), (0.01 - 1e-11, True), (0.0099, False)])
+    def test_the_dead_band_is_tested_at_single_precision(self, tmp_path,
+                                                         level, opens):
+        """OASN holds the level and the 0.01 of its gate as single-precision
+        REALs (noiprm.f:17, oasnun22.f:276), so a level that reads as 0.01
+        opens the block."""
+        lines = self._deck(tmp_path, options='N J', n_wavenumbers=512,
+                           noise=OasnNoise(surface_level=level)
+                           ).read_text().splitlines()
+        off = self._deck(tmp_path, options='N J', n_wavenumbers=512,
+                         noise=OasnNoise(surface_level=0.0)
+                         ).read_text().splitlines()
+        assert len(lines) - len(off) == (2 if opens else 0)
+
+    @pytest.mark.requires_binary
+    def test_the_binary_reads_a_level_on_the_dead_band_edge(self, tmp_path):
+        """0.01 - 1e-11 dB reads as 0.01 in single precision: the deck
+        carries the block OASN then reads, and the run ends cleanly."""
+        from uacpy.models.oases._common import _oases_subprocess_env
+        import subprocess
+        self._deck(tmp_path, options='N J', n_wavenumbers=512,
+                   noise=OasnNoise(surface_level=0.01 - 1e-11))
+        proc = subprocess.run(
+            [str(OASN(verbose=False)._exe)], cwd=tmp_path,
+            env=_oases_subprocess_env('oasn_run', FOR014='rpo', FOR016='xsm',
+                                      FOR026='chk'),
+            capture_output=True, text=True, timeout=300,
+        )
+        assert proc.returncode == 0, proc.stderr[-600:]
+        assert 'End of file' not in proc.stdout + proc.stderr
+        assert (tmp_path / 'oasn_run.xsm').stat().st_size > 0
 
 
 class TestOastPlpStructuralParse:
@@ -2480,7 +2499,7 @@ class TestOasesFrequencyReachesTheDeck:
         env = self._env()
 
         def tl(freq):
-            return np.asarray(OAST().compute_tl(
+            return np.asarray(OAST().compute_field(
                 env, Source(depths=50.0, frequencies=freq), rcv).dB).ravel()
 
         # Bit-identical before the fix: the deck carried '200.0' either way.
@@ -2703,8 +2722,8 @@ class TestOasesRefusesWhatItCannotWriteAsAsked:
 
         Reference: OAST run on its own 3-element array (LS=3, DELTA=5 m,
         SD=25 m, THETA=0, LTYP=1): the source record is patched in here
-        because the writer now refuses 'L'. Advised route: OASP COHERENT_TL,
-        one deck per element, weights 1/n, ResultStack.superpose(). OASES
+        because the writer refuses 'L'. Advised route: OASP COHERENT_TL,
+        one deck per element, weights 1/n, Field.superpose(). OASES
         divides each element by LS (PHASES, oaseun31.f:1776-1777), so equal
         weights without the 1/n give a TL 20*log10(3) = 9.54 dB too low (a
         field three times too strong).
@@ -2722,11 +2741,11 @@ class TestOasesRefusesWhatItCannotWriteAsAsked:
         n = len(depths)
 
         def advised(weights):
-            stack = OASP(verbose=False).run(
+            field = OASP(verbose=False).run(
                 env, Source(depths=depths, frequencies=100.0,
                             weights=weights),
                 rcv, run_mode=RunMode.COHERENT_TL)
-            return np.asarray(stack.superpose().dB, dtype=float)
+            return np.asarray(field.superpose().dB, dtype=float)
 
         weighted = advised([1.0 / n] * n)
         unweighted = advised(None)

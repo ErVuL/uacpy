@@ -131,12 +131,15 @@ def processing_gain_dB(bandwidth_hz: float, duration_s: float) -> float:
     duration_s : float
         Signal duration (s).
     """
-    bt = float(bandwidth_hz) * float(duration_s)
-    if bt <= 0.0:
+    # Each factor on its own: two negatives make a positive product, and a
+    # NaN fails every comparison.
+    bandwidth, duration = float(bandwidth_hz), float(duration_s)
+    if not (np.isfinite(bandwidth) and bandwidth > 0.0
+            and np.isfinite(duration) and duration > 0.0):
         raise ConfigurationError(
-            f"processing_gain_dB: B*T must be > 0; got bandwidth_hz="
-            f"{bandwidth_hz!r} x duration_s={duration_s!r} = {bt:g}.")
-    return float(10.0 * np.log10(bt))
+            f"processing_gain_dB: B and T must each be > 0 and finite; got "
+            f"bandwidth_hz={bandwidth_hz!r}, duration_s={duration_s!r}.")
+    return float(10.0 * np.log10(bandwidth * duration))
 
 
 # Largest ambiguity surface ``ambiguity_function`` will allocate:

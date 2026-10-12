@@ -4,10 +4,13 @@ compensation, and symbol-timing recovery."""
 
 from __future__ import annotations
 
+from collections import namedtuple
+
 from scipy.signal import resample
 import numpy as np
 import scipy.signal as _sig
 
+from uacpy.acoustic_signal._results import PlottedResult
 from uacpy.comms.phy import _require_integer_sps
 from uacpy.core._validate import require_positive_finite_scalar
 from uacpy.core.constants import DEFAULT_SOUND_SPEED
@@ -351,14 +354,34 @@ def compensate_doppler(signal, scale):
     return resample(x, n_out)
 
 
+class DopplerEstimate(PlottedResult, namedtuple(
+        "DopplerEstimate", "best_scale scales peak_metric")):
+    """A Doppler-scale estimate and the scan it came from, what
+    :func:`estimate_doppler_scale` returns.
+
+    ``best_scale`` is the estimate (``a = v/c``, the centre of the winning
+    plateau), ``scales`` the candidates scanned and ``peak_metric`` the
+    matched-filter metric at each. The tuple unpacks as
+    ``best_scale, scales, peak_metric = estimate_doppler_scale(...)``.
+    :meth:`plot` draws the ambiguity curve with
+    :func:`~uacpy.plot.plot_doppler_ambiguity`, which marks ``best_scale``.
+    """
+
+    _plotter = "plot_doppler_ambiguity"
+
+    def _field_units(self):
+        return {"best_scale": "", "scales": "", "peak_metric": ""}
+
+
 def estimate_doppler_scale(received, template, scales=None):
     """Estimate the Doppler scale ``a = v/c`` that distorts ``received``.
 
     For each candidate ``a`` the receive signal is compensated by that same ``a``
     (i.e. ``compensate_doppler(received, a)``) and scored against ``template`` with the
     energy-normalized matched-filter metric (:func:`matched_filter_metric`,
-    a value in ``[0, 1]``); the best-scoring scale wins. Returns ``(best_scale,
-    scales, peak_metric)`` — the last two for plotting the ambiguity curve.
+    a value in ``[0, 1]``); the best-scoring scale wins. Returns a
+    :class:`DopplerEstimate` ``(best_scale, scales, peak_metric)`` — the last
+    two the ambiguity curve its :meth:`~DopplerEstimate.plot` draws.
 
     ``best_scale`` is the CENTRE of the winning plateau, not the candidate
     ``argmax`` picks out. The metric is a staircase (see below), so a whole run
@@ -398,6 +421,10 @@ def estimate_doppler_scale(received, template, scales=None):
     full scan, for the longest records. An explicit ``scales`` array is
     scanned in full.
 
+    The cost grows with the record passed: every candidate resamples and
+    correlates all of it. Pass the stretch around the probe, not a whole
+    capture; :meth:`~uacpy.comms.OFDMReceiver.from_passband` does.
+
     Parameters
     ----------
     received : array_like
@@ -417,7 +444,7 @@ def estimate_doppler_scale(received, template, scales=None):
         scales = np.asarray(scales, dtype=float)
         peak = _metric_scan(r, t, scales)
         _reject_all_zero_metric(peak, r, t, scales)
-        return _plateau_centre(scales, peak), scales, peak
+        return DopplerEstimate(_plateau_centre(scales, peak), scales, peak)
 
     grid = np.linspace(-DOPPLER_SCALE_MAX, DOPPLER_SCALE_MAX,
                        DOPPLER_SCALE_COUNT)
@@ -435,7 +462,7 @@ def estimate_doppler_scale(received, template, scales=None):
         # concluding the surface is all-zero.
         peak = _metric_scan(r, t, grid)
         _reject_all_zero_metric(peak, r, t, grid)
-        return _plateau_centre(grid, peak), grid, peak
+        return DopplerEstimate(_plateau_centre(grid, peak), grid, peak)
     centre = int(coarse_idx[int(np.argmax(coarse_peak))])
     fine_idx = np.arange(max(0, centre - (stride - 1)),
                          min(grid.size, centre + stride))
@@ -451,10 +478,35 @@ def estimate_doppler_scale(received, template, scales=None):
     keep[1:] = idx[1:] != idx[:-1]
     idx, vals = idx[keep], vals[keep]
     scales_out = grid[idx]
-    return _plateau_centre(scales_out, vals), scales_out, vals
+    return DopplerEstimate(_plateau_centre(scales_out, vals), scales_out,
+                           vals)
 
 
 _MAX_COARSE_STRIDE = 15
+
+
+def _doppler_scan_stretch(received, template):
+    """The stretch of ``received`` a default Doppler scan over ``template``
+    needs: the whole record when it is short, else a window centred on the
+    template's matched-filter peak at ``a = 0``.
+
+    Every candidate is scored over the record passed, so the scan costs time
+    in proportion to its length. What it resolves stops growing at
+    ``1/grid_step`` samples — past that the resample quantum ``1/N`` is finer
+    than the grid and the stride is 1 (:func:`_coarse_stride`) — so the
+    window is that long, and at least the template stretched by the largest
+    scale with one template length either side; a longer capture would cost
+    time without changing the answer's resolution."""
+    r = np.asarray(received)
+    t = np.asarray(template)
+    step = 2.0 * DOPPLER_SCALE_MAX / (DOPPLER_SCALE_COUNT - 1)
+    span = max(int(np.ceil(1.0 / step)),
+               int(np.ceil(t.size * (1.0 + DOPPLER_SCALE_MAX))) + 2 * t.size)
+    if r.size <= span:
+        return r
+    start = int(np.argmax(matched_filter_metric(r, t)))
+    lo = min(max(start - (span - t.size) // 2, 0), r.size - span)
+    return r[lo:lo + span]
 
 
 def _coarse_stride(n_samples: int, grid_step: float) -> int:

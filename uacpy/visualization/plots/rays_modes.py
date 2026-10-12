@@ -48,6 +48,7 @@ def _plot_rays(
     env: Optional[Environment] = None,
     figsize: Tuple[float, float] = (12, 6),
     color_by: Optional[str] = 'bounces',
+    color=None,
     show_receivers: bool = True,
     show_source: bool = True,
     show_legend: bool = True,
@@ -60,7 +61,10 @@ def _plot_rays(
 
     ``color_by='bounces'`` colours rays by direct/surface/bottom/both
     multipath class (red / green / blue / black); ``None`` paints every
-    ray in the same colour. The legend reports per-class ray counts.
+    ray in the same colour, the bottom-class blue unless ``color=`` names
+    another. ``color=`` alone paints the whole fan that colour, which is
+    ``color_by=None``: one colour has no classes to tell apart. The legend
+    reports per-class ray counts when the fan is coloured by class.
     """
     if not isinstance(rays, Rays):
         raise ConfigurationError(f"Rays.plot: expected Rays, got {type(rays).__name__}.")
@@ -79,28 +83,23 @@ def _plot_rays(
     bounce_counts = {'direct': 0, 'surface': 0, 'bottom': 0, 'both': 0}
     max_r_km = 0.0
     max_z = 0.0
-    for ray in rays.rays:
+    for ray, kind in zip(rays.rays, rays.kinds):
         r = np.asarray(ray.get('r', []))
         z = np.asarray(ray.get('z', []))
         if r.size == 0:
             continue
         max_r_km = max(max_r_km, m_to_km(float(np.max(r))))
         max_z = max(max_z, float(np.max(z)))
-        n_top = int(ray.get('n_top_bounces', 0) or 0)
-        n_bot = int(ray.get('n_bot_bounces', 0) or 0)
-        if n_top and n_bot:
-            kind = 'both'
-        elif n_bot:
-            kind = 'bottom'
-        elif n_top:
-            kind = 'surface'
-        else:
-            kind = 'direct'
         bounce_counts[kind] += 1
-        # color_by=None paints the whole fan one colour; the bottom-class blue
-        # doubles as that neutral colour.
-        color = color_map[kind] if color_by == 'bounces' else color_map['bottom']
-        ax.plot(m_to_km(r), z, color=color, alpha=alpha,
+        # One colour for the fan: the caller's, else the bottom-class blue,
+        # which doubles as the neutral colour.
+        if color is not None:
+            ray_color = color
+        elif color_by == 'bounces':
+            ray_color = color_map[kind]
+        else:
+            ray_color = color_map['bottom']
+        ax.plot(m_to_km(r), z, color=ray_color, alpha=alpha,
                 linewidth=linewidth, solid_capstyle='round',
                 zorder=ZORDER_RAYS, **mpl_kw)
 
@@ -153,7 +152,7 @@ def _plot_rays(
         # a dense ray fan.
         _draw_geometry(ax, rays.source_depths, source_markersize_bonus=2)
 
-    if show_legend and color_by == 'bounces':
+    if show_legend and color_by == 'bounces' and color is None:
         import matplotlib.lines as mlines
         handles = [
             mlines.Line2D([], [], color=col, linewidth=2,
@@ -246,7 +245,7 @@ def _plot_arrivals(
                 else _checked_dynamic_range_dB('Arrivals.plot',
                                                dynamic_range_dB))
     if arrivals.arrivals:
-        arrivals = arrivals.at_receiver(receiver, who='Arrivals.plot')
+        arrivals = arrivals._at_receiver(receiver, 'Arrivals.plot')
     _owns_fig = ax is None
     fig, ax = fig_ax(ax, figsize)
     color_map = RAY_CLASS_COLOURS
@@ -401,9 +400,9 @@ def _plot_arrivals(
 @typed_plot_error(who='Modes.plot')
 def _plot_mode_functions(
     modes: Modes,
-    n_modes: Optional[int] = None,
     ax=None,
     *,
+    n_modes: Optional[int] = None,
     figsize: Tuple[float, float] = (8, 6),
     title: Optional[str] = None,
     show_imaginary: bool = False,
@@ -632,6 +631,7 @@ def plot_greens_function(
     cmap: str = 'viridis',
     figsize: Tuple[float, float] = (9, 6),
     title: Optional[str] = None,
+    show_colorbar: bool = True,
 ):
     """Image the depth-separated Green's function ``|G(k_r, z)|`` of a ``.grn``.
 
@@ -678,6 +678,8 @@ def plot_greens_function(
         ``ax`` is given.
     title : str, optional
         Axes title. ``None`` draws the default caption; ``''`` draws none.
+    show_colorbar : bool, optional
+        Draw the colorbar of the 2-D panel. Default True.
     """
     floor_dB = -_checked_dynamic_range_dB('plot_greens_function',
                                           dynamic_range_dB)
@@ -721,7 +723,8 @@ def plot_greens_function(
             db = 20.0 * np.log10(np.maximum(panel, PRESSURE_FLOOR) / ref)
         im = ax.pcolormesh(k_r, z, db, shading='auto', cmap=cmap,
                            vmin=floor_dB, vmax=0.0)
-        fig.colorbar(im, ax=ax, label='$|G|$ (dB re panel max)')
+        if show_colorbar:
+            fig.colorbar(im, ax=ax, label='$|G|$ (dB re panel max)')
         ax.set_ylabel('Depth (m)')
         invert_yaxis_once(ax)
     else:
@@ -950,14 +953,17 @@ def plot_dispersion(
 @typed_plot_error
 def plot_modes_heatmap(
     modes: Modes,
-    n_modes: Optional[int] = None,
     ax=None,
     *,
+    n_modes: Optional[int] = None,
     figsize: Tuple[float, float] = (8, 6),
     title: Optional[str] = None,
     mode_range: Optional[Tuple[int, int]] = None,
     normalize: bool = True,
     cmap: str = 'RdBu_r',
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    show_colorbar: bool = True,
 ):
     """Heatmap of ``ψ_m(z)`` over (depth, mode index).
 
@@ -987,6 +993,11 @@ def plot_modes_heatmap(
         Scale each mode to peak ±1. Default True.
     cmap : str, optional
         Colormap. Default ``'RdBu_r'``.
+    vmin, vmax : float, optional
+        Colour limits; ``None`` is ``∓1`` when ``normalize`` and the largest
+        ``|ψ|`` drawn, symmetric, otherwise.
+    show_colorbar : bool, optional
+        Draw the colorbar. Default True.
     """
     if not isinstance(modes, Modes):
         raise ConfigurationError(
@@ -1033,19 +1044,21 @@ def plot_modes_heatmap(
             peak = float(np.max(np.abs(phi[:, i])))
             if peak > 0:
                 phi[:, i] /= peak
-        vmin, vmax = -1.0, 1.0
+        vabs = 1.0
     else:
         vabs = float(np.max(np.abs(phi))) if phi.size else 1.0
-        vmin, vmax = -vabs, vabs
+    vmin = -vabs if vmin is None else vmin
+    vmax = vabs if vmax is None else vmax
     idx = np.arange(start + 1, stop + 1)
     # ``shading='nearest'`` centres each column on its integer mode index,
     # so no (n+1)-long edge array is needed.
     im = ax.pcolormesh(idx, modes.depths, phi, cmap=cmap,
                        shading='nearest', vmin=vmin, vmax=vmax)
-    fig.colorbar(
-        im, ax=ax,
-        label='Normalised amplitude' if normalize else r'$\psi_m(z)$',
-    )
+    if show_colorbar:
+        fig.colorbar(
+            im, ax=ax,
+            label='Normalised amplitude' if normalize else r'$\psi_m(z)$',
+        )
     ax.set_xlabel('Mode index')
     # A mode index is an integer — mode 4.5 does not exist. On a short span the
     # default locator subdivides: mode_range=(3, 7) drew 3.5, 4.5, 5.5, 6.5 and
@@ -1289,13 +1302,18 @@ def _plot_covariance(
     frequency_index: int = 0,
     figsize: Tuple[float, float] = (6, 5),
     title: Optional[str] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    show_colorbar: bool = True,
 ):
     """Heatmap of one covariance slice ``|C[frequency_index, :, :]|``.
 
     A line array whose ``receiver_positions`` run along one coordinate (a
     vertical array in depth, a horizontal one in x or y) is drawn against
     that coordinate, depth increasing downward; any other array is drawn
-    against the receiver index."""
+    against the receiver index. ``vmin`` / ``vmax`` fix the colour limits
+    (``None`` autoscales each) and ``show_colorbar=False`` leaves the bar to
+    :func:`~uacpy.plot.shared_colorbar`, as on :func:`~uacpy.plot.plot_field`."""
     if not isinstance(cov, Covariance):
         raise ConfigurationError(
             f"Covariance.plot: expected Covariance, got {type(cov).__name__}."
@@ -1305,19 +1323,21 @@ def _plot_covariance(
     C = np.abs(cov.covariance[frequency_index])
     along = _array_coordinate(getattr(cov, 'receiver_positions', None))
     if along is None:
-        im = ax.imshow(C, cmap='viridis', aspect='auto', origin='upper')
+        im = ax.imshow(C, cmap='viridis', aspect='auto', origin='upper',
+                       vmin=vmin, vmax=vmax)
         ax.set_xlabel('Receiver j')
         ax.set_ylabel('Receiver i')
     else:
         coordinate, label, is_depth = along
         im = ax.pcolormesh(coordinate, coordinate, C, cmap='viridis',
-                           shading='nearest')
+                           shading='nearest', vmin=vmin, vmax=vmax)
         ax.set_xlabel(f'{label}, j')
         ax.set_ylabel(f'{label}, i')
         if is_depth:
             invert_yaxis_once(ax)
     unit = cov.unit
-    fig.colorbar(im, ax=ax, label=f'|C| ({unit})' if unit else '|C|')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label=f'|C| ({unit})' if unit else '|C|')
     f_hz = (float(cov.frequencies[frequency_index])
             if cov.frequencies is not None else None)
     if title is None and f_hz is not None:
@@ -1339,16 +1359,23 @@ def _plot_replicas(
     y_index: int = 0,
     figsize: Tuple[float, float] = (8, 5),
     title: Optional[str] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    show_colorbar: bool = True,
 ):
     """Magnitude of one element's replica response over the candidate
     (depth, range) grid, at one frequency and one ``y`` node.
 
-    Candidate range is drawn in km and depth in m, the axes
+    The candidate horizontal axis (``range``, or OASN's ``x``, named as such)
+    is drawn in km and depth in m, the axes
     :func:`~uacpy.plot.plot_matched_field` draws the ambiguity
     surface on, so a replica panel and the surface built from it line up.
     ``y_index`` picks the plane of an OASN ``(depth, x, y)`` candidate grid
     (the first by default) and the default title names it, with the
-    frequency and the element; a ``(depth, range)`` bank has no ``y``."""
+    frequency and the element; a ``(depth, range)`` bank has no ``y``.
+    ``vmin`` / ``vmax`` fix the colour limits (``None`` autoscales each) and
+    ``show_colorbar=False`` leaves the bar to
+    :func:`~uacpy.plot.shared_colorbar`, as on :func:`~uacpy.plot.plot_field`."""
     if not isinstance(rep, Replicas):
         raise ConfigurationError(
             f"Replicas.plot: expected Replicas, got {type(rep).__name__}."
@@ -1377,10 +1404,11 @@ def _plot_replicas(
                                   names.index(horizontal[0]))))
     im = ax.pcolormesh(
         m_to_km(rep.candidates[horizontal[0]]), rep.candidates['depth'], R,
-        shading='nearest', cmap='magma',
+        shading='nearest', cmap='magma', vmin=vmin, vmax=vmax,
     )
-    fig.colorbar(im, ax=ax, label='|R|')
-    ax.set_xlabel('Candidate range (km)')
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label='|R|')
+    ax.set_xlabel(f'Candidate {horizontal[0]} (km)')
     ax.set_ylabel('Candidate depth (m)')
     invert_yaxis_once(ax)
     freqs = getattr(rep, 'frequencies', None)
@@ -1433,7 +1461,8 @@ def _resolve_beam_pattern(pattern) -> np.ndarray:
         return np.array([[-180.0, 0.0], [180.0, 0.0]])
     if isinstance(pattern, (str, Path)):
         from uacpy.io.refl_io import read_source_beam_pattern
-        return np.asarray(read_source_beam_pattern(pattern), dtype=float)
+        read = read_source_beam_pattern(pattern)
+        return np.column_stack([read.angles, read.levels_dB])
     table = np.asarray(pattern, dtype=float)
     if table.ndim != 2 or table.shape[1] != 2:
         raise ConfigurationError(
@@ -1831,11 +1860,13 @@ def plot_beam_pattern(
 
     Parameters
     ----------
-    pattern : ndarray or path-like or None
-        What :attr:`uacpy.Source.beam_pattern` holds: an ``(N, 2)``
-        ``[angle_deg, level_dB]`` table, a ``.sbp`` file, or ``None`` for an
-        omnidirectional source (drawn as the flat 0 dB circle Bellhop itself
-        substitutes).
+    pattern : ndarray, BeamPatternTable, path-like or None
+        What :attr:`uacpy.Source.beam_pattern` takes: an ``(N, 2)``
+        ``[angle_deg, level_dB]`` table, the
+        :class:`~uacpy.io.BeamPatternTable` that
+        :func:`~uacpy.io.read_source_beam_pattern` returns, a ``.sbp`` file,
+        or ``None`` for an omnidirectional source (drawn as the flat 0 dB
+        circle Bellhop itself substitutes).
     polar : bool, default True
         Draw on polar axes oriented like the field: 0° along increasing
         range, positive angles downward. ``False`` draws level against angle

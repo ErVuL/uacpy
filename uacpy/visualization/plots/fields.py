@@ -11,13 +11,16 @@ from uacpy.core.environment import Environment
 from uacpy.core.exceptions import (
     ConfigurationError, NumericsWarning, ValidityWarning,
 )
+from uacpy.core.acoustics.levels import no_energy_mask
 from uacpy.core.metrics import tl_rmse_on_shared_ranges
 from uacpy.core.results import Field
+from uacpy.core.results._superposition import split_source_depths
+from uacpy.core.results.quantities import label as quantity_label
 from uacpy.core.units import m_to_km
 from uacpy.visualization.style import (cmap_for_field, reversed_cmap,
                                       PROBABILITY_COLORMAP,
                                       PROBABILITY_LIMITS)
-from uacpy.visualization.plots._common import _value_array, _value_label, _time_trace_label, _default_value, _coord_label, _coord_axis, _TL_LIMITS, _is_loss_view, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, _draw_credit, _model_attribution, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn, _title_or, _fit_subplot_margins, _fit_colorbar_strip, _grid_figure, _credit_attributions
+from uacpy.visualization.plots._common import _value_array, _value_label, _time_trace_label, _default_value, _coord_label, _coord_axis, _coordinate_caption, _TL_LIMITS, _is_loss_view, _overlay_seafloor, _pinned_subtitle, _draw_result_credit, _draw_credit, _model_attribution, fig_ax, invert_yaxis_once, _draw_geometry, typed_plot_error, _plot_warn, _title_or, _fit_subplot_margins, _fit_colorbar_strip, _grid_figure, _credit_attributions
 
 
 # Which of ``plot_field``'s knobs each of its three render branches reads.
@@ -41,6 +44,11 @@ _BRANCH_DESCRIPTION = {
 # Contour-label unit, keyed by ``value``. Linear pressure ('magnitude', 'real',
 # 'imag') carries no unit, so its labels are bare numbers.
 _CONTOUR_FMT = {'dB': '%g dB', 'level': '%g dB', 'phase': '%g rad'}
+_CONTOUR_UNIT = {'dB': ' dB', 'level': ' dB', 'phase': ' rad'}
+
+#: Figure fraction tight_layout keeps below a figure title on a
+#: multi-panel grid.
+_TITLE_ROOM_TOP = 0.95
 
 # ``value`` modes that render a dB view of the quantity, and so take its dB
 # colormap (``cmap_for_field(kind, dB=True)``). Every other mode is a linear
@@ -48,14 +56,11 @@ _CONTOUR_FMT = {'dB': '%g dB', 'level': '%g dB', 'phase': '%g rad'}
 # and 'magnitude' takes the ordered map 'level' takes.
 # ``plot_field`` and ``compare_models`` both key on this, so one field renders
 # the same through either entry point.
-from uacpy.core.acoustics.levels import no_energy_mask
-
-
-#: Figure fraction tight_layout keeps below a figure title on a
-#: multi-panel grid.
-_TITLE_ROOM_TOP = 0.95
-
 _DB_VALUES = ('dB', 'level')
+
+#: Largest receiver-marker size on a (depth, range) heatmap: the TL map and
+#: the sonar maps draw the same lattice at the same size.
+_HEATMAP_MAX_MARKERSIZE = 6
 
 #: Views that draw the carrier itself rather than its envelope, so a grid
 #: coarser than half a wavelength draws structure the field does not have.
@@ -138,14 +143,18 @@ def plot_field(
     stacked : bool
         Only valid on a 2-D field that carries a ``'time'`` axis. Plots
         each row of ``data`` as an offset trace stacked vertically — the
-        classic seismic-record waterfall.
+        classic seismic-record waterfall. A depth stack runs downward (the
+        shallowest trace on top), a range stack upward; in both a positive
+        value points up.
     stack_offset : float, optional
         Vertical offset between stacked traces. ``None`` picks
         ``2 × max|data|`` for visual separation.
     show_colorbar : bool, optional
         Draw the value colorbar (2-D heatmap only). Default ``True``.
-    contours : sequence of float, optional
-        Contour levels drawn over the 2-D heatmap.
+    contours : sequence or array of float, optional
+        Contour levels drawn over the 2-D heatmap, by the rule of every map
+        plotter: a level outside the map's range is reported and not drawn,
+        and an axis held at one sample draws none, with a warning.
 
     Knobs that the selected branch cannot use are rejected with a
     :class:`~uacpy.core.exceptions.ConfigurationError` rather than silently
@@ -157,6 +166,15 @@ def plot_field(
         title=title, label=label, figsize=figsize, stacked=stacked,
         stack_offset=stack_offset, show_colorbar=show_colorbar,
         contours=contours, **mpl_kw)
+
+
+@typed_plot_error(who=lambda *args, who, **kwargs: who)
+def _plot_field_as(field, env: Optional[Environment] = None, *, who: str,
+                   **kwargs):
+    """:func:`plot_field` as :func:`plot_result` draws a Field, each
+    refusal naming ``who``, the call the user made (``Field.plot``)."""
+    return _draw_field(field, kwargs.pop('ax', None), who=who, env=env,
+                       **kwargs)
 
 
 def _drop_singleton_axes(field, *, keep_cross_section=False):
@@ -250,17 +268,6 @@ def _draw_field(field, ax=None, *, who, env=None, source=None, receiver=None,
             "(depth, range) cross-section, label= to the 1-D line "
             "cut, stack_offset= to stacked=True."
         )
-    if (branch == 'heatmap' and contours
-            and min(field.coords[a].size for a in axes_present) < 2):
-        # A contour is interpolated between neighbouring samples, so an axis
-        # held at one sample (a cross-section kept for its overlay) has nothing
-        # to trace a level along.
-        sizes = ', '.join(f"{a}={field.coords[a].size}" for a in axes_present)
-        raise ConfigurationError(
-            f"{who}: contours= needs at least 2 samples on both axes; "
-            f"got {sizes}."
-        )
-
     if branch == 'stacked':
         fig, ax_out = _plot_field_stacked(
             field, arr, axes_present, ax=ax, title=title,
@@ -278,7 +285,7 @@ def _draw_field(field, ax=None, *, who, env=None, source=None, receiver=None,
             vmin=vmin, vmax=vmax, cmap=cmap, value=value, title=title,
             figsize=figsize,
             show_colorbar=True if show_colorbar is None else show_colorbar,
-            contours=contours, **mpl_kw,
+            contours=contours, who=who, **mpl_kw,
         )
     if ax is None:                       # credit only a figure we own
         _draw_result_credit(fig, field, env=env)
@@ -304,13 +311,19 @@ def _plot_field_stacked(
         peak = float(np.max(np.abs(traces))) if traces.size else 1.0
         offset = 2.0 * peak if peak > 0 else 1.0
 
+    # A depth stack runs downward, as every other depth axis does; a range
+    # stack keeps offset increasing upward, the record-section convention.
+    # The stack direction is the sign of the baselines, not an inverted
+    # axis, so a positive pressure points up in both.
+    step_offset = -offset if other_axis.endswith('depth') else offset
+
     fig, ax = fig_ax(ax, figsize)
     # setdefault, not a positional style: passing linewidth= through **mpl_kw
     # would otherwise collide with the hardcoded one and raise a raw TypeError.
     mpl_kw.setdefault('linewidth', 0.8)
     for i, c in enumerate(other_coord):
-        ax.plot(time, traces[i] + i * offset, **mpl_kw)
-    ax.set_xlabel(_coord_label('time'))
+        ax.plot(time, traces[i] + i * step_offset, **mpl_kw)
+    ax.set_xlabel(_coord_label('time', field))
     ax.set_ylabel(other_label + ' (stacked)')
     # One tick per trace is unreadable the moment a stack is more than a
     # couple of dozen deep: at 60 ranges the labels overprint into a solid
@@ -320,7 +333,7 @@ def _plot_field_stacked(
     # still drawn; only the labelling is thinned.
     step = max(1, len(other_coord) // 12)
     shown = range(0, len(other_coord), step)
-    ax.set_yticks([i * offset for i in shown])
+    ax.set_yticks([i * step_offset for i in shown])
     # Significant digits, not fixed decimals: a range axis in km spans values
     # a single decimal place would round to the same label.
     ax.set_yticklabels([f"{float(other_coord[i]):.4g}" for i in shown])
@@ -351,7 +364,7 @@ def _plot_field_1d(
     else:
         # Range / frequency cut: coordinate on X, value on Y. For a loss
         # (TL, reverberation), put the louder (smaller-dB) end at the top.
-        x_plot, x_label = _coord_axis(coord, axis_name)
+        x_plot, x_label = _coord_axis(coord, axis_name, field)
         line, = ax.plot(x_plot, vals, label=label, **mpl_kw)
         ax.set_xlabel(x_label)
         ax.set_ylabel(value_label)
@@ -583,7 +596,7 @@ def _plot_field_2d(
     field, arr, value_label, axes_present,
     *, ax, env, vmin, vmax, cmap, value, title, figsize, source=None,
     receiver=None,
-    show_colorbar=True, contours=None, **mpl_kw,
+    show_colorbar=True, contours=None, who='plot_field', **mpl_kw,
 ):
     # First coord axis on Y, second on X — which for the canonical
     # ['depth', 'range'] field is the usual depth-vs-range cross-section.
@@ -657,8 +670,8 @@ def _plot_field_2d(
 
     # Both axes go through _coord_axis, so a range axis reads in km whether it
     # lands on x or on y — same scale as every other view of that axis.
-    x_plot, x_label = _coord_axis(x_coord, x_name)
-    y_plot, y_label = _coord_axis(y_coord, y_name)
+    x_plot, x_label = _coord_axis(x_coord, x_name, field)
+    y_plot, y_label = _coord_axis(y_coord, y_name, field)
 
     # ``plot_field`` keeps a length-1 axis only for a cross-section overlay;
     # the helper draws it as a band so the row still renders.
@@ -672,14 +685,9 @@ def _plot_field_2d(
     # (core/results/field.py documents both in metres below the surface).
     if y_name.endswith('depth'):
         invert_yaxis_once(ax)
-    if contours:
-        cs = ax.contour(
-            x_plot, y_plot, Z, levels=list(contours),
-            colors='black', linewidths=1.5, alpha=0.8,
-            linestyles='solid',
-        )
-        ax.clabel(cs, inline=True, fontsize='small',
-                  fmt=_CONTOUR_FMT.get(value, '%g'))
+    _draw_contours(ax, x_plot, y_plot, Z, contours, who=who,
+                   fmt=_CONTOUR_FMT.get(value, '%g'), linewidth=1.5,
+                   unit=_CONTOUR_UNIT.get(value, ''), alpha=0.8)
     if show_colorbar:
         fig.colorbar(im, ax=ax, label=value_label,
                      fraction=0.046, pad=0.02)
@@ -702,7 +710,8 @@ def _plot_field_2d(
         if source is not None or receiver is not None:
             # Range is measured from the source, so the source sits at r = 0
             # even when the field's own grid starts further out.
-            _draw_geometry(ax, source, receiver, max_markersize=6,
+            _draw_geometry(ax, source, receiver,
+                           max_markersize=_HEATMAP_MAX_MARKERSIZE,
                            source_range_m=0.0, env=env)
     return fig, ax
 
@@ -771,10 +780,75 @@ def _finish_sonar_heatmap(fig, ax, im, field, *, env, x_label, colorbar_label,
             ax, im, m_to_km(field.coords['range']), field.coords['depth'],
             np.real(np.asarray(field.data)), env)
     if source is not None or receiver is not None:
-        _draw_geometry(ax, source=source, receiver=receiver, env=env)
+        _draw_geometry(ax, source=source, receiver=receiver,
+                       max_markersize=_HEATMAP_MAX_MARKERSIZE,
+                       source_range_m=0.0, env=env)
     if owns_fig:                         # credit only a figure we own
         _draw_result_credit(fig, field, env=env)
     return fig, ax
+
+
+def _contour_levels(contours, who):
+    """``contours`` as sorted unique float levels, ``None`` when there are
+    none to draw (``None`` or empty); any sequence or array of numbers,
+    refused when it holds something else, a non-finite level or a bool (on
+    the bathymetry maps ``contours=True`` asks for default isobaths, which a
+    level map has no counterpart of; here it would be the level 1)."""
+    if contours is None:
+        return None
+    if np.asarray(contours).dtype == bool:
+        raise ConfigurationError(
+            f"{who}: contours= takes the levels to draw, in the map's unit; "
+            f"got {contours!r}, a bool, which would draw the level 1.",
+            remediation="Pass the levels, e.g. contours=[140.0, 160.0], or "
+                        "None to draw none.")
+    try:
+        levels = np.atleast_1d(np.asarray(contours, dtype=float)).ravel()
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{who}: contours= takes the levels to draw, a sequence or array "
+            f"of numbers; got {contours!r}.") from exc
+    if levels.size == 0:
+        return None
+    if not np.all(np.isfinite(levels)):
+        raise ConfigurationError(
+            f"{who}: contours= levels must be finite; got "
+            f"{levels.tolist()}.")
+    return np.unique(levels)
+
+
+def _draw_contours(ax, x, y, Z, contours, *, who, fmt, linewidth,
+                   unit='', color='black', alpha=None):
+    """Labelled contour lines of ``Z`` at the ``contours`` levels: the one
+    rule of every map plotter. Levels come as any sequence or array of
+    numbers (:func:`_contour_levels`). A map held at one sample on an axis
+    has nothing to interpolate a level along, so it draws none and warns;
+    the heatmap still renders. A level outside the map's finite range has
+    no line: it is reported in one warning and the others are drawn."""
+    levels = _contour_levels(contours, who)
+    if levels is None:
+        return
+    Z = np.asarray(Z, dtype=float)
+    if min(Z.shape) < 2:
+        _plot_warn(
+            f"{who}: contours= needs at least 2 samples on both axes; got "
+            f"{Z.shape[0]}×{Z.shape[1]}, so no contours are drawn.",
+            NumericsWarning)
+        return
+    finite = Z[np.isfinite(Z)]
+    inside = ((levels > finite.min()) & (levels < finite.max())
+              if finite.size else np.zeros(levels.size, dtype=bool))
+    if not inside.all():
+        span = (f"{finite.min():.1f}-{finite.max():.1f}{unit}"
+                if finite.size else "no finite value")
+        _plot_warn(
+            f"{who}: contours={levels[~inside].tolist()}{unit} lie outside "
+            f"the map's {span}, so they are not drawn.", NumericsWarning)
+    if inside.any():
+        cs = ax.contour(x, y, Z, levels=levels[inside], colors=color,
+                        linewidths=linewidth, linestyles='solid',
+                        **({} if alpha is None else {'alpha': alpha}))
+        ax.clabel(cs, inline=True, fontsize='small', fmt=fmt)
 
 
 @typed_plot_error
@@ -787,7 +861,7 @@ def plot_signal_excess(
     receiver=None,
     vmax: Optional[float] = None,
     cmap: str = 'RdBu_r',
-    show_boundary: bool = True,
+    contours: Optional[Sequence[float]] = (0.0,),
     show_colorbar: bool = True,
     title: Optional[str] = None,
     figsize: Tuple[float, float] = (10, 5),
@@ -799,7 +873,8 @@ def plot_signal_excess(
     :func:`uacpy.sonar.passive_signal_excess_field` /
     :func:`uacpy.sonar.active_signal_excess_field` with a diverging
     colormap centred at SE = 0 dB (warm = detectable, cool = not) and
-    draws the SE = 0 contour — the detection boundary.
+    draws labelled SE contours, by default the SE = 0 dB one — the
+    detection boundary.
 
     Parameters
     ----------
@@ -817,8 +892,12 @@ def plot_signal_excess(
         the diverging map's neutral colour.
     cmap : str, optional
         Diverging colormap. Default ``'RdBu_r'``.
-    show_boundary : bool, optional
-        Draw the SE = 0 dB detection-boundary contour. Default True.
+    contours : sequence of float, optional
+        Signal-excess levels (dB) drawn as labelled contour lines,
+        ``(0.0,)`` — the detection boundary — by default; e.g.
+        ``(0.0, 10.0)`` adds the SE = +10 dB line; any sequence or array.
+        ``()`` or ``None`` draws none. A level outside the field's range
+        has no line and is reported in one warning.
     source, receiver : Source / Receiver, optional
         Draw the run geometry over the heatmap, with the markers
         :func:`plot_field` uses.
@@ -869,24 +948,9 @@ def plot_signal_excess(
     fig, ax, im, Z, r_km, x_label, depths, _owns_fig = _begin_sonar_heatmap(
         field, ax, env=env, figsize=figsize, vmin=-vmax, vmax=vmax, cmap=cmap,
         **mpl_kw)
-    if show_boundary and np.isfinite(Z).any():
-        finite_z = Z[np.isfinite(Z)]
-        if finite_z.min() < 0.0 < finite_z.max():
-            if min(Z.shape) < 2:
-                # A contour is interpolated between neighbouring samples, so a
-                # field held at one depth (or one range) has nothing to trace
-                # the boundary along. The heatmap itself still renders.
-                _plot_warn(
-                    "plot_signal_excess: the SE = 0 boundary needs at least 2 "
-                    f"samples on both axes; got depth={Z.shape[0]}, "
-                    f"range={Z.shape[1]}, so no boundary contour is drawn.", NumericsWarning)
-            else:
-                cs = ax.contour(
-                    r_km, depths, Z, levels=[0.0],
-                    colors='black', linewidths=1.5, linestyles='solid',
-                )
-                ax.clabel(cs, inline=True, fontsize='small',
-                          fmt=lambda _: 'SE = 0 dB')
+    _draw_contours(ax, r_km, depths, Z, contours, who='plot_signal_excess',
+                   fmt=lambda level: f'SE = {level:g} dB', linewidth=1.5,
+                   unit=' dB')
     return _finish_sonar_heatmap(
         fig, ax, im, field, env=env, x_label=x_label,
         colorbar_label='Signal excess (dB)', show_colorbar=show_colorbar,
@@ -903,7 +967,7 @@ def plot_detection_probability(
     source=None,
     receiver=None,
     cmap: str = PROBABILITY_COLORMAP,
-    contour_levels: Sequence[float] = (0.1, 0.5, 0.9),
+    contours: Optional[Sequence[float]] = (0.1, 0.5, 0.9),
     show_colorbar: bool = True,
     title: Optional[str] = None,
     figsize: Tuple[float, float] = (10, 5),
@@ -927,8 +991,11 @@ def plot_detection_probability(
         Overlays the seafloor, as in :func:`plot_field`.
     cmap : str, optional
         Colormap. Default ``'RdYlGn'`` (red = lost, green = detected).
-    contour_levels : sequence of float, optional
-        ``P_D`` contour lines to draw. Default ``(0.1, 0.5, 0.9)``.
+    contours : sequence of float, optional
+        ``P_D`` levels drawn as labelled contour lines. Default
+        ``(0.1, 0.5, 0.9)``; any sequence or array; ``()`` or ``None`` draws
+        none. A level outside the field's range has no line and is reported
+        in one warning.
     source, receiver : Source / Receiver, optional
         Draw the run geometry over the heatmap, with the markers
         :func:`plot_field` uses.
@@ -971,25 +1038,8 @@ def plot_detection_probability(
     fig, ax, im, Z, r_km, x_label, depths, _owns_fig = _begin_sonar_heatmap(
         field, ax, env=env, figsize=figsize, vmin=PROBABILITY_LIMITS[0],
         vmax=PROBABILITY_LIMITS[1], cmap=cmap, **mpl_kw)
-    finite = Z[np.isfinite(Z)]
-    if contour_levels and finite.size:
-        levels = [
-            lv for lv in sorted(contour_levels)
-            if finite.min() < lv < finite.max()
-        ]
-        if levels and min(Z.shape) < 2:
-            # Nothing to interpolate a level along on an axis held at one
-            # sample; the heatmap itself still renders.
-            _plot_warn(
-                "plot_detection_probability: contour_levels= needs at least 2 "
-                f"samples on both axes; got depth={Z.shape[0]}, "
-                f"range={Z.shape[1]}, so no contours are drawn.", NumericsWarning)
-        elif levels:
-            cs = ax.contour(
-                r_km, depths, Z, levels=levels,
-                colors='black', linewidths=1.2, linestyles='solid',
-            )
-            ax.clabel(cs, inline=True, fontsize='small', fmt='%.1f')
+    _draw_contours(ax, r_km, depths, Z, contours,
+                   who='plot_detection_probability', fmt='%g', linewidth=1.2)
     sigma = field.sigma_dB
     pin = _pinned_subtitle(field)
     auto = 'Detection probability'
@@ -1001,6 +1051,141 @@ def plot_detection_probability(
         show_colorbar=show_colorbar, title=title,
         auto_title=f"{auto} — {pin}" if pin else auto, owns_fig=_owns_fig,
         source=source, receiver=receiver)
+
+
+#: Events :func:`plot_track_exposure` ticks individually; past it the ticks
+#: merge into a bar at any figure size, and the track line alone is drawn.
+_MAX_EVENT_TICKS = 200
+
+
+@typed_plot_error
+def plot_track_exposure(
+    field: Field,
+    ax=None,
+    *,
+    positions=None,
+    depth: Optional[float] = None,
+    contours: Optional[Sequence[float]] = None,
+    cmap: Optional[str] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    show_colorbar: bool = True,
+    title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10, 5),
+    **mpl_kw,
+):
+    """Plan view of a moving source's cumulative exposure around its track.
+
+    Draws the map :meth:`Field.track_exposure` returns with ``along=``,
+    seen from above. The x axis is along the track and the y axis is the
+    distance from it, mirrored to both sides (the sum is the same either
+    side of a straight track). The track is the line ``y = 0``, and its
+    events are ticks on it.
+
+    Parameters
+    ----------
+    field : Field
+        A plan-view track map: ``kind='sound_exposure'`` on ``('along',
+        'range')``, optionally with a ``'depth'`` axis first.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes; a new figure is made when omitted.
+    positions : array_like, optional
+        The events' along-track positions (m). The track is drawn from the
+        first to the last, with a tick per event when there are at most
+        200 (more would merge into a bar). Unset, the track is drawn across
+        the whole map.
+    depth : float, optional
+        Receiver depth (m) to draw, nearest on the map's depth axis.
+        Required when the map holds more than one depth.
+    contours : sequence of float, optional
+        Levels (dB re the map's reference) drawn as labelled contours, the
+        same keyword as on the other field maps; an exposure criterion
+        (e.g. ``uacpy.noise.EXPOSURE_THRESHOLDS``) contoured is the area
+        inside which it is reached. A level outside the map's range is
+        reported and not drawn.
+    cmap, vmin, vmax : optional
+        Colour map and limits; the colour limits default to the data's.
+    show_colorbar : bool, optional
+        Draw the colorbar. Default True.
+    title : str, optional
+        Axes title. ``None`` draws the default caption; ``''`` draws none.
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(10, 5)`` by default; unused when
+        ``ax`` is given.
+    **mpl_kw
+        Passed to ``pcolormesh``.
+
+    Returns
+    -------
+    fig, ax
+    """
+    who = 'plot_track_exposure'
+    if not isinstance(field, Field):
+        raise ConfigurationError(
+            f"{who}: expected Field, got {type(field).__name__}.")
+    if field.kind != 'sound_exposure' or 'along' not in field.coords:
+        raise ConfigurationError(
+            f"{who}: needs the plan view Field.track_exposure(..., along=) "
+            f"returns; got kind={field.kind!r} on axes {list(field.coords)}.",
+            remediation="Pass along= (receiver along-track coordinates) to "
+                        "track_exposure.")
+    if 'depth' in field.coords:
+        depths = np.atleast_1d(field.coords['depth'])
+        if depth is None and depths.size > 1:
+            raise ConfigurationError(
+                f"{who}: the map holds {depths.size} receiver depths; pick "
+                f"one with depth=.")
+        field = field.at(depth=depths[0] if depth is None else depth)
+    if list(field.coords) != ['along', 'range']:
+        raise ConfigurationError(
+            f"{who}: expected axes ['along', 'range'] after the depth is "
+            f"chosen; got {list(field.coords)}.")
+    along_km = m_to_km(np.asarray(field.coords['along'], dtype=float))
+    off_km = m_to_km(np.asarray(field.coords['range'], dtype=float))
+    values = np.asarray(field.data, dtype=float)          # (along, range)
+    # Both sides of the track: the far side is the mirror image. A zero
+    # distance is the track itself and appears once.
+    near = off_km > 0.0
+    across = np.concatenate((-off_km[near][::-1], off_km))
+    image = np.concatenate((values[:, near][:, ::-1], values), axis=1).T
+
+    owns_fig = ax is None
+    fig, ax = fig_ax(ax, figsize)
+    im = ax.pcolormesh(along_km, across, image, shading='nearest',
+                       cmap=cmap or cmap_for_field('sound_exposure', dB=True),
+                       vmin=vmin, vmax=vmax, **mpl_kw)
+    if positions is None:
+        ax.axhline(0.0, color='black', linewidth=1.0)
+    else:
+        events_km = m_to_km(np.atleast_1d(np.asarray(positions, dtype=float)))
+        ax.plot([events_km.min(), events_km.max()], [0.0, 0.0],
+                color='black', linewidth=1.0)
+        if events_km.size <= _MAX_EVENT_TICKS:
+            ax.plot(events_km, np.zeros(events_km.size), linestyle='none',
+                    marker='|', markersize=6, color='black')
+    _draw_contours(ax, along_km, across, image, contours, who=who,
+                   fmt='%g dB', linewidth=1.5, unit=' dB', color='white')
+    # The unit part of the registry's SEL label, which names the map's own
+    # reference pressure when it is not 1 µPa: '(dB re 1 µPa²·s)'.
+    unit = quantity_label('sound_exposure', 'dB',
+                          reference=getattr(field, 'reference', None))
+    unit = unit[unit.index('('):]
+    label = f'Cumulative SEL {unit}'
+    if field.weighting:
+        label = f'{field.weighting}-weighted cumulative SEL {unit}'
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, label=label, fraction=0.046, pad=0.02)
+    ax.set_xlabel('Along track (km)')
+    ax.set_ylabel('Distance from track (km)')
+    ax.set_aspect('auto')
+    auto = 'Cumulative exposure around the track'
+    if field.track_events:
+        auto += f' ({field.track_events} events)'
+    pin = _pinned_subtitle(field)
+    ax.set_title(_title_or(title, f"{auto} — {pin}" if pin else auto))
+    if owns_fig:
+        _draw_result_credit(fig, field)
+    return fig, ax
 
 
 def _labelled_fields(fields, labels, who, *, each=''):
@@ -1136,7 +1321,8 @@ def compare(
             ax.plot(np.asarray(arr).ravel(), f.coords[common_axis],
                     label=lbl, **mpl_kw)
         else:
-            x_plot, x_label = _coord_axis(f.coords[common_axis], common_axis)
+            x_plot, x_label = _coord_axis(f.coords[common_axis], common_axis,
+                                          f)
             ax.plot(x_plot, np.asarray(arr).ravel(), label=lbl, **mpl_kw)
     # The kind check above makes the first field representative of them all,
     # so it settles the shared value-axis label and — for a loss cut — the
@@ -1256,8 +1442,9 @@ def compare_models(
         Figure title; none is drawn when unset.
     ncols : int, optional
         Panels per row; ``None`` is one row.
-    contours : sequence of float, optional
-        dB levels contoured on every panel.
+    contours : sequence or array of float, optional
+        dB levels contoured on every panel, by :func:`plot_field`'s rule (a
+        level outside a panel's range is reported for that panel).
     fig : Figure or SubFigure, optional
         Draw the grid into this (see above).
     **mpl_kw
@@ -1473,7 +1660,7 @@ def compare_models(
         # Its ticks and label live outside its axes, so it too is measured.
         _fit_colorbar_strip(fig, cbar_ax)
     # One shape for every grid-of-panels return on this surface: the 2-D
-    # axes array, matching _plot_field_stack (documented in the Returns
+    # axes array, matching _plot_source_depth_panels (documented in the Returns
     # section above).
     return fig, axes
 
@@ -1627,6 +1814,7 @@ def plot_field_difference(
     diff_vmax: Optional[float] = None,
     cmap: Optional[str] = None,
     title: Optional[str] = None,
+    figsize: Tuple[float, float] = (10, 5),
     **mpl_kw,
 ):
     """Heatmap of ``field`` minus ``reference``, in dB.
@@ -1654,6 +1842,9 @@ def plot_field_difference(
         Colormap. ``None`` takes the diverging map the ``'difference'``
         quantity carries (``RdBu_r``), whose neutral colour marks zero.
     title : str, optional
+    figsize : tuple, optional
+        Size (inches) of the new figure, ``(10, 5)`` by default; unused
+        when ``ax`` is given.
     **mpl_kw
         Forwarded to :func:`plot_field`.
 
@@ -1713,7 +1904,7 @@ def plot_field_difference(
         colour = dict(vmin=-10.0 if vmin is None else vmin,
                       vmax=10.0 if vmax is None else vmax, cmap=cmap)
     owns_fig = ax is None
-    fig, ax = fig_ax(ax, mpl_kw.pop('figsize', (10, 5)))
+    fig, ax = fig_ax(ax, figsize)
     _draw_field(difference, ax, who=who, env=env, title=title, **colour,
                 **mpl_kw)
     # The registry says 'Difference (dB)'; this panel knows which difference it
@@ -1828,8 +2019,17 @@ def plot_field_statistics(
     # A no-energy cell is a marker, not a 600 dB level: NaN it before the
     # reductions, as plot_field does before autoscaling.
     cuts = []
-    for f in kept_fields:
-        c = np.asarray(f.at(depth=depth).dB, dtype=float)
+    for name, f in zip(names, kept_fields):
+        cut = f.at(depth=depth)
+        spread = [axis for axis, values in cut.coords.items()
+                  if np.size(values) > 1 and axis != 'range']
+        if spread:
+            raise ConfigurationError(
+                f"plot_field_statistics: {name!r} cut at depth={depth:g} m "
+                f"still spans {spread}; the statistics are over range only. "
+                f"Select one value of each first, e.g. "
+                f"field.at({spread[0]}=...).")
+        c = np.asarray(cut.dB, dtype=float)
         cuts.append(np.where(no_energy_mask(c), np.nan, c))
     means = [float(np.nanmean(c)) for c in cuts]
     stds = [float(np.nanstd(c)) for c in cuts]
@@ -1900,18 +2100,40 @@ def plot_field_statistics(
     return fig, axes
 
 
-@typed_plot_error
-def _plot_field_stack(stack, env: Optional[Environment] = None, *,
-                      ncols: Optional[int] = None,
-                      title: Optional[str] = None,
-                      figsize: Optional[Tuple[float, float]] = None, **kwargs):
-    """Grid of TL panels, one per slab of a Field :class:`ResultStack`.
+@typed_plot_error(who=lambda *args, who, **kwargs: who)
+def _plot_source_depth_panels(field, env: Optional[Environment] = None, *,
+                              who: str,
+                              ncols: Optional[int] = None,
+                              title: Optional[str] = None,
+                              figsize: Optional[Tuple[float, float]] = None,
+                              **kwargs):
+    """Grid of panels, one per source depth of a Field with a
+    ``source_depth`` axis.
 
-    Each panel is a :func:`plot_field` heatmap titled by the slab's stacking
-    coordinate (e.g. ``source_depth=20``); ``title`` titles the whole figure.
-    Extra kwargs forward to :func:`plot_field`.
+    Each panel is a :func:`plot_field` view of one source's field titled
+    by its depth (``Source depth = 20 m``), the source marked on a
+    (depth, range) panel; ``title`` titles the whole figure. Extra kwargs
+    forward to :func:`plot_field`, whose refusals name ``who``. A panel shows two
+    axes, so a field with more than two others of several values (a
+    frequency or a time beside depth and range) is refused, naming ``who``
+    (the call the user made), the field's own axes and the selection that
+    removes the extra one.
     """
-    n = len(stack)
+    spread = [axis for axis, values in field.coords.items()
+              if axis != 'source_depth' and values.size > 1]
+    if len(spread) > 2:
+        beyond = [axis for axis in spread if axis not in ('depth', 'range')]
+        raise ConfigurationError(
+            f"{who}: a field over {list(field.coords)} is drawn as one "
+            f"two-axis panel per source depth, and {spread} are "
+            f"{len(spread)} axes of several values.",
+            remediation="Select one value of "
+                        + ', '.join(beyond) + " first, e.g. field.at("
+                        + ', '.join(f'{a}=...' for a in beyond)
+                        + ").plot().")
+    field._warn_if_weights_unapplied('plot')
+    planes = split_source_depths(field)
+    n = len(planes)
     ncols = ncols or min(n, 3)
     nrows = int(np.ceil(n / ncols))
     figsize = figsize or (5.5 * ncols, 4.0 * nrows)
@@ -1920,27 +2142,25 @@ def _plot_field_stack(stack, env: Optional[Environment] = None, *,
     # A source-depth grid is "one source at a time", so each panel marks the
     # source it belongs to. The whole array on every panel would say the
     # opposite, and nothing at all leaves the reader drawing the marker by
-    # hand. ``source=`` from the caller wins, and any other stacking
-    # coordinate is left alone.
-    per_panel_source = (
-        stack.coordinate_name == 'source_depth'
-        and 'source' not in kwargs
-        and all(getattr(s, 'source_depths', None) is not None
-                for s in stack.slabs)
-    )
-    for i, (coord, slab) in enumerate(stack):
-        extra = ({'source': np.atleast_1d(slab.source_depths)}
-                 if per_panel_source else {})
-        plot_field(slab, ax=flat[i], env=env, **extra, **kwargs)
-        flat[i].set_title(f"{stack.coordinate_name}={coord:g}")
+    # hand. ``source=`` from the caller wins. Only a (depth, range) panel has
+    # a place to mark it: a (range, frequency) plane of one receiver depth
+    # has none.
+    per_panel_source = 'source' not in kwargs
+    for i, (depth, plane) in enumerate(
+            zip(field.coords['source_depth'], planes)):
+        extra = ({'source': np.atleast_1d(plane.source_depths)}
+                 if per_panel_source
+                 and set(plane.coords) == {'depth', 'range'} else {})
+        _draw_field(plane, flat[i], who=who, env=env, **extra, **kwargs)
+        flat[i].set_title(_coordinate_caption('source_depth', depth))
     for j in range(n, len(flat)):
         flat[j].axis('off')
     if title:
         fig.suptitle(title, fontweight='bold')
     # After the suptitle, and leaving it room: tight_layout before it let the
-    # figure title overprint the middle panel's title on three or more slabs.
+    # figure title overprint the middle panel's title on three or more panels.
     fig.tight_layout(rect=(0.0, 0.0, 1.0, _TITLE_ROOM_TOP if title else 1.0))
-    _draw_result_credit(fig, stack.slabs[0], env=env)
+    _draw_result_credit(fig, field, env=env)
     return fig, axes
 
 
@@ -1970,7 +2190,7 @@ def _reduce_to_spectrum(field, method: str) -> Field:
 
 
 @typed_plot_error(who='Field.plot_transfer_function')
-def plot_transfer_function(field, *, ax=None, title=None,
+def plot_transfer_function(field, ax=None, *, title=None,
                            figsize=(8, 6), **kwargs):
     """Plot the transfer function ``H(f)`` at one receiver cell as two
     stacked panels: modulus in dB (``20·log10|H|``, top) over phase
@@ -2058,7 +2278,7 @@ def plot_transfer_function(field, *, ax=None, title=None,
 
 
 @typed_plot_error(who='Field.plot_impulse_response')
-def plot_impulse_response(field, *, ax=None, title=None, window: str = 'hann',
+def plot_impulse_response(field, ax=None, *, title=None, window: str = 'hann',
                           nfft: Optional[int] = None,
                           t_start: Optional[float] = None,
                           figsize=(8, 4), **kwargs):

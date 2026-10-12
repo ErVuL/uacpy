@@ -19,7 +19,9 @@ from uacpy.core.exceptions import ConfigurationError, NumericsWarning
 from uacpy.core.units import KNOTS_PER_M_PER_S, knots_to_ms
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core._grid import _RangeProfile
-from uacpy.core._validate import require_finite
+from uacpy.core._validate import (
+    real_array_or_none, refuse_two_columns, require_finite,
+    require_generator)
 from uacpy.core.constants import STANDARD_GRAVITY_M_S2
 from uacpy.core._provenance import coerce_data_sources
 
@@ -74,7 +76,10 @@ class Altimetry(_RangeProfile):
     def coerce(cls, value):
         """Coerce ``None`` / ``Altimetry`` / ``(N, 2)`` ``(range, height)``
         pairs into an :class:`Altimetry` (``None`` passes through — a flat
-        z = 0 surface).
+        z = 0 surface). Two columns ``(ranges, heights)`` are refused with
+        the ``np.column_stack`` remedy, except for two 2-sample columns,
+        which a ``2 x 2`` input cannot be told apart from: it is read as two
+        ``(range, height)`` pairs.
 
         Parameters
         ----------
@@ -83,12 +88,17 @@ class Altimetry(_RangeProfile):
         """
         if value is None or isinstance(value, Altimetry):
             return value
-        try:
-            arr = np.asarray(value, dtype=float)
-        except (TypeError, ValueError):
+        arr = real_array_or_none(value)
+        if arr is None:
             raise ConfigurationError(
                 f"Altimetry: must be shape (N, 2) as [(range, height_m), ...]; "
                 f"got non-numeric {value!r}.")
+        refuse_two_columns(
+            arr, who='Altimetry', name='altimetry',
+            columns='ranges, heights', pair='range, height',
+            carrier='an Altimetry',
+            remediation="Pass altimetry=np.column_stack([ranges, heights]) "
+                        "or Altimetry(ranges=ranges, heights=heights).")
         if arr.ndim != 2 or arr.shape[1] != 2:
             raise ConfigurationError(
                 f"Altimetry: must have shape (N, 2) as [(range, height_m), "
@@ -243,14 +253,7 @@ def generate_sea_surface(
         raise ConfigurationError(
             f"generate_sea_surface: n_points must be >= 2; got {n_points}."
         )
-    if rng is None:
-        rng = np.random.default_rng()
-    elif not isinstance(rng, np.random.Generator):
-        raise ConfigurationError(
-            f"generate_sea_surface: rng must be a numpy.random.Generator; "
-            f"got {type(rng).__name__}.",
-            remediation="Pass rng=np.random.default_rng(seed) for a "
-                        "reproducible surface.")
+    rng = require_generator(rng, "generate_sea_surface")
     g = STANDARD_GRAVITY_M_S2
 
     ranges = np.linspace(0, rmax_m, n_points)

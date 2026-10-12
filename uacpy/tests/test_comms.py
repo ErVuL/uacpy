@@ -199,6 +199,21 @@ class TestDoppler:
         # and abs=2e-4 allows a two-node miss.
         assert best == pytest.approx(a_true, abs=2e-4)
 
+    @pytest.mark.parametrize('scales', [None, np.linspace(0, 4e-3, 41)])
+    def test_every_scan_returns_a_doppler_estimate(self, scales):
+        """The default two-stage grid and an explicit scan both return the
+        record, whose best_scale is the first field and whose .plot() draws
+        the curve it holds."""
+        fs = 48000.0
+        t = np.arange(4000) / fs
+        template = np.exp(1j * 2 * np.pi * (6000 * t + 0.5 * 4e6 * t ** 2))
+        estimate = comms.estimate_doppler_scale(
+            comms.compensate_doppler(template, -2e-3), template, scales)
+        assert type(estimate) is comms.DopplerEstimate
+        assert estimate[0] == estimate.best_scale
+        assert estimate.scales.shape == estimate.peak_metric.shape
+        assert hasattr(estimate, 'plot')
+
     def test_doppler_from_speed_is_the_v_over_c_scale(self):
         """The estimator's output is the same quantity a platform speed maps
         to, so the two are directly comparable."""
@@ -2778,6 +2793,24 @@ class TestSmallCommsGuards:
         with pytest.raises(ConfigurationError, match="empty channel h"):
             comms.apply_channel(np.ones(8), [])
 
+    def test_a_long_channel_is_applied_by_fft_and_matches_the_direct_sum(self):
+        # 20 000 samples through 4 000 complex taps: overlap-add, equal to
+        # the direct convolution to rounding.
+        import time
+        rng = np.random.default_rng(11)
+        x = rng.standard_normal(20000) + 1j * rng.standard_normal(20000)
+        h = rng.standard_normal(4000) + 1j * rng.standard_normal(4000)
+        comms.apply_channel(x[:100], h[:50])
+        t0 = time.perf_counter()
+        y = comms.apply_channel(x, h)
+        fast = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        want = np.convolve(x, h)
+        direct = time.perf_counter() - t0
+        assert y.size == want.size
+        assert np.max(np.abs(y - want)) < 1e-12 * np.max(np.abs(want))
+        assert fast < 0.5 * direct
+
     def test_estimate_doppler_scale_empty_template_raises(self):
         with pytest.raises(ConfigurationError, match="empty template"):
             comms.estimate_doppler_scale(np.ones(32), np.array([]))
@@ -2851,7 +2884,8 @@ class TestSyncMetricsAreScaleInvariant:
 
     @pytest.mark.parametrize("amplitude", [1e3, 1.0, 1e-4, 1e-9, 1e-12])
     def test_schmidl_cox_syncs_at_every_amplitude(self, amplitude):
-        pre = schmidl_cox_preamble(self.NSC, self.CP, seed=7)
+        pre = schmidl_cox_preamble(self.NSC, self.CP,
+                                   rng=np.random.default_rng(7))
         rx = np.concatenate([np.zeros(self.OFFSET, complex),
                              pre * amplitude,
                              np.zeros(40, complex)])
@@ -2943,6 +2977,29 @@ class TestOFDMArgumentValidation:
         with pytest.raises(ConfigurationError, match="cp_len"):
             comms.estimate_channel(block, pilot, 8, -4)
         assert comms.estimate_channel(block, pilot, 8, 0).size == 8
+
+    def test_preamble_unset_rng_draws_the_fixed_pn_sequence(self):
+        """``rng=None`` is the fixed sequence both ends of a link rebuild:
+        bit-identical to a generator seeded with the package's PN seed, and
+        different from any other generator's draw."""
+        from uacpy.comms.ofdm import _PREAMBLE_PN_SEED
+        default = schmidl_cox_preamble(64, 16)
+        assert np.array_equal(default, schmidl_cox_preamble(
+            64, 16, rng=np.random.default_rng(_PREAMBLE_PN_SEED)))
+        assert not np.array_equal(default, schmidl_cox_preamble(
+            64, 16, rng=np.random.default_rng(7)))
+
+    def test_preamble_draws_from_the_generator_it_is_given(self):
+        a = schmidl_cox_preamble(64, 16, rng=np.random.default_rng(7))
+        b = schmidl_cox_preamble(64, 16, rng=np.random.default_rng(7))
+        assert np.array_equal(a, b)
+
+    @pytest.mark.parametrize("rng", [7, np.random.PCG64(7)])
+    def test_preamble_refuses_an_rng_that_is_not_a_generator(self, rng):
+        with pytest.raises(ConfigurationError,
+                           match=r"schmidl_cox_preamble: rng must be a "
+                                 r"numpy\.random\.Generator or None; got "):
+            schmidl_cox_preamble(64, 16, rng=rng)
 
     def test_preamble_negative_cp_len_is_rejected(self):
         # A negative cp makes ofdm_symbol's t[n_sc - cp:] slice empty, so
@@ -3686,10 +3743,11 @@ class TestChannelTapsDriveTheLinkHarness:
         first, last = float(arr.delays.min()), float(arr.delays.max())
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
-            rts, t = delayandsum(arr.by_receiver[0][0][0], passband, fs, fc,
-                                 t_start=first,
-                                 time_window=((last - first)
-                                              + baseband.size / fs + 0.02))
+            rts, t = delayandsum(arr.by_receiver[0][0][0],
+                                 source_waveform=passband, sample_rate=fs,
+                                 trace_frequency=fc, t_start=first,
+                                 output_duration=(last - first)
+                                              + baseband.size / fs + 0.02)
         mixed = (comms.downconvert(rts, fs, fc)
                  * np.exp(-2j * np.pi * fc * t[0]))
         via_passband = comms.rrc_matched_filter(mixed, sps, 0.25, 8)
@@ -3861,3 +3919,244 @@ class TestOneSchemeTable:
             comms.constellation('32qam')
         with pytest.raises(ConfigurationError, match='unsupported scheme'):
             comms.ber_theory('32qam', 10.0)
+
+
+class TestJanusReadsALongRecordInBoundedMemory:
+    """The chips-alignment bank runs block by block, and after the Doppler
+    resample the preamble is re-detected near where it moved rather than
+    over the whole recording again."""
+
+    FS = 48000.0
+
+    @staticmethod
+    def _recording(fs, seconds, at):
+        pkt = comms.JanusPacket(class_id=16, app_type=0)
+        wav = comms.janus_transmit(pkt, sample_rate=fs)
+        rng = np.random.default_rng(9)
+        x = 0.05 * rng.standard_normal(int(seconds * fs))
+        i = int(at * fs)
+        x[i:i + wav.size] += wav
+        return x
+
+    def test_the_blocked_statistic_is_the_whole_bank_statistic(self,
+                                                                monkeypatch):
+        from uacpy.comms import janus
+        x = self._recording(self.FS, 3.0, 1.0)
+        fmin, fsw = janus._band_params(janus.FC_INITIAL, janus.BW_INITIAL)
+        _, fs_c = janus._canonical_fs(1.0 / fsw, self.FS)
+        xc = janus._resample(x, fs_c / self.FS)
+        args = (xc, fs_c, fmin, fsw, janus.FH_SEQUENCE, 1.0 / fsw, 5.0)
+        whole, _ = janus._chips_alignment(*args)
+        monkeypatch.setattr(janus, '_ALIGN_BLOCK_SAMPLES', 10_000)
+        blocked, _ = janus._chips_alignment(*args)
+        np.testing.assert_allclose(blocked, whole, rtol=1e-12)
+
+    def test_the_post_doppler_detection_reads_only_the_packets_neighbourhood(
+            self, monkeypatch):
+        from uacpy.comms import janus
+        x = self._recording(self.FS, 12.0, 5.0)
+        sizes = []
+        real = janus._detect
+
+        def spy(xx, *args):
+            sizes.append(np.size(xx))
+            return real(xx, *args)
+
+        monkeypatch.setattr(janus, '_detect', spy)
+        out, ok = comms.janus_demodulate(x, self.FS)
+        assert ok
+        assert len(sizes) == 2 and sizes[1] < sizes[0] / 3
+
+    def test_no_bank_product_holds_more_than_one_block_of_frames(
+            self, monkeypatch):
+        from uacpy.comms import janus
+        seen = []
+
+        class Frames(np.ndarray):
+            def __matmul__(self, other):
+                seen.append(self.shape)
+                return np.asarray(self) @ other
+
+        real = janus.sliding_window_view
+        monkeypatch.setattr(janus, 'sliding_window_view',
+                            lambda *a, **k: real(*a, **k).view(Frames))
+        monkeypatch.setattr(janus, '_ALIGN_BLOCK_SAMPLES', 10_000)
+        comms.janus_detect(self._recording(self.FS, 3.0, 1.0), self.FS)
+        assert len(seen) > 1
+        assert max(rows * width for rows, width in seen) <= 10_000
+
+    def test_the_doppler_resample_covers_only_the_packets_stretch(
+            self, monkeypatch):
+        """A 2 m/s packet in a 12 s record: the Doppler stage interpolates
+        the stretch the re-detection and the frame read, not the record."""
+        from uacpy.comms import janus
+        wav = comms.janus_transmit(comms.JanusPacket(class_id=16, app_type=0),
+                                   sample_rate=self.FS)
+        n = int(round(wav.size / (1.0 + comms.doppler_from_speed(2.0))))
+        wav = np.interp(np.linspace(0, wav.size - 1, n), np.arange(wav.size),
+                        wav)
+        x = 0.05 * np.random.default_rng(9).standard_normal(int(12 * self.FS))
+        x[int(5 * self.FS):int(5 * self.FS) + wav.size] += wav
+        sizes = []
+        real = janus.np.interp
+        monkeypatch.setattr(janus.np, 'interp',
+                            lambda q, *a: (sizes.append(np.size(q)),
+                                           real(q, *a))[1])
+        reception = comms.janus_demodulate(x, self.FS)
+        assert reception.crc_ok and reception.doppler_scale != 0.0
+        assert sizes and max(sizes) < x.size / 3
+
+    @pytest.mark.parametrize('lo, hi', [(0, 500), (1234, 5678),
+                                        (9000, 10_011), (0, 10_011)])
+    @pytest.mark.parametrize('scale', [1.0011, 0.9987])
+    def test_a_resampled_stretch_is_the_whole_resample_sliced(self, lo, hi,
+                                                              scale):
+        from uacpy.comms import janus
+        x = np.random.default_rng(3).standard_normal(10_000)
+        hi = min(hi, janus._resampled_size(x.size, scale))
+        np.testing.assert_array_equal(
+            janus._resample_stretch(x, scale, lo, hi),
+            janus._resample(x, scale)[lo:hi])
+
+
+class TestJanusAndPhyInputGuards:
+    """Flags and app-data bits are checked where the packet is built into
+    bits; the sample rate is a positive finite number; every emitted tone,
+    and a mixer's carrier, sits strictly below Nyquist."""
+
+    @pytest.mark.parametrize('field, value, refused', [
+        ('mobility', 2, True), ('tx_rx', 3, True), ('forward', -1, True),
+        ('mobility', 1, False), ('schedule', 0, False)])
+    def test_a_flag_holds_one_bit(self, field, value, refused):
+        pkt = comms.JanusPacket(**{field: value})
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match=f'{field} is a one-bit flag'):
+                pkt.to_bits()
+        else:
+            assert pkt.to_bits().size == 64
+
+    def test_app_data_holds_bits(self):
+        with pytest.raises(ConfigurationError,
+                           match='app_data must hold bits'):
+            comms.JanusPacket(app_data=np.full(34, 2)).to_bits()
+
+    @pytest.mark.parametrize('rate', [np.nan, 0.0, -48000.0])
+    def test_a_rate_that_is_not_positive_and_finite_is_refused(self, rate):
+        bits = comms.JanusPacket().to_bits()
+        with pytest.raises(ConfigurationError,
+                           match='janus_modulate: sample_rate must be > 0'):
+            comms.janus_modulate(bits, sample_rate=rate)
+
+    @pytest.mark.parametrize('wakeup, refused', [(True, True), (False, False)])
+    def test_the_wakeup_tone_may_not_sit_on_nyquist(self, wakeup, refused):
+        """At sample_rate = 2·(fc + bw/2) the top wake-up tone is exactly
+        Nyquist; the data tones all sit below it."""
+        from uacpy.comms import janus
+        bits = comms.JanusPacket().to_bits()
+        edge = 2 * (janus.FC_INITIAL + janus.BW_INITIAL / 2)
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match='top wake-up tone .* at or above'):
+                comms.janus_modulate(bits, sample_rate=edge, wakeup=wakeup)
+        else:
+            assert comms.janus_modulate(bits, sample_rate=edge,
+                                        wakeup=wakeup).size > 0
+        assert comms.janus_modulate(bits, sample_rate=edge + 2.0,
+                                    wakeup=True).size > 0
+
+    @pytest.mark.parametrize('fc, refused', [(900.0, True), (500.0, True),
+                                             (400.0, False)])
+    def test_a_mixer_carrier_must_sit_below_nyquist(self, fc, refused):
+        x = np.ones(16, dtype=complex)
+        if refused:
+            with pytest.raises(ConfigurationError,
+                               match='upconvert: the carrier fc'):
+                comms.upconvert(x, 1000.0, fc)
+        else:
+            assert comms.upconvert(x, 1000.0, fc).size == 16
+
+    def test_downconvert_refuses_a_complex_record(self):
+        with pytest.raises(ConfigurationError,
+                           match='downconvert: passband must be real'):
+            comms.downconvert(np.ones(16, dtype=complex), 1000.0, 200.0)
+
+
+class TestTheDopplerScanReadsTheProbesNeighbourhood:
+    """A default Doppler scan of a long capture reads the stretch around the
+    probe — 1/grid_step samples, past which the scan resolves no more — and
+    picks the scale the whole capture gives."""
+
+    FS = 12000.0
+
+    def _capture(self, a_true, seconds=8.0, at=5.0, seed=3):
+        dur = 0.45
+        t = np.arange(int(dur * self.FS)) / self.FS
+        template = np.sin(2 * np.pi * (2000 * t + 3000 / dur * t ** 2 / 2))
+        n_rx = int(round(template.size / (1.0 + a_true)))
+        sig = np.interp(np.linspace(0, template.size - 1, n_rx),
+                        np.arange(template.size), template)
+        rng = np.random.default_rng(seed)
+        x = 0.3 * rng.standard_normal(int(seconds * self.FS))
+        i = int(at * self.FS)
+        x[i:i + sig.size] += sig
+        return x, template
+
+    def test_a_short_record_is_scanned_whole(self):
+        from uacpy.comms.sync import _doppler_scan_stretch
+        x, template = self._capture(0.0, seconds=4.0, at=1.0)
+        assert _doppler_scan_stretch(x, template).size == x.size
+
+    @pytest.mark.parametrize('a_true', [-2e-3, 0.0, 1.3e-3])
+    def test_the_stretch_estimates_the_scale_as_well_as_the_capture(
+            self, a_true):
+        """The LFM metric is flat to a few dB across the grid, so the two
+        need not pick the same candidate; both land within 1e-4 (0.15 m/s)
+        of the truth (measured over 7 scales x 3 seeds: mean error 3.3e-5 on
+        the stretch, 3.8e-5 on the whole capture)."""
+        from uacpy.comms.sync import _doppler_scan_stretch
+        x, template = self._capture(a_true)
+        stretch = _doppler_scan_stretch(x, template)
+        assert stretch.size == 60000 < x.size
+        grid = np.linspace(-5e-3, 5e-3, 601)
+        k = int(np.argmin(np.abs(grid - a_true)))
+        near = grid[max(0, k - 12):k + 13]
+        for record in (x, stretch):
+            best, _, _ = comms.estimate_doppler_scale(record, template,
+                                                      scales=near)
+            assert best == pytest.approx(a_true, abs=1e-4)
+
+    def test_from_passband_scans_only_the_stretch(self, monkeypatch):
+        from uacpy.comms import transceiver
+        seen = []
+        real = transceiver.estimate_doppler_scale
+
+        def spy(received, template, scales=None):
+            seen.append(np.size(received))
+            return real(received, template, scales=np.array([0.0]))
+
+        monkeypatch.setattr(transceiver, 'estimate_doppler_scale', spy)
+        rng = np.random.default_rng(12)
+        tx = comms.OFDMTransmitter("qpsk", 64, 16)
+        rx = comms.OFDMReceiver("qpsk", 64, 16)
+        pb = tx.transmit_passband(rng.integers(0, 2, 256), 48000.0, 12000.0,
+                                  oversample=4)
+        capture = np.concatenate([0.01 * rng.standard_normal(200_000), pb,
+                                  0.01 * rng.standard_normal(200_000)])
+        rx.from_passband(capture, 48000.0, 12000.0)
+        assert seen and seen[0] < capture.size / 4
+
+
+@pytest.mark.parametrize('call', [
+    lambda rng: comms.awgn(np.ones(16, dtype=complex), 10.0, rng=rng),
+    lambda rng: comms.fading_taps(2, 64, 1.0, sample_rate=1000.0, rng=rng),
+    lambda rng: comms.simulate_link('bpsk', 10.0, 200, rng=rng),
+    lambda rng: comms.ber_sweep('bpsk', [10.0], 200, rng=rng),
+    lambda rng: schmidl_cox_preamble(64, 16, rng=rng)])
+def test_rng_takes_a_generator_and_refuses_a_seed(call):
+    call(np.random.default_rng(0))
+    with pytest.raises(ConfigurationError,
+                       match=r'rng must be a numpy.random.Generator or None; '
+                             r'got int\.') as info:
+        call(0)
+    assert 'np.random.default_rng(seed)' in info.value.remediation

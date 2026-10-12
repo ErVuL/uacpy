@@ -35,14 +35,14 @@ receiver = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 100),
 | `depths` | **required** | Source depth(s), metres, positive down. |
 | `frequencies` | **required** | Hz. Scalar or vector — [§6](#6-frequencies--a-scalar-or-a-band). |
 | `source_type` | `'point'` | Source *geometry*: `'point'`, `'line'`, `'scaled'` — [§4](#4-source_type--what-the-source-physically-is). |
-| `beam_pattern` | `None` | Directivity, `(N, 2)` of `[angle_deg, level_dB]` or a `.sbp` path — [§5](#5-beam_pattern--a-directional-source). |
-| `weights` | `None` → all `1` | Complex drive of each depth, summed by `ResultStack.superpose()`; on a one-depth `Source` the run applies it to the field it returns — [§3](#3-source-depth--one-or-several). |
+| `beam_pattern` | `None` | Directivity, `(N, 2)` of `[angle_deg, level_dB]`, the `BeamPatternTable` `read_source_beam_pattern` returns, or a `.sbp` path — [§5](#5-beam_pattern--a-directional-source). |
+| `weights` | `None` → all `1` | Complex drive of each depth, summed by `Field.superpose()`; on a one-depth `Source` the run applies it to the field it returns — [§3](#3-source-depth--one-or-several). |
 | `source_level_dB` | `None` | dB re 1 µPa at 1 m for a unit-weight element; recorded as every result's `source_level_dB` attribute so `Field.at_source_level()` turns TL into a received level. The engines never read it: TL is unchanged. |
 
 | `Receiver(...)` | Default | Meaning |
 |---|---|---|
 | `depths` | **required** | Receiver depth(s), metres, positive down. |
-| `ranges` | `None` → `0.0` **+ warning** | Metres, measured from the source. |
+| `ranges` | `None` → `0.0` **+ warning** | Metres, measured from the source. A run whose every receiver range lies within one wavelength of the source (the shortest of the run's band, in the slowest water) warns: no model's far-field sum holds there, and ranges typed in kilometres land there at low frequency. |
 
 Both coerce scalars and lists to 1-D `float64` arrays, so `depths=25.0` and
 `depths=[25.0]` leave you holding the same `array([25.])`, and both refuse a
@@ -146,10 +146,10 @@ source = uacpy.Source(depths=[100.0, 1300.0, 3000.0], frequencies=50.0)
 receiver = uacpy.Receiver(depths=np.linspace(0.0, 5000.0, 140),
                           ranges=np.linspace(2000.0, 100_000.0, 320))
 
-stack = Bellhop(n_beams=3000).run(env, source, receiver,
+field = Bellhop(n_beams=3000).run(env, source, receiver,
                                   run_mode=RunMode.INCOHERENT_TL)
-for depth, slab in stack:
-    slab.plot(env=env)
+for depth in field.coords['source_depth']:
+    field.at(source_depth=depth).plot(env=env)
 ```
 
 ![Three source depths, three oceans](figures/srcrcv_source_depth.png)
@@ -157,7 +157,7 @@ for depth, slab in stack:
 The Munk profile's sound-channel axis is at 1300 m, and where the source sits
 relative to it changes everything. From 100 m — well above the axis — the
 energy funnels down, turns, and returns to the surface as the classic
-convergence-zone arcs, the first at ~55 km with a broad shadow zone in front of
+convergence-zone arcs, the first at ~64 km with a broad shadow zone in front of
 it. Put the source **on** the axis and that structure reorganises: the arcs are
 shallower, closer together, and no longer separated by clean shadow. From
 3000 m, below the axis, it reorganises a third time, with one bright arc
@@ -167,32 +167,32 @@ reaching the surface near 78 km.
 interference pattern laid over it — see [Bellhop](../models/bellhop.md) for the
 three summation modes.)
 
-### Multi-element `depths`, `weights` and `ResultStack`
+### Multi-element `depths`, `weights` and the field of several sources
 
 **Every field model accepts more than one source depth in a single run** —
 the TL modes, `BROADBAND` and `TIME_SERIES` on Bellhop, Kraken, Scooter, RAM,
-SPARC and the OASES field models. The run returns a
-[`ResultStack`](results.md#5-resultstack--one-run-several-source-depths) —
-one slab per depth, plus the coordinate they vary along:
+SPARC and the OASES field models. The run returns
+[one `Field`](results.md#5-several-source-depths--one-field-and-resultstack-for-rays)
+whose leading `source_depth` axis holds one plane per depth:
 
 ```python
 >>> Bellhop(n_beams=3000).run(env, uacpy.Source(depths=[15., 50., 85.],
 ...                                             frequencies=200.0), receiver)
-ResultStack(3 Field slabs, source depths [15, 50, 85] m)
+Field(Bellhop, pressure Pa, frequency 200 Hz, source depths [15, 50, 85] m × …)
 >>> Kraken().run(env, uacpy.Source(depths=[20.0, 60.0], frequencies=200.0), receiver)
-ResultStack(2 Field slabs, source depths [20, 60] m)
+Field(Kraken, pressure Pa, frequency 200 Hz, source depths [20, 60] m × …)
 ```
 
-Bellhop writes every depth into one deck and its reader splits the slabs,
+Bellhop writes every depth into one deck and its reader splits it by depth,
 and Kraken (TL modes) and Scooter (`COHERENT_TL`) do the same; every other engine reads one
 depth per deck, so `run()` runs it once per depth with the same
 environment, receiver and keywords, each in its own `source_depth_<z>m`
-subdirectory of a pinned `work_dir`. Either way each slab
-is the field of **one unit-amplitude source**, so the stack is what you sum
-to drive the sources together. `weights=` on the `Source` gives each one a
+subdirectory of a pinned `work_dir`, and joins the fields. Either way each
+plane is the field of **one unit-amplitude source**, so the field is what you
+sum to drive the sources together. `weights=` on the `Source` gives each one a
 complex amplitude (a scalar broadcasts; default all ones); the engines never
-read it, and `stack.superpose()` adds the slabs' complex pressure with those
-weights — `Σ wᵢ·pᵢ` on the shared grid:
+read it, and `field.superpose()` adds the sources' complex pressure with
+those weights — `Σ wᵢ·pᵢ` on the shared grid:
 
 ```python
 >>> pair = uacpy.Source(depths=[40.0, 60.0], frequencies=200.0, weights=[1, -1])
@@ -201,20 +201,23 @@ weights — `Σ wᵢ·pᵢ` on the shared grid:
 {'depths': [40.0, 60.0], 'weights': [(1+0j), (-1+0j)], 'coherent': True}
 ```
 
-`superpose([w1, w2, …])` takes the weights from the call instead. A stack of
-real dB values has lost its phase and refuses to add — superpose the complex
-field the run returned.
+`superpose([w1, w2, …])` takes the weights from the call instead. A field of
+real dB values has lost its phase and refuses to add coherently — superpose
+the complex field the run returned, or add intensities with
+`superpose(coherent=False)`.
 
-A **one-depth** `Source` has nothing to stack, so the run applies its weight
-itself — the one-slab `superpose()` — and records it the same way:
+A **one-depth** `Source` has nothing to sum, so the run applies its weight
+itself — the one-source `superpose()` — and records it the same way:
 `Source(depths=25.0, frequencies=200.0, weights=2.0)` returns a field 6.02 dB
 louder than the unweighted run, with `metadata['superposed_sources']` =
 `{'depths': [25.0], 'weights': [(2+0j)]}`. In a mode that returns real dB
 (`INCOHERENT_TL`, `SEMICOHERENT_TL`, OAST's `COHERENT_TL`) the weight has
 nothing to scale, and the run refuses it before the engine starts.
 
-Outside the field modes only Bellhop stacks (`RAYS`, `ARRIVALS`,
-`EIGENRAYS`). Kraken's `MODES` takes a multi-depth `Source` without stacking:
+Outside the field modes Bellhop takes several depths in `RAYS`, `ARRIVALS`
+and `EIGENRAYS` and returns a `ResultStack`, one `Rays` or `Arrivals` slab per
+depth (their paths cannot share one array). Kraken's `MODES` takes a
+multi-depth `Source` too:
 the mode set does not depend on the source depth, so the run returns one
 `Modes` whose `source_depths` lists every depth, and `Modes.excitation(source)`
 reads the shapes there. Reflection tables and array products have no
@@ -232,14 +235,14 @@ TIME_SERIES); for REFLECTION loop over single-depth Sources externally.
 
 | Mode | Multi-element `depths`? |
 |---|---|
-| `COHERENT_TL`, `INCOHERENT_TL`, `SEMICOHERENT_TL`, `BROADBAND`, `TIME_SERIES` | ✅ every model returns `ResultStack` |
+| `COHERENT_TL`, `INCOHERENT_TL`, `SEMICOHERENT_TL`, `BROADBAND`, `TIME_SERIES` | ✅ every model returns one `Field` over `source_depth` |
 | `RAYS`, `ARRIVALS`, `EIGENRAYS` | ✅ [Bellhop](../models/bellhop.md) returns `ResultStack` |
 | `MODES` | ✅ [Kraken](../models/kraken.md) returns one `Modes` carrying every depth |
 | `REFLECTION`, `COVARIANCE`, `REPLICA`, `REVERBERATION` | ❌ `ConfigurationError` ([Bounce](../models/bounce.md) reads no source depth and ignores the extras) |
 
 A sweep over anything else — frequency, a model knob — still goes through
-[`run_parallel`](utilities.md); `.stack()` on the outcome gives the same
-`ResultStack`, along whatever coordinate you varied.
+[`run_parallel`](utilities.md); `.stack()` on the outcome joins the fields
+along whatever coordinate you varied.
 
 ---
 
@@ -260,6 +263,7 @@ to cylindrical `10·log₁₀ r` and the line source to no geometric spreading a
 all — but the *difference* between the two is the cylindrical term either way.
 
 ```python
+env, _, _ = shallow_water()
 ranges = np.linspace(100.0, 5000.0, 400)
 receiver = uacpy.Receiver(depths=60.0, ranges=ranges)
 
@@ -282,8 +286,9 @@ established) — so the residual is the modes' reweighting (`1/k_m` against
 `1/√k_m`), not a level offset. Every engine reports this level: Bellhop's raw
 line field (`4√π/√R`, `influence.f90:784`) is divided by `4√π`, Kraken's and
 Scooter's (`1/√(k₀R)`, `EvaluateMod.f90:36`, `TransformG.f90`) are multiplied
-by `√k₀` with `k₀ = 2πf/c(z_s)`; before this the three disagreed by
-`4√(πk₀)` — 13 dB at 100 Hz, 19 dB at 400 Hz — on the same source.
+by `√k₀` with `k₀ = 2πf/c(z_s)`. The raw outputs differ by `4√(πk₀)` —
+13 dB at 100 Hz, 19 dB at 400 Hz — on the same source, which is why each is
+rescaled to the one reference.
 
 One consequence JKPS spells out: the line-source factor is frequency
 dependent, so a broadband `'line'` run synthesised from Kraken or Scooter
@@ -319,8 +324,9 @@ Try one of these source geometries instead:
 ## 5. `beam_pattern` — a directional source
 
 Real projectors are not omnidirectional. `beam_pattern` takes an `(N, 2)` array
-of `[angle_deg, level_dB]` with **strictly increasing** angles, or a path to an
-existing `.sbp` file. uacpy stages it into the run's working directory as
+of `[angle_deg, level_dB]` with **strictly increasing** angles, the
+`BeamPatternTable` record `uacpy.io.read_source_beam_pattern` returns, or a
+path to an existing `.sbp` file. uacpy stages it into the run's working directory as
 `<case>.sbp` and flips the engine's beam-pattern switch.
 
 Give the lobe the shape a projector has rather than a rectangle. A beam
@@ -352,9 +358,9 @@ The beam is 30° wide between its −3 dB points, so it covers about what a
 hand-drawn "±15°" table would — but with a skirt instead of a cliff: −10 dB at
 25°, a first null at 33.9°, and sidelobes no higher than −13.3 dB. The steep
 launch angles are suppressed rather than deleted, and the near-source field
-thins accordingly. Counting cells louder than 50 dB TL, the omni panel lights
-63% of the water column at 500 m range against the beamed panel's 35%, and 84%
-against 63% at 200 m. The beam's −3 dB edge reaches the seabed at about 280 m.
+thins accordingly. Counting cells louder than 50 dB TL over 100 m of range, the
+omni panel lights 67% of the water column around 500 m against the beamed
+panel's 40%, and 84% against 73% around 200 m. The beam's −3 dB edge reaches the seabed at about 280 m.
 
 Past that the two panels converge, and that convergence is the physical point:
 a beam pattern buys near-field control, not far-field gain. Averaged over
@@ -364,7 +370,7 @@ only 1.2 dB quieter over 3.5–5 km, because the paths that survive to 5 km in a
 passes at full level. The residual 1.2 dB is the skirt still costing a little
 on the steeper multipaths — a rectangular table, which passes everything
 inside ±15° flat and kills everything outside, converges harder still, to
-+0.5 dB.
++0.6 dB.
 
 **Only two models read a pattern**: [Bellhop](../models/bellhop.md) and
 [Kraken](../models/kraken.md). Anything else refuses rather than ignoring it:
@@ -405,6 +411,8 @@ Left to itself, every frequency-domain field model in the package defaults to
 coherent TL, and a frequency vector then hits the single-frequency guard:
 
 ```python
+>>> source = uacpy.Source(depths=25.0, frequencies=200.0)
+>>> point = uacpy.Receiver(depths=60.0, ranges=3000.0)
 >>> Bellhop().run(env, uacpy.Source(depths=25.0,
 ...                                 frequencies=np.linspace(150., 250., 16)), point)
 ConfigurationError: Bellhop.run(run_mode=COHERENT_TL) takes a single source
@@ -450,17 +458,22 @@ Every rule below was checked by triggering it.
 `receiver.ranges` are horizontal separations from the source, not positions on
 some external chart. The source is at range zero, which is a **singularity**:
 the field there is infinite for a point source, so no engine can give you a
-useful number — and every engine now refuses it the same way. Run
-`Receiver(depths=[30.0, 60.0], ranges=[0.0, 1000.0])` on any model —
-Bellhop, Kraken, Scooter, RAM, SPARC, the OASES family included — and the
-`r = 0` column comes back **`NaN` with a `ValidityWarning`**: Bellhop's notes
-that no ray travels zero distance; the others name the `1/√r`-type spreading
-factor that is singular there and mask the meaningless number the engine
-wrote into that column.
+useful number. Run `Receiver(depths=[30.0, 60.0], ranges=[0.0, 1000.0])` with
+a point source on any model — Bellhop, Kraken, Scooter, RAM, SPARC, the OASES
+family included — and the `r = 0` column comes back **`NaN` with a
+`ValidityWarning`** (OAST: with a `NumericsWarning`, the column lying outside
+its native FFT range grid). Bellhop never evaluates that column: its point-source
+spreading factor is set to 0 there (`Bellhop/influence.f90:786-787`), and every
+beam type but `'S'` starts its receiver loop right of the source
+(`influence.f90:419`, `:528` and the like), so its notice cites those lines. A
+line source with `beam_type='S'`, whose loop starts at the first receiver
+(`influence.f90:672`), returns the column as Bellhop wrote it, with no notice.
+The other engines name the `1/√r`-type spreading factor that is singular there
+and mask the number the engine wrote into that column.
 
-All the engines agree to about a decibel in the `r = 1 km` column of the very
-same run — 53–54 dB at 30 m, 50–51 dB at 60 m for Bellhop, Kraken, Scooter
-and RAM. So start a TL grid past the near field —
+All the engines agree to within a decibel in the `r = 1 km` column of the very
+same run (the 25 m, 200 Hz source of `shallow_water()`) — 52.5–53.3 dB at 30 m,
+49.7–50.1 dB at 60 m for Bellhop, Kraken, Scooter and RAM. So start a TL grid past the near field —
 `np.linspace(50.0, 5000.0, 250)`, not `np.linspace(0.0, 5000.0, 250)` — and
 the warning is your cue when you forget.
 
@@ -498,7 +511,7 @@ ConfigurationError: source depths must be strictly increasing; got
 ```
 
 This is deliberate, and it is about the *output*. Row `i` of a returned `Field`
-is receiver depth `i`; slab `i` of a `ResultStack` is source depth `i`. An
+is receiver depth `i`; plane `i` of a multi-depth run's `source_depth` axis is source depth `i`. An
 unsorted axis would make those rows ambiguous, and a duplicated one would put
 two identical rows in a result you then index by label. It also protects every
 downstream `np.interp`, which produces silent garbage on an unsorted `xp`.
@@ -527,6 +540,7 @@ This is the asymmetry that surprises people most, and it follows from what each
 carrier *is*.
 
 ```python
+env, source, _ = shallow_water()
 receiver = uacpy.Receiver(depths=np.linspace(1.0, 160.0, 160), ranges=3000.0)
 for model in (Bellhop(n_beams=4000), Kraken(), RAM()):
     model.run(env, source, receiver).to_dB()      # 100 m water — warns, runs
@@ -606,9 +620,9 @@ singularity above.
 `Field(data.shape=(1, 1))`, not a scalar. Use `.isel(...)` or `.at(...)` to
 collapse it — see [results](results.md).
 
-**You do not choose the slab order.** `Source(depths=[85., 15., 50.])` does not
-give you a `ResultStack` in that order — it raises, because the axis must be
-increasing. Reorder after the run if you need to.
+**You do not choose the plane order.** `Source(depths=[85., 15., 50.])` does
+not give you a `source_depth` axis in that order — it raises, because the axis
+must be increasing. Reorder after the run if you need to.
 
 **One `Source`, many models.** The carriers hold no solver state, so the same
 `Source` and `Receiver` go into every model — that is what makes the
@@ -634,7 +648,7 @@ interpolation abscissae.
   bathymetry, sound speed, seabed, sea surface, absorption. Together with this
   page that is the complete input to `run()`.
 - **What comes back** — [results](results.md) for the `Field` this geometry
-  shapes, `ResultStack`, and slicing; [plotting](plotting.md) for `source=` /
+  shapes, the field of several sources, and slicing; [plotting](plotting.md) for `source=` /
   `receiver=` overlays.
 - **Arrays as instruments** — [array processing](arrays.md) takes the `Field`
   from a `Receiver` you laid out as an array and beamforms it;

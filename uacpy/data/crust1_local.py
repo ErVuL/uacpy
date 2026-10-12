@@ -40,7 +40,7 @@ from uacpy.core.environment import (
     BoundaryProperties, SeabedColumn, Bottom, SedimentLayer,
 )
 from uacpy.core.exceptions import (
-    ConfigurationError, DataFetchError, FallbackWarning, ProvenanceWarning,
+    ConfigurationError, DataFetchError, FallbackWarning,
 )
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.data import _cache
@@ -52,6 +52,7 @@ from uacpy.data._geo import (
     checked_max_distance, checked_offset, cell_half_diagonal_km,
 )
 from uacpy.data.globsed_local import globsed_node
+from uacpy.data._provenance_notice import provenance_notice
 from uacpy.data._http import http_get, checked_member_size
 from uacpy.data.sediment import _fill_gaps_from_nearest, _warn_filled_gaps
 from uacpy.data.sources import SOURCES, DataProvenance
@@ -130,8 +131,7 @@ _COMMERCIAL_WARNING = (
 
 
 def _warn_non_commercial():
-    warnings.warn(_COMMERCIAL_WARNING, ProvenanceWarning,
-                  skip_file_prefixes=USER_FRAME_SKIP)
+    provenance_notice(_COMMERCIAL_WARNING)
 
 # Below this total sediment thickness (m) the seabed is treated as bare rock —
 # a thinner column (e.g. at a spreading-ridge crest, or after a near-zero GlobSed
@@ -375,11 +375,22 @@ def _globsed_thickness(point, *, verbose):
     Returns ``None`` when GlobSed is unavailable (dataset not cached) or has no
     value at the point (land / unmapped) so the caller keeps CRUST1.0's own
     1°-scale sediment column. GlobSed is the higher-resolution total thickness,
-    used by default to rescale the coarse CRUST1.0 sediment stack.
+    used by default to rescale the coarse CRUST1.0 sediment stack. A cached
+    grid that cannot be read also returns ``None``, with a
+    ``FallbackWarning``: the native column then stands in for the thickness
+    the default asked for.
     """
     from uacpy.data.globsed_local import fetch_sediment_thickness
     try:
         return fetch_sediment_thickness(point)
+    except _cache.UnreadableCacheError as exc:
+        warnings.warn(
+            f"The cached GlobSed grid cannot be read ({exc.message}), so the "
+            f"CRUST1.0 bottom keeps its native 1° sediment thickness instead "
+            f"of GlobSed's. Re-run install.sh --data globsed, or pass "
+            f"use_globsed=False to keep the native column by choice.",
+            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        return None
     except (DataFetchError, ConfigurationError):
         log_message('crust1', f"GlobSed thickness unavailable at {point}; "
                     "keeping CRUST1.0 native sediment column", verbose=verbose)
@@ -445,7 +456,12 @@ def fetch_crust1_profile(point, *, max_distance_km=None) -> Crust1Profile:
     max_distance_km : float, optional
         Refuse a cell whose centre stands farther than this (km) from
         ``point`` (the offset rule); ``None`` (default) sets no limit.
+
+    CRUST1.0 has no formal licence, so every read emits a
+    :class:`~uacpy.core.exceptions.ProvenanceWarning`, as
+    :func:`uacpy.data.fetch_bottom` with ``source='crust1'`` does.
     """
+    _warn_non_commercial()
     lat, lon = as_coordinate(point)
     prov = _crust1_provenance(lat, lon, who='fetch_crust1_profile',
                               max_distance_km=checked_max_distance(

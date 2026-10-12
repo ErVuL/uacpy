@@ -46,8 +46,9 @@ fs = 1000.0
 pulse = ricker_wavelet(np.arange(int(0.04 * fs)) / fs,
                        float(source.frequencies[0]))
 # A rigid bottom loses nothing, so the guide rings past any finite record and
-# the synthesis says the 4 s record wraps; that is this lossless guide, not
-# the plot, and the notice is printed.
+# the synthesis says the 4 s record wraps: the energy past its end lands on its
+# start (the spikes ahead of each range's first arrival). That is this
+# lossless guide, not the plot, and the notice is printed.
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
     waveform = transfer.synthesize_time_series(source_waveform=pulse,

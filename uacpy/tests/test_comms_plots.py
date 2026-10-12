@@ -4,8 +4,9 @@
 axis/indexing contracts (OFDM bin addressing, ms delay axis, 0 Hz-centred
 spectrum, symbol-interval windowing) and are asserted on the drawn data; the
 thin wrappers (``plot_convergence``, ``plot_sync_metric``,
-``plot_doppler_ambiguity``) get their one transform pinned plus a shared
-smoke/``ax=`` sweep. The comms numerics themselves live in ``test_comms.py``
+``plot_doppler_ambiguity``, which takes the ``DopplerEstimate`` whole) get
+their one transform pinned plus a shared smoke/``ax=`` sweep. The comms
+numerics themselves live in ``test_comms.py``
 and ``test_comms_equalizers.py``; the constellation/BER plotters are covered in
 ``test_carrier_plot_methods.py`` callers and the doc figure gates.
 """
@@ -146,13 +147,45 @@ def test_plot_sync_metric_draws_threshold_line_only_when_given():
     plt.close(fig)
 
 
+def _doppler_estimate(best_scale, scales, peak):
+    from uacpy.comms import DopplerEstimate
+    return DopplerEstimate(best_scale, scales, peak)
+
+
 def test_plot_doppler_ambiguity_plots_scales_in_thousandths_and_marks_the_peak():
     scales = np.linspace(-2e-3, 2e-3, 5)
     peak = np.array([0.1, 0.2, 0.3, 1.0, 0.4])
-    fig, ax = plot_doppler_ambiguity(scales, peak)
+    fig, ax = plot_doppler_ambiguity(_doppler_estimate(1e-3, scales, peak))
     np.testing.assert_allclose(ax.lines[0].get_xdata(), scales * 1e3)
     np.testing.assert_allclose(ax.lines[1].get_xdata(), [1.0, 1.0])
     plt.close(fig)
+
+
+def test_plot_doppler_ambiguity_marks_the_estimators_plateau_centre():
+    """Example 31's probe: the metric is a plateau, whose low edge argmax
+    finds 1.40e-3 while the estimator returns its centre, 1.50e-3. The line
+    marks the estimate's own best_scale; the plotter computes nothing."""
+    from uacpy import comms
+    fs = 12000.0
+    t = np.arange(4000) / fs
+    probe = np.exp(1j * 2 * np.pi * (1500 * t + 0.5 * 2e5 * t ** 2))
+    estimate = comms.estimate_doppler_scale(
+        comms.compensate_doppler(probe, -1.5e-3), probe,
+        np.linspace(0, 3e-3, 61))
+    assert estimate.scales[int(np.argmax(estimate.peak_metric))] < (
+        estimate.best_scale)
+    for fig, ax in (plot_doppler_ambiguity(estimate), estimate.plot()):
+        np.testing.assert_allclose(ax.lines[1].get_xdata(),
+                                   [estimate.best_scale * 1e3] * 2)
+        assert ax.get_legend().get_texts()[0].get_text() == (
+            f"a = {estimate.best_scale * 1e3:.2f} e-3")
+        plt.close(fig)
+
+
+def test_plot_doppler_ambiguity_refuses_bare_arrays():
+    from uacpy.core.exceptions import ConfigurationError
+    with pytest.raises(ConfigurationError, match='needs the DopplerEstimate'):
+        plot_doppler_ambiguity(np.linspace(-1e-3, 1e-3, 5))
 
 
 def test_plot_convergence_plots_mse_in_decibels_with_a_floor():
@@ -166,8 +199,9 @@ def test_plot_convergence_plots_mse_in_decibels_with_a_floor():
 @pytest.mark.parametrize("plotter, args", [
     (plot_convergence, (np.array([1.0, 0.5, 0.1]),)),
     (plot_sync_metric, (np.array([0.1, 0.8, 0.2]),)),
-    (plot_doppler_ambiguity, (np.linspace(-1e-3, 1e-3, 5),
-                              np.array([0.2, 0.4, 1.0, 0.5, 0.3]))),
+    (plot_doppler_ambiguity, (_doppler_estimate(
+        0.0, np.linspace(-1e-3, 1e-3, 5),
+        np.array([0.2, 0.4, 1.0, 0.5, 0.3])),)),
     (plot_subcarriers, (_TAPS, 8)),
 ])
 def test_comms_plotters_return_fig_ax_and_honour_ax(plotter, args):
@@ -217,3 +251,35 @@ def test_an_error_free_point_is_not_drawn_as_a_measured_ber():
     np.testing.assert_allclose(bound.get_ydata(), [1e-4, 1e-5])
     assert bound.get_marker() == 'v' and bound.get_linestyle() == 'None'
     plt.close(fig)
+
+
+class TestOneNullPolicyForMagnitudesInDecibels:
+    """A null of ``20·log10|x|`` is drawn on a floor ``dynamic_range_dB``
+    below the peak (120 dB by default), by every magnitude-in-dB plotter,
+    with no numpy warning and no point dropped."""
+
+    def test_the_channel_and_subcarrier_views_floor_a_null_alike(self):
+        import warnings
+        import matplotlib.pyplot as plt
+        from uacpy.plot import plot_channel, plot_subcarriers
+        taps = np.array([1.0, 1.0])              # H = 0 at Nyquist
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            fig, (_, ax_f) = plot_channel(taps, sample_rate=2.0)
+            channel = ax_f.lines[-1].get_ydata()
+            fig2, ax_s = plot_subcarriers(taps, 8)
+            subcarriers = ax_s.lines[-1].get_ydata()
+        for drawn in (channel, subcarriers):
+            assert np.all(np.isfinite(drawn))
+            assert np.min(drawn) == pytest.approx(np.max(drawn) - 120.0)
+        plt.close('all')
+
+    @pytest.mark.parametrize('span', [20.0, 60.0])
+    def test_the_floor_follows_dynamic_range_dB(self, span):
+        import matplotlib.pyplot as plt
+        from uacpy.plot import plot_subcarriers
+        fig, ax = plot_subcarriers(np.array([1.0, 1.0]), 8,
+                                   dynamic_range_dB=span)
+        drawn = ax.lines[-1].get_ydata()
+        assert np.min(drawn) == pytest.approx(np.max(drawn) - span)
+        plt.close(fig)

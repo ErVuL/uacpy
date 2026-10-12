@@ -107,7 +107,8 @@ def omp_estimate(received, tx_pilots, n_taps, sparsity):
     # [0, 30]. The same channel in Pa rather than µPa estimated a different
     # delay. A relative floor keeps the guard against an all-zero column —
     # the only thing the offset was needed for — without setting a scale.
-    # Same idiom as ``_ZF_REL_FLOOR`` / ``_PILOT_REL_FLOOR`` in comms.ofdm.
+    # Same idiom as ``_ZF_REL_FLOOR`` here and ``_PILOT_REL_FLOOR`` in
+    # comms.ofdm.
     raw_norms = np.linalg.norm(A, axis=0)
     peak_norm = float(raw_norms.max()) if raw_norms.size else 0.0
     norms = np.maximum(raw_norms, _COLUMN_NORM_REL_FLOOR * peak_norm) \
@@ -133,7 +134,7 @@ def omp_estimate(received, tx_pilots, n_taps, sparsity):
 _ZF_REL_FLOOR = 1e-12
 
 
-def regularizer(h2, snr_linear):
+def _regularizer(h2, snr_linear):
     """Denominator offset for ``conj(H)/(|H|^2 + eps)``, in the units of ``h2``.
 
     Zero-forcing (``snr_linear is None``) uses a floor at ``_ZF_REL_FLOOR`` of
@@ -225,7 +226,7 @@ def mmse_equalizer(received, h, snr_linear):
             f"long as h (and a cyclic prefix of >= {hc.size - 1} samples).")
     H = np.fft.fft(hc, r.size)
     h2 = np.abs(H) ** 2
-    eps = regularizer(h2, snr)
+    eps = _regularizer(h2, snr)
     if eps <= 0.0:
         # A channel with no power anywhere: nothing is recoverable, which is
         # the all-zero output conj(H)/(0 + 1/snr) already gave.

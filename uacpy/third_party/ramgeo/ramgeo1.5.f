@@ -52,7 +52,7 @@ c
 c     mr=bathymetry points, mz=depth grid, mp=pade terms.
 c
 c     UACPY: enlarged from (mr=100,mz=8000,mp=10) so uacpy's fine Lytaev
-c     range/depth grids fit (matches the patched ramsurf1.5.f dimensions).
+c     range/depth grids fit (ramsurf1.5.f's stock upstream dimensions).
       parameter (mr=505,mz=20002,mp=10)
       dimension rb(mr),zb(mr),cw(mz),cb(mz),rhob(mz),attn(mz),alpw(mz),
      >   alpb(mz),f1(mz),f2(mz),f3(mz),ksq(mz),ksqw(mz),ksqb(mz),u(mz),

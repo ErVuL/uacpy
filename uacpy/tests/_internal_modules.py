@@ -46,7 +46,8 @@ PACKAGE_INTERNAL_MODULES = {
         "the export protocol engine (Exportable, the attribute encoding, the "
         "optional-extra import) that the signal result tuples, "
         "ParallelResult and the io and data records (ExportRecord) build "
-        "on, as the results and carriers do",
+        "on, as the results and carriers do; plot_carrier reads "
+        "CarrierExport as what a carrier is",
     'uacpy.core._finite_difference':
         "the float32 resolution rule for differencing stored wavenumbers, "
         "applied by the modal dispersion estimate",
@@ -55,8 +56,8 @@ PACKAGE_INTERNAL_MODULES = {
         "against",
     'uacpy.core._plotting':
         "the one import that reaches up into uacpy.visualization: every "
-        "carrier and result .plot() draws through the public plotter it "
-        "names (docs/DEV.md section 7)",
+        "carrier and result .plot() draws through the plotter it names "
+        "(docs/DEV.md section 7)",
     'uacpy.core._provenance':
         "the one de-duplication rule for DataProvenance records, shared by "
         "the carriers and the fetchers' assembled profiles",
@@ -65,6 +66,11 @@ PACKAGE_INTERNAL_MODULES = {
     'uacpy.core._repr':
         "the one-line repr formatting (axis, quantity, record and tool "
         "helpers) every public class prints with, one form across packages",
+    'uacpy.core.results._superposition':
+        "the fields of several sources as one Field over source_depth: the "
+        "joining and splitting the depth loop, the readers, the engines' "
+        "per-depth steps, ParallelResult.stack and the panel plotters run, "
+        "and the weight rules a run and Field.superpose share",
     'uacpy.core._validate':
         "the argument validators every package refuses bad input with, one "
         "wording per rule",

@@ -195,6 +195,21 @@ def test_fetch_wind_local_dispatch(wind_cache):
                            source='local') == pytest.approx(ms_to_knots(8.5))
 
 
+def test_the_wind_source_matches_in_any_case(wind_cache):
+    assert data.fetch_wind((0.6, 0.6), date='2021-03-15',
+                           source='LOCAL') == pytest.approx(ms_to_knots(8.5))
+    track = data.fetch_wind_transect((0.6, 0.6), (0.7, 0.7), n_points=2,
+                                     date='2021-03-15', source='Local')
+    assert track.data == pytest.approx(ms_to_knots(8.5))
+
+
+@pytest.mark.parametrize('spelling, order', [
+    ('AUTO', ('waverys', 'ww3')), ('WW3', ('ww3',)),
+    (('WAVERYS', 'Ww3'), ('waverys', 'ww3'))])
+def test_the_wave_source_matches_in_any_case(spelling, order):
+    assert waves_mod._resolve_order(spelling) == order
+
+
 # ── waves ─────────────────────────────────────────────────────────────────────
 
 def test_ww3_fetch_hs(monkeypatch):
@@ -301,13 +316,25 @@ def _waves_record(hs, source='waverys'):
 
 # ── sea surface ───────────────────────────────────────────────────────────────
 
-def test_hs_to_pm_wind():
-    # Inverts the Pierson-Moskowitz Hs = coeff·U², so it must round-trip
-    # against whatever coefficient the module carries.
+def test_hs_to_pm_wind_answers_in_knots():
+    # Inverts the Pierson-Moskowitz Hs = coeff·U² (U in m/s), so it must
+    # round-trip against whatever coefficient the module carries, in knots.
+    from uacpy.core.units import ms_to_knots
     for u in (5.0, 10.0, 18.0):
         hs = sea_surface._PM_HS_COEFF * u ** 2
-        assert sea_surface.hs_to_pm_wind(hs) == pytest.approx(u)
+        assert sea_surface.hs_to_pm_wind(hs) == pytest.approx(ms_to_knots(u))
     assert sea_surface.hs_to_pm_wind(-1.0) == 0.0        # clamped, not NaN
+
+
+def test_the_pm_wind_of_a_wave_height_raises_that_height_in_generate_sea_surface():
+    # The documented use: feed hs_to_pm_wind straight into the generator,
+    # which takes knots; the realisations' mean 4·rms is the Hs asked for.
+    from uacpy.core.altimetry import generate_sea_surface
+    rng = np.random.default_rng(3)
+    wind_kn = sea_surface.hs_to_pm_wind(2.0)
+    hs = [4.0 * np.std(generate_sea_surface(20000.0, wind_kn, rng=rng)[:, 1])
+          for _ in range(10)]
+    assert np.mean(hs) == pytest.approx(2.0, rel=0.1)
 
 
 def test_fetch_sea_surface_from_waves(monkeypatch):
@@ -424,7 +451,8 @@ def test_live_and_climatology_wind_provenance_differ(dated_wind_cache,
                                                      monkeypatch):
     monkeypatch.setattr(waves_mod, 'fetch_waves',
                         lambda point, **kw: (_ for _ in ()).throw(DataFetchError("no waves")))
-    monkeypatch.setattr(wind_live, '_wind_speed', lambda *a, **kw: (7.0, None))
+    monkeypatch.setattr(wind_live, '_wind_speed',
+                        lambda *a, **kw: (7.0, None, '2021-03-15T00:00:00Z'))
     kw = dict(date='2021-03-15', rmax_m=5000.0, n_points=32,
               rng=np.random.default_rng(4))
     (live,) = sea_surface.fetch_sea_surface(
@@ -432,8 +460,28 @@ def test_live_and_climatology_wind_provenance_differ(dated_wind_cache,
     (clim,) = sea_surface.fetch_sea_surface(
         (0.6, 0.6), source='local', **kw).data_sources
     assert live.source.id == clim.source.id == 'nbs'
-    assert live.data_date is None and live.requested_date == '2021-03-15'
+    assert live.data_date == '2021-03-15T00:00:00Z'
+    assert live.requested_date == '2021-03-15'
     assert clim.data_date == 'month 03, 2013-2022 (climatology)'
+
+
+def test_a_live_wind_records_the_time_step_the_service_returned(monkeypatch):
+    # The stub serves its 2020-01-01T00:00Z step whatever is asked: the
+    # record names the step read, not the date requested.
+    monkeypatch.setattr(wind_live, 'http_get',
+                        _nbs_server({'u_wind': 3.0, 'v_wind': 4.0}))
+    _speed, prov = wind_live.wind_at((50.0, 0.0), date='2020-01-02T18:00')
+    assert prov.data_date == '2020-01-01T00:00:00Z'
+    assert prov.requested_date == '2020-01-02'
+    assert prov.offset_days == 1
+
+
+def test_a_live_wave_height_records_the_time_step_the_service_returned(
+        monkeypatch):
+    monkeypatch.setattr(ww3_live, 'http_get', _ww3_server(2.4))
+    _hs, prov = ww3_live.hs_at((50.0, 0.0), date='2020-01-02')
+    assert prov.data_date == '2020-01-01T00:00:00Z'
+    assert prov.requested_date == '2020-01-02'
 
 
 # ── fetch_environment altimetry integration ───────────────────────────────────
@@ -523,7 +571,7 @@ def test_sea_surface_holds_its_wave_height_at_every_transect_length(
     # Hs = 4·rms for a Gaussian sea surface.
     assert 4.0 * np.std(alt.heights) == pytest.approx(hs, rel=0.1)
     # The step resolves the peak wavelength lambda_p = 2*pi*U^2/g.
-    u = sea_surface.hs_to_pm_wind(hs)
+    u = sea_surface._pm_wind_ms(hs)
     dx = rmax_m / (alt.ranges.size - 1)
     from uacpy.core.altimetry import SEA_SURFACE_SAMPLES_PER_PEAK
     from uacpy.core.constants import STANDARD_GRAVITY_M_S2

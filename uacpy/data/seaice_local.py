@@ -61,7 +61,9 @@ __all__ = ['download_seaice_db', 'fetch_sea_ice_concentration',
 # m/s, cs 1800 m/s, αp 0.4 dB/λ, αs 1.0 dB/λ ("realistic attenuations of
 # 0.4 dB/λ for compressional waves and 1.0 dB/λ for shear waves"). Typical
 # ranges (Etter, *Underwater Acoustic Modeling*): cp 1300-3900, cs 1400-1900
-# m/s.
+# m/s. COA §4.10.4 (Figs. 4.22, 4.24) gives these values to a 4 m thick plate;
+# sea_ice_surface builds them into an elastic half-space, the plate's
+# thick-ice limit (its docstring states where that holds).
 SEA_ICE_COMPRESSIONAL_SPEED = 3500.0       # m/s
 SEA_ICE_SHEAR_SPEED = 1800.0               # m/s
 SEA_ICE_DENSITY = 0.9                      # g/cm³
@@ -514,9 +516,20 @@ def sea_ice_surface(
     homogeneous elastic boundary regardless of concentration; partial cover is
     reduced to the present/absent ice-edge decision rather than a mixed surface.
 
+    The canopy is an elastic **half-space**: infinitely thick ice with no
+    air above it. Computational Ocean Acoustics §4.10.4 (Figs. 4.22, 4.24)
+    gives these parameters to a 4 m thick plate. The half-space is that
+    plate's thick-ice limit, so it stands for the plate only where the ice is
+    many shear wavelengths thick: well above f = c_s/h, about 450 Hz for 4 m
+    of ice and 600 Hz for 3 m. Below that the ice is a fraction of a
+    wavelength thick (Medwin & Clay, *Fundamentals of Acoustical
+    Oceanography* §2.6.5), and the half-space's reflection is not the
+    plate's. The model writers emit the top boundary as one half-space line
+    with no thickness field, so a plate cannot be given here.
+
     ``roughness`` is the RMS interface roughness (m), 0 by default — the
-    smooth homogeneous plate the source above tabulates these parameters for.
-    **That plate is known to under-predict the loss**: Computational Ocean
+    smooth homogeneous ice the source above tabulates these parameters for.
+    **That smooth ice is known to under-predict the loss**: Computational Ocean
     Acoustics §4, on this exact 0.4 / 1.0 dB/λ environment, records that "it
     has been demonstrated that the loss computed for such an environment is too
     low ... the ice cover is extremely inhomogeneous ... characterized by
@@ -564,7 +577,10 @@ def fetch_sea_ice_surface(
     returns the elastic ice ``BoundaryProperties`` where the point is
     ice-covered (concentration ≥ ``threshold``) for the given month, or ``None``
     for open water. ``roughness`` passes through to :func:`sea_ice_surface`,
-    whose docstring records why the 0 default under-predicts the loss. Used by
+    whose docstring records why the 0 default under-predicts the loss. The
+    ice is an elastic half-space, the thick-ice limit of the 4 m plate the
+    parameters are tabulated for, which holds well above c_s/h (about 450 Hz
+    for 4 m of ice; see :func:`sea_ice_surface`). Used by
     ``fetch_environment(surface_sources='seaice')``.
 
     Parameters

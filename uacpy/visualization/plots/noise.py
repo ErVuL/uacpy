@@ -82,7 +82,8 @@ def plot_wenz(wenz, ax=None, *, show_components=True, title=None, ymin=6,
 def plot_weighting(group, ax=None, *, frequency=None, title=None,
                    figsize=(8, 4), **mpl_kw):
     """Plot marine-mammal auditory weighting curve(s). ``group`` is a name or a
-    list of names.
+    list of names. A convenience over
+    :func:`uacpy.noise.auditory_weighting`, which returns the numbers drawn.
 
     Parameters
     ----------
@@ -119,14 +120,15 @@ def plot_weighting(group, ax=None, *, frequency=None, title=None,
 @typed_plot_error
 def plot_source_level(frequency, level_dB, ax=None, *, label=None, title=None,
                       figsize=(8, 4), **mpl_kw):
-    """Plot a ship source-level spectrum (dB re 1 µPa·m vs band centre).
+    """Plot a ship source-level spectrum (dB re 1 µPa²·m² vs band centre),
+    the ISO 18405 unit :mod:`uacpy.noise` states its source levels in.
 
     Parameters
     ----------
     frequency : array_like
         Band centre frequencies (Hz).
     level_dB : array_like
-        Source level per band (dB re 1 µPa·m).
+        Source level per band (dB re 1 µPa²·m²).
     ax : matplotlib.axes.Axes, optional
         Existing axes; a new figure is made when omitted.
     label : str, optional
@@ -148,7 +150,7 @@ def plot_source_level(frequency, level_dB, ax=None, *, label=None, title=None,
     mpl_kw.setdefault("marker", "o")
     ax.semilogx(f, lv, label=label, **mpl_kw)
     ax.set_xlabel("Decidecade band centre (Hz)")
-    ax.set_ylabel("Source level (dB re 1 µPa·m)")
+    ax.set_ylabel("Source level (dB re 1 µPa²·m²)")
     ax.set_title(_title_or(title, "Ship radiated noise"))
     ax.grid(which="both", alpha=0.3)
     if label:

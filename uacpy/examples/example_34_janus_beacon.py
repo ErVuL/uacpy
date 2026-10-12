@@ -6,8 +6,9 @@ rate-1/2 K=9 convolutional coding and depth-13 interleaving, sent as FH-BFSK in
 the initial band, through delay + reverberation + noise, then detected and
 decoded.
 
-Uses: comms.JanusPacket · janus.janus_modulate / janus_detect /
-janus_demodulate · uacpy.io.write_wav
+Uses: comms.JanusPacket · comms.janus_transmit / janus_detect /
+janus_receive · acoustic_signal.spectrogram · plot_sync_metric ·
+uacpy.io.write_wav
 """
 
 import os
@@ -19,7 +20,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
 from uacpy import comms
-from uacpy.comms import janus
+from uacpy.acoustic_signal import spectrogram
+from uacpy.comms import janus   # the band constants FC_INITIAL, BW_INITIAL
 
 OUT = Path(os.environ.get('UACPY_EXAMPLE_OUTPUT')
            or Path(__file__).parent / 'output')
@@ -35,14 +37,13 @@ app_data = np.zeros(34, dtype=int)
 app_data[:16] = comms.bytes_to_bits(b"SOS")[:16]
 packet = comms.JanusPacket(class_id=16, app_type=0, app_data=app_data,
                            mobility=1, tx_rx=1)
-bits = packet.to_bits()
 print(f"  packet   : 64 bits, v{janus.JANUS_VERSION}, class {packet.class_id}, "
       f"app type {packet.app_type}")
 print(f"  band     : Fc={janus.FC_INITIAL / 1e3:.2f} kHz, "
       f"Bw={janus.BW_INITIAL / 1e3:.2f} kHz, Cd=6.25 ms")
 
 # 32 preamble chips + 144 data chips of FH-BFSK.
-waveform = janus.janus_modulate(bits, sample_rate=fs)
+waveform = comms.janus_transmit(packet, sample_rate=fs)
 uacpy.io.write_wav(OUT / 'example_34_janus.wav', waveform, fs,
                    metadata={'title': 'JANUS baseline packet',
                              'comment': 'NATO STANAG 4748, initial band'})
@@ -63,9 +64,10 @@ received = received + np.sqrt(
     np.mean(waveform ** 2) / 10 ** (snr_dB / 10)) * rng.standard_normal(
         received.size)
 
-start, metric = janus.janus_detect(received, fs)
-out_bits, crc_ok = janus.janus_demodulate(received, fs)
-decoded, _ = janus.JanusPacket.from_bits(out_bits)
+# janus_detect returns the GO-CFAR statistic the receiver searches;
+# janus_receive detects, demodulates, decodes and parses the packet.
+start, metric = comms.janus_detect(received, fs)
+decoded, crc_ok = comms.janus_receive(received, fs)
 print(f"  preamble : detected at sample {start} (GO-CFAR)")
 print(f"  CRC      : {'OK' if crc_ok else 'FAIL'}")
 print(f"  decoded  : class {decoded.class_id}, app type {decoded.app_type}, "
@@ -73,21 +75,20 @@ print(f"  decoded  : class {decoded.class_id}, app type {decoded.app_type}, "
       f"payload match {np.array_equal(decoded.app_data, app_data)}")
 
 fig, axes = plt.subplots(2, 1, figsize=(11, 8), constrained_layout=True)
-axes[0].specgram(waveform, NFFT=256, Fs=fs, noverlap=224, cmap='jet')
+# The waveform's samples read as pascals: the levels are dB re 1 Pa²/Hz.
+spectrogram(waveform, fs, nperseg=256, noverlap=224).plot(
+    ax=axes[0], ref=1.0, freq_min=janus.FC_INITIAL - janus.BW_INITIAL,
+    freq_max=janus.FC_INITIAL + janus.BW_INITIAL,
+    title='FH-BFSK waveform — hopping over 13 tone pairs')
 axes[0].axhline(janus.FC_INITIAL, color='w', ls='--', lw=0.8)
-axes[0].set_ylim(janus.FC_INITIAL - janus.BW_INITIAL,
-                 janus.FC_INITIAL + janus.BW_INITIAL)
-axes[0].set_title('FH-BFSK waveform — hopping over 13 tone pairs')
-axes[0].set_xlabel('Time [s]')
-axes[0].set_ylabel('Frequency [Hz]')
 
-axes[1].plot(metric)
+uacpy.plot.plot_sync_metric(metric, ax=axes[1],
+                            title='GO-CFAR preamble detection statistic')
 axes[1].axvline(int(np.argmax(metric)), color='g', ls=':', lw=1,
                 label='detected preamble')
-axes[1].set_title('GO-CFAR preamble detection statistic')
+# The statistic is one value per quarter-chip alignment, not per sample.
 axes[1].set_xlabel('Alignment column (¼-chip)')
 axes[1].set_ylabel('CFAR statistic')
-axes[1].grid(alpha=0.3)
 axes[1].legend()
 
 fig.savefig(OUT / 'example_34_janus_beacon.png', dpi=120)

@@ -1,18 +1,19 @@
-"""Add an engine's saved run-settings record to ``tests/data/run_settings_by_engine.json``.
+"""Write engines' run-settings records to ``tests/data/run_settings_by_engine.json``.
 
-``test_a_saved_run_settings_loads_from_the_class_path_it_names`` loads one
-saved record per registered engine: the default-mode
-``run_settings(...).to_dict()`` on the conformance suite's example guide,
-which is what a result saved to disk carries. A new engine needs its record
-written once. Command line, run from the repository root (the directory
-holding ``uacpy/``)::
+``test_the_run_settings_record_keeps_its_saved_form`` compares the record
+each registered engine writes — its default-mode ``run_settings(...).to_dict()``
+on the conformance suite's example guide, which a result saved to disk
+carries — with the one saved here: the fields at every level, so a field
+added, renamed or removed is a change the suite reports, and a deliberate
+one is recorded by rewriting the record. uacpy reads only records this
+version writes, so the file holds the current form. Command line, run from
+the repository root (the directory holding ``uacpy/``)::
 
+    python -m uacpy.tests._save_run_settings              # every engine
     python -m uacpy.tests._save_run_settings KEY [KEY ...]
 
-writes the record of each registry key (``ENGINES``) and exits 0. A key
-already in the file is refused and nothing is written: a saved record stands
-for every file saved before, so rewriting it would hide the change that
-stops such files loading.
+writes the record of each registry key (``ENGINES``), replacing a saved
+one, and exits 0.
 """
 import json
 import sys
@@ -36,12 +37,10 @@ def saved_record(key):
 
 
 def main(keys):
-    text = SAVED_SETTINGS.read_text(encoding='utf-8')
-    saved = json.loads(text)
-    present = sorted(set(keys) & set(saved))
-    if present:
-        print(f"already saved, not rewritten: {present}", file=sys.stderr)
-        return 1
+    from uacpy.models._registry import ENGINES
+    saved = (json.loads(SAVED_SETTINGS.read_text(encoding='utf-8'))
+             if SAVED_SETTINGS.exists() else {})
+    keys = list(keys) or sorted(ENGINES)
     for key in keys:
         saved[key] = saved_record(key)
     out = json.dumps(dict(sorted(saved.items())), indent=1) + '\n'

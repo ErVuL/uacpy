@@ -1,26 +1,28 @@
-"""The source-depth stack of a run: one engine run per source depth
-(:func:`run_per_source_depth`), the weight of a one-depth source
-(:func:`apply_single_source_weight`), the slabs of a result, the scratch
-subdirectory of each depth, the weights stamp, and the common time axis of
-time-domain slabs."""
+"""The source depths of a run: one engine run per source depth
+(:func:`run_per_source_depth`) joined into one result, the weight of a
+one-depth source (:func:`apply_single_source_weight`), the slabs of a
+result, the scratch subdirectory of each depth, the weights stamp, and the
+common time axis of time-domain fields."""
 
+import dataclasses
 from typing import List
 
 import numpy as np
 
 from uacpy._log import log_message
 from uacpy.core.results import Field, ResultStack
-from uacpy.core.run_settings import RunSettings
-from uacpy.core.results.stack import (_check_stack_weightable,
-                                      _dB_weight_refusal,
-                                      _weighted_slab_sum)
+from uacpy.core.run_settings import RunMode, RunSettings
+from uacpy.core.results._superposition import (_check_sources_weightable,
+                                               _dB_weight_refusal,
+                                               _stack_fields, _weighted_sum)
 from uacpy.core.source import Source
 
 
 def _slabs_of(result):
-    """The slabs of a ``ResultStack``, or ``[result]`` for a single result —
-    so a wrapper's post-assembly steps (masking, stamping, output paths)
-    run per slab whether the engine returned one field or a stack."""
+    """The slabs of a ``ResultStack``, or ``[result]`` for any other result
+    (one Field over several source depths included) — so a wrapper's
+    post-assembly steps (stamping, output paths) run on every result object
+    the run returns."""
     return result.slabs if isinstance(result, ResultStack) else [result]
 
 
@@ -38,8 +40,9 @@ def _source_depth_subdirs(depths) -> List[str]:
 
 
 def _stamp_source_weights(slabs, source: 'Source') -> None:
-    """Record ``source.weights`` on every slab of a source-depth stack so
-    ``ResultStack.superpose()`` finds them without the ``Source``."""
+    """Record ``source.weights`` on the result of a multi-depth run (each
+    slab of a sparse stack) so ``Field.superpose()`` finds them without the
+    ``Source``."""
     for slab in slabs:
         slab.source_weights = source.weights.copy()
 
@@ -93,64 +96,111 @@ def _pad_time_slabs_to_common_axis(slabs):
     return padded
 
 
-def run_per_source_depth(source, run_one, *, pad_time_axes: bool,
-                         model_name: str, verbose,
-                         scratch_subdir) -> ResultStack:
-    """One single-depth engine run, ``run_one(single_depth_source)``,
-    per ``source.depths`` entry, stacked over ``source_depth``. The same
-    env, receiver, mode and keywords go to every depth, and each slab's
-    ``source_weights`` records ``source.weights`` for
-    :meth:`ResultStack.superpose` to read as its default. A pinned
-    ``work_dir`` gets one ``source_depth_<z>m`` subdirectory per depth,
-    so the ``*_file`` paths each slab carries stay that slab's. Time-
-    domain slabs whose window the engine sized from each depth's own
-    arrivals are zero-padded at the end to one common axis
-    (``pad_time_axes``, set when the caller gave no
-    ``output_duration``), so the stack always superposes.
-    ``scratch_subdir(name)`` is the model's redirect of its pinned work
-    directory (``PropagationModel._scratch_subdir``); ``model_name`` and
-    ``verbose`` name the model in the log and the refusal."""
+def _one_time_axis(slabs) -> bool:
+    """Whether the time-domain ``Field`` slabs share one time axis (any
+    other slabs are taken as sharing it)."""
+    if not all(isinstance(s, Field) and 'time' in s.coords for s in slabs):
+        return True
+    first = slabs[0].coords['time']
+    return all(s.coords['time'].shape == first.shape
+               and np.array_equal(s.coords['time'], first) for s in slabs[1:])
+
+
+def run_per_source_depth(source, settings: RunSettings, run_one, *,
+                         pad_time_axes: bool, model_name: str, verbose,
+                         scratch_subdir):
+    """One single-depth engine run, ``run_one(single_depth_source,
+    settings)``, per ``source.depths`` entry, joined over ``source_depth``,
+    and the settings the runs used. The same env, receiver, mode and
+    keywords go to every depth.
+
+    Fields are joined into one Field whose leading ``source_depth`` axis
+    holds each depth's unit-amplitude field
+    (:func:`~uacpy.core.results.stack_fields`); sparse
+    results (rays, arrivals) into a ``ResultStack``. The result records
+    ``source.weights`` for :meth:`Field.superpose` to read as its default.
+    A pinned ``work_dir`` gets one ``source_depth_<z>m`` subdirectory per
+    depth, so the ``*_file`` paths of each depth stay its own (one entry
+    per depth in the joined field's metadata).
+
+    Time-domain fields must share one time axis. Records whose window the
+    engine sized from each depth's own arrivals are zero-padded at the end
+    to the longest (``pad_time_axes``, set when the caller gave no
+    ``output_duration``). Records that open at different instants — an
+    engine that starts each just before that depth's earliest arrival —
+    are run again, every depth with ``t_start`` the earliest of those
+    starts, when the caller gave no ``t_start``; the settings returned say
+    so in a note. ``scratch_subdir(name)`` is the model's redirect of its
+    pinned work directory (:func:`~uacpy.models._workspace.scratch_subdir`);
+    ``model_name`` and ``verbose`` name the model in the log and the
+    refusal."""
     n = int(source.depths.size)
     log_message(model_name,
                 f"multi-depth Source: {n} single-depth runs, one per "
                 f"depth {source.depths.tolist()}",
                 verbose=verbose, level='info')
-    slabs = []
     subdirs = _source_depth_subdirs(source.depths)
-    for i in range(n):
-        single = source.at_depth(i)
-        with scratch_subdir(subdirs[i]):
-            slabs.append(run_one(single))
-        # The weights are applied by ``superpose``, not here — but a
-        # field they could never scale (a dB-only mode, or a real trace
-        # under a complex weight) is refused now rather than after the
-        # remaining n-1 runs, so the one-source and many-source paths
-        # refuse the same input at the same point.
-        if i == 0 and not source.has_unit_weights and isinstance(
-                slabs[0], Field):
-            _check_stack_weightable(
-                slabs[0], source.weights,
-                where=f"{model_name}: Source(weights="
-                      f"{source.weights.tolist()})")
-    if pad_time_axes:
-        slabs = _pad_time_slabs_to_common_axis(slabs)
+
+    def run_every_depth(ran: RunSettings):
+        slabs = []
+        for i in range(n):
+            single = source.at_depth(i)
+            with scratch_subdir(subdirs[i]):
+                slabs.append(run_one(single, ran))
+            # The weights are applied by ``superpose``, not here — but a
+            # field they could never scale (a dB-only mode, or a real trace
+            # under a complex weight) is refused now rather than after the
+            # remaining n-1 runs, so the one-source and many-source paths
+            # refuse the same input at the same point.
+            if i == 0 and not source.has_unit_weights and isinstance(
+                    slabs[0], Field):
+                _check_sources_weightable(
+                    slabs[0], source.weights,
+                    where=f"{model_name}: Source(weights="
+                          f"{source.weights.tolist()})")
+        if pad_time_axes:
+            slabs = _pad_time_slabs_to_common_axis(slabs)
+        return slabs
+
+    slabs = run_every_depth(settings)
+    if (not _one_time_axis(slabs) and settings.mode == RunMode.TIME_SERIES
+            and settings.time is not None and settings.time.t_start is None):
+        starts = [float(s.coords['time'][0]) for s in slabs]
+        t_start = min(starts)
+        note = (f"t_start: every source depth's record opens at "
+                f"{t_start:.6g} s, the earliest of the depths' own starts "
+                f"({', '.join(f'{t:.6g}' for t in starts)} s), so the "
+                f"depths share one time axis")
+        log_message(model_name,
+                    f"the {n} depths' records open at different instants; "
+                    f"running every depth again with t_start={t_start:.6g} s",
+                    verbose=verbose, level='info')
+        settings = settings._replace(
+            time=dataclasses.replace(settings.time, t_start=t_start),
+            notes=settings.notes + (note,))
+        slabs = run_every_depth(settings)
     _stamp_source_weights(slabs, source)
+    if isinstance(slabs[0], Field):
+        result = _stack_fields(slabs, source.depths,
+                               coordinate_name='source_depth',
+                               who=f"{model_name}.run")
+        return result, settings
     return ResultStack.from_slabs(slabs, source.depths,
-                                  coordinate_name='source_depth')
+                                  coordinate_name='source_depth'), settings
 
 
 def apply_single_source_weight(result, source: 'Source', *, model_name: str):
     """A one-depth ``Source`` with a non-unit weight scales its
     ``Field`` by that weight — the ``n = 1`` case of
-    :meth:`ResultStack.superpose` — and records it in
+    :meth:`Field.superpose` — and records it in
     ``metadata['superposed_sources']``. Unit weight leaves the result
     untouched; a complex weight on a real time-domain trace is refused
     for the reason ``superpose`` gives."""
     if not isinstance(result, Field):
         return result
     w = complex(source.weights[0])
-    result.data, _ = _weighted_slab_sum(
-        [result], [w], where=f"{model_name}: Source(weights={w})")
+    result.data, _ = _weighted_sum(
+        result, [result.data], [w], where=f"{model_name}: Source(weights={w})")
     result.metadata['superposed_sources'] = {
         'depths': source.depths.tolist(),
         'weights': [w.real if not result.is_complex else w],
@@ -177,40 +227,43 @@ def run_depth_loop(source, settings: RunSettings, run_one, *,
                    pad_time_axes: bool, model_name: str, verbose,
                    scratch_subdir):
     """The source-depth loop and the weights of stages 4-5 around
-    ``run_one(source) -> result``, which launches the engine for the
-    ``Source`` it is handed: once per depth into a ``ResultStack``
-    (``settings.depth_loop == 'per_depth'``, see
-    :func:`run_per_source_depth`), once with the unit copy of a
-    weighted one-depth source (:func:`apply_single_source_weight`), or once
-    with the whole source. ``model_name``, ``verbose`` and
-    ``scratch_subdir`` are the model's (see :func:`run_per_source_depth`)."""
+    ``run_one(source, settings) -> result``, which launches the engine for
+    the ``Source`` it is handed under ``settings``: once per depth, joined
+    into one result (``settings.depth_loop == 'per_depth'``, see
+    :func:`run_per_source_depth`), once with the unit copy of a weighted
+    one-depth source (:func:`apply_single_source_weight`), or once with the
+    whole source. Returns the result and the settings the run used.
+    ``model_name``, ``verbose`` and ``scratch_subdir`` are the model's (see
+    :func:`run_per_source_depth`)."""
     if settings.depth_loop == 'per_depth':
         return run_per_source_depth(
-            source, run_one, pad_time_axes=pad_time_axes,
+            source, settings, run_one, pad_time_axes=pad_time_axes,
             model_name=model_name, verbose=verbose,
             scratch_subdir=scratch_subdir)
     n_depths = int(source.depths.size)
     if (n_depths == 1 and settings.source_weights is not None
             and settings.weights_applied):
-        # The engine sees a unit source — as it does for every slab of
+        # The engine sees a unit source — as it does for every depth of
         # a multi-depth run — and the weight is applied here, once,
         # whatever the engine's launches do with the source they are
         # handed.
-        result = run_one(source.at_depth(0))
+        result = run_one(source.at_depth(0), settings)
         return apply_single_source_weight(result, source,
-                                          model_name=model_name)
-    result = run_one(source)
-    # A stack the engine built itself (Bellhop's .shd / .ray / .arr
-    # readers, Kraken's and Scooter's TL) carries the same weight stamp —
-    # and the same refusal — as a looped one.
-    if (n_depths > 1 and isinstance(result, ResultStack)
-            and result.coordinate_name == 'source_depth'
-            and result.n_slabs == n_depths):
-        if settings.source_weights is not None and isinstance(
-                result.slabs[0], Field):
-            _check_stack_weightable(
-                result.slabs[0], source.weights,
-                where=f"{model_name}: Source(weights="
-                      f"{source.weights.tolist()})")
-        _stamp_source_weights(result.slabs, source)
-    return result
+                                          model_name=model_name), settings
+    result = run_one(source, settings)
+    # A multi-depth result the engine built itself (Bellhop's .shd / .ray /
+    # .arr readers, Kraken's and Scooter's TL) carries the same weight
+    # stamp — and the same refusal — as a looped one.
+    if n_depths > 1:
+        if isinstance(result, Field) and 'source_depth' in result.coords:
+            if settings.source_weights is not None:
+                _check_sources_weightable(
+                    result, source.weights,
+                    where=f"{model_name}: Source(weights="
+                          f"{source.weights.tolist()})")
+            _stamp_source_weights([result], source)
+        elif (isinstance(result, ResultStack)
+              and result.coordinate_name == 'source_depth'
+              and result.n_slabs == n_depths):
+            _stamp_source_weights(result.slabs, source)
+    return result, settings

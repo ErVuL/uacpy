@@ -9,12 +9,17 @@ and ``Field.to_time_trace``) expects a single canonical form: the
     p̄(r, z, f)  ∝  ψ̄(r, z, f) · exp(-i k₀ r) · exp(-iπ/4) / √r
 
 where ψ is the slow PE envelope, k₀ = ω/c₀ is the reference wavenumber,
-``exp(-iπ/4)`` is the Hankel-asymptotic cylindrical-spreading phase of
-``H₀⁽¹⁾(k₀r) ≈ √(2/(π k₀ r))·exp(+i(k₀r - π/4))`` under the conjugated
-carrier, and the bar denotes complex conjugation (the conjugate flips the
+and the bar denotes complex conjugation (the conjugate flips the
 mpiramS / Collins ``exp(+i k₀ r)`` carrier, the physics ``exp(-iωt)``
 convention, to the ``exp(+iωt)`` engineering sign uacpy uses everywhere
-else). mpiramS bakes the π/4 into what it
+else). ``exp(-iπ/4)`` is the conjugate of the point source's far-field
+phase: in the physics sign a unit point source radiates
+``(i/4)·H₀⁽¹⁾(k₀r)`` per mode, and with
+``H₀⁽¹⁾(k₀r) ≈ √(2/(π k₀ r))·exp(+i(k₀r - π/4))`` the prefactor
+``i = exp(+iπ/2)`` lifts the Hankel ``-π/4`` to
+``exp(+i(k₀r + π/4))/√(8π k₀ r)`` (JKPS §5.2, eq. (5.14), whose prefactor
+is ``i·e^{-iπ/4}``); conjugated, that is ``exp(-i k₀ r)·exp(-iπ/4)``.
+mpiramS bakes the ``+π/4`` into what it
 writes; the Collins codes factor out only ``exp(+i k₀ r)``
 (``ramgeo1.5.f:436``, ``ramsurf1.5.f:445``, ``rams0.5.f:270``), so their
 branches apply it here.
@@ -147,16 +152,18 @@ def psi_to_travelling_wave(
         psi.shape, range_axis, None, ranges_m, None,
     )[0]
 
-    # The Hankel-asymptotic cylindrical-spreading phase under the conjugated
+    # The point source's far-field phase exp(+iπ/4) — the i of (i/4)·H₀⁽¹⁾
+    # times the Hankel exp(-iπ/4), JKPS eq. (5.14) — under the conjugated
     # carrier (see the module docstring). mpiramS bakes it into psif; the
     # Collins codes do not write it, so the RAMS / RAMSURF branches apply it.
-    hankel = np.exp(-1j * np.pi / 4.0)
+    point_source_phase = np.exp(-1j * np.pi / 4.0)
 
     if convention == MPIRAMS:
         # peramx already applies the full 3-D / Hankel-asymptotic output scaling
         # scl = exp(+i(ω/c₀·r + π/4))/(4π) (peramx.f90:429); the Collins PE
         # self-starter is itself a far-field Hankel approximation (Collins 1993;
-        # JKPS), so the π/4 is the cylindrical-spreading phase, already baked in.
+        # JKPS), so the +π/4 is the point source's far-field phase (JKPS
+        # eq. (5.14)), already baked in.
         # The wrapper must therefore ONLY conjugate (peramx marches the conjugate
         # time convention) and restore the 4π — applying any extra exp(±iπ/4)
         # here would double-count that phase. Verified: conj(psif)·4π matches
@@ -166,12 +173,12 @@ def psi_to_travelling_wave(
     elif convention == RAMS:
         # rams0.5 marches its own carrier in, one g₀ = exp(+i k₀ Δr rot₀) per
         # range step (``rams0.5.f:849-850``), so conj recovers the carrier —
-        # but the code writes no Hankel π/4 (the dump at ``rams0.5.f:270``
+        # but the code writes no point-source π/4 (the dump at ``rams0.5.f:270``
         # divides by ``sqrt(r+eps)`` only), so it is applied here. ``rot₀`` is the
         # rotated-Padé scalar (``rams0.5.f:865-888``; exactly 1 when the
         # rotation is off, ``:909``) and is left in — it belongs to the
         # operator, not to the phase convention.
-        out = psi_bar * hankel
+        out = psi_bar * point_source_phase
     else:  # RAMSURF — needs explicit carrier
         if k0 is None or freq_axis is None:
             # Narrowband ramsurf: a scalar k0 with no freq_axis is OK.
@@ -189,8 +196,9 @@ def psi_to_travelling_wave(
                 -1j * k0_arr.reshape(k0_shape) * ranges_m.reshape(rng_shape)
             )
         # ramsurf1.5 / ramgeo write the bare envelope: the carrier at :445 /
-        # :436 carries no π/4, so the Hankel phase is applied here as well.
-        out = psi_bar * carrier * hankel
+        # :436 carries no π/4, so the point-source phase is applied here as
+        # well.
+        out = psi_bar * carrier * point_source_phase
 
     if apply_radial:
         radial = (1.0 / np.sqrt(ranges_m)).reshape(rng_shape_only)

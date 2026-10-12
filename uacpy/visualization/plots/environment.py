@@ -329,10 +329,10 @@ def _draw_halfspace_bottom(ax_bathy, halfspace, r_km, seafloor, z_max_layer):
 @typed_plot_error(who='Environment.plot')
 def plot_environment(
     env: Environment,
+    ax=None,
     *,
     source=None,
     receiver=None,
-    ax=None,
     show_bottom_colorbar: bool = True,
     show_data_credit=True,
     sea_ice=None,
@@ -545,9 +545,13 @@ def plot_environment(
             ssp_r_km_b, ssp.depths, ssp_grid,
             cmap=water_cmap,
             vmin=water_cs_min, vmax=water_cs_max,
-            # Linear between the profile's samples, in depth and range —
-            # what every model does with the SSP. 'nearest' painted a
-            # 3-sample profile as flat blocks stepping at depths it never has.
+            # Linear between the profile's samples: in depth, as every engine
+            # interpolates a profile, and in range, as Bellhop's 'Q' option
+            # does (Bellhop/sspMod.f90 Quad; the RAM family instead switches
+            # to the nearest profile midway between nodes,
+            # models/ram/collins.py). A model-agnostic rendering; 'nearest'
+            # painted a 3-sample profile as flat blocks stepping at depths it
+            # never has.
             shading='gouraud', zorder=0,
         )
     else:
@@ -558,9 +562,8 @@ def plot_environment(
             x_water, ssp.depths, np.tile(ssp_1d, (1, 2)),
             cmap=water_cmap,
             vmin=water_cs_min, vmax=water_cs_max,
-            # Linear between the profile's samples, in depth and range —
-            # what every model does with the SSP. 'nearest' painted a
-            # 3-sample profile as flat blocks stepping at depths it never has.
+            # Linear in depth between the samples, as in the range-dependent
+            # branch above (one profile, so no range interpolation).
             shading='gouraud', zorder=0,
         )
 
@@ -699,7 +702,7 @@ def _ssp_to_draw(env_or_ssp, depths, ranges):
 
 
 @typed_plot_error(who='SoundSpeedProfile.plot')
-def plot_ssp(env_or_ssp, *, depths=None, ranges=None, ax=None,
+def plot_ssp(env_or_ssp, ax=None, *, depths=None, ranges=None,
              title: Optional[str] = None,
              figsize=(5, 6), label: Optional[str] = None, color=None,
              show_legend: Optional[bool] = None, **line_kwargs):
@@ -837,6 +840,35 @@ def _layered_property_at_depths(layered, prop, seafloor, z):
     return out
 
 
+def _seabed_depth_samples(bottom, r_km, seafloor_r, n_depths):
+    """Absolute depths (m) a seabed cross-section is sampled at.
+
+    ``n_depths`` evenly spaced samples over the seabed — from ``pad`` above
+    the shallowest seafloor (never above the surface) to ``pad`` below the
+    deepest layer stack, ``pad`` being a quarter of that vertical extent and
+    at least 20 m — plus, for every layer thinner than that spacing, three
+    samples inside it (near its top, mid-layer, near its bottom) under each
+    range sample, so a thin layer is drawn with its own thickness instead of
+    falling between two evenly spaced samples."""
+    sf_min, sf_max = float(np.min(seafloor_r)), float(np.max(seafloor_r))
+    max_thk = bottom.total_thickness_max()
+    pad = max(20.0, 0.25 * ((sf_max - sf_min) + max_thk))
+    z_top = max(0.0, sf_min - pad)
+    z = np.linspace(z_top, sf_max + max_thk + pad, n_depths)
+    step = z[1] - z[0] if z.size > 1 else np.inf
+    extra = []
+    for j, r_node in enumerate(r_km):
+        col = bottom.columns[bottom.column_index_at(
+            range=float(km_to_m(r_node)))]
+        top = float(seafloor_r[j])
+        for layer in col.layers:
+            thickness = float(layer.thickness)
+            if 0.0 < thickness < step:
+                extra.extend(top + thickness * np.array([0.01, 0.5, 0.99]))
+            top += thickness
+    return np.union1d(z, extra) if extra else z
+
+
 def _seabed_property_grid(bottom, prop, r_km, z, seafloor_r):
     """``[len(z), len(r_km)]`` grid of ``prop`` in the seabed, NaN above the
     range-local seafloor — the water column is left blank because NaN cells
@@ -867,7 +899,12 @@ def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
                      figsize: Tuple[float, float] = (8, 5), **mpl_kw):
     """Plane-wave bottom loss against grazing angle, one curve per seabed.
 
-    Draws what :func:`uacpy.core.acoustics.bottom_loss_curve` computes.
+    Draws what :func:`uacpy.core.acoustics.bottom_loss_curve` computes: the
+    loss of a FLUID half-space, so a seabed's shear speed takes no part (a
+    carrier that has one is drawn as its fluid with that function's
+    ``FallbackWarning``) and the default title says "fluid seabed". For an
+    elastic or layered seabed compute the reflection with ``Bounce`` or
+    ``OASR`` and draw it with ``rc.plot(quantity='loss')``.
     ``materials`` is anything that function accepts — a preset name
     (``'sand'``), a property dict (``sound_speed``, ``density``,
     ``attenuation``), a seabed carrier such as ``BoundaryProperties`` — or an
@@ -1016,7 +1053,10 @@ def plot_bottom_loss(materials, ax=None, *, grazing_angles_deg=None,
     ax.grid(True, alpha=0.3)
     if len(items) > 1:
         ax.legend(loc='upper left', fontsize='small')
-    ax.set_title(_title_or(title, 'Plane-wave bottom loss'))
+    # bottom_loss_curve is the fluid-fluid loss (shear ignored, with a
+    # FallbackWarning for a seabed that carries shear), so the default
+    # caption says so.
+    ax.set_title(_title_or(title, 'Plane-wave bottom loss (fluid seabed)'))
     return fig, ax
 
 
@@ -1026,7 +1066,7 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
                            show_data_credit=True, fig=None):
     """Small-multiples cross-sections of the **seabed geoacoustic properties**.
 
-    One range × sub-bottom-depth heatmap per property present in
+    One range × depth heatmap per property present in
     ``env.bottom`` — sound speed ``cp``, shear speed ``cs``, density ``ρ``,
     compressional / shear attenuation ``αp`` / ``αs`` — each with its own
     colorbar. Properties that are uniformly zero or absent (e.g. shear for a
@@ -1035,7 +1075,11 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
 
     Works for every ``Bottom`` shape (half-space, layered, range-dependent
     half-space, range-dependent layered); for layered
-    seabeds the layers track the bathymetry. Pass ``properties=`` to restrict
+    seabeds the layers track the bathymetry. The depth axis is absolute but
+    spans the seabed only — from a margin above the shallowest seafloor to
+    a margin below the deepest layer stack — and every layer thinner than
+    the depth step gets samples of its own, so no layer falls between
+    samples however deep the water. Pass ``properties=`` to restrict
     the panels, naming each by its attribute (``'sound_speed'``,
     ``'shear_speed'``, ``'density'``, ``'attenuation'``,
     ``'shear_attenuation'``) or its symbol (``'cp'``, ``'cs'``, ``'ρ'``,
@@ -1057,8 +1101,8 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
         Size (inches) of the new figure; ``None`` sizes it from the panel
         grid.
     n_ranges, n_depths : int, optional
-        Samples of each heatmap along range and sub-bottom depth. Default
-        240 and 200.
+        Samples of each heatmap along range and depth (plus the samples
+        each thin layer adds, see above). Default 240 and 200.
     show_data_credit : bool, Environment, Result or sequence, optional
         The data-source credit footnote of a standalone figure (see above).
     fig : Figure or SubFigure, optional
@@ -1112,10 +1156,7 @@ def plot_bottom_properties(env, *, properties=None, title: Optional[str] = None,
     else:
         seafloor_r = np.full(r_km.shape, float(env.depth))
 
-    max_thk = bottom.total_thickness_max()
-    sf_max = float(np.max(seafloor_r))
-    z_floor = sf_max + max_thk + max(20.0, 0.25 * sf_max)
-    z = np.linspace(0.0, z_floor, n_depths)
+    z = _seabed_depth_samples(bottom, r_km, seafloor_r, n_depths)
 
     panels = []
     for prop, sym, unit, cmap in _BOTTOM_PROPERTIES:
@@ -1229,7 +1270,8 @@ def _absorption_to_draw(coefficient, frequencies, depths):
 
 @typed_plot_error
 def plot_absorption(coefficient, ax=None, *, frequencies=None, depths=None,
-                    label=None, title=None, figsize=(7.5, 4.5), **mpl_kw):
+                    label=None, title=None, figsize=(7.5, 4.5),
+                    show_colorbar=True, **mpl_kw):
     """Draw an :class:`~uacpy.core.absorption.AbsorptionCoefficient`, or a
     bare alpha array in dB/km on the ``frequencies`` (and ``depths``) given.
 
@@ -1265,6 +1307,8 @@ def plot_absorption(coefficient, ax=None, *, frequencies=None, depths=None,
     figsize : tuple, optional
         Size (inches) of the new figure, ``(7.5, 4.5)`` by default; unused when
         ``ax`` is given.
+    show_colorbar : bool, optional
+        Draw the colorbar of a depth-frequency heatmap. Default True.
     **mpl_kw
         Matplotlib keywords for the curve or the heatmap.
     """
@@ -1297,7 +1341,8 @@ def plot_absorption(coefficient, ax=None, *, frequencies=None, depths=None,
         ax.set_xscale('log')
         invert_yaxis_once(ax)
         ax.set_ylabel("Depth (m)")
-        fig.colorbar(mesh, ax=ax, label=value_label)
+        if show_colorbar:
+            fig.colorbar(mesh, ax=ax, label=value_label)
     else:
         name = label or coefficient.model
         ax.loglog(freqs, values, label=name, **mpl_kw)
@@ -1311,7 +1356,7 @@ def plot_absorption(coefficient, ax=None, *, frequencies=None, depths=None,
 
 
 @typed_plot_error(who=lambda profile, *_a, **_k: f"{type(profile).__name__}.plot")
-def plot_range_profile(profile, *, ax=None, title=None, figsize=(10, 4),
+def plot_range_profile(profile, ax=None, *, title=None, figsize=(10, 4),
                        **mpl_kw):
     """Render a 1-D ``value(range)`` carrier — :class:`Bathymetry` or
     :class:`Altimetry`; ``profile.plot()`` is the method form.

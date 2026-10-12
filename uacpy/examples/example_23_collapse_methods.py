@@ -78,6 +78,10 @@ for label, field in fields.items():
     print(f"  {label:34s} TL {np.nanmin(field.dB):.1f}-"
           f"{np.nanmax(field.dB):.1f} dB")
 
+# env= draws the environment's own sloping seafloor over every panel, for
+# reference: Scooter ran on the flat seabed each collapse chose, so its cells
+# under the slope are covered, and below a shallower collapsed seabed the field
+# is blank (NaN).
 fig, _ = uacpy.plot.compare_models(
     fields, env=env, ncols=2, vmin=40, vmax=110, contours=[60, 80],
     title='One range-dependent environment, collapsed four ways')

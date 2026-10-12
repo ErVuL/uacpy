@@ -27,7 +27,6 @@ date-specific conditions use the Copernicus Marine source
 
 import datetime as _dt
 import re
-import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -53,22 +52,23 @@ from uacpy.core.geo import (
 from uacpy.data._geo import (
     require_month, ring_offsets, run_representative_indices, capped_n_points,
     require_source, DEFAULT_MAX_TRANSECT_POINTS, checked_max_points,
+    checked_max_days, cut_at_first_invalid,
     checked_n_points, checked_max_distance, checked_offset, cell_half_diagonal_km,
 )
 from uacpy.core.geo import parse_date
-from uacpy.core.exceptions import (
-    ConfigurationError, DataFetchError, FallbackWarning,
-)
-from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.data._chain import SourceChain, SourceProvider, first_answer
+from uacpy.core.exceptions import ConfigurationError, DataFetchError
+from uacpy.data._chain import (SourceChain, SourceProvider, first_answer,
+                               lower_source_spec)
 from uacpy.data._http import http_get
 from uacpy.data.sources import SOURCES, DataProvenance
 from uacpy._log import log_message
-from uacpy.data._provenance_notice import one_provenance_notice
+from uacpy.data._provenance_notice import (one_provenance_notice,
+                                           provenance_fallback)
 
 __all__ = ['fetch_ssp', 'fetch_ssp_transect', 'ssp_transect_plan',
            'fetch_ts_profile', 'TSProfile', 'assemble_range_dependent',
-           'extend_ssp_below_data', 'extend_column_to_seafloor']
+           'extend_ssp_below_data', 'extend_column_to_seafloor',
+           'deepen_with_climatology']
 
 DEFAULT_BASE_URL = 'https://www.ncei.noaa.gov/thredds-ocean/dodsC/woa23/DATA'
 DEFAULT_DECADE = 'decav'              # 1955-2022 average of all decades
@@ -140,7 +140,7 @@ def fetch_ssp(
     base_url: str = DEFAULT_BASE_URL,
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
-    max_days: Optional[float] = None,
+    max_days: Optional[int] = None,
     max_distance_km: Optional[float] = None,
 ) -> SoundSpeedProfile:
     """Sound-speed profile at a ``(lat, lon)`` point from World Ocean Atlas
@@ -161,9 +161,10 @@ def fetch_ssp(
         Sound-speed equation. Default ``'teos10'``; see
         :func:`uacpy.core.acoustics.sound_speed_teos10` for why UNESCO
         (Chen-Millero 1977 as published) sits 0.6 m/s above it in deep water.
-        ``'mackenzie'`` is :func:`uacpy.core.acoustics.sound_speed_mackenzie`, which
-        takes depth in metres, so the table entry inverts the pressure to
-        depth first (Leroy & Parthiot at the 45° reference latitude).
+        ``'mackenzie'`` is :func:`uacpy.core.acoustics.sound_speed_mackenzie`,
+        which is stated in depth, so it reads the WOA23 depths directly; the
+        pressure equations convert the depths to pressure at the site
+        latitude.
     resolution : {'1.00', '0.25'}, optional
         WOA grid spacing in degrees. Default ``'1.00'``.
     source : str or sequence of str, optional
@@ -179,9 +180,10 @@ def fetch_ssp(
         WOA averaging period directory (default ``'decav'``).
     base_url, timeout, verbose
         THREDDS root, network timeout, logging gate.
-    max_days : float, optional
-        The staleness guard (days) of the time-specific sources, as in
-        :func:`uacpy.data.fetch_environment`; WOA23 does not read it.
+    max_days : int, optional
+        The staleness guard (whole days) of the time-specific sources, as in
+        :func:`uacpy.data.fetch_environment`; WOA23 does not read it. A
+        fraction or a negative is refused before any fetch.
     max_distance_km : float, optional
         Refuse data standing farther than this (km) from ``point``, whichever
         source answers; ``None`` (default) sets no limit beyond the
@@ -210,6 +212,8 @@ def fetch_ssp(
             timeout=timeout, verbose=verbose, max_distance_km=max_distance_km)
 
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_ssp')
+    max_days = _checked_optional_max_days(max_days, 'fetch_ssp')
+    source = _checked_ssp_source(source, 'fetch_ssp')
     from uacpy.data.bathymetry import _refuse_a_dry_point
     _refuse_a_dry_point(point, who='fetch_ssp', cache_only=source == 'local',
                         timeout=timeout, verbose=verbose)
@@ -342,7 +346,7 @@ def fetch_ssp_transect(
     timeout: float = 60.0,
     verbose: Union[bool, str] = False,
     seafloor=None,
-    max_days: Optional[float] = None,
+    max_days: Optional[int] = None,
     max_distance_km: Optional[float] = None,
 ) -> SoundSpeedProfile:
     """Range-dependent sound-speed profile along ``start`` → ``end``.
@@ -406,8 +410,9 @@ def fetch_ssp_transect(
     seafloor : Bathymetry, optional
         The transect's bathymetry; a column short of its own seafloor is
         extended to it (see above).
-    max_days : float, optional
-        Staleness guard (days) of the time-specific sources.
+    max_days : int, optional
+        Staleness guard (whole days) of the time-specific sources, as on
+        :func:`fetch_ssp`.
     max_distance_km : float, optional
         Refuse a waypoint whose data stand farther than this (km) from it;
         ``None`` (default) sets no limit beyond the per-waypoint
@@ -415,6 +420,8 @@ def fetch_ssp_transect(
     """
     formula = canonical_formula(formula, 'fetch_ssp_transect')
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_ssp_transect')
+    max_days = _checked_optional_max_days(max_days, 'fetch_ssp_transect')
+    source = _checked_ssp_source(source, 'fetch_ssp_transect')
 
     def woa23_call(backend):
         return _fetch_ssp_transect_backend(
@@ -642,6 +649,8 @@ def fetch_ts_profile(
         (default) sets no limit beyond the wet-cell hop's ``ProvenanceWarning``.
     """
     max_distance_km = checked_max_distance(max_distance_km, 'fetch_ts_profile')
+    source = lower_source_spec(source)
+    _check_woa_source(source)
     from uacpy.data.bathymetry import _refuse_a_dry_point
     _refuse_a_dry_point(point, who='fetch_ts_profile',
                         cache_only=source == 'local', timeout=timeout,
@@ -700,7 +709,8 @@ def _ts_profile_with_cell(
     # A wet-cell hop is reported once, by the offset rule on the provenance
     # (_woa_provenance): its ProvenanceWarning names the cell and the km.
 
-    # Monthly/seasonal fields cap at 1500 m. If this column reached that cap
+    # Monthly fields cap at 1500 m (this module reads monthly and annual
+    # fields only). If this column reached that cap
     # (deeper water exists below it), splice the annual mean on underneath; if
     # it stopped shallower it already hit the seafloor, so leave it be.
     if period != 0 and depths[-1] >= _MONTHLY_MAX_DEPTH:
@@ -829,8 +839,7 @@ def _truncate_column(z, t, s) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     z, t, s = z[:n], t[:n], s[:n]
     valid = (np.isfinite(t) & np.isfinite(s)
              & (t < WOA_FILL_THRESHOLD) & (s < WOA_FILL_THRESHOLD))
-    cut = valid.size if valid.all() else int(np.argmax(~valid))
-    return z[:cut], t[:cut], s[:cut]
+    return cut_at_first_invalid(valid, z, t, s)
 
 
 # Public source names: ``'woa23'`` is cache-first — the install-time grids,
@@ -841,6 +850,32 @@ WOA_SOURCES = ('woa23', 'local')
 _WOA_BACKENDS = ('opendap', 'local')
 
 
+def _check_woa_source(source):
+    """Refuse a ``source`` that is not one of :data:`WOA_SOURCES`."""
+    require_source(source, WOA_SOURCES, 'WOA23 source',
+                   "Use 'woa23' (the installed grids, else NCEI THREDDS "
+                   "online) or 'local' (the installed grids only; "
+                   "install.sh --data woa23).")
+
+
+def _checked_optional_max_days(max_days, who):
+    """``max_days`` validated in ``who``'s name; ``None`` (each source's own
+    default) passes."""
+    return None if max_days is None else checked_max_days(max_days, who)
+
+
+def _checked_ssp_source(source, who):
+    """``source`` with its ids lower-cased, after refusing in ``who``'s
+    name an id the SSP chain does not know — before any fetch, so a
+    misspelled source costs no request."""
+    source = lower_source_spec(source)
+    if not (isinstance(source, str) and source in WOA_SOURCES):
+        sources, cache_only = _SSP_CHAIN.resolve(source)
+        _SSP_CHAIN.attempts(sources, cache_only=cache_only, who=who,
+                            keyword='source=')
+    return source
+
+
 def _woa_cache_first(source, call):
     """``call(backend)`` for each backend ``source`` names, cached first,
     raising the most substantive error if none answers.
@@ -848,10 +883,7 @@ def _woa_cache_first(source, call):
     The installed grids fall through to THREDDS only when they are absent or
     unreadable (:func:`uacpy.data._cache.is_cache_miss`); a column the grids
     read as dry ends the chain, since THREDDS serves the same files."""
-    require_source(source, WOA_SOURCES, 'WOA23 source',
-                   "Use 'woa23' (the installed grids, else NCEI THREDDS "
-                   "online) or 'local' (the installed grids only; "
-                   "install.sh --data woa23).")
+    _check_woa_source(source)
     answer, _attempt = first_answer(
         _WOA23_SSP.attempts(cache_only=(source == 'local')),
         lambda _source, backend: call(backend))
@@ -1155,6 +1187,15 @@ def extend_ssp_below_data(ssp, depth_max: float,
     pressure term rather than a single gradient. At the trench point above the
     extension gives 1611.08 m/s, 0.01 m/s from that 1611.07 m/s reference.
 
+    It holds only for a profile that already reaches the deep isothermal
+    layer: the increment keeps the deepest temperature and adds the pressure
+    term alone. A cast that stops in or above the main thermocline still has
+    colder water below it, so its extension runs fast. At (45.6, -6.2) in
+    July the WOA23 column cut at 1000 m and extended to the 4782 m seafloor
+    reaches 1571.9 m/s, against 1541.9 m/s for the analysed column and
+    1507.4 m/s for the constant hold. Continue such a cast with a measured or
+    climatology column below its last level instead.
+
     Parameters
     ----------
     ssp : SoundSpeedProfile
@@ -1183,14 +1224,12 @@ def extend_ssp_below_data(ssp, depth_max: float,
             float(data[-1, j]), last, depth_max, latitude, speed_fn)
 
     if span > _EXTRAPOLATION_WARN_M:
-        warnings.warn(
+        provenance_fallback(
             f"sound-speed profile ends at {last:.0f} m but the seafloor is at "
             f"{depth_max:.0f} m; extrapolated the last {span:.0f} m along the "
             f"profile's deep gradient to {new_row[0]:.1f} m/s. Analysed T/S "
             f"products are shallower than bathymetry over much of the deep "
-            f"ocean — supply a measured profile if the deep column matters.",
-            FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
-        )
+            f"ocean — supply a measured profile if the deep column matters.")
 
     return type(ssp)(
         depths=np.append(depths, depth_max),
@@ -1243,3 +1282,156 @@ def extend_column_to_seafloor(column, seafloor, range_m: float,
     if depth <= float(np.asarray(column.depths)[-1]):
         return column
     return extend_ssp_below_data(column, depth, latitude=latitude)
+
+
+#: Depth span (m) over which a cast hands over to the climatology column below
+#: it: the cast's deepest this-many metres (all of a shorter cast) are a
+#: raised-cosine blend from the cast to the column, so the joined profile
+#: carries no step and no gradient kink at the join (a step would read as a
+#: reflector and a kink as a false turning depth to a ray model). Core Argo
+#: floats stop near 2000 dbar, so for them the blend spans 1500-2000 m.
+CAST_BLEND_M = 500.0
+
+
+def _blend_cast_onto_column(cast, column, *, verbose=False):
+    """``cast`` continued below its deepest level by ``column``.
+
+    Over the cast's deepest :data:`CAST_BLEND_M` the profile blends from the
+    cast to the column with a raised-cosine weight, at the union of both
+    profiles' levels there; above that it is the cast and below the cast it
+    is the column. The result cites both, and keeps the cast's ``formula``.
+    ``cast`` itself is returned when the column ends no deeper than it.
+    """
+    z_cast = np.asarray(cast.depths, dtype=float)
+    c_cast = np.asarray(cast.sound_speed, dtype=float)[:, 0]
+    z_last = float(z_cast[-1])
+    z_col = np.asarray(column.depths, dtype=float)
+    c_col = np.asarray(column.sound_speed, dtype=float)[:, 0]
+    if z_col[-1] <= z_last:
+        return cast
+    top = max(float(z_cast[0]), z_last - CAST_BLEND_M)
+    above = z_cast < top
+    blend_z = np.union1d(z_cast[(z_cast >= top) & (z_cast <= z_last)],
+                         z_col[(z_col >= top) & (z_col <= z_last)])
+    span = z_last - top
+    weight = (0.5 * (1.0 - np.cos(np.pi * (blend_z - top) / span))
+              if span > 0.0 else np.ones_like(blend_z))
+    blend_c = ((1.0 - weight) * np.interp(blend_z, z_cast, c_cast)
+               + weight * np.interp(blend_z, z_col, c_col))
+    below = z_col > z_last
+    log_message('sound_speed', f"the cast ends at {z_last:.0f} m; the "
+                f"climatology continues it to {z_col[-1]:.0f} m (blended over "
+                f"{top:.0f}-{z_last:.0f} m)", verbose=verbose)
+    return SoundSpeedProfile(
+        depths=np.concatenate([z_cast[above], blend_z, z_col[below]]),
+        sound_speed=np.concatenate([c_cast[above], blend_c, c_col[below]]),
+        kind='measured',
+        data_sources=tuple(cast.data_sources) + tuple(column.data_sources),
+        formula=cast.formula)
+
+
+def deepen_with_climatology(
+    ssp,
+    point: Coordinate,
+    *,
+    date: Union[str, _dt.date, None] = None,
+    month: Optional[int] = None,
+    source: str = 'woa23',
+    resolution: str = '1.00',
+    formula: Optional[str] = None,
+    timeout: float = 60.0,
+    verbose: Union[bool, str] = False,
+) -> SoundSpeedProfile:
+    """A measured cast continued below its deepest level by the WOA23
+    climatology column at the same point and month.
+
+    A CTD, XBT or glider cast usually stops above the seafloor, and the water
+    below it keeps cooling. :func:`extend_ssp_below_data` holds the deepest
+    temperature and adds the pressure term alone, which is right only from
+    the deep isothermal layer down; a cast cut in the thermocline extends
+    fast (30 m/s at 4.8 km for a 1000 m cast in the Bay of Biscay in July).
+    This takes the analysed column instead. Over the cast's deepest
+    :data:`CAST_BLEND_M` metres (all of a shorter cast) the profile blends
+    from the cast to the column with a raised-cosine weight, so the join
+    carries no step (a false reflector) and no gradient kink (a false turning
+    depth for a ray model); below the cast it is the column. The result
+    cites both records. It is what ``fetch_environment`` does to a fetched
+    Argo cast; a profile passed to ``fetch_environment(ssp=...)`` is used as
+    given, so deepen it with this first.
+
+    Parameters
+    ----------
+    ssp : SoundSpeedProfile
+        The cast: one column (not range-dependent).
+    point : (lat, lon)
+        Where the cast was taken, in decimal degrees.
+    date : str or datetime.date, optional
+        The cast's date; its month picks the climatological month. Mutually
+        exclusive with ``month``.
+    month : int, optional
+        Climatological month ``1``–``12``. ``None`` (and no ``date``) takes
+        the annual mean.
+    source : {'woa23', 'local'}, optional
+        ``'woa23'`` (default) reads the installed WOA23 grids, else the NCEI
+        THREDDS server; ``'local'`` reads the installed grids only.
+    resolution : {'1.00', '0.25'}, optional
+        WOA23 grid spacing in degrees. Default ``'1.00'``.
+    formula : {'teos10', 'unesco', 'delgrosso', 'mackenzie'}, optional
+        The equation the climatology's sound speed is computed with.
+        ``None`` (default) takes the cast's own ``ssp.formula`` when it
+        records one, else TEOS-10, so both sides of the join share one
+        equation.
+    timeout : float, optional
+        Network timeout (s) of a THREDDS read. Default 60.
+    verbose : bool or str, optional
+        Logging gate. Default False.
+
+    Returns
+    -------
+    SoundSpeedProfile
+        The cast down to its deepest level, then the climatology column to
+        its own deepest level (the WOA23 cell's seafloor). The cast itself
+        when the column ends no deeper than the cast.
+
+    Raises
+    ------
+    ConfigurationError
+        ``ssp`` is not a one-column ``SoundSpeedProfile``, or ``source`` is
+        not a WOA23 source.
+    DataFetchError
+        No WOA23 column at ``point`` (a dry cell, or ``source='local'``
+        with the grids not installed), as :func:`fetch_ssp` raises it.
+
+    Examples
+    --------
+    >>> import uacpy
+    >>> cast = uacpy.SoundSpeedProfile(depths=[0.0, 200.0, 1000.0],
+    ...                                sound_speed=[1512.0, 1505.0, 1492.0])
+    >>> deep = uacpy.data.deepen_with_climatology(
+    ...     cast, (45.6, -6.2), month=7, source='local')  # doctest: +SKIP
+    """
+    who = 'deepen_with_climatology'
+    if not isinstance(ssp, SoundSpeedProfile):
+        raise ConfigurationError(
+            f"{who}: ssp is a {type(ssp).__name__}, not a "
+            f"SoundSpeedProfile.",
+            remediation="Build the cast as SoundSpeedProfile(depths=..., "
+                        "sound_speed=...).")
+    if ssp.is_range_dependent:
+        raise ConfigurationError(
+            f"{who}: ssp holds {ssp.sound_speed.shape[1]} range columns; it "
+            f"deepens one cast.",
+            remediation="Deepen each column on its own point and stack them "
+                        "with uacpy.data.assemble_range_dependent.")
+    if not isinstance(source, str) or source not in WOA_SOURCES:
+        raise ConfigurationError(
+            f"{who}: source={source!r} is not a climatology source.",
+            remediation="Use 'woa23' (the installed grids, else NCEI "
+                        "THREDDS online) or 'local' (the installed grids "
+                        "only).")
+    column = fetch_ssp(point, date=date, month=month,
+                       formula=formula or ssp.formula
+                       or DEFAULT_SOUND_SPEED_FORMULA,
+                       resolution=resolution, source=source,
+                       timeout=timeout, verbose=verbose)
+    return _blend_cast_onto_column(ssp, column, verbose=verbose)

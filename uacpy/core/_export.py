@@ -19,12 +19,21 @@ round trip is ``np.savez(path, **x.to_dict())`` read back with
 ``cls.from_dict(dict(np.load(path, allow_pickle=True)))``; there is no
 separate save method.
 
+**Load only npz files you wrote.** The nested records a ``to_dict`` holds
+are stored as object arrays, so reading them back needs
+``allow_pickle=True``, and unpickling runs whatever code the file carries.
+For a file from elsewhere use the NetCDF route (``to_netcdf`` /
+``from_netcdf``): JSON attributes and arrays, every class path checked by
+``_resolve_class`` before anything is imported. Every ``allow_pickle=True``
+sentence in the package points here.
+
 The xarray and pandas imports are deferred to the call: both come with the
 optional ``uacpy[xarray]`` extra.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import warnings
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -114,19 +123,27 @@ def encode_attrs(entries: Mapping[str, Any], attrs: Dict[str, Any], *,
     A string, number, bool or real numeric array goes in as itself; a
     complex number or array as a ``<key>_real`` / ``<key>_imag`` pair named
     in ``attrs['complex_attrs']``; a tuple or list of numbers as a real array
-    named in ``attrs['tuple_attrs']``. :func:`decode_attrs` restores all
-    three. Keys already in ``attrs``, keys in ``skip`` and ``None`` values
+    named in ``attrs['tuple_attrs']``; a list or tuple of strings (one file
+    path per source depth, say) as a JSON string named in
+    ``attrs['string_list_attrs']``. :func:`decode_attrs` restores all
+    four, a string sequence as a list. Keys already in ``attrs``, keys in
+    ``skip`` and ``None`` values
     are passed over. Any other entry (a dict, an array of more than one
     dimension) is left out, with a warning that names it and ``who``.
     """
     skip = set(skip)
-    complex_keys, tuple_keys, dropped = [], [], []
+    complex_keys, tuple_keys, string_keys, dropped = [], [], [], []
     for key, value in entries.items():
         if key in attrs or key in skip or value is None:
             continue
         if isinstance(value, (str, bool, int, float, np.integer,
                               np.floating)):
             attrs[key] = value
+            continue
+        if (isinstance(value, (list, tuple)) and value
+                and all(isinstance(v, str) for v in value)):
+            attrs[key] = json.dumps(list(value))
+            string_keys.append(key)
             continue
         numbers = None
         if isinstance(value, (np.ndarray, list, tuple, complex,
@@ -151,6 +168,8 @@ def encode_attrs(entries: Mapping[str, Any], attrs: Dict[str, Any], *,
         attrs['complex_attrs'] = ','.join(complex_keys)
     if tuple_keys:
         attrs['tuple_attrs'] = ','.join(tuple_keys)
+    if string_keys:
+        attrs['string_list_attrs'] = ','.join(string_keys)
     if dropped:
         warnings.warn(
             f"{who}: metadata {sorted(dropped)} cannot be held "
@@ -160,16 +179,19 @@ def encode_attrs(entries: Mapping[str, Any], attrs: Dict[str, Any], *,
 
 
 def _attr_names(listing) -> List[str]:
-    """The keys a ``complex_attrs`` / ``tuple_attrs`` attr names."""
+    """The keys a ``complex_attrs`` / ``tuple_attrs`` /
+    ``string_list_attrs`` attr names."""
     return [name for name in str(listing or '').split(',') if name]
 
 
 def decode_attrs(attrs: Mapping[str, Any],
                  reserved: Iterable[str] = ()) -> Dict[str, Any]:
     """The entries :func:`encode_attrs` wrote, back as a plain dict: every
-    attr outside ``reserved`` and the two listing attrs, with the complex
-    pairs joined and the tuple entries made tuples again."""
-    reserved = set(reserved) | {'complex_attrs', 'tuple_attrs'}
+    attr outside ``reserved`` and the three listing attrs, with the complex
+    pairs joined, the tuple entries made tuples again and the string
+    sequences lists again."""
+    reserved = set(reserved) | {'complex_attrs', 'tuple_attrs',
+                                'string_list_attrs'}
     out = {k: v for k, v in attrs.items() if k not in reserved}
     restore_bool_attrs(out)
     for key in _attr_names(attrs.get('complex_attrs')):
@@ -180,6 +202,8 @@ def decode_attrs(attrs: Mapping[str, Any],
         out[key] = complex(value) if value.ndim == 0 else value
     for key in _attr_names(attrs.get('tuple_attrs')):
         out[key] = tuple(float(x) for x in np.atleast_1d(out[key]))
+    for key in _attr_names(attrs.get('string_list_attrs')):
+        out[key] = json.loads(out[key])
     return out
 
 
@@ -364,6 +388,58 @@ def refuse_complex_without_backend(who: str, name: str) -> None:
                     "later, whose compound type holds complex values.")
 
 
+def netcdf_holding(dataset) -> Tuple[str, str]:
+    """``(what, reader)``: what the root ``dataset`` of a NetCDF file holds
+    and the call that reads it back, for the refusal a reader of another
+    class gives when it is handed the file.
+
+    A result names its class (``uacpy_class``, on the dataset or on its one
+    array) and reads back with ``Result.from_netcdf``; a carrier keeps its
+    fields as JSON (``uacpy_fields``, whose ``'__class__'`` names it) and
+    reads back with ``Environment.from_netcdf`` for an Environment, its own
+    ``from_xarray`` of ``xarray.open_dataset`` otherwise; a signal result
+    lists its fields (``uacpy_result_fields``) and reads back with its
+    class's ``from_xarray``. One array naming no class is a Field as
+    ``Field.to_xarray`` and xarray alone write it."""
+    attrs = dict(dataset.attrs)
+    variables = [str(name) for name in dataset.data_vars]
+    if len(variables) == 1 and 'uacpy_class' not in attrs:
+        attrs.update({k: v for k, v in dataset[variables[0]].attrs.items()
+                      if k == 'uacpy_class'})
+    def named(name):
+        return f"{'an' if name[:1] in 'AEIOU' else 'a'} {name}"
+
+    if 'uacpy_class' in attrs:
+        name = str(attrs['uacpy_class']).rpartition('.')[2]
+        return (named(name),
+                f"{name}.from_netcdf(path), or Result.from_netcdf(path)")
+    if CarrierExport._FIELDS_ATTR in attrs:
+        try:
+            saved = json.loads(attrs[CarrierExport._FIELDS_ATTR])
+            path = saved.get('__class__') if isinstance(saved, dict) else None
+        except (TypeError, ValueError):
+            path = None
+        name = str(path or 'carrier').rpartition('.')[2]
+        if name == 'Environment':
+            return "an Environment", "Environment.from_netcdf(path)"
+        return (named(name),
+                f"{name}.from_xarray(xarray.open_dataset(path))")
+    if 'uacpy_result_fields' in attrs:
+        return (f"a signal result (fields {attrs['uacpy_result_fields']})",
+                "the from_xarray(xarray.open_dataset(path)) of its class")
+    if not variables:
+        return ("no data variable",
+                "the reader of the class that wrote it, if it is the file "
+                "meant")
+    if len(variables) == 1:
+        dims = [str(d) for d in dataset[variables[0]].dims]
+        return (f"one array, {variables[0]!r} over {dims}, naming no class "
+                f"(a Field as Field.to_xarray writes it)",
+                "Field.from_netcdf(path), or Result.from_netcdf(path)")
+    return (f"variables {variables} naming no uacpy class",
+            "the from_netcdf or from_xarray of the class that wrote it")
+
+
 # ── complex values in a netCDF file ────────────────────────────────────────
 
 #: The trailing dimension a complex variable is written on: its real and
@@ -504,17 +580,32 @@ def saved_class_path(cls) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
-def _resolve_class(path: str, base: type) -> type:
+def _resolve_class(path: str, base: type, *,
+                   already_imported: bool = False) -> type:
     """The class a saved ``__class__`` path names, refused unless it is a
     uacpy class and a ``base``: a file names what to rebuild, and a path
-    outside the package would import arbitrary code."""
+    outside the package would import arbitrary code.
+
+    ``already_imported=True`` also accepts a class from a module outside the
+    package that this program has already imported (an engine a user
+    defined): looking it up imports nothing, so the file runs no code."""
     import importlib
     module, _, name = str(path).rpartition('.')
-    if not module.startswith('uacpy.'):
+    if module.startswith('uacpy.'):
+        try:
+            klass = getattr(importlib.import_module(module), name, None)
+        except ImportError:
+            klass = None
+    elif already_imported and module in sys.modules:
+        klass = getattr(sys.modules[module], name, None)
+    else:
         raise ConfigurationError(
             f"from_dict: {path!r} is not a uacpy class; a saved carrier names "
-            f"one of the package's own.")
-    klass = getattr(importlib.import_module(module), name, None)
+            f"one of the package's own.",
+            remediation=("A class defined outside uacpy loads only from a "
+                         "module the program has already imported: import "
+                         "it before loading the file."
+                         if already_imported else None))
     if not (isinstance(klass, type) and issubclass(klass, base)):
         raise ConfigurationError(
             f"from_dict: {path!r} is not a {base.__name__}.")
@@ -525,7 +616,7 @@ def _encode(value):
     """One carrier field as plain data: a nested carrier as its own
     :meth:`CarrierExport.to_dict`, a provenance record by its source id, a
     date as ISO text, an enum by its value, a path as text; arrays copied,
-    sequences element by element, everything else as it is."""
+    sequences and mappings element by element, everything else as it is."""
     import datetime
     import enum
     import pathlib
@@ -546,6 +637,8 @@ def _encode(value):
         return str(value)
     if isinstance(value, (list, tuple)):
         return type(value)(_encode(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _encode(v) for k, v in value.items()}
     return value
 
 
@@ -686,7 +779,9 @@ class CarrierExport(Exportable):
         """Every constructor field as plain data, nested carriers as their
         own ``to_dict``, under ``'__class__'``, the carrier's public class
         path. ``np.savez(path, **c.to_dict())`` saves it; ``from_dict`` of
-        ``dict(np.load(path, allow_pickle=True))`` reads it back."""
+        ``dict(np.load(path, allow_pickle=True))`` reads it back — for a
+        file you wrote, since unpickling runs the file's code (module
+        docstring; ``from_netcdf`` for others)."""
         return {'__class__': saved_class_path(type(self)),
                 **{name: _encode(value)
                    for name, value in self._constructor_fields().items()}}

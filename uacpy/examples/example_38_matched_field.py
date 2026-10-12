@@ -92,13 +92,15 @@ for name, surface in surfaces.items():
 # plot_matched_field draws each (depth, range) surface in dB re its own peak,
 # with cell edges from the candidate positions, depth downward, range in km,
 # the true position as the package's source star and the peak as a cross.
+# A 25 dB window: MVDR's sidelobes sit 17-21 dB under its peak, so a narrower
+# one would leave its panel blank but for the peak.
 fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
 for ax, (name, surface) in zip(axes, surfaces.items()):
     uacpy.plot.plot_matched_field(
-        surface, ax, dynamic_range_dB=15.0,
+        surface, ax, dynamic_range_dB=25.0,
         true_position=(true_range, true_depth), show_colorbar=False,
         show_legend=ax is axes[0], title=f"{name} ambiguity surface")
-# Both panels are on the same -15..0 dB window, so one bar describes both.
+# Both panels are on the same -25..0 dB window, so one bar describes both.
 uacpy.plot.shared_colorbar(fig, axes, label='Normalised power [dB re max]')
 fig.suptitle("Matched-field localization — KRAKEN replicas "
              "(150 Hz, 16-element VLA)")

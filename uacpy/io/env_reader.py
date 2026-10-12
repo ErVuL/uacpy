@@ -37,7 +37,7 @@ from uacpy.core.exceptions import (
 )
 from uacpy.core.units import km_to_m
 from uacpy.io.bellhop_writer import BELLHOP_SSP_GUARD_RANGE_FACTOR
-from uacpy.core.deck_limits import AT_DB_PER_NEPER
+from uacpy.core.deck_limits import AT_DB_PER_NEPER, AT_LAST_SSP_POINT_EPS_M
 from uacpy.io.at_codes import (
     BOUNDARY_TYPES_BY_CODE, SSP_INTERP_BY_CODE, AttenuationUnits,
 )
@@ -301,6 +301,25 @@ def _volume_absorption(code: str, fid, path):
         alternatives_label='codes')
 
 
+def _volume_absorption_of(path):
+    """TopOpt(4) of the deck at ``path`` — the volume law ``CRCI`` adds to
+    the attenuation it converts (``misc/AttenMod.f90``) — with the row
+    ``ReadTopOpt`` reads after it: ``('F', (T, S, pH, z_bar))`` for
+    Francois-Garrison, ``(code, None)`` otherwise; ``None`` when no readable
+    deck is there."""
+    try:
+        with open(path, 'r') as fid:
+            for what in ('title', 'frequency', 'NMedia'):
+                _record(fid, what, path)
+            code = _option(_record(fid, 'TopOpt', path), 7)[3]
+            if code != 'F':
+                return code, None
+            return code, tuple(
+                _values(_record(fid, 'Francois-Garrison', path))[:4])
+    except (OSError, UnicodeDecodeError, FileFormatError, ValueError):
+        return None
+
+
 def _warn_if_z_bar_is_dropped(path, absorption, z_bar: float,
                               water_depth: float, broadband: bool) -> None:
     """A ``'F'`` deck reads as the Francois-Garrison law with its water,
@@ -346,9 +365,10 @@ def _medium(rows: _Rows, index: int):
         row = rows.read(f"medium {index} SSP row", z)
         medium.append(row)
         z = row[0]
-        # ReadEnvironmentMod stops the medium on the row that reaches its
-        # base depth; compare at the deck's 1e-6 m print resolution.
-        if z >= base - 1e-6 * max(1.0, abs(base)):
+        # The medium ends on the row AT its base depth, by AT's own absolute
+        # test ABS(z - Depth) < 100*EPSILON(1.0) (misc/sspMod.f90:353); a
+        # row merely near the base, or past it, is read on as AT reads on.
+        if abs(z - base) < AT_LAST_SSP_POINT_EPS_M:
             return n_mesh, sigma, base, np.asarray(medium, dtype=float)
 
 
@@ -669,14 +689,22 @@ def read_env(
         RunType(3) ``'*'`` points ``beam_pattern`` at the sibling ``.sbp``.
     receiver : Receiver
         Receiver depths, and ranges from the deck (Bellhop) or the ``.flp``.
+        A KRAKEN-family deck with no ``.flp`` carries no ranges: the
+        Receiver holds the single range 0 m and an ``IOWarning`` says so.
     options : dict
-        ``'model'``, ``'title'``, and the solver settings under the keyword
-        names the matching writer takes: ``interp_ssp``, ``n_mesh`` (one per
-        medium), and ``c_low``/``c_high``/``rmax_m`` (KRAKEN) or
+        ``'model'`` and ``'title'``, which describe the deck and are not
+        writer keywords, and the solver settings under the keyword names
+        the matching writer takes: ``interp_ssp``, and ``n_mesh`` (one per
+        medium, water first) and ``c_low``/``c_high``/``rmax_m`` (KRAKEN), or
         ``run_type``/``beam_type``/``source_type``/``grid_type``/
-        ``n_beams``/``alpha``/``step``/``z_box``/``r_box`` (Bellhop, metres),
+        ``source_beam_pattern``/``beam_shift``/``n_beams``/
+        ``launch_angles``/``ray_step``/``z_box``/``r_box`` (Bellhop, metres),
         plus the Cerveny/Gaussian beam-shape entries when the deck has them,
-        and ``mode_depths`` for a KRAKEN deck read beside its ``.flp``.
+        and ``mode_depths`` for a KRAKEN deck read beside its ``.flp``. With
+        ``'model'`` and ``'title'`` left out they write the deck back:
+        ``write_kraken_env_file(path, env, source, receiver, **settings)``.
+        A Bellhop deck's per-medium mesh counts are informational there
+        (Bellhop sizes no mesh) and are not returned.
 
     Raises
     ------
@@ -816,7 +844,10 @@ def read_env(
             alternatives_label='codes')
     options: Dict[str, Any] = {
         'model': model, 'title': title,
-        'interp_ssp': SSP_INTERP_BY_CODE[ssp_code], 'n_mesh': n_mesh,
+        'interp_ssp': SSP_INTERP_BY_CODE[ssp_code],
+        # Bellhop reads the medium lines' NMesh and sizes no mesh with it;
+        # its writer takes no n_mesh.
+        **({} if model == 'bellhop' else {'n_mesh': n_mesh}),
         **tail['options'],
     }
     frequencies: Union[float, np.ndarray] = tail.get('frequencies', freq)
@@ -943,6 +974,16 @@ def read_env(
         water_density=float(rho[0]))
     source = Source(depths=np.asarray(source_depths, dtype=float),
                     frequencies=frequencies, **source_kwargs)
+    if receiver_ranges is None:
+        # A KRAKEN-family deck carries receiver depths only; the ranges live
+        # in field.exe's .flp, and there is none beside this deck.
+        warnings.warn(
+            f"read_env: {path} carries receiver depths but no ranges (a "
+            f"KRAKEN-family deck with no .flp beside it), so the Receiver "
+            f"holds the single range 0 m. Set receiver.ranges before a TL "
+            f"run.",
+            IOWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        receiver_ranges = np.array([0.0])
     receiver = Receiver(depths=np.asarray(receiver_depths, dtype=float),
                         ranges=receiver_ranges)
     return env, source, receiver, options

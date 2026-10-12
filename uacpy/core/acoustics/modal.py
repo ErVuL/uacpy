@@ -260,7 +260,7 @@ def _check_water_only_tabulation(weight, depths, seafloor_depth, who):
     """With no half-space: the tabulation must reach the seafloor when the
     caller names it, and a mode still non-zero at the deepest tabulated
     depth is reported, its normalisation stopping at the seabed so the
-    attenuation returned is an upper bound."""
+    water-column term returned is an upper bound on that term."""
     # A truncated span shorts the water-column integrals too (measured
     # 0.5-0.7x on a half-column tabulation), so the check runs whenever
     # the caller names the seafloor, bottom term or not.
@@ -281,9 +281,10 @@ def _check_water_only_tabulation(weight, depths, seafloor_depth, who):
     # text after 5.176 calls for needs a half-space gamma_m and rho_b, and
     # neither exists here, so `norm` stays a water-column integral
     # while the true denominator is larger. The omitted term is
-    # positive, so alpha_m comes back high: an upper bound, measured
-    # 0.7 % / 2.4 % / 5.1 % / 17 % over the exact perturbation
-    # integral for modes 1-4 of an analytic 100 m Pekeris guide.
+    # positive, so the water-column term comes back high: an upper bound
+    # on that term, measured 0.7 % / 2.4 % / 5.1 % / 17 % over the exact
+    # perturbation integral for modes 1-4 of an analytic 100 m Pekeris
+    # guide. The seabed-loss term is absent altogether.
     # A pressure-release seabed zeroes psi(D): no tail, no error.
     # A rigid one zeroes psi'(D) with psi(D) at a maximum, and no
     # energy enters it either, so the water-column integral is
@@ -297,19 +298,20 @@ def _check_water_only_tabulation(weight, depths, seafloor_depth, who):
         warnings.warn(
             f"{who}: the mode shapes are non-zero "
             f"at the deepest tabulated depth "
-            f"({float(depths[-1]):g} m). For a penetrable "
-            f"(lossy-boundary) mode set they continue as an "
-            f"evanescent tail into the seabed, but without bottom= "
-            f"there is no half-space gamma or density from which to "
-            f"form it: the ∫psi²/rho dz normalisation stops at the "
-            f"seabed while the text after JKPS Eq. 5.176 extends it "
-            f"into the bottom, and the returned Im(k) is an UPPER "
-            f"BOUND on the true attenuation for such sets (measured "
-            f"0.7-17 % high across the four modes of a 100 m "
-            f"Pekeris guide, worst for the near-cutoff mode that "
-            f"dominates at long range). A RIGID-seabed mode set "
-            f"(psi'(D)=0, psi(D) at a maximum) has no tail and its "
-            f"returned Im(k) is exact; pass "
+            f"({float(depths[-1]):g} m), so for a penetrable seabed "
+            f"they continue as an evanescent tail into it, but with "
+            f"no half-space gamma, density or attenuation to form that "
+            f"part from, the returned Im(k) is the water-column term "
+            f"alone: an UPPER BOUND on that term (its ∫psi²/rho dz "
+            f"normalisation stops at the seabed, where the text after "
+            f"JKPS Eq. 5.176 extends it into the bottom; measured "
+            f"0.7-17 % high across the four modes of a 100 m Pekeris "
+            f"guide) with NO seabed-loss term, so over a lossy seabed "
+            f"it is far below the true attenuation (23-487x low for "
+            f"the trapped modes over a 0.5 dB/wavelength seabed at "
+            f"50 Hz). Pass bottom= (env.bottom) for both. A "
+            f"RIGID-seabed mode set (psi'(D)=0, psi(D) at a maximum) "
+            f"has no tail and its returned Im(k) is exact; pass "
             f"bottom=BoundaryProperties(acoustic_type='rigid') to "
             f"state that boundary and silence this warning.",
             NumericsWarning, skip_file_prefixes=USER_FRAME_SKIP)

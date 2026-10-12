@@ -12,11 +12,13 @@ on, and the conversion between attenuation units:
 * :func:`convert_attenuation_units` — dB/km, dB/m, dB/wavelength, Nepers/m,
   Q and L.
 
-The models (:class:`~uacpy.core.absorption.Thorp`,
+The laws (:class:`~uacpy.core.absorption.Thorp`,
 :class:`~uacpy.core.absorption.FrancoisGarrison`,
-:class:`~uacpy.core.absorption.Biological`) and the ``absorption_*`` functions
-return an :class:`~uacpy.core.absorption.AbsorptionCoefficient` carrying its
-unit; these return numbers in the unit their name states.
+:class:`~uacpy.core.absorption.Biological`,
+:class:`~uacpy.core.absorption.ConstantAbsorption`) return an
+:class:`~uacpy.core.absorption.AbsorptionCoefficient`, which carries its unit,
+through ``.table()``; the ``absorption_*`` functions here return dB/km arrays
+(:func:`convert_attenuation_units` for any other unit).
 """
 
 from typing import Optional, Union
@@ -50,7 +52,7 @@ def absorption_thorp(frequency: _ArrayLike,
     returns the dB/km numbers.
 
     Uses the JKPS Eq. (1.47) coefficients, which match the AT
-    ``AttenMod.f90:93`` formula used internally by the Acoustics-Toolbox
+    ``AttenMod.f90:93-94`` formula used internally by the Acoustics-Toolbox
     binaries character for character. Note AT's own comment there labels it
     "JKPS Eq. 1.34" — 1st-edition numbering for the same expression, which the
     2nd edition prints as (1.47). The two are not different formulas.
@@ -184,23 +186,29 @@ def absorption_francois_garrison(
     ----------
     frequency : float or array
         Frequency in Hz.
-    temperature : float, array or (N, 2) pairs
+    temperature : float or array
         Water temperature (°C). Default 10.
-    salinity : float, array or (N, 2) pairs
+    salinity : float or array
         Salinity (PSU). Default 35.
-    pH : float, array or (N, 2) pairs
+    pH : float or array
         Acidity. Default 8.
     depth : float or array, optional
         Depth (m). Default ``None``, the surface (0 m).
         The defaults are the package's reference sea water
-        (``core.constants.REFERENCE_*``). Each water property is a single
-        value, an array broadcast with the others, or ``(depth, value)``
-        pairs interpolated linearly onto ``depth`` (end values held), which
-        then must be given (:func:`uacpy.core._validate.water_property`).
+        (``core.constants.REFERENCE_*``). Each water property is exactly
+        one of a single value (constant water), an array of exactly
+        ``depth``'s shape (one value per point), or otherwise ``(depth,
+        value)`` pairs, an ``(M, 2)`` array interpolated onto ``depth``
+        (which it then needs). Any other array is refused: it is never
+        broadcast against ``depth``, so an omitted or scalar ``depth`` takes
+        single values and pairs only. Values come first: ``M`` pairs on a
+        depth grid of exactly shape ``(M, 2)`` are read as values.
+        ``frequency`` is not a water property and broadcasts with
+        ``depth``.
 
     Returns
     -------
-    ndarray, the broadcast shape of the inputs
+    ndarray, the broadcast shape of ``frequency`` and ``depth``
         0-d when every input is scalar; array inputs keep their
         broadcast shape (a 1-element array stays 1-D).
 
@@ -302,7 +310,11 @@ def absorption_biological(frequency: _ArrayLike, f0_hz: float, Q: float,
         0-d for a scalar input.
     """
     f = np.asarray(frequency, dtype=float)
-    return a0 / ((1.0 - f0_hz ** 2 / f ** 2) ** 2 + 1.0 / Q ** 2)
+    # At f = 0 the ratio f0²/f² is inf and the layer's attenuation is 0, the
+    # exact limit; numpy's divide-by-zero RuntimeWarning on the way is not a
+    # uacpy warning, so it is silenced and the limit returned.
+    with np.errstate(divide='ignore'):
+        return a0 / ((1.0 - f0_hz ** 2 / f ** 2) ** 2 + 1.0 / Q ** 2)
 
 
 # The units of :func:`convert_attenuation_units` whose definition carries a
@@ -313,12 +325,22 @@ _FREQUENCY_DEPENDENT_UNITS = frozenset({'dB/wavelength', 'Q', 'L'})
 _ATTENUATION_UNITS = ('dB/km', 'dB/m', 'dB/wavelength', 'Nepers/m', 'Q', 'L')
 
 
+def _first_bad(values: np.ndarray) -> str:
+    """A value that is not positive and finite, for a refusal: the number
+    itself, or an array's first such entry and the array's size."""
+    if values.ndim == 0:
+        return f"{float(values)!r}"
+    flat = values.ravel()
+    bad = flat[~(np.isfinite(flat) & (flat > 0.0))]
+    return f"{float(bad[0])!r} (one of {flat.size} values)"
+
+
 def convert_attenuation_units(
     alpha: _ArrayLike,
-    frequency: float,
+    frequency: _ArrayLike,
     from_unit: str,
     to_unit: str,
-    sound_speed: float = DEFAULT_SOUND_SPEED,
+    sound_speed: _ArrayLike = DEFAULT_SOUND_SPEED,
 ) -> np.ndarray:
     """Convert volume attenuation between unit conventions.
 
@@ -330,7 +352,8 @@ def convert_attenuation_units(
     - ``Nepers/m`` — ``a`` itself.
     - ``dB/m`` — ``a · 20/ln(10)``; the pivot every path converts through.
     - ``dB/km`` — dB of amplitude loss per 1000 m.
-    - ``dB/wavelength`` — dB per ``lambda = c/f``, hence frequency-independent.
+    - ``dB/wavelength`` — dB per wavelength ``lambda = c/f``: it needs ``f``
+      and ``c`` to convert, and a loss proportional to ``f`` is constant in it.
     - ``Q`` — quality factor, ``a = omega/(2·c·Q)``. Q divides, so a
       conversion *from* ``'Q'`` requires ``alpha > 0`` and raises
       :class:`ConfigurationError` otherwise. Going *to* ``'Q'`` from a zero
@@ -340,23 +363,28 @@ def convert_attenuation_units(
 
     ``sound_speed`` is therefore required for the wavelength / Q / L paths and
     ignored for the rest, and ``frequency`` the same way: those three paths
-    need a positive finite one and raise :class:`ConfigurationError` without
-    it, while ``dB/km`` ↔ ``dB/m`` ↔ ``Nepers/m`` convert at any frequency.
+    need every value positive and finite and raise :class:`ConfigurationError`
+    otherwise, while ``dB/km`` ↔ ``dB/m`` ↔ ``Nepers/m`` convert at any
+    frequency.
 
-    Returns an ndarray shaped like ``alpha``: 0-d for a scalar input; an
-    array input keeps its shape (a 1-element array stays 1-D).
+    ``alpha``, ``frequency`` and ``sound_speed`` broadcast together on the
+    wavelength / Q / L paths, so a spectrum ``alpha(f)`` converts in one call
+    with ``frequency=f``, and a column ``alpha(z)`` with ``sound_speed=c(z)``.
+    Returns an ndarray of that broadcast shape (``alpha``'s own shape on the
+    other paths): 0-d for scalar input; an array input keeps its shape (a
+    1-element array stays 1-D).
 
     Parameters
     ----------
     alpha : float or ndarray
         Attenuation in ``from_unit``.
-    frequency : float
+    frequency : float or ndarray
         Frequency (Hz); used by the ``'dB/wavelength'``, ``'Q'`` and ``'L'``
         paths, which need it positive and finite.
     from_unit, to_unit : str
         One of ``'dB/km'``, ``'dB/m'``, ``'dB/wavelength'``, ``'Nepers/m'``,
         ``'Q'``, ``'L'``.
-    sound_speed : float, optional
+    sound_speed : float or ndarray, optional
         Sound speed (m/s) of the wavelength, Q and L paths. Default
         :data:`~uacpy.core.constants.DEFAULT_SOUND_SPEED`.
 
@@ -367,8 +395,8 @@ def convert_attenuation_units(
 
     - ``'m'`` (lowercase) — dB/m with a frequency power-law
       ``α(f) = α₀ · (f/f₀)^β`` below a transition frequency ``fT``.
-      Round-tripping needs the (``β``, ``f₀``, ``fT``) triple, which is
-      outside the scalar-frequency contract here.
+      Round-tripping needs the (``β``, ``f₀``, ``fT``) triple, which this
+      function's arguments do not carry.
     - ``'F'`` — dB/(m·kHz), i.e. ``α(f) = α₀ · f[kHz]``. The single
       ``frequency`` argument would suffice, but the unit is rare enough
       that adding it would broaden the contract for one AT-only use.
@@ -389,11 +417,15 @@ def convert_attenuation_units(
     # on the wavelength paths and as a silent 0 or inf on the Q and L ones.
     # The rest of the table is a pure scaling and converts at any frequency.
     needs_frequency = {from_unit, to_unit} & _FREQUENCY_DEPENDENT_UNITS
-    if needs_frequency and not (np.isfinite(frequency) and frequency > 0.0):
+    if needs_frequency:
+        frequency = np.asarray(frequency, dtype=float)
+        sound_speed = np.asarray(sound_speed, dtype=float)
+    if needs_frequency and not np.all(np.isfinite(frequency)
+                                      & (frequency > 0.0)):
         raise ConfigurationError(
             f"convert_attenuation_units: {sorted(needs_frequency)} is defined "
             f"per wavelength or per cycle, so it needs a positive finite "
-            f"frequency; got frequency={frequency!r}.",
+            f"frequency; got frequency={_first_bad(frequency)}.",
             remediation="Pass the frequency the attenuation was measured at, "
                         "or convert between dB/km, dB/m and Nepers/m, which "
                         "carry no frequency.")
@@ -402,11 +434,12 @@ def convert_attenuation_units(
     # ``sound_speed=0`` returned 0.0 dB/wavelength from a real dB/km loss — a
     # lossless medium — and a negative speed returned a negative, i.e.
     # amplifying, attenuation, both silently.
-    if needs_frequency and not (np.isfinite(sound_speed) and sound_speed > 0.0):
+    if needs_frequency and not np.all(np.isfinite(sound_speed)
+                                      & (sound_speed > 0.0)):
         raise ConfigurationError(
             f"convert_attenuation_units: {sorted(needs_frequency)} is defined "
             f"per wavelength or per cycle, so it needs a positive finite "
-            f"sound speed; got sound_speed={sound_speed!r}.",
+            f"sound speed; got sound_speed={_first_bad(sound_speed)}.",
             remediation="Pass the sound speed of the medium the attenuation "
                         "was measured in, or convert between dB/km, dB/m and "
                         "Nepers/m, which carry no sound speed.")

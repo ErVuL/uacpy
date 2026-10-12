@@ -39,7 +39,6 @@ from uacpy.acoustic_signal import (
     processing_gain_dB,
     pulse_compression,
     ricker_wavelet,
-    simulate_reception,
     sparc_pulse,
     welch,
     spectrogram,
@@ -170,18 +169,20 @@ def pulse_compression_gain():
     _, tx = lfm_chirp(freq_start, freq_end, T, sample_rate=fs)
 
     arr = _bellhop_arrivals()
-    taps = arr.amplitudes * np.exp(1j * arr.phases)
-    _, rx = simulate_reception(analytic_signal(tx), taps, arr.delays, fs)
-    rx = np.real(rx)
+    # Each arrival's copy of the chirp, filtered by its volume absorption
+    # across the band, on the record's own clock.
+    received = arr.to_time_series(source_waveform=tx, sample_rate=fs)
+    t_rx = received.times
+    rx = received.data[0, 0]
     # The 0 dB-source record placed at SL = 180 dB re 1 µPa at 1 m, in Pa,
     # plus noise at 72 dB re 1 µPa²/Hz over the chirp's band.
     clean = rx * 1e-6 * 10.0 ** (180.0 / 20.0)
     _, noise = make_bandlimited_noise(3000.0, 4000.0, rx.size / fs, sample_rate=fs,
                                       psd_level_dB=72.0, rng=rng)
     noisy = clean + noise
-    t_rx = np.arange(noisy.size) / fs
 
     lags, comp = pulse_compression(analytic_signal(noisy), analytic_signal(tx), fs)
+    lags = lags + t_rx[0]
     gain = processing_gain_dB(freq_end - freq_start, T)
     span = (arr.delays.min(), arr.delays.max())
 

@@ -109,14 +109,15 @@ def field_slicing():
     return fig
 
 
-def stack_panels():
-    """A multi-source run returns a ResultStack, one Field slab per depth."""
+def source_depth_panels():
+    """A multi-source run returns one Field over source_depth, drawn one
+    panel per depth."""
     env, _, receiver = shallow_water()
-    source = uacpy.Source(depths=[15.0, 50.0, 85.0], frequencies=200.0)
-    stack = Bellhop(n_beams=3000).run(env, source, receiver)
-    fig, _ = stack.plot(
+    three_sources = uacpy.Source(depths=[15.0, 50.0, 85.0], frequencies=200.0)
+    field = Bellhop(n_beams=3000).run(env, three_sources, receiver)
+    fig, _ = field.plot(
         env=env, figsize=(12.5, 3.8),
-        title='ResultStack[Field] — one slab per source depth')
+        title='One Field over source_depth — one panel per source depth')
     fig.tight_layout()   # re-fit: the panel plotter sets its suptitle last
     return fig
 
@@ -143,7 +144,8 @@ def time_synthesis():
     sample_rate = 4000.0
     t_src, chirp = lfm_chirp(150.0, 450.0, 0.04, sample_rate=sample_rate)
     waveform = chirp * np.hanning(chirp.size)
-    series = H.synthesize_time_series(waveform, sample_rate, t_start=0.5)
+    series = H.synthesize_time_series(source_waveform=waveform,
+                                      sample_rate=sample_rate, t_start=0.5)
 
     fig, (ax_src, ax_rx) = plt.subplots(
         1, 2, figsize=(11.0, 4.2), gridspec_kw={'width_ratios': [1.0, 2.0]})
@@ -206,7 +208,7 @@ def modes_and_reflection():
 FIGURES = {
     'results_field_kinds': field_kinds,
     'results_slicing': field_slicing,
-    'results_stack': stack_panels,
+    'results_stack': source_depth_panels,
     'results_time_synthesis': time_synthesis,
     'results_rays_arrivals': rays_and_arrivals,
     'results_modes_reflection': modes_and_reflection,

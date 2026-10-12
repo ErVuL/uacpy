@@ -6,13 +6,14 @@ five ways on one grid, as a snapshot sheet and as one GIF per solver.
 * SPARC marches time natively, over the same water with a rigid floor: its
   deck carries only vacuum and rigid boundaries and it refuses the
   half-space, so its panel shows a different seabed, chosen explicitly
-  below. Its range domain has an implicit periodic
-  boundary from the wavenumber-FFT method, so T_MAX must end BEFORE the wave
-  reaches the far edge or the late frames show aliasing rather than
-  propagation. TIME_SERIES auto-widens the solver domain to 3× the receiver
-  span (600 m here), and at 1500 m/s, 0.18 s puts the front at 270 m — past
-  the array, so reflections are visible, and well inside the wrap edge. Adapt
-  it as T_MAX < 3·max(receiver ranges)/c.
+  below. Its range synthesis is a direct sum over a Δk grid, periodic in
+  range with period RMax, which defaults to 4× the farthest receiver
+  (`rmax_factor`; 800 m here). A receiver at r sees the fold of the arrival
+  that belongs at RMax − r, at (RMax − r)/c, so T_MAX must end before
+  3·max(r)/c (0.4 s here) or the late frames show aliasing rather than
+  propagation. At 1500 m/s, 0.18 s puts the front at 270 m — past the array,
+  so reflections are visible, and well before the wrap. Adapt it as
+  T_MAX < 3·max(receiver ranges)/c.
 * RAM, Scooter and Kraken get there through broadband H(f) → IFFT, which is a
   wave-equation solution too.
 * Bellhop is the contrast: its TIME_SERIES output is a per-receiver
@@ -86,10 +87,10 @@ def run(name, model, waveform=None, run_env=env):
     native convention.
     """
     # Two notices belong to what this sheet shows and are printed: the
-    # receivers start 2 m from the source, so the spectral solvers drop the
-    # paths steeper than their windows keep, and Bellhop's delay-and-sum
-    # drops the echoes that land after the 0.2 s window. Any other warning is
-    # shown as usual.
+    # receivers start 2 m from the source, so RAM and Kraken drop the paths
+    # steeper than their angular windows keep (Scooter integrates from
+    # k = 0 and keeps them), and Bellhop's delay-and-sum drops the echoes
+    # that land after the 0.2 s window. Any other warning is shown as usual.
     with warnings.catch_warnings(record=True) as caught:
         if waveform is None:
             field = model.run(run_env, source, receiver,
@@ -119,17 +120,18 @@ def run(name, model, waveform=None, run_env=env):
 # derivation at run time. SPARC's pulse band and n_time_samples are its own
 # pulse-shaping knobs (not equivalent to source_waveform); RAM's dr/dz are
 # pinned for upper-band resolution (dz puts the 50 m seafloor a quarter cell
-# below a node, where the fluid codes place the interface best) and c0=1500
+# below a node, where the fluid codes place the interface best), c0=1500
 # matches the physical sound speed so its carrier wavelength lines up with the
-# others. Bellhop's fan reaches ±89.9° so the receivers 2 m from the source
-# keep their direct path.
+# others, and n_pade=6 because mpiramS's Padé root finder does not converge
+# with 8 terms at dr=1 m. Bellhop's fan reaches ±89.9° so the receivers 2 m
+# from the source keep their direct path.
 fields = {
     'SPARC': run('SPARC', uacpy.SPARC(n_time_samples=400, time_max=T_MAX, freq_min=F_MIN,
-                                      freq_max=F_MAX,
-                                      max_launches=receiver.depths.size),
+                                      freq_max=F_MAX),
                    run_env=rigid_floor_env),
     'Scooter': run('Scooter', uacpy.Scooter(), waveform),
-    'RAM': run('RAM', uacpy.RAM(dr=1.0, dz=0.498753, c0=1500.0), waveform),
+    'RAM': run('RAM', uacpy.RAM(dr=1.0, dz=0.498753, c0=1500.0, n_pade=6),
+               waveform),
     'Kraken': run('Kraken', uacpy.Kraken(), waveform),
     'Bellhop': run('Bellhop', uacpy.Bellhop(backend='fortran',
                                             launch_angles=(-89.9, 89.9)),

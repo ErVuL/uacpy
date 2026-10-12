@@ -27,6 +27,8 @@ import struct
 from pathlib import Path
 
 import pytest
+import warnings
+
 import numpy as np
 
 from uacpy import Environment, Source, Receiver, BoundaryProperties
@@ -177,13 +179,12 @@ class TestSPARCEnvironmentHandling:
             m.run(env, source_50hz,
                   Receiver(depths=np.array([50.0]), ranges=np.array([1000.0])))
 
-    def test_oversized_depth_axis_raises_before_any_launch(
+    def test_a_depth_axis_past_a_pinned_cap_raises_before_any_launch(
             self, sparc_simple_env, source_50hz, monkeypatch):
-        """``output_mode='R'`` runs one subprocess per receiver depth, so a
-        depth axis past ``max_launches`` (default 20) raises
-        ``UnsupportedFeatureError`` rather than queueing hours of solves —
-        and it raises before any binary is launched."""
-        m = SPARC(verbose=False, output_mode='R')
+        """``output_mode='R'`` runs one subprocess per receiver depth; a
+        depth axis past the caller's ``max_launches`` raises
+        ``UnsupportedFeatureError`` before any binary is launched."""
+        m = SPARC(verbose=False, output_mode='R', max_launches=20)
         monkeypatch.setattr(
             m, "_run_sparc",
             lambda *a, **k: pytest.fail("binary launched before the "
@@ -193,11 +194,11 @@ class TestSPARCEnvironmentHandling:
                   Receiver(depths=np.linspace(10.0, 90.0, 21),
                            ranges=np.array([1000.0])))
 
-    def test_oversized_range_axis_raises_before_any_launch(
+    def test_a_range_axis_past_a_pinned_cap_raises_before_any_launch(
             self, sparc_simple_env, source_50hz, monkeypatch):
-        """``'D'`` loops the binary per receiver range; the same cap guards
-        that axis."""
-        m = SPARC(verbose=False, output_mode='D')
+        """``'D'`` loops the binary per receiver range; the same pinned cap
+        guards that axis."""
+        m = SPARC(verbose=False, output_mode='D', max_launches=20)
         monkeypatch.setattr(
             m, "_run_sparc",
             lambda *a, **k: pytest.fail("binary launched before the "
@@ -206,6 +207,22 @@ class TestSPARCEnvironmentHandling:
             m.run(sparc_simple_env, source_50hz,
                   Receiver(depths=np.array([50.0]),
                            ranges=np.linspace(100.0, 2100.0, 21)))
+
+    @pytest.mark.parametrize('output_mode, axis', [
+        ('R', dict(depths=np.linspace(10.0, 90.0, 21),
+                   ranges=np.array([1000.0]))),
+        ('D', dict(depths=np.array([50.0]),
+                   ranges=np.linspace(100.0, 2100.0, 21)))])
+    def test_no_cap_by_default(self, sparc_simple_env, source_50hz,
+                               output_mode, axis):
+        """Unset, max_launches caps nothing: 21 launches are planned."""
+        m = SPARC(verbose=False, output_mode=output_mode)
+        assert m.max_launches is None
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            settings = m.run_settings(sparc_simple_env, source_50hz,
+                                      Receiver(**axis), RunMode.TIME_SERIES)
+        assert len(settings.engine.run_bases) == 21
 
     @pytest.mark.requires_binary
     def test_one_binary_run_per_receiver_range_in_vertical_mode(
@@ -233,8 +250,8 @@ class TestSPARCEnvironmentHandling:
     @pytest.mark.requires_binary
     def test_one_binary_run_per_receiver_depth(self, sparc_simple_env,
                                                source_50hz, monkeypatch):
-        """The horizontal path loops the binary once per depth; the max_launches
-        cap exists because of it."""
+        """The horizontal path loops the binary once per depth; a pinned
+        max_launches caps that loop."""
         import warnings as _w
         m = SPARC(verbose=False)
         calls = {'n': 0}
@@ -419,6 +436,14 @@ def _direct_dtft_row(G, f_idx, win=None):
     return np.sum(G.astype(np.complex128) * kernel, axis=0)
 
 
+
+def _uniform_k_phase_speeds(c_hi, c_lo, nk, freq):
+    """Phase speeds ``c_hi`` down to ``c_lo`` whose wavenumbers at ``freq``
+    are uniform, as the Hankel transform requires: SPARC's and SCOOTER's own
+    grid (``scooter.f90:77-79``)."""
+    omega = 2.0 * np.pi * freq
+    return omega / np.linspace(omega / c_hi, omega / c_lo, nk)
+
 class TestSparcSnapshotFieldIsUnchangedByTheRowContraction:
     """End to end: the same snapshot through ``snapshot_to_field`` with
     the row contraction and with a plain summed transform at the same
@@ -434,7 +459,7 @@ class TestSparcSnapshotFieldIsUnchangedByTheRowContraction:
             data=(rng.standard_normal((nt, 1, nrd, nk)) +
                     1j * rng.standard_normal((nt, 1, nrd, nk))
                     ).astype(np.complex64),
-            phase_speeds=np.linspace(2500.0, 1400.0, nk),
+            phase_speeds=_uniform_k_phase_speeds(2500.0, 1400.0, nk, freq),
             receiver_depths=np.linspace(10.0, 200.0, nrd),
             source_depths=[20.0], frequencies=freq,
             times=np.arange(nt) / (200.0 * freq),       # output TIMES
@@ -490,7 +515,8 @@ class TestSparcSnapshotIsEvaluatedAtTheSourceFrequency:
         nrd, nk = G.shape[1], G.shape[2]
         return GreensFunction(
             data=G[:, None].astype(np.complex128),
-            phase_speeds=np.linspace(2500.0, 1400.0, nk),
+            phase_speeds=_uniform_k_phase_speeds(2500.0, 1400.0, nk,
+                                               self.F0),
             receiver_depths=np.linspace(10.0, 100.0, nrd),
             source_depths=[20.0], frequencies=self.F0,
             times=np.arange(self.NT) * self.DT,
@@ -625,7 +651,7 @@ class TestBroadbandTransformRefusesASparcSnapshot:
     """``WriteHeaderSparc`` puts the output TIME vector in the ``.grn``'s
     frequency slot (``sparc.f90:317-319``), so transforming a snapshot as a
     multi-frequency Green's function labels seconds as hertz and reports a
-    ``center_frequency`` that is a time. The two snapshot transforms already
+    ``fc`` that is a time. The two snapshot transforms already
     refuse a non-SPARC ``.grn``; this is the same guard the other way round."""
 
     def test_a_sparc_grn_names_the_two_snapshot_transforms(self, tmp_path):

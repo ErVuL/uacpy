@@ -380,7 +380,7 @@ def _registered_keys_for(model_name: str) -> set:
 
 # (model_cls, run_kwargs) — keep small fast runs; covers the path that
 # actually attaches metadata keys. ``work_dir`` is pinned so the
-# ``_attach_output_paths`` branch fires (cleanup=True suppresses it).
+# ``attach_output_paths`` branch fires (cleanup=True suppresses it).
 def _drift_cases():
     from uacpy.tests.conftest import engine_entry
     from uacpy.models import (
@@ -498,7 +498,7 @@ def test_documented_metadata_has_no_dead_rows():
     static scan closes that gap without needing a binary: it greps the emitters
     (``uacpy/models``, ``uacpy/io``, ``uacpy/core``, ``uacpy/sonar``) for the
     two forms a key is written in — ``key=value`` (most keys reach metadata as
-    keyword arguments to ``_result_kwargs``) and a quoted ``'key'`` (dict
+    keyword arguments to ``result_kwargs``) and a quoted ``'key'`` (dict
     literals, ``metadata['key'] = …``, ``primary_files``).
     """
     from uacpy.core.results import _DOCUMENTED_METADATA, _UNIVERSAL_METADATA
@@ -541,3 +541,30 @@ def test_documented_metadata_has_no_dead_rows():
         f"uacpy/{{models,io,core,sonar}} writes. Delete the stale row(s), or "
         f"fix the emitter that was supposed to attach them."
     )
+
+
+@pytest.mark.parametrize('model', ['Scooter', 'SPARC'])
+@pytest.mark.parametrize('key,words', [
+    ('source_type', ('point', 'line', 'scaled')),
+    ('spectrum', ('positive', 'negative', 'both')),
+])
+def test_the_hankel_rows_describe_the_words_hankel_transform_accepts(
+        model, key, words):
+    """``GreensFunction.to_field`` stamps the ``source_type`` / ``spectrum``
+    it handed :func:`hankel_transform`, which accepts exactly these words and
+    refuses the Acoustics-Toolbox letters; the registry row
+    ``list_metadata()`` returns quotes each word."""
+    from uacpy.core.acoustics import hankel_transform
+    from uacpy.core.exceptions import ConfigurationError
+    from uacpy.core.results import _DOCUMENTED_METADATA
+
+    G = np.ones((1, 4), dtype=complex)
+    k = np.linspace(0.1, 0.4, 4)
+    r = np.array([50.0])
+    for word in words:
+        hankel_transform(G, k, r, attenuation=0.0, **{key: word})
+    with pytest.raises(ConfigurationError, match=f'{key} must be'):
+        hankel_transform(G, k, r, attenuation=0.0, **{key: words[0][0].upper()})
+    description = _DOCUMENTED_METADATA[(model, key)][1]
+    for word in words:
+        assert f"'{word}'" in description, (model, key, description)

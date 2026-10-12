@@ -18,10 +18,20 @@ from uacpy.core.exceptions import ConfigurationError
 from uacpy.core.surface import Surface
 
 
+#: The reduction each feature a model cannot read gets when neither the
+#: engine's spec nor the caller names one. uacpy guidance: no engine manual
+#: or textbook names a reduction of a range-dependent environment to one
+#: column, so these are uacpy's choices — the deepest seafloor, the median
+#: seabed column over the track (one rule for every engine, so one
+#: environment reduces to the same seabed whichever engine runs it;
+#: ``collapse={'bottom_range': 'r0'}`` takes the column at the source), and
+#: the column at the source (r = 0) for the profiles and the surface — as is
+#: the per-model override an engine's ``spec.collapse`` declares (the mean
+#: SSP of the single-solve engines).
 DEFAULT_COLLAPSE: Dict[str, str] = {
     'bathymetry': 'max',
     'ssp': 'r0',
-    'bottom_range': 'r0',
+    'bottom_range': 'median',
     'bottom_layers': 'halfspace',
     'altimetry': 'drop',
     'surface': 'r0',
@@ -126,8 +136,12 @@ def collapse_elastic_boundary(boundary, method: str):
     surface :class:`BoundaryProperties`, returning the same kind.
     """
     def _zero_shear(b):
-        b.shear_speed = 0.0
-        b.shear_attenuation = 0.0
+        # A boundary that carries no shear is left as it is: an assignment
+        # re-validates it as given, and a parameter-free half-space (rigid,
+        # vacuum) refuses a shear_speed it was given, zero included.
+        if b.shear_speed or b.shear_attenuation:
+            b.shear_speed = 0.0
+            b.shear_attenuation = 0.0
 
     valid = sorted(VALID_COLLAPSE_METHODS['elastic'])
     if method not in valid:

@@ -12,12 +12,15 @@ from uacpy.core.exceptions import (
 )
 from uacpy.models._band import (
     _time_series_grid, _TIME_SERIES_THRESHOLD_DB, _TimeSeriesGrid,
-    pad_waveform_to_duration, time_series_band,
+    frequencies_text, pad_waveform_to_duration, time_series_band,
 )
 from uacpy.core.run_settings import Notice
 
 # The pulse a TIME_SERIES run marches when ``pulse_type`` is unpinned: the
 # run's own waveform, staged as STSFIL, or the canned wavelet without one.
+# 'PN+B' is the pulse of the toolbox's tests/iso.env; 'FN+B' is uacpy guidance
+# — the same suffix on the file-read shape 'F' (doc/sparc.htm: "'F' From a
+# '.STS' (Source Time Series) file"), which no toolbox deck uses.
 _WAVEFORM_PULSE = 'FN+B'
 _CANNED_PULSE = 'PN+B'
 
@@ -114,15 +117,41 @@ class _PulseBand(NamedTuple):
     grid: Optional[_TimeSeriesGrid] = None
 
 
+#: The spectral support ``[0, m·F]`` ``tslib/cans.f90`` states for a canned
+#: pulse shape built on the deck frequency ``F``, as the multiple ``m``:
+#: 'P' :27 "(peak at 0, support [0, 3F]", 'R' :32 "(peak at F, support
+#: [0, 2F]", 'A' :38 "(peak at F, support [0, 2.5F]", 'N' :57 "(peak at 1 F,
+#: support [0, 4F], [0,3F] OK". The other canned shapes ('S', 'H', 'M',
+#: 'G') are stated "support [0, infinity]" and take
+#: :data:`_CANNED_SUPPORT_UNSTATED`.
+_CANNED_SUPPORT = {'P': 3.0, 'R': 2.0, 'A': 2.5, 'N': 3.0}
+#: The band multiple of a canned shape ``cans.f90`` gives no finite support
+#: for: uacpy guidance, the band of the toolbox's SPARC decks
+#: (``doc/sparc.htm``'s sample ``0.0 15.0`` for 5 Hz, ``tests/iso.env``
+#: ``0.0 300.0`` for 100 Hz).
+_CANNED_SUPPORT_UNSTATED = 3.0
+
 # Where a derived band edge came from, as SparcSettings records it. A
 # waveform's edge names the base rule's own origin of it
 # (:func:`~uacpy.models._band._time_series_grid`, the band every synthesising
 # engine derives for the same pulse and record).
 _BAND_FROM_WAVEFORM = (
     "{edge}, the run's source_waveform padded to the {time_max:g} s record")
-_BAND_FROM_OCTAVE = (
-    "one octave around source.frequencies[0], the canned pulse's frequency")
 _BAND_FROM_FREQUENCIES = "the span of run(frequencies=...)"
+
+
+def canned_band_origin(pulse: str) -> str:
+    """Where both edges of a canned pulse's derived band came from: the
+    support ``tslib/cans.f90`` states for its shape, or the toolbox decks'
+    ``[0, 3F]`` for a shape stated unbounded."""
+    shape = pulse[0]
+    if shape in _CANNED_SUPPORT:
+        return (f"[0, {_CANNED_SUPPORT[shape]:g} × source.frequencies[0]], "
+                f"the canned {shape!r} pulse's spectral support "
+                f"(tslib/cans.f90)")
+    return (f"[0, {_CANNED_SUPPORT_UNSTATED:g} × source.frequencies[0]], "
+            f"the toolbox's SPARC decks (tslib/cans.f90 states the canned "
+            f"{shape!r} pulse's support as [0, infinity])")
 
 
 def resolve_pulse_type(source_waveform, *, pulse_type) -> Tuple[str, str]:
@@ -145,8 +174,10 @@ def derived_band(source, time, time_max: float, *,
     ``run(frequencies=)`` sets it: for a pulse read from STSFIL, the
     band the base rule (:func:`_time_series_grid`) derives from the
     waveform zero-padded to SPARC's own ``time_max`` record; for a canned
-    pulse, one octave around ``source.frequencies[0]``. ``None`` for a
-    waveform the base rule derives no band from."""
+    pulse, ``[0, m·F]`` on ``F = source.frequencies[0]`` with ``m`` the
+    support ``tslib/cans.f90`` states for its shape
+    (:data:`_CANNED_SUPPORT`, else :data:`_CANNED_SUPPORT_UNSTATED`).
+    ``None`` for a waveform the base rule derives no band from."""
     waveform = None if time is None else time.source_waveform
     pulse, _origin = resolve_pulse_type(waveform, pulse_type=pulse_type)
     if pulse[0] in 'FB':
@@ -165,8 +196,9 @@ def derived_band(source, time, time_max: float, *,
             grid)
     freq = float(np.atleast_1d(
         np.asarray(source.frequencies, dtype=float))[0])
-    return _PulseBand(max(freq / 2.0, 0.1), freq * 2.0,
-                      _BAND_FROM_OCTAVE, _BAND_FROM_OCTAVE)
+    multiple = _CANNED_SUPPORT.get(pulse[0], _CANNED_SUPPORT_UNSTATED)
+    origin = canned_band_origin(pulse)
+    return _PulseBand(0.0, multiple * freq, origin, origin)
 
 
 def resolve_pulse_band(source, frequencies, time, time_max: float, *,
@@ -218,16 +250,41 @@ def resolve_pulse_band(source, frequencies, time, time_max: float, *,
                       None if derived is None else derived.grid)
 
 
-def multi_frequency_notice(source, octave_band: bool):
+def frequencies_span_notice(band: _PulseBand, frequencies,
+                            source) -> Optional[Notice]:
+    """A notice when ``run(frequencies=)`` set an edge of the pulse band,
+    else ``None``. SPARC marches one pulse in time (doc/sparc.htm), so the
+    values set only the band edges they span, not a grid of solves, and the
+    result's frequency axis is the deck frequency ``source.frequencies[0]``
+    with the band as its ``band_hz``."""
+    if _BAND_FROM_FREQUENCIES not in (band.freq_min_origin,
+                                      band.freq_max_origin):
+        return None
+    grid = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    deck = float(np.atleast_1d(np.asarray(source.frequencies,
+                                          dtype=float))[0])
+    return Notice(
+        "run(frequencies=) sets the pulse band edges only",
+        f"SPARC marches one pulse in time (doc/sparc.htm), so the "
+        f"{grid.size} values of run(frequencies=) set only the pulse band: "
+        f"freq_min = {band.freq_min:g} Hz ({band.freq_min_origin}), "
+        f"freq_max = {band.freq_max:g} Hz ({band.freq_max_origin}). The "
+        f"result's frequency axis is the deck frequency "
+        f"source.frequencies[0] = {deck:g} Hz, and the band is its band_hz.",
+        FallbackWarning)
+
+
+def multi_frequency_notice(source, canned_band: bool):
     """``(note, warning)`` when ``source`` lists more than one frequency,
     else ``None``.
 
     ``TIME_SERIES`` is not in ``spec.traits.single_frequency_modes`` (the mode is
     broadband by nature), but SPARC's deck carries one frequency — the
-    one the attenuation is converted at and a canned pulse is centred on
+    one the attenuation is converted at and a canned pulse is built on
     — so a multi-frequency Source silently loses every entry but the
-    first; say which one is being read. ``octave_band``: the band is the
-    auto octave around that frequency.
+    first; say which one is being read. ``canned_band``: the band is the
+    canned pulse's spectral support on that frequency
+    (:func:`canned_band_origin`).
     """
     freqs = np.atleast_1d(np.asarray(source.frequencies, dtype=float))
     if freqs.size <= 1:
@@ -235,14 +292,15 @@ def multi_frequency_notice(source, octave_band: bool):
     head = (f"SPARC drives one pulse band per run: reading "
             f"source.frequencies[0] = {float(freqs[0]):.6g} Hz and "
             f"ignoring the other {freqs.size - 1} "
-            f"({list(freqs[1:])}). ")
-    if octave_band:
-        tail = ("The auto band is one octave around it; pass "
+            f"({frequencies_text(freqs[1:])}). ")
+    if canned_band:
+        tail = ("The auto band is the canned pulse's spectral support on "
+                "it, from 0 Hz to a multiple of it (tslib/cans.f90); pass "
                 "SPARC(freq_min=..., freq_max=...) to cover the whole source "
                 "band in the single run.")
     else:
         tail = ("It is the frequency the deck converts the attenuation "
-                "at and centres a canned pulse on; the pulse band is "
+                "at and builds a canned pulse on; the pulse band is "
                 "set separately (SPARC(freq_min=..., freq_max=...), "
                 "frequencies= or the source waveform).")
     return Notice(f"source.frequencies[1:] ignored "
@@ -283,33 +341,24 @@ def band_limit_notice(band: _PulseBand):
         f"band.", NumericsWarning)
 
 
-def source_series_rows(pulse: str, waveform, sample_rate, n_depths: int,
-                       freq_min: float, freq_max: float) -> Tuple[int, int]:
+def source_series_rows(pulse: str, waveform,
+                       n_depths: int) -> Tuple[int, int]:
     """``(samples, rows)`` of the STSFIL series ``waveform`` is written
     with when ``pulse`` is read from file, ``(0, 0)`` for a canned
-    pulse; refused when the binary cannot read or band-pass it.
+    pulse; refused when the binary cannot read it.
 
     Unless ``pulse_type[3] == 'N'`` the binary band-passes the series
     once per wavenumber (``tslib/sourceMod.f90:68``,
-    ``tslib/bandpassc.f90``) between the cuts ``sparc.f90:391-401`` sets
-    for that wavenumber — ``k·cLow/2π`` under ``'L'``/``'B'``,
-    ``k·cHigh/2π`` under ``'H'``/``'B'``, else 0 and ``10·fMax`` — which
-    (a) stops on any length that is not a power of two
-    (``bandpassc.f90:24-25``), so the series is zero-padded up to one,
-    and (b) truncates each cut to an integer FFT bin of width
-    ``1/(Nt·Δt)`` (``bandpassc.f90:14-16``). The wavenumber loop sweeps
-    those cuts across the deck's pulse band ``[freq_min, freq_max]``, so a
-    padded series shorter than ``1/(freq_max - freq_min)`` gives every
-    wavenumber's cut the same one or two bins and the per-wavenumber
-    filtering collapses; that length is refused with the sample count
-    that fixes it. The rows are bounded by
-    :data:`_MAX_STS_POINTS` / :data:`_MAX_STS_ROWS` over the
-    ``n_depths`` source depths each row carries.
+    ``tslib/bandpassc.f90``), which stops on any length that is not a
+    power of two (``bandpassc.f90:24-25``), so the series is zero-padded
+    up to one (:func:`short_series_notice` states what a short one
+    resolves). The rows are bounded by :data:`_MAX_STS_POINTS` /
+    :data:`_MAX_STS_ROWS` over the ``n_depths`` source depths each row
+    carries.
     """
     if pulse[0] not in 'FB':
         return 0, 0
     n = int(np.asarray(waveform).size)
-    sample_rate = float(sample_rate)
     filtered = pulse[3] != 'N'
     n_write = (1 << max(1, int(np.ceil(np.log2(n))))) if filtered else n
     if (n_write * n_depths > _MAX_STS_POINTS
@@ -326,27 +375,47 @@ def source_series_rows(pulse: str, waveform, sample_rate, n_depths: int,
                 f"is band-passed)."
             ),
         )
-    if filtered:
-        duration = n_write / sample_rate
-        needed = 1.0 / (freq_max - freq_min)
-        if duration < needed * (1.0 - 1e-9):
-            n_needed = int(np.ceil(needed * sample_rate))
-            raise ConfigurationError(
-                f"SPARC: source_waveform spans {duration:.6g} s "
-                f"({n_write} samples at {sample_rate:.6g} Hz, after "
-                f"zero-padding to a power of two for the band-pass), "
-                f"shorter than 1/(freq_max - freq_min) = {needed:.6g} s. The "
-                f"binary band-passes the series once per wavenumber "
-                f"between cuts it sweeps across the "
-                f"{freq_min:.6g}-{freq_max:.6g} Hz pulse band "
-                f"(sparc.f90:391-401) and truncates each cut to an FFT "
-                f"bin of width 1/duration (tslib/bandpassc.f90:14-16), "
-                f"so this record gives every wavenumber the same bins.",
-                remediation=(
-                    f"np.pad(source_waveform, (0, {n_needed - n})) "
-                    f"(zero-pad to at least {n_needed} samples), or "
-                    f"SPARC(pulse_type='{pulse[:3]}N') to "
-                    f"skip the band-pass."
-                ),
-            )
     return n, n_write
+
+
+def short_series_notice(pulse: str, waveform, sample_rate,
+                        freq_min: float, freq_max: float) -> Optional[Notice]:
+    """A notice when the band-passed STSFIL series is shorter than
+    ``1/(freq_max - freq_min)``, else ``None``.
+
+    Unless ``pulse_type[3] == 'N'`` the binary band-passes the series
+    (zero-padded to a power of two, :func:`source_series_rows`) once per
+    wavenumber between the cuts ``sparc.f90:391-401`` sets for that
+    wavenumber — ``k·cLow/2π`` under ``'L'``/``'B'``, ``k·cHigh/2π`` under
+    ``'H'``/``'B'``, else 0 and ``10·fMax`` — and truncates each cut to an
+    integer FFT bin of width ``1/(Nt·Δt)`` (``bandpassc.f90:14-16``). The
+    wavenumber loop sweeps those cuts across the deck's pulse band
+    ``[freq_min, freq_max]``, so a shorter series gives every wavenumber's
+    cut the same one or two bins; the notice names the sample count that
+    keeps them apart.
+    """
+    if pulse[0] not in 'FB' or pulse[3] == 'N':
+        return None
+    n = int(np.asarray(waveform).size)
+    sample_rate = float(sample_rate)
+    n_write = 1 << max(1, int(np.ceil(np.log2(n))))
+    duration = n_write / sample_rate
+    needed = 1.0 / (freq_max - freq_min)
+    if duration >= needed * (1.0 - 1e-9):
+        return None
+    n_needed = int(np.ceil(needed * sample_rate))
+    return Notice(
+        f"STSFIL series {duration:.6g} s < 1/(freq_max - freq_min) "
+        f"= {needed:.6g} s",
+        f"SPARC: source_waveform spans {duration:.6g} s ({n_write} "
+        f"samples at {sample_rate:.6g} Hz, after zero-padding to a power "
+        f"of two for the band-pass), shorter than 1/(freq_max - freq_min) "
+        f"= {needed:.6g} s. The binary band-passes the series once per "
+        f"wavenumber between cuts it sweeps across the "
+        f"{freq_min:.6g}-{freq_max:.6g} Hz pulse band (sparc.f90:391-401) "
+        f"and truncates each cut to an FFT bin of width 1/duration "
+        f"(tslib/bandpassc.f90:14-16), so this record gives every "
+        f"wavenumber the same bins. np.pad(source_waveform, "
+        f"(0, {n_needed - n})) (at least {n_needed} samples) keeps the "
+        f"cuts apart; SPARC(pulse_type='{pulse[:3]}N') skips the band-pass.",
+        NumericsWarning)

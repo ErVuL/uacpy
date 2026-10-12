@@ -105,17 +105,18 @@ def test_sparc_time_series_takes_frequencies_as_its_pulse_band(pekeris,
 
 
 @pytest.mark.requires_binary
-def test_sparc_with_a_pinned_band_warns_on_frequencies(pekeris, stop_at):
-    """``SPARC(freq_min=, freq_max=)`` pin the band, so the run ignores
-    ``frequencies=`` with a warning."""
+def test_sparc_with_a_pinned_band_refuses_frequencies(pekeris, stop_at):
+    """``SPARC(freq_min=, freq_max=)`` pin the band, so ``frequencies=``
+    contradicts them and the run is refused before its environment is
+    projected."""
+    from uacpy.core.exceptions import ConfigurationError
     from uacpy.models import SPARC
     model = SPARC(verbose=False, freq_min=50.0, freq_max=150.0)
     stop_at(SPARC, 'project')
     env, source, receiver = pekeris
-    with pytest.warns(UserWarning, match='ignoring frequencies='):
-        with pytest.raises(StageReached):
-            model.run(env, source, receiver, run_mode=RunMode.TIME_SERIES,
-                      frequencies=np.array([90.0, 100.0, 110.0]))
+    with pytest.raises(ConfigurationError, match='contradict each other'):
+        model.run(env, source, receiver, run_mode=RunMode.TIME_SERIES,
+                  frequencies=np.array([90.0, 100.0, 110.0]))
 
 
 @pytest.mark.requires_binary
@@ -333,5 +334,4 @@ def test_bellhop_broadband_records_where_its_band_came_from(pekeris):
     band = uacpy.Source(depths=50.0, frequencies=[90.0, 110.0])
     assert origin(source, frequencies=[90.0, 100.0, 110.0]) == 'frequencies='
     assert origin(band) == 'Source.frequencies'
-    assert origin(source) == (f"{model.n_freqs} bins over fc*(1 +/- "
-                              f"{model.bandwidth_factor:g}/2)")
+    assert origin(source) == "128 bins over fc*(1 +/- 0.5/2)"

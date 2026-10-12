@@ -24,7 +24,8 @@ class RamGrid(FrozenRecord):
         Range and depth steps (m) written to the deck.
     zmax : float
         Depth (m) of the PE domain floor, absorbing layer included, in the
-        geometric frame (mpiramS: snapped onto its ``deltaz`` grid).
+        geometric frame (mpiramS: on its ``deltaz`` lattice — an automatic
+        one snapped onto it, a pinned one with ``dz`` chosen to divide it).
     n_depth_points : int
         Depth points the binary marches over ``zmax``: mpiramS's
         ``icount = floor(zmax/dz - 0.5) + 2`` (``peramx.f90:391``), the
@@ -118,7 +119,10 @@ class RamSettings(EngineSettings):
         whose row 5 carries the rotation instead.
     grids : tuple of RamGrid
         One per binary launch, in launch order: one for mpiramS and a
-        Collins TL run, one per bin for a Collins band.
+        Collins TL run, one per bin for a Collins band. A Collins band
+        marches one ``dr`` for every bin: sized at the band's top on the
+        fluid codes, at its bottom on rams0.5 (past ``λ/5`` for the bins
+        above it).
     notices : tuple of Notice
         What resolving these settings found worth saying about the run — a
         grid the budget coarsened, trapped modes it cannot carry, a pinned
@@ -196,9 +200,9 @@ class RamKnobs:
     depth_decimation: int
     earth_curvature: bool
     n_pade: int
-    n_sediment_points: int
-    n_stability: int
-    rams_dr_factor: float
+    n_sediment_points: Optional[int]
+    n_stability: Optional[int]
+    rams_dr_factor: Optional[float]
     rams_rotation: bool
     rams_rotation_angle: Optional[float]
     stability_range_m: Optional[float]

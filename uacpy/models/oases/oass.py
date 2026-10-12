@@ -9,9 +9,15 @@ from typing import Dict, Optional, Union
 
 import numpy as np
 
-from uacpy.models.base import DEFAULT_RUN_TIMEOUT_S, PropagationModel
+from uacpy.models.base import (
+    DEFAULT_RUN_TIMEOUT_S, PropagationModel, _host_options,
+)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.models._knobs import is_real_number, whole_count
 from uacpy.models._spec import ModelSpec
+from uacpy.models._window import (
+    check_pinned_window, refuse_inverted_window,
+)
 from uacpy.core.run_settings import (
     EngineSettings, OutputSpec, RunMode, RunSettings,
 )
@@ -23,7 +29,8 @@ from uacpy.core.exceptions import (
     ValidityWarning,
 )
 from uacpy.io.oases_writer import (
-    write_oass_input, oass_bottom_interfaces, _OASES_MAX_WAVENUMBERS,
+    write_oass_input, oass_bottom_interfaces, oases_wavenumber_bounds,
+    _OASES_MAX_WAVENUMBERS,
     _check_oass_range_count, _OASS_REVERB_OPTIONS,
 )
 from uacpy.io._parsers import parse_oast_tl
@@ -33,15 +40,20 @@ from uacpy.io.oases_reader import (
 from uacpy.models.oases._common import (
     C_LOW_MATCH_RTOL,
     _OASES_TRAITS, _OASS_MIN_MEAN_FIELD_ROUGHNESS, _OASS_SPECTRA,
-    _OASS_SURFACE_INTERFACE, _geometry_options, _oases_find_executable,
+    _OASS_SURFACE_INTERFACE, _geometry_options, _oases_binary,
     _reject_plane_geometry_letter_on_a_point_source,
     _reject_unintegrable_spectral_exponent, _roughness_notice,
+    SCATTERING_UNPINNED_FIELDS, resolve_spectral_exponent,
 )
 from uacpy.models.oases._base import OASES
 from uacpy.models.oases.oast import OAST, _oast_options
 from uacpy.models.oases.oasr import OASR
 from uacpy.models.oases._mean_field import _MeanFieldRun, _mean_field_inputs
 from uacpy.models._notices import message_notice
+from uacpy.models._extract import (
+    attach_output_paths, mask_source_axis, result_kwargs,
+)
+from uacpy.models._launch import require_output
 
 
 #: OASS echoes the wavenumber count it settled on after re-deriving it from
@@ -155,8 +167,8 @@ class OASSSettings(EngineSettings):
 def _check_oass_knobs(*, correlation_length, spectral_exponent,
                       roughness_spectrum, mean_field, options,
                       multiple_scattering) -> None:
-    """Refuse an OASS knob no run could use: a missing correlation
-    length, an unintegrable spectral exponent, an unknown roughness
+    """Refuse an OASS knob no run could use: a missing or non-positive
+    correlation length, an unintegrable spectral exponent, an unknown roughness
     spectrum, a mean field that cannot feed OASS, a raw ``options``
     string beside the typed flags it would discard."""
     if correlation_length is None:
@@ -169,7 +181,19 @@ def _check_oass_knobs(*, correlation_length, spectral_exponent,
             remediation=("Pass the interface correlation length in "
                          "metres, e.g. OASS(correlation_length=10.0)."),
         )
-    _reject_unintegrable_spectral_exponent('OASS', spectral_exponent)
+    # As OASSP: a negative length is OASES' switch to a volume-scattering
+    # layer record (oaseun31.f:76-90) no uacpy carrier expresses, and zero
+    # a degenerate roughness spectrum the deck writer refuses.
+    if not (is_real_number(correlation_length)
+            and np.isfinite(correlation_length) and correlation_length > 0):
+        raise ConfigurationError(
+            f"OASS(correlation_length={correlation_length!r}) must be a "
+            f"positive length in metres: a negative value is OASES' "
+            f"volume-scattering switch (oaseun31.f:76-90), which no uacpy "
+            f"carrier expresses, and zero a degenerate roughness spectrum.",
+            remediation="Pass correlation_length > 0 (metres).")
+    if spectral_exponent is not None:
+        _reject_unintegrable_spectral_exponent('OASS', spectral_exponent)
     if str(roughness_spectrum).lower() not in _OASS_SPECTRA:
         raise ConfigurationError(
             f"OASS(roughness_spectrum={roughness_spectrum!r}) is not "
@@ -457,8 +481,12 @@ def _oass_settings(name: str, mean_settings, projection_notices, *,
     mean field's own settings (its COHERENT_TL run on the same
     environment and receiver). ``c_low_pinned`` unset takes the mean
     field's ``CMIN``; one that differs from it is noted (see
-    :func:`_c_low_mismatch_notice`). ``name`` is the model the
-    roughness notice names."""
+    :func:`_c_low_mismatch_notice`). The resolved window is refused when
+    ``c_low`` is not below the ``CMAX`` the deck carries (``c_high``, else
+    :func:`oases_wavenumber_bounds`'s "no upper limit"): ``WK0 = ω/CMAX``
+    then lies above ``WKMAX = ω/CMIN`` and the scattered field is zero
+    (unoass21.f:190-191). ``name`` is the model the refusals and the
+    roughness notice name."""
     mean_c_low = mean_settings.engine.c_low
     notices = list(projection_notices)
     if c_low_pinned is None:
@@ -468,12 +496,21 @@ def _oass_settings(name: str, mean_settings, projection_notices, *,
         notice = _c_low_mismatch_notice(c_low_pinned, mean_c_low)
         if notice is not None:
             notices.append(message_notice(notice, ValidityWarning))
+    cmax = (oases_wavenumber_bounds(
+                env.ssp.extend_to(float(env.depth)).to_pairs())[1]
+            if c_high is None else c_high)
+    refuse_inverted_window(name, float(c_low), float(cmax),
+                           c_low=c_low_pinned, c_high=c_high)
     options = _geometry_options(options, source)
     interface = _oass_interface(env, interface)
     frequency = _require_single_frequency(source)
     notices.append(_roughness_notice(
         name, env, interface, frequency,
         rms_roughness, oass_index_space=True))
+    # GETOPT reads 'g' or 'G' as the Goff-Jordan spectrum (unoass21.f:674).
+    spectral_exponent, unused = resolve_spectral_exponent(
+        name, spectral_exponent, goff=bool(set(options) & {'g', 'G'}))
+    notices.append(message_notice(unused, FallbackWarning))
     return OASSSettings(
         options=options,
         interface=interface,
@@ -566,9 +603,15 @@ class OASS(OASES):
         are not adopted from OASR or OAST."
     spectral_exponent : float
         ``M``, the roughness power-spectrum exponent. Must exceed 1.5 or the
-        spectrum is not integrable. Default 2.0.
+        spectrum is not integrable. ``None`` (default) is 2.5, OASES' own
+        Goff-Jordan exponent (oaseun31.f:103-104;
+        :data:`~uacpy.core.engine_defaults.OASSP_SPECTRAL_EXPONENT`). The
+        default Gaussian spectrum does not read it (oaseun31.f:3689-3692): set
+        there, the run says it is not used.
     roughness_spectrum : str
-        ``'gaussian'`` (default) or ``'goff-jordan'`` (option ``'g'``,
+        ``'gaussian'`` (default, OASES' own: "Uses a Goff-Jordan roughness
+        spectrum as opposed to the default gaussian spectrum",
+        oass.tex:136-137) or ``'goff-jordan'`` (option ``'g'``,
         ``unoass21.f:674``).
     rms_roughness : float, optional
         ``|RG|`` (m) at the scattering interface in the **OASS** deck.
@@ -589,9 +632,10 @@ class OASS(OASES):
         and the default the smaller ones.
     mean_field : OAST, optional
         The producer run. ``None`` builds ``OAST(options='N J T s')``. A
-        supplied model keeps its own configuration; only ``work_dir``,
-        ``cleanup``, ``use_tmpfs``, ``verbose`` and ``timeout`` are
-        redirected onto this run. An ``OASR`` is refused: its ``.rhs``
+        supplied model keeps its own configuration, ``verbose`` and
+        ``timeout`` included; only ``work_dir``, ``cleanup`` and
+        ``use_tmpfs`` are redirected onto this run, whose directory holds
+        the ``.rhs`` oass2 reads. An ``OASR`` is refused: its ``.rhs``
         stamps every record with interface index 2 and samples wavenumber
         as ``cos(angle)``, neither of which the ``INTFC``-match /
         uniform-``DLWVNO`` inference at ``unoass21.f:200-211`` can consume.
@@ -637,8 +681,7 @@ class OASS(OASES):
     transmission loss, so it does not compare against a TL field.
 
     **Collapse defaults (overrides of :data:`DEFAULT_COLLAPSE`).** Per-model:
-    ``'ssp': 'mean'``, ``'bottom_range': 'median'`` (the layer stack is
-    kept).
+    ``'ssp': 'mean'`` (the layer stack is kept).
 
     Examples
     --------
@@ -654,13 +697,22 @@ class OASS(OASES):
     # median bottom column.
     spec = ModelSpec(
         modes=(RunMode.REVERBERATION, RunMode.COVARIANCE),
+        # The layered stack OASP solves the mean field on (INENVI is shared
+        # verbatim between the binaries), so the capabilities are OASP's;
+        # a rough interface is column 7 (RG) of its layer record
+        # (oaseun31.f:54).
         supports={'layered_bottom', 'elastic_media',
                   'rough_surface', 'rough_bottom'},
+        # Both decks run in plane geometry for a line Source, option 'P'
+        # (unoass21.f:654-656).
         source_types=frozenset({'point', 'line'}),
-        collapse={'ssp': 'mean', 'bottom_range': 'median'},
+        collapse={'ssp': 'mean'},
         traits=_OASES_TRAITS,
     )
     provenance_id = 'oases'
+
+    _UNPINNED_FIELDS = SCATTERING_UNPINNED_FIELDS
+    _BINARIES = MappingProxyType({'oass': _oases_binary('oass2')})
     # REVERBERATION: -10·log10 E[|p_scat|²] in dB, a loss (see
     # _reverberation_field); COVARIANCE: the .xsm matrix.
     outputs = MappingProxyType({
@@ -675,7 +727,7 @@ class OASS(OASES):
         executable: Optional[Path] = None,
         # Roughness statistics of the scattering interface (Block IV).
         correlation_length: Optional[float] = None,
-        spectral_exponent: float = 2.0,
+        spectral_exponent: Optional[float] = None,
         roughness_spectrum: str = 'gaussian',
         rms_roughness: Optional[float] = None,
         interface: Optional[int] = None,
@@ -695,15 +747,13 @@ class OASS(OASES):
         timeout: float = DEFAULT_RUN_TIMEOUT_S,
         collapse: Optional[Dict[str, str]] = None,
     ):
-        super().__init__(
-            use_tmpfs=use_tmpfs, verbose=verbose, work_dir=work_dir,
-            cleanup=cleanup, timeout=timeout, collapse=collapse,
-        )
+        super().__init__(**_host_options(locals()))
         self.correlation_length = (
             float(correlation_length) if correlation_length is not None
             else None
         )
-        self.spectral_exponent = float(spectral_exponent)
+        self.spectral_exponent = (float(spectral_exponent)
+                                  if spectral_exponent is not None else None)
         # Kept as passed until the check, whose refusal quotes it; then
         # normalised, so the option letter and the options-exclusivity check
         # compare case-folded values and OASS and OASSP accept the same
@@ -712,6 +762,9 @@ class OASS(OASES):
         self.rms_roughness = (
             float(rms_roughness) if rms_roughness is not None else None
         )
+        # OASS reads INTFCE as an INTEGER layer index (unoass21.f:151).
+        if interface is not None:
+            whole_count('OASS: interface', interface, 1)
         self.interface = int(interface) if interface is not None else None
         self.multiple_scattering = bool(multiple_scattering)
         self.mean_field = mean_field
@@ -740,25 +793,29 @@ class OASS(OASES):
         # install.sh:1157 copies the raw executable; bin/oases carries
         # symlinks for oasn/oasp/oasr/oast but none for oass.
         self._exe = self._resolve_executable(
-            executable, lambda: _oases_find_executable(self, 'oass2'),
+            executable, lambda: self._find_binary('oass'),
         )
 
     def _build_mean_field(self) -> 'OAST':
-        """The mean-field producer: the supplied OAST, or
-        ``OAST(options='N J T s')``, with this run's ``verbose`` and
-        ``timeout``, and OASS's ``cleanup``: its files share OASS's
+        """The mean-field producer: the supplied OAST with its own
+        ``verbose`` and ``timeout``, or ``OAST(options='N J T s')`` with
+        this run's; either with OASS's ``cleanup``: its files share OASS's
         directory, which OASS's ``cleanup`` keeps or wipes, so the mean
         field's result records their paths exactly when they survive."""
-        mean = (self.mean_field if self.mean_field is not None
-                else OAST(options='N J T s'))
-        return mean.copy(verbose=self.verbose, timeout=self.timeout,
-                         cleanup=self.cleanup)
+        if self.mean_field is None:
+            return OAST(options='N J T s', verbose=self.verbose,
+                        timeout=self.timeout, cleanup=self.cleanup)
+        return self.mean_field.copy(cleanup=self.cleanup)
 
     def _check_knobs(self) -> None:
         """Refuse a constructor knob no run could use
-        (:func:`_check_oass_knobs`). Run at construction and again by every
+        (:func:`_check_oass_knobs`, and a pinned phase-speed window that is not
+        positive or not ordered,
+        :func:`~uacpy.models._window.check_pinned_window`). Run at
+        construction and again by every
         run (:meth:`_validate_engine`), since the attributes can be
         reassigned in between."""
+        check_pinned_window('OASS', c_low=self.c_low, c_high=self.c_high)
         _check_oass_knobs(
             correlation_length=self.correlation_length,
             spectral_exponent=self.spectral_exponent,
@@ -905,16 +962,16 @@ class OASS(OASES):
             return self._read_mean_field(inputs, deck)
         proc = inputs.prepared.process
         if inputs.settings.mode == RunMode.COVARIANCE:
-            cov_path = self._require_output(
-                [inputs.work_dir / f'{deck.stem}.xsm'],
+            cov_path = require_output(
+                self.model_name, [inputs.work_dir / f'{deck.stem}.xsm'],
                 what='a covariance file', process=proc,
             )
             self._log(f"Reading OASS covariance file: {cov_path}")
             product = read_oasn_covariance(
                 cov_path, receiver_depths=inputs.receiver.depths)
         else:
-            plt_path = self._require_output(
-                [inputs.work_dir / f'{deck.stem}.plt'],
+            plt_path = require_output(
+                self.model_name, [inputs.work_dir / f'{deck.stem}.plt'],
                 what='a reverberation table (FOR020 .plt)', process=proc,
             )
             self._log(f"Reading OASS output: {plt_path}")
@@ -941,8 +998,8 @@ class OASS(OASES):
         """
         result = inputs.prepared.producer._run_producer_launch(
             self._mean_field_stage_inputs(inputs), deck)
-        rhs = self._require_output(
-            [inputs.work_dir / f'{deck.stem}.045'],
+        rhs = require_output(
+            self.model_name, [inputs.work_dir / f'{deck.stem}.045'],
             what="a mean-field .rhs (option 's')",
             hint=("The producer ran but left no boundary operators; check "
                   "that the scattering interface is rough."),
@@ -1031,8 +1088,8 @@ class OASS(OASES):
         data = oass_out['tl']
         native_depths = oass_out['depths']
         native_ranges = oass_out['ranges']
-        kw = self._result_kwargs(
-            source,
+        kw = result_kwargs(
+            self.model_name, self.provenance, source,
             backend='oass',
             oass_quantity='reverberation_loss_dB',
             **extras,
@@ -1050,10 +1107,11 @@ class OASS(OASES):
         # treatment as OAST's native-FFT-grid mismatch.
         result = _oass_on_receiver_ranges(native, native_ranges,
                                           receiver)
-        result = self._mask_source_axis(result, source)
-        self._attach_output_paths(
+        result = mask_source_axis(self.model_name, result, source)
+        attach_output_paths(
             result, inputs.work_dir, deck.stem,
             primary_files=(('plt_file', '.plt'),),
+            cleanup=self.cleanup,
         )
         return result
 
@@ -1075,9 +1133,10 @@ class OASS(OASES):
         result = self._stamp_file_result(
             covariance, inputs.source, backend='oass',
             frequencies=extras.pop('frequencies', None), **extras)
-        self._attach_output_paths(
+        attach_output_paths(
             result, inputs.work_dir, deck.stem,
             primary_files=(('xsm_file', '.xsm'), ('cor_file', '.cor')),
+            cleanup=self.cleanup,
         )
         return result
 

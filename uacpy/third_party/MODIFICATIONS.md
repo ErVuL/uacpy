@@ -802,16 +802,16 @@ the vendored file is byte-for-byte that copy plus the three patches below.
   `ramgeo` binary); `install.sh` installs it to `uacpy/bin/ramgeo/`.
   `ramgeo.in` is the upstream sample, kept for a smoke test.
 
-Two patches give it full parity with the other Collins backends (the same
-two `ramsurf1.5.f` carries), and a third initialises a counter `ramsurf1.5.f`
-already initialises:
+Two patches give it parity with the other Collins backends (dimensions as
+`ramsurf1.5.f`'s stock ones, the `outpt` dump it carries), and a third
+initialises a counter `ramsurf1.5.f` already initialises:
 
 ### Enlarged array dimensions
 
 Stock RAMGEO dimensions `parameter (mr=100,mz=8000,mp=10)` are too small
 for uacpy's fine Lytaev range/depth grids (a few-hundred-Hz run can need
 >8000 depth points), causing a silent array overflow and an empty
-`tl.grid`. Enlarged to match the patched `ramsurf1.5.f`:
+`tl.grid`. Enlarged to `ramsurf1.5.f`'s stock (upstream) dimensions:
 
 ```diff
 -      parameter (mr=100,mz=8000,mp=10)

@@ -353,6 +353,13 @@ class TestVisualizationNamesWhatToSupply:
 #: then written where the refusal originates, at every call, so the sweep
 #: reads those calls instead of counting the raise as indirect.
 _REMEDIATION_PASS_THROUGH = {
+    ('acoustic_signal/channel.py', '_require_start_time'):
+        "one start-time guard for the plain synthesis, convolution and "
+        "reception functions; each names where its own start comes from "
+        "(h[0], the first output sample, the earliest arrival).",
+    ('acoustic_signal/channel.py', '_per_cell_start_times'):
+        "one per-cell start guard for the functions taking a start per "
+        "cell; each names its own cells (H's, the grid's).",
     ('sonar/sonar_equation.py', '_require_se_field'):
         "one signal-excess kind guard for the three Field doors of the "
         "sonar equation; each names how to build the field it needs.",
@@ -362,6 +369,9 @@ _REMEDIATION_PASS_THROUGH = {
     ('models/_budget.py', 'memory_budget'):
         "one memory policy for five engines; each names the knobs that "
         "shrink its own estimate (n_time_samples, depth_decimation, ...).",
+    ('core/_validate.py', 'refuse_two_columns'):
+        "one two-columns guard for the ssp=, bathymetry= and altimetry= "
+        "coercers; each names its own carrier route.",
     ('models/_window.py', 'steep_path_notice'):
         "one steep-path notice for the wavenumber engines; each names the "
         "knob that keeps its paths (leaky_modes, c_high).",
@@ -530,13 +540,13 @@ def _pressure_slab(depth, range_):
                  coords={'depth': depth, 'range': range_})
 
 
-def _stack_of_slabs(depths):
-    """A source-depth ResultStack whose slabs sit on the given depth axes."""
-    from uacpy.core.results.stack import ResultStack
+def _over_source_depths(depths):
+    """The fields of sources on the given receiver depth axes, joined over
+    ``source_depth`` as a multi-depth run joins them."""
+    from uacpy.core.results import stack_fields
     r = np.linspace(500, 4000, 6)
     slabs = [_pressure_slab(z, r) for z in depths]
-    return ResultStack(slabs, np.arange(float(len(depths))),
-                       coordinate_name='source_depth')
+    return stack_fields(slabs, np.arange(float(len(depths))))
 
 
 class _FlatModes:
@@ -740,13 +750,14 @@ def _guard_cases():
          lambda: synthesize_replica(_FlatModes(), source_depth=50.0,
                                     ranges=[1000.0, 0.0, -5.0], array_depths=[10.0]),
          ('got 2 value(s) <= 0', 'first at index 1')),
-        ('replica_bank_slab_depth_axis',
-         lambda: replica_bank_from_field(_stack_of_slabs([z4]),
+        ('replica_bank_multi_depth_field_depth_axis',
+         lambda: replica_bank_from_field(_over_source_depths([z4]),
                                          array_depths=np.linspace(5, 95, 7)),
-         ("slab 'depth' axis of shape (4,)", 'array_depths of shape (7,)')),
-        ('replica_bank_slabs_share_axes',
-         lambda: replica_bank_from_field(_stack_of_slabs([z4, z4 + 1.0])),
-         ('Got slab 1',)),
+         ("field 'depth' axis of shape (4,)", 'array_depths of shape (7,)')),
+        ('joined_fields_share_axes',
+         lambda: _over_source_depths([z4, z4 + 1.0]),
+         ('fields[1] is on a different grid from fields[0]',
+          'same lengths, different coordinate values')),
         ('replica_bank_field_depth_axis',
          lambda: replica_bank_from_field(
              _pressure_slab(z4, np.linspace(500, 4000, 6)),

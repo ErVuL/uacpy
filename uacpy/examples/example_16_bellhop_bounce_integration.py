@@ -53,7 +53,7 @@ bounced = uacpy.Bellhop(backend='fortran').run_with_bounce(
     c_low=1400.0, c_high=10000.0, rmax_m=10000.0)
 print(f"  half-space TL {np.nanmin(native.dB):.1f}-{np.nanmax(native.dB):.1f} dB, "
       f"BOUNCE TL {np.nanmin(bounced.dB):.1f}-{np.nanmax(bounced.dB):.1f} dB, "
-      f"max |Δ| {np.nanmax(np.abs(bounced.dB - native.dB)):.1f} dB")
+      f"max |Δ| {np.nanmax(np.abs(bounced.dB - native.dB)):.3f} dB")
 
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 uacpy.plot.plot_field(native, env=elastic_env, ax=axes[0], vmin=40, vmax=90,
@@ -74,12 +74,16 @@ fig.savefig(OUT / 'example_16_bounce_tl.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
 # ── 2. Three sediment layers over a half-space, with Scooter ────────────────
+# Every layer carries shear. Scooter solves the fluid media as one block and
+# reaches elastic media only by shooting up from the half-space below them
+# (scooter.f90:206-207, :374-379), so an elastic layer must not sit above a
+# fluid one.
 layered = uacpy.SeabedColumn(
     layers=[
         uacpy.SedimentLayer(thickness=5.0, sound_speed=1550.0, density=1.5,
                             attenuation=0.3, shear_speed=100.0),
         uacpy.SedimentLayer(thickness=10.0, sound_speed=1650.0, density=1.7,
-                            attenuation=0.5),
+                            attenuation=0.5, shear_speed=150.0),
         uacpy.SedimentLayer(thickness=20.0, sound_speed=1800.0, density=2.0,
                             attenuation=0.8, shear_speed=200.0,
                             shear_attenuation=0.5),
@@ -93,8 +97,8 @@ layered_env = uacpy.Environment(name='Continental shelf — layered sediment',
 layered_tl = uacpy.Scooter().run(
     layered_env,
     uacpy.Source(frequencies=100.0, depths=50.0),
-    uacpy.Receiver(depths=np.linspace(1, 199, 30),     # from 300 m: inside
-                   ranges=np.linspace(300, 5000, 38)))  # c_high's 44° window
+    uacpy.Receiver(depths=np.linspace(1, 199, 30),
+                   ranges=np.linspace(300, 5000, 38)))
 print(f"  {layered.total_thickness():.1f} m of sediment in "
       f"{len(layered.layers)} layers, bottom.is_layered="
       f"{layered_env.bottom.is_layered}; Scooter TL "
@@ -154,7 +158,7 @@ rd_tl = uacpy.RAM().run(
 print(f"  range-dependent seabed: RAM TL {np.nanmin(rd_tl.dB):.1f}-"
       f"{np.nanmax(rd_tl.dB):.1f} dB")
 
-fig, _ = uacpy.plot.plot_field(rd_tl, env=rd_env, contours=[70, 85, 100],
+fig, _ = uacpy.plot.plot_field(rd_tl, env=rd_env, contours=[70, 80, 90],
                           title='RAM TL — range-dependent bottom (mud to sand)')
 fig.savefig(OUT / 'example_16_rd_bottom_tl.png', dpi=150, bbox_inches='tight')
 plt.close(fig)

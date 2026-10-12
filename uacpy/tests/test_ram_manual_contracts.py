@@ -199,7 +199,7 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
         rcv = Receiver(depths=np.array([50.0]), ranges=np.array([3000.0]))
         captured = self._capture(
             monkeypatch, 'write_inpe', None,
-            lambda m: m.compute_tl(env=env, source=src, receiver=rcv))
+            lambda m: m.compute_field(env=env, source=src, receiver=rcv))
         assert captured['stability_range_m'] == pytest.approx(3000.0)
         assert captured['n_stability'] in (1, 2)
 
@@ -209,7 +209,7 @@ class TestStabilityConstraintDefaultsSpanTheMarch:
         rcv = Receiver(depths=np.array([50.0]), ranges=np.array([3000.0]))
         captured = self._capture(
             monkeypatch, 'write_ramin', 'ramgeo',
-            lambda m: m.compute_tl(env=env, source=src, receiver=rcv))
+            lambda m: m.compute_field(env=env, source=src, receiver=rcv))
         assert captured['n_stability'] == 1
         assert captured['stability_range_m'] == 0.0
 
@@ -239,7 +239,7 @@ class TestOmpThreadContract:
 
         monkeypatch.setattr(RAM, '_run_subprocess', fake_run)
         with pytest.raises(RuntimeError, match='spawn captured'):
-            model._run_binary(tmp_path)
+            model._run_binary(tmp_path, dr=10.0)
         return seen['env']
 
     @staticmethod
@@ -445,8 +445,8 @@ class TestCollinsAttnIsPerWavelength:
                                              attenuation=0.2)))
         model = RAM(verbose=False)
         seg = ram_collins.collins_range_segments(
-            env, 'ramgeo', zmax=400.0, freq=freq, knobs=model._knob_record(),
-            speed_bounds=model._speed_bounds)[0]
+            env, 'ramgeo', zmax=400.0, freq=freq,
+            knobs=model._knob_record())[0]
         return seg['bottom_attn'][:2]
 
     def test_deck_attenuation_does_not_scale_with_frequency(self):

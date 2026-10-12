@@ -27,7 +27,7 @@ _EXPORTS = {
         'Result', 'PhaseReference', 'Field', 'ResultStack',
         'Arrivals', 'Rays', 'Modes',
         'Covariance', 'Replicas',
-        'ReflectionCoefficient', 'GreensFunction',
+        'ReflectionCoefficient', 'GreensFunction', 'stack_fields',
     )},
     **{name: 'uacpy.core.exceptions' for name in (
         'UACPYError', 'ExecutableNotFoundError', 'ModelExecutionError',
@@ -88,6 +88,7 @@ if _typing.TYPE_CHECKING:
     from uacpy.core.results import (  # noqa: F401
         Arrivals, Covariance, Field, GreensFunction, Modes, PhaseReference,
         Rays, ReflectionCoefficient, Replicas, Result, ResultStack,
+        stack_fields,
     )
     from uacpy.core.source import Source  # noqa: F401
 

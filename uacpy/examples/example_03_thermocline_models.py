@@ -35,9 +35,10 @@ env = uacpy.Environment(
                                     sound_speed=1650.0, shear_speed=250.0,
                                     density=1.7, attenuation=0.4),
 )
-source = uacpy.Source(depths=15.0,        # in the mixed layer, above the duct
+source = uacpy.Source(depths=15.0,        # in the mixed layer, above the thermocline
                       frequencies=100.0)
-receiver = uacpy.Receiver(depths=np.linspace(3, 197, 70),
+# Depths in 2 m steps, so the source depth is one of them.
+receiver = uacpy.Receiver(depths=np.linspace(3, 197, 98),
                           ranges=np.linspace(500, 25000, 120))
 
 # Every model takes the same (env, source, receiver): swapping the solver is
@@ -63,8 +64,10 @@ fig, _ = uacpy.plot.compare_models(fields, env=env)
 fig.savefig(OUT / 'example_03_fields.png', dpi=150, bbox_inches='tight')
 plt.close(fig)
 
-# The same five fields as 1-D cuts: slice each one first, then overlay.
-mid_range = float(np.median(receiver.ranges))
+# The same five fields as 1-D cuts: slice each one first, then overlay. Both
+# cuts sit on receiver samples, so every model is cut at the same place
+# (Field.at picks the nearest sample).
+mid_range = float(receiver.ranges[receiver.ranges.size // 2])
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 uacpy.plot.compare([f.at(depth=15.0) for f in fields.values()],
                    labels=list(fields), ax=axes[0],

@@ -11,7 +11,8 @@ from uacpy.core.acoustics.wavenumber import (
     _warn_zero_ranges, hankel_transform, snapshot_frequency_component,
     wavenumber_taper, wavenumbers_from_phase_speeds,
 )
-from uacpy.core.exceptions import ConfigurationError, ProvenanceWarning
+from uacpy.core.exceptions import (ConfigurationError, FallbackWarning,
+                                   ProvenanceWarning)
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 
 from uacpy.core.results._base import Result, coordinate_axis
@@ -54,6 +55,9 @@ class GreensFunction(Result):
     title : str
         The file's title line.
     """
+
+    #: The plotter that draws this result (``.plot()``).
+    _plotter = 'plot_greens_function'
 
     def __init__(
         self,
@@ -190,6 +194,30 @@ class GreensFunction(Result):
                 f"nsd={nsd}."
             )
 
+    def _nearest_frequency_index(self, frequency) -> int:
+        """Index of the stored frequency nearest ``frequency`` on a
+        multi-frequency file. Warns, as :meth:`Field.at` does, when the
+        request lies more than half the edge frequency step past either end
+        of the stored band, where the nearest slice is the edge one."""
+        asked = float(frequency)
+        if not np.isfinite(asked):
+            raise ConfigurationError(
+                f"GreensFunction.to_field: frequency must be finite; got "
+                f"{frequency!r}.")
+        freqs = np.asarray(self.frequencies, dtype=float)
+        ifreq = int(np.argmin(np.abs(freqs - asked)))
+        ordered = np.sort(freqs)
+        low = ordered[0] - 0.5 * (ordered[1] - ordered[0])
+        high = ordered[-1] + 0.5 * (ordered[-1] - ordered[-2])
+        if not low <= asked <= high:
+            warnings.warn(
+                f"GreensFunction.to_field: frequency={asked:g} Hz lies "
+                f"outside the stored band [{ordered[0]:g}, {ordered[-1]:g}] "
+                f"Hz by more than half a frequency step; the edge slice at "
+                f"{freqs[ifreq]:g} Hz is transformed instead.",
+                FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP)
+        return ifreq
+
     def _refuse_snapshot(self, method: str) -> None:
         if self.is_snapshot:
             raise ConfigurationError(
@@ -260,8 +288,12 @@ class GreensFunction(Result):
             Receiver ranges (m).
         frequency : float, optional
             Hz. Selects the nearest frequency slice of a multi-frequency
-            file; required there. The returned field is labelled with the
-            slice's own frequency.
+            file; required there. A request more than half a frequency step
+            outside the stored band takes the edge slice with a
+            ``FallbackWarning``, as :meth:`Field.at` does. The returned
+            field is labelled with the slice's own frequency, so on a
+            single-frequency file, whose one slice is transformed whatever
+            is asked, the label says which.
         source_type, spectrum : see :func:`~uacpy.core.acoustics.hankel_transform`.
         source_depth_idx : int
             Index into the source-depth axis. Defaults to the first source.
@@ -284,7 +316,7 @@ class GreensFunction(Result):
                 f"say which one to transform.",
                 remediation="Pass frequency= (the nearest slice is taken), "
                             "or use to_transfer_function for all of them.")
-        ifreq = (int(np.argmin(np.abs(self.frequencies - float(frequency))))
+        ifreq = (self._nearest_frequency_index(frequency)
                  if self.n_frequencies > 1 else 0)
         self._check_source_depth_idx(source_depth_idx)
         _warn_zero_ranges(ranges, source_type, context=self.title)
@@ -372,8 +404,8 @@ class GreensFunction(Result):
             source_depths=np.atleast_1d(self.source_depths[source_depth_idx]),
             frequencies=freqs,
             metadata={
-                'center_frequency': float(freqs[len(freqs) // 2]),
-                'nfreq': nfreq,
+                'fc': float(freqs[len(freqs) // 2]),
+                'n_frequencies': nfreq,
                 'source_type': source_type,
                 'spectrum': spectrum,
             },
@@ -666,7 +698,9 @@ class GreensFunction(Result):
         ``receiver_depths``, ``times``, ``stabilizing_attenuation``,
         ``title`` and the identity, as :meth:`Field.to_dict` writes it.
         ``np.savez(f, **d)`` stores it; read it back with
-        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`."""
+        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`. That load
+        unpickles, so use it only on files you wrote; :meth:`to_netcdf` /
+        :meth:`from_netcdf` is the route for a file from elsewhere."""
         return {
             'data': self.data.copy(),
             'phase_speeds': self.phase_speeds.copy(),
@@ -681,8 +715,8 @@ class GreensFunction(Result):
     def from_dict(cls, d: dict) -> "GreensFunction":
         """Reconstruct a :class:`GreensFunction` from :meth:`to_dict` output,
         or from the mapping ``np.load(f, allow_pickle=True)`` returns for a
-        file written with ``np.savez(f, **gf.to_dict())``. A file written
-        before the payload was named ``data`` holds it as ``values``.
+        file written with ``np.savez(f, **gf.to_dict())`` (load such a file
+        only if you wrote it: ``allow_pickle=True`` unpickles).
 
         Parameters
         ----------
@@ -690,8 +724,9 @@ class GreensFunction(Result):
             :meth:`to_dict` output, or the mapping ``np.load`` returns for it.
         """
         d = cls._unwrap_saved(
-            d, payload=('data', 'values', 'phase_speeds', 'receiver_depths'))
-        return cls(data=d['data'] if 'data' in d else d['values'],
+            d, payload=('data', 'phase_speeds', 'receiver_depths'),
+            required=('times', 'title', 'stabilizing_attenuation'))
+        return cls(data=d['data'],
                    phase_speeds=d['phase_speeds'],
                    receiver_depths=d['receiver_depths'], times=d['times'],
                    stabilizing_attenuation=d['stabilizing_attenuation'],

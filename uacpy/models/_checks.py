@@ -1,10 +1,13 @@
-"""The carrier and geometry checks of stages 1-2 that read no model state:
-the carrier types, where receivers sit against the resolvable depth and the
-local seafloor, how far the range-dependent axes reach, the speed bounds and
-the modelled depth of an environment, the ``.irc`` layout of a
-``'precalc'`` seabed, and the ``'precalc'`` sea surface no Acoustics Toolbox
-binary reads."""
+"""The checks that read no model state: the signature every model's own
+``run`` keeps (checked when the class is defined), the carrier and geometry
+checks of stages 1-2 — the carrier types, where receivers sit against the
+resolvable depth and the local seafloor, how far the range-dependent axes
+reach, the speed bounds and the modelled depth of an environment, the
+``.irc`` layout of a ``'precalc'`` seabed, the ``'precalc'`` sea surface no
+Acoustics Toolbox binary reads — and the pulse pair a ``TIME_SERIES`` call
+supplies."""
 
+import inspect
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -15,11 +18,13 @@ from uacpy._log import log_message
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.core.environment import Environment
 from uacpy.core.exceptions import (
-    ConfigurationError, FallbackWarning, UnsupportedFeatureError,
-    ValidityWarning,
+    ConfigurationError, FallbackWarning, InvalidDepthError,
+    UnsupportedFeatureError, ValidityWarning,
 )
 from uacpy.core.receiver import Receiver
+from uacpy.core.run_settings import RunMode
 from uacpy.core.source import Source
+from uacpy.models._band import _real_pulse
 
 
 def check_carrier_types(model_name: str, env, source, receiver, *,
@@ -84,6 +89,49 @@ def warn_receiver_below_resolvable(
             f"Bellhop, Scooter, SPARC and RAM).",
             ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
         )
+
+
+def warn_receivers_within_a_wavelength(
+    model_name: str, env: 'Environment', frequencies,
+    receiver: 'Receiver',
+) -> None:
+    """``ValidityWarning`` when every receiver range lies within one
+    wavelength of the source, at the shortest wavelength the run carries:
+    the highest of the run's ``frequencies`` (Hz, its band) in the slowest
+    water. The measure is the horizontal range, the ``k r`` of the far-field
+    forms below; a receiver far below the source at a short range is
+    inside it too.
+
+    Each model sums a far-field form: the mode sum's Hankel asymptote, "for
+    ranges much greater than a wavelength" (Collins & Siegmann, *Parabolic
+    Wave Equations with Applications*, sect. 1.2.6), a ray's spreading, a
+    parabolic equation's outgoing wave. Inside one wavelength none holds,
+    whatever the units were meant to be; ranges typed in kilometres (0.5-5
+    for 0.5-5 km) land there at low frequency, so the warning says so. A
+    grid reaching past one wavelength, a genuine short-range run included,
+    is not flagged."""
+    freqs = np.atleast_1d(np.asarray(frequencies, dtype=float))
+    freqs = freqs[np.isfinite(freqs) & (freqs > 0.0)]
+    if not freqs.size:
+        return
+    water = np.asarray(env.ssp.sound_speed, dtype=float)
+    water = water[np.isfinite(water) & (water > 0.0)]
+    if not water.size:
+        return
+    wavelength = float(water.min() / freqs.max())
+    farthest = float(receiver.range_max)
+    if not 0.0 < farthest < wavelength:
+        return
+    warnings.warn(
+        f"{model_name}: every receiver range lies within one wavelength of "
+        f"the source (the farthest at {farthest:g} m, the wavelength "
+        f"{wavelength:.3g} m at {float(freqs.max()):g} Hz in "
+        f"{float(water.min()):g} m/s water), where the far-field sums the "
+        f"models evaluate do not hold. Ranges are in metres: "
+        f"ranges=np.linspace(0.5, 5, 10) is 0.5-5 m, and kilometres are "
+        f"written 1000 times larger.",
+        ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    )
 
 
 def check_per_range_receiver_depth(
@@ -327,6 +375,281 @@ def reject_malformed_irc_bottom(model_name: str, env: 'Environment') -> None:
                     "a theta/|R|/phase angle table (.brc/.trc)."
                 ),
             )
+
+
+def check_run_signature(cls, name: str, body) -> None:
+    """Refuse a model class ``cls`` whose own ``run`` (``body``, declared as
+    attribute ``name``) breaks the signature every model shares: the four
+    carriers by position (``cls._RUN_POSITIONAL``), every extra as a
+    keyword, no ``**kwargs`` sink, and no default of its own for
+    ``run_mode``."""
+    label = f"{cls.__name__}.{name}()"
+    params = list(inspect.signature(body).parameters.values())
+    for p in params:
+        if p.kind is inspect.Parameter.VAR_KEYWORD:
+            raise TypeError(
+                f"{label} must not use **kwargs: an unknown "
+                "keyword has to raise TypeError, not be swallowed. Declare "
+                "the accepted extras as keyword-only after a bare '*'."
+            )
+        # The mirror of the rule below: a *args sink accepts exactly the
+        # unknown positional arguments that rule exists to refuse.
+        if p.kind is inspect.Parameter.VAR_POSITIONAL:
+            raise TypeError(
+                f"{label} must not use *args: an unknown positional "
+                "argument has to raise TypeError, not be swallowed. The "
+                "four carriers are the whole positional contract."
+            )
+
+    leading = params[:len(cls._RUN_POSITIONAL)]
+    names = tuple(p.name for p in leading)
+    if names != cls._RUN_POSITIONAL:
+        raise TypeError(
+            f"{label} must begin with "
+            f"{cls._RUN_POSITIONAL!r}; got {names!r}."
+        )
+    for p in leading:
+        if p.kind is inspect.Parameter.KEYWORD_ONLY:
+            raise TypeError(
+                f"{label} parameter {p.name!r} must be "
+                "positional-or-keyword, not keyword-only."
+            )
+    # The override hands ``run_mode`` to ``super().run()``, which
+    # resolves ``None`` through ``_default_run_mode()``: a default of the
+    # override's own would be a second decider of the default mode.
+    # ``inspect.Parameter.empty`` (no default at all) decides nothing, so
+    # only a non-None default is refused.
+    run_mode = leading[-1]
+    if run_mode.default not in (None, inspect.Parameter.empty):
+        raise TypeError(
+            f"{label} declares run_mode={run_mode.default!r}; the "
+            f"default must be None — run() resolves it through "
+            f"_default_run_mode(), which is the place to change it."
+        )
+
+    for p in params[len(cls._RUN_POSITIONAL):]:
+        if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD:
+            raise TypeError(
+                f"{label} parameter {p.name!r} must be "
+                "keyword-only (place it after a bare '*') so unknown "
+                "positional args cannot reach it."
+            )
+
+
+def validate_geometry(model, env, source, receiver, run_mode=None) -> None:
+    """The source/receiver geometry of a call to engine ``model`` checked
+    against what it resolves (the default of
+    :meth:`~uacpy.models.base.PropagationModel._validate_geometry`): the beam
+    pattern it reads or not, a multi-depth source on a mode that stacks
+    none, the source depths (``model._check_source_depths``), a source on
+    the pressure-release surface, and the receiver grid."""
+    if (source.beam_pattern is not None
+            and not model._supports_source_beam_pattern):
+        raise ConfigurationError(
+            f"{model.model_name} does not read a source beam pattern; "
+            f"drop Source(beam_pattern=...) or use Bellhop or Kraken."
+        )
+
+    # Whether a multi-depth Source is legal is a question about the
+    # MODE, not about the model: ``_supports_multi_source_depth`` says
+    # the engine batches depths into one deck *somewhere*, which is the
+    # declarative capability the matrix prints, and would wave through a
+    # mode of that same engine which stacks nothing (Kraken MODES).
+    n_depths = len(np.atleast_1d(source.depths))
+    if n_depths > 1:
+        mode = (run_mode if run_mode is not None
+                else model._default_run_mode())
+        if not model._stacks_source_depths(mode):
+            raise ConfigurationError(
+                f"{model.model_name} takes a single source depth per "
+                f"{mode.name} run; got {n_depths}: "
+                f"{np.asarray(source.depths).tolist()}. A multi-depth "
+                f"Source stacks "
+                f"only in the field modes (COHERENT_TL / INCOHERENT_TL "
+                f"/ SEMICOHERENT_TL / BROADBAND / TIME_SERIES); for "
+                f"{mode.name} loop over single-depth Sources externally."
+            )
+
+    resolvable_depth = model._check_source_depths(env, source)
+
+    # A source exactly at z = 0 sits on the pressure-release sea surface,
+    # where the boundary forces p ≈ 0: a field run then returns a
+    # degenerate result (a null / saturated-TL sentinel, or — in RAM — an
+    # unphysical normalisation) that a valid-looking ``Source(depths=0)``
+    # hides. Reflection coefficients and mode shapes don't propagate a
+    # source field, so the warning doesn't apply to those.
+    if (run_mode not in (RunMode.REFLECTION, RunMode.MODES)
+            and np.any(np.asarray(source.depths) == 0.0)):
+        warnings.warn(
+            f"{model.model_name}: a source at depth 0 m is on the "
+            f"pressure-release sea surface, where the field is ~0 — the "
+            f"result is degenerate (null / saturated TL, model-dependent). "
+            f"Use a small positive depth (e.g. 1 m).",
+            ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
+        )
+
+    if receiver is None:
+        # A mode with no receiver geometry (Kraken MODES builds its own
+        # depth grid): nothing below reads one.
+        return
+
+    if receiver.depth_min < 0:
+        raise ConfigurationError("Receiver depths must be non-negative.")
+
+    # A point source's field carries a 1/sqrt(r) factor that is singular
+    # on the source axis, so a grid whose largest range is 0 m has no
+    # cell any engine can fill: every wrapper NaNs the r = 0 column, and
+    # the PE grid chooser divides by a range step it sizes from r_max.
+    # Modes that evaluate nothing on the receiver range axis are exempt
+    # (see ``_NO_RANGE_AXIS_MODES``); a mixed grid such as
+    # ``ranges=[0, 1000]`` keeps its NaN column and the masking warning.
+    if (run_mode not in model._NO_RANGE_AXIS_MODES
+            and receiver.range_max <= 0.0):
+        raise ConfigurationError(
+            f"{model.model_name}: the receiver's largest range is 0 m; "
+            f"give at least one positive receiver range (a field at "
+            f"r = 0 is undefined for a point source).",
+            remediation="Receiver(depths=<your depths>, ranges=[1000.0])",
+        )
+
+    warn_receiver_below_resolvable(model.model_name, env, receiver,
+                                   resolvable_depth)
+    check_per_range_receiver_depth(
+        model.model_name, env, receiver,
+        paired=model._receiver_grid_is_paired(receiver),
+        verbose=model.verbose)
+    warn_on_range_coverage(model.model_name, env, receiver)
+    warn_on_ssp_start(model.model_name, env)
+
+
+def check_source_depths(model, env, source) -> float:
+    """Refuse a source depth engine ``model`` cannot resolve; return the
+    resolvable depth (``model._max_receiver_depth``), the default of
+    :meth:`~uacpy.models.base.PropagationModel._check_source_depths`."""
+    resolvable_depth = model._max_receiver_depth(env)
+    if np.any(source.depths > resolvable_depth):
+        exc = InvalidDepthError(
+            float(source.depths.max()), resolvable_depth, "Source",
+        )
+        note = model._source_below_domain_note(env, resolvable_depth)
+        if note:
+            # Message enrichment only. ``InvalidDepthError.__reduce__``
+            # rebuilds from the three constructor arguments, so a copy
+            # that crosses a process boundary (``run_parallel``) carries
+            # the base remediation.
+            exc.remediation = f"{exc.remediation}.\n\n{note}"
+        raise exc
+    if np.any(source.depths < 0):
+        raise ConfigurationError("Source depths must be non-negative.")
+    return resolvable_depth
+
+
+def reject_unsupported_run_kwargs(model_name: str, **kwargs) -> None:
+    """Refuse the optional ``run()`` keywords engine ``model_name`` never
+    consumes.
+
+    Every model takes the full keyword set (``frequencies``,
+    ``source_waveform``, ``sample_rate``, ``output_duration``,
+    ``t_start``) so a polymorphic ``model.run(...)`` never raises
+    ``TypeError``. A keyword that no mode of this model reads — the
+    waveform keywords on a model without ``TIME_SERIES``, ``frequencies=``
+    on one without a broadband path — would be ignored, and ignoring it
+    *silently* would hide a caller mistake, so any of these passed a
+    non-``None`` value raises here instead.
+    ``PropagationModel._run_keywords_never_consumed`` names them; a keyword
+    the model reads on another mode is warned about and dropped instead
+    (:func:`warn_ignored_run_kwargs`)."""
+    supplied = sorted(name for name, value in kwargs.items() if value is not None)
+    if supplied:
+        raise UnsupportedFeatureError(
+            model_name,
+            f"run parameter(s): {', '.join(supplied)}",
+            alternatives_label='run parameters',
+        )
+
+
+def warn_ignored_run_kwargs(model_name: str, run_mode, reason=None,
+                            **named_values) -> None:
+    """Warn when the resolved ``run_mode`` of a call to engine
+    ``model_name`` will not consume some of the optional ``run()`` keywords
+    the caller supplied.
+
+    Complements :func:`reject_unsupported_run_kwargs`: that check is for
+    models that *never* consume a keyword (hard error); this one is for
+    keywords the model does consume, just not on the resolved run mode's
+    path. Only non-``None`` values are reported, in a single
+    ``FallbackWarning``. Consuming paths (BROADBAND/TIME_SERIES, …) must not
+    call it."""
+    ignored = [
+        f'{name}=' for name, value in named_values.items()
+        if value is not None
+    ]
+    if not ignored:
+        return
+    if reason is None:
+        reason = 'these apply to BROADBAND/TIME_SERIES only'
+    warnings.warn(
+        f"{model_name}.run(run_mode="
+        f"{getattr(run_mode, 'name', run_mode)}): ignoring "
+        f"{', '.join(ignored)} — {reason}.",
+        FallbackWarning, skip_file_prefixes=USER_FRAME_SKIP,
+    )
+
+
+def require_timeseries_signal(model_name: str, run_mode: 'RunMode',
+                              source_waveform, sample_rate) -> None:
+    """Refuse an unusable TIME_SERIES signal pair of a call to engine
+    ``model_name``; returns nothing.
+
+    Raises :class:`ConfigurationError` when the caller asked for a
+    :attr:`RunMode.TIME_SERIES` result but did not supply both
+    ``source_waveform`` and ``sample_rate``, when the waveform is not a
+    real finite pressure pulse, or when ``sample_rate`` is not a
+    positive finite number.
+
+    The waveform rule is the one every waveform entry point applies
+    (:func:`~uacpy.models._band._real_pulse`): a real, finite, 1-D array.
+    A complex waveform is refused whatever its imaginary part, and a
+    ``(time, signal)`` pair or a 2-D array with the pair hint.
+
+    Used by every wrapper that synthesises p(t) from a broadband
+    transfer function (Bellhop, RAM, Scooter, Kraken, OASP), and by
+    SPARC for the series a ``pulse_type`` opening with ``'F'`` / ``'B'``
+    stages as ``STSFIL``.
+    """
+    if run_mode == RunMode.TIME_SERIES and (
+        source_waveform is None or sample_rate is None
+    ):
+        raise ConfigurationError(
+            f"{model_name}.run(run_mode=TIME_SERIES) requires "
+            f"source_waveform and sample_rate. For the broadband "
+            f"transfer function H(f), use run_mode=RunMode.BROADBAND."
+        )
+    if run_mode == RunMode.TIME_SERIES and sample_rate is not None:
+        # Refuse a sample rate that is not a positive finite number. The
+        # test is NaN-closed (``not (sr > 0)`` rather than ``sr <= 0``)
+        # because nan compares False both ways and would slip through:
+        # nothing downstream stops it either — pad_waveform_to_duration
+        # and time_series_band (models/_band.py) no-op on a
+        # non-positive rate — so it surfaces as a ZeroDivisionError in
+        # the delay-and-sum, a raw ValueError from the deep guard in
+        # acoustic_signal/_synthesis.py (``waveform_synthesis_setup``),
+        # or a trace on a descending time axis.
+        try:
+            sr = float(sample_rate)
+        except (TypeError, ValueError):
+            sr = float('nan')
+        if not np.isfinite(sr) or not (sr > 0.0):
+            raise ConfigurationError(
+                f"{model_name}.run(run_mode=TIME_SERIES): "
+                f"sample_rate must be a positive finite number of Hz; "
+                f"got {sample_rate!r}."
+            )
+    if run_mode == RunMode.TIME_SERIES and source_waveform is not None:
+        _, problem = _real_pulse(source_waveform)
+        if problem is not None:
+            raise ConfigurationError(
+                f"{model_name}.run(run_mode=TIME_SERIES): {problem}")
 
 
 def reject_precalc_surface(env, *, model_name) -> None:

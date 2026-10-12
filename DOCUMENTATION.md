@@ -69,9 +69,12 @@ uacpy is a Python package plus a set of native solver binaries you compile
 once. From the repository root:
 
 ```bash
-pip install -e ".[dev]"   # editable install + dev/test dependencies
+pip install -e .           # editable install
 ./install.sh -y           # compile native binaries into uacpy/bin/ (gitignored)
 ```
+
+The `test` and `dev` extras (`pip install -e ".[dev]"`) add the test and lint
+toolchain; a user does not need them.
 
 `install.sh` builds Bellhop, Kraken, Scooter, SPARC, Bounce and the RAM family
 (mpiramS, rams0.5, ramsurf1.5, ramgeo1.5), and (by default) downloads and
@@ -87,6 +90,23 @@ builds the OASES suite from MIT. Useful flags:
 Run `./install.sh --help` for the full flag list. Always use the project
 virtualenv for execution. `uacpy.__version__` reports the installed package
 version.
+
+Check what got built with `python -m uacpy`: it prints the version and one
+row per binary each engine can launch (every backend, and Kraken's
+`field.exe`) — whether it was found and where, and the backend a construction
+with no `backend=` resolves — then exits 0 when every engine has a binary and
+1 otherwise. An optional install not made (OASES, `./install.sh --oases no`)
+is named but does not fail the check. Found means on disk and executable: no
+binary is run, so a found build can still fail on the machine (`bellhopcuda`
+on a host with no CUDA device, which a `backend=None` run replaces with the
+next installed build). From Python the table is
+`uacpy.models.engine_status()`, an `EngineStatus`: `to_dataframe()` gives one
+row per binary, and `missing_engines(*, optional_installs=False)` names the
+engines with no binary found (those of an optional install not made only with
+`optional_installs=True`). A model whose `backend=` was left `None` names the
+build it resolved in its repr (`Bellhop(backend='cuda')`); Kraken and RAM
+choose their backend per environment at run time, and `result.backend` names
+the one that ran.
 
 ## 3. Quick Start
 
@@ -117,9 +137,9 @@ receiver = uacpy.Receiver(
     ranges=np.linspace(100, 10_000, 200),  # range axis (m)
 )
 
-field = uacpy.Bellhop().compute_tl(env, source, receiver)
+field = uacpy.Bellhop().run(env, source, receiver)
 
-uacpy.plot.plot_field(field, env=env)
+field.plot(env=env, source=source)
 plt.show()
 
 # field is a Field of COMPLEX PRESSURE in Pa, on a (depth × range) grid.
@@ -129,11 +149,10 @@ print(field.dB.shape)                 # (101, 200)
 print(field.at(depth=50.0).dB.shape)  # (200,) — TL vs range at source depth
 ```
 
-`compute_tl` is the convenience wrapper for transmission loss; it is
+`compute_field` is the convenience wrapper for the pressure field; it is
 exactly `model.run(env, source, receiver, run_mode=RunMode.COHERENT_TL)`.
 
-Note what that means: despite the name, `compute_tl` does **not** return TL. It
-returns the **coherent** complex pressure field, `unit='Pa'`, phase intact —
+It returns the **coherent** complex pressure field, `unit='Pa'`, phase intact —
 `.dB` (`-20·log10|p|`) is the step that makes it a loss. Two consequences. You
 can beamform or matched-filter the result, because the phase is still there
 ([§8](#8-results)). And a coherent field crosses any threshold
@@ -145,6 +164,29 @@ two answers land.
 The model classes are re-exported at the top level (`uacpy.Bellhop`, …);
 the plotters live on `uacpy.plot`, the acoustics helpers on `uacpy.acoustics`
 and the TL metrics on `uacpy.metrics`. `dir(uacpy)` is the full index.
+
+### Which call for which task
+
+Several tasks have more than one route; each pair below differs in what it
+returns, and the left column is the one to reach for first.
+
+| Task | Use | Not the same as |
+|---|---|---|
+| A TL map | `field = Model().run(env, source, receiver)`, then `field.plot(env=env)`; `field.dB` is the loss | `compute_field` is the same call; it returns complex pressure too |
+| TL for a detection budget | `run(..., run_mode=RunMode.INCOHERENT_TL)` | the coherent default, whose interference nulls push detection ranges out |
+| A pulse at one receiver | `run(..., run_mode=RunMode.TIME_SERIES, source_waveform=w, sample_rate=fs)`; from an `H(f)` you already hold, `H.to_time_trace(depth=z, range=r, source_waveform=w, sample_rate=fs)` | `H.to_time_trace()` with no waveform, which is the band-limited impulse response |
+| A pulse at every receiver | `H.synthesize_time_series(source_waveform=w, sample_rate=fs)` on a `Field`; `arr.to_time_series(source_waveform=w, sample_rate=fs)` on `Arrivals` — both return a `Field` at `fs` | `H.synthesize_time_series(..., t_start='reduced')`, each range on its own record, for a section whose travel times outspan `1/Δf` |
+| An impulse response | `H.impulse_response(fs)` on a `Field`; `arr.impulse_response(fs)` on `Arrivals` (the received amplitudes, absorption at every frequency) — every cell's `h(t)` at `fs`, each range on its reduced-time record | `H.to_time_trace()` with no waveform, one cell's band-limited response at a rate of the package's choosing; `arr.amplitudes`, the geometric column, which carries no volume absorption |
+| A long signal (a recording) through a modelled channel | `ir = H.impulse_response(fs)` (or `arr.impulse_response(fs)`), then `ir.at(depth=z, range=r).apply(source_waveform=x, sample_rate=fs)`; blocks too long to hold: `acoustic_signal.apply_impulse_response_blocks(cell.data * cell.dt, blocks)`, whose output starts at `cell.times[0] + abs(r) / cell.reduction_speed` on a reduced cell | `synthesize_time_series`, whose `1/Δf` record must hold the whole signal (refused otherwise) |
+| A modem channel from arrivals | `arr.channel_taps(symbol_rate, fc=fc)` | — |
+| SEL over a grid | `H.sound_exposure_level(source_waveform=w, sample_rate=fs)`, in dB | `acoustic_signal.sound_exposure`, which is per band and linear (Pa²·s) |
+| Weighted SEL and the range a criterion is reached | `sel = H.sound_exposure_level(source_waveform=w, sample_rate=fs, weighting='VHF')`, then `sonar.detection_ranges(sel.ranges, signal_excess_dB=sel.at(depth=z).data - EXPOSURE_THRESHOLDS['VHF']['impulsive']['TTS']['SEL'])`: the outermost range the map reaches the criterion (`inf` past the grid, `nan` never); the whole recipe is [noise guide §8](docs/guide/noise.md#a-noise-impact-assessment-end-to-end) | the unweighted map, which goes with the peak criterion (`H.peak_sound_pressure_level`), not the SEL one |
+| Moving-source exposure | a single-event SEL map's `sel.track_exposure(positions, closest_approach=d)` (`along=` for the plan view, `.plot()`); a continuous source is one event per `Δt`: its received-level map (`H.broadband_loss(source_spectrum=S).at_source_level(SL)`) takes `level.track_exposure(..., event_duration=Δt)`, each event's SEL the level plus `10·log10(Δt)` ([results §6b](docs/guide/results.md#6b-weighted-accumulated-and-moving-source-exposure)) | `acoustics.sum_levels_dB`, which adds events heard at fixed ranges |
+| Detection range | `sonar.detection_range_from_field(se)` on a signal-excess `Field`; `sonar.detection_range(ranges, signal_excess_dB=se)` on arrays | — |
+| Read a `.shd` file | `io.read_shd_file(path)` → `Field` | `io.read_shd_bin` / `read_shd_asc`, which return the raw file record |
+| Compare models on a plot | `plot.compare(fields)` overlays 1-D cuts; `plot.compare_models(fields)` draws 2-D maps side by side | — |
+| Beamform a field | `acoustic_signal.beamform_field(p, x, angles, f)` → beam power with `.plot()` | `acoustic_signal.beamform`, which returns the SNR per look of a sonar budget |
+| Matched-field processing | `sonar.bartlett(R, replicas)` / `sonar.mvdr(R, replicas)` | `acoustic_signal.bartlett` / `mvdr(R, weights)`, the same estimators over rows of element weights; a star import of both packages rebinds one pair |
 
 ## 4. Core Concepts
 
@@ -188,23 +230,34 @@ argument, not a `run()` argument (see *Constructor-only configuration* below).
 
 ### The `compute_*` convenience family
 
-Each `RunMode` has a thin wrapper that capability-checks the model and
-forwards to `run()` with the right mode and kwargs:
+`run(run_mode=…)` reaches every mode; each of the eleven `compute_*` methods
+is `run()` with its mode fixed. It first refuses a model that does not
+declare the mode — `UnsupportedFeatureError` naming the engines that do —
+then forwards the call to `run()`. Settings stay on the model
+(`Kraken(n_modes=…)`, `Bellhop(n_beams=…)`): no wrapper takes a per-call
+override of one.
 
-| Wrapper | Run mode | Extra kwargs |
-|---|---|---|
-| `compute_tl` | `COHERENT_TL` (also `INCOHERENT_TL`/`SEMICOHERENT_TL` via `run_mode=`) | — |
-| `compute_rays` / `compute_eigenrays` / `compute_arrivals` | `RAYS` / `EIGENRAYS` / `ARRIVALS` | — |
-| `compute_modes` | `MODES` | `n_modes=` (and takes no `receiver`) |
-| `compute_reflection` | `REFLECTION` | — |
-| `compute_time_series` | `TIME_SERIES` | `source_waveform=`, `sample_rate=`, `output_duration=` (record length), `t_start=` (first sample, s after emission; `None` = a tenth of the record (or `4/bandwidth`, whichever is longer) before the estimated earliest arrival on the IFFT engines, a tenth of the pulse before it on Bellhop's delay-and-sum; a value overrides it on every engine), `frequencies=` |
-| `compute_transfer_function` | `BROADBAND` | `frequencies=` |
-| `compute_covariance` / `compute_replicas` | `COVARIANCE` / `REPLICA` | — |
+| Wrapper | Runs | Returns | Models | Extra keywords |
+|---|---|---|---|---|
+| `compute_field` | `COHERENT_TL`, or `INCOHERENT_TL` / `SEMICOHERENT_TL` via `run_mode=` | `Field`: the coherent complex pressure (`unit='Pa'`; `.dB` is the TL); real dB in the incoherent modes and from OAST | Bellhop, Kraken, OASP, OAST, RAM, Scooter (`INCOHERENT_TL`: Bellhop, Kraken; `SEMICOHERENT_TL`: Bellhop) | `run_mode=` |
+| `compute_rays` | `RAYS` | `Rays`: the traced ray fan | Bellhop | — |
+| `compute_eigenrays` | `EIGENRAYS` | `Rays`: the rays that reach the receivers | Bellhop | — |
+| `compute_arrivals` | `ARRIVALS` | `Arrivals`: delay, amplitude and phase of each path at each receiver | Bellhop | — |
+| `compute_modes` | `MODES` | `Modes`: wavenumbers `k` and depth eigenfunctions `phi` | Kraken | takes no `receiver` |
+| `compute_reflection` | `REFLECTION` | `ReflectionCoefficient`: the plane-wave seabed reflection table | Bounce, OASR | — |
+| `compute_time_series` | `TIME_SERIES` | `Field` of real p(t) on a `time` axis | Bellhop, Kraken, OASP, OASSP, RAM, SPARC, Scooter | `source_waveform=`, `sample_rate=`, `output_duration=` (record length; on the IFFT engines — Kraken, Scooter, RAM, OASP, OASSP — one period of a circular record: a trace still ringing at its end, a record ending before the slowest arrival or a receiver range span longer than the record gives one warning that the later response folded onto it), `t_start=` (first sample, s after emission; `None` = a tenth of the record (or `4/bandwidth`, whichever is longer) before the estimated earliest arrival on the IFFT engines, a tenth of the pulse before it on Bellhop's arrival reception; a value overrides it on every engine but SPARC, which warns and ignores it because its record starts at emission), `frequencies=` |
+| `compute_transfer_function` | `BROADBAND` | `Field` of complex H(f) on a `frequency` axis | Bellhop, Kraken, OASP, OASSP, RAM, Scooter | `frequencies=` |
+| `compute_covariance` | `COVARIANCE` | `Covariance`: the hydrophone cross-spectral matrix C(f, i, j) | OASN (noise field), OASS (reverberant field) | — |
+| `compute_replicas` | `REPLICA` | `Replicas`: the field at the array per candidate source position | OASN | — |
+| `compute_reverberation` | `REVERBERATION` | `Field` of `kind='reverberation'`, a loss in dB scattered from a rough interface | OASS | — |
 
 All take `(env, source, receiver)` positionally (except `compute_modes`,
 which omits `receiver` — modes are receiver-independent depth
-eigenfunctions). Calling a wrapper a model doesn't support raises
-`UnsupportedFeatureError` listing models that do.
+eigenfunctions). A multi-depth `Source` gives one `Field` over a leading
+`source_depth` axis from the wrappers that return a `Field`, and a
+`ResultStack` of one slab per depth from `compute_rays`,
+`compute_eigenrays` and `compute_arrivals` (§8, *The field of several
+sources*).
 
 ### `RunMode`
 
@@ -236,7 +289,7 @@ existing one without re-typing every argument:
 ```python
 base = uacpy.RAM(dr=2.0, dz=0.5, n_pade=8)
 for dr in (1.0, 2.0, 4.0):
-    field = base.copy(dr=dr).compute_tl(env, source, receiver)
+    field = base.copy(dr=dr).compute_field(env, source, receiver)
 ```
 
 For many independent runs, batch them with `uacpy.run_parallel` over
@@ -264,12 +317,13 @@ run_mode=…)` runs the carrier-level checks `run()` runs — the run mode
 are checked as the default and `COHERENT_TL`), the source frequencies against
 that mode, the source geometry and beam pattern, the source/receiver depths and
 the bottom type — and raises the exception a real run would for those, so you
-can gate a batch up front. It checks the environment as given; checks that
+can gate a batch up front. It also resolves the run's settings as `run()`
+does, on the environment the engine projects from `env`, so the refusals that
 need the computational grid (RAM's depth-cell and domain limits, for example)
-happen only inside `run()`.
+come from it too; only the solver itself does not run.
 
 The catalogue flags drive policy, mirroring the `uacpy.data` source catalogue:
-constructing an engine whose licence forbids commercial use — currently only
+constructing an engine whose licence forbids commercial use — only
 **OASES** (academic, non-redistributable) — emits a one-time `ProvenanceWarning`, so
 a licence-restricted result is never produced silently. GPL / public-domain
 engines (Acoustics Toolbox; the Collins RAM family) stay quiet.
@@ -314,16 +368,13 @@ family with one `except`. The typed subclasses are
 when no PE grid meets the accuracy budget), `FileFormatError` (I/O parse
 failure), `DataFetchError` (the data layer), and `OutputContractError` (a
 model returned another result than its settings declare: a uacpy defect
-to report). One method raises a bare
-`ValueError` instead: `supports_feature` on an unregistered capability name
-(`PropagationModel.supports_feature` in `models/base.py`), documented on the
-method itself. `UACPYError` does not derive from `ValueError`, so changing it
-would break a caller catching `ValueError` around that call. Everywhere else, a
-uacpy check raises a uacpy error — apart from the Pythonic container
+to report). `supports_feature` on a name that is not a capability flag
+raises `ConfigurationError` too; `UACPYError` does not derive from
+`ValueError`, so catch it as `ConfigurationError`. Every uacpy check raises a
+uacpy error — apart from the Pythonic container
 protocols: `.p`, `.magnitude` and `.phase` raise `AttributeError` on a real
-field, `.dB` and `.tl` raise it on a time trace (§8), an out-of-range `.isel`
-raises `IndexError`, and `Bounce.run(receiver=None)` without `rmax_m` or
-`n_angles` raises `TypeError`.
+field, `.dB` and `.tl` raise it on a time trace (§8), and an out-of-range
+`.isel` raises `IndexError`.
 
 ### Warnings
 
@@ -341,7 +392,9 @@ Every warning uacpy emits is a subclass of `UACPYWarning`, itself a
 A filter on `UserWarning` still catches all of them;
 `warnings.filterwarnings('ignore', category=uacpy.FallbackWarning)` silences
 one cause and keeps the others, and `simplefilter('error', uacpy.NumericsWarning)`
-stops a run on an under-resolved grid only.
+stops a run on an under-resolved grid only. Under `run_parallel` the workers do
+not inherit the filter: each job runs to the end, and the filter acts as its
+warnings are re-emitted, failing that job (its result dropped, not stacked).
 
 ### Status output, logging & parallelism
 
@@ -372,7 +425,8 @@ nothing about which solver runs over it. Build it once, reuse it everywhere.
 
 ```text
 Environment(bathymetry, ssp, altimetry, bottom, surface, absorption,
-            *, name, location, transect, date, water_density)
+            *, name, location, transect, date, water_density,
+            extra_data_sources)
 ```
 
 All arguments except `bathymetry` are optional. Each is a small typed carrier
@@ -393,6 +447,11 @@ a list of `(range, depth)` pairs for a sloping/range-dependent seafloor:
 env = Environment(bathymetry=100)                       # flat, 100 m
 env = Environment(bathymetry=[(0, 100), (10_000, 200)])  # wedge, 100→200 m
 ```
+
+Arrays held as two columns go through `np.column_stack([ranges, depths])` (or
+`Bathymetry(ranges=, depths=)`): `bathymetry=(ranges, depths)` is refused with
+that hint, except with two points, where the 2 × 2 input cannot be told from
+two pairs and is read as pairs. `altimetry=` and `ssp=` follow the same rule.
 
 `altimetry` describes a non-flat sea surface as `(range, height)` pairs (height
 positive up). Build a realistic rough surface from a Pierson–Moskowitz spectrum
@@ -463,8 +522,11 @@ straight from sea-ice climatology with
 
 The SSP **shape** (the profile data) lives on the environment; the
 *interpolation scheme* used between samples is a model knob, not an env field
-(e.g. `Bellhop(interp_ssp='cubic')`). Pass `ssp=` in any of these forms — the
-constructor coerces them to a `SoundSpeedProfile`:
+(`interp_ssp=`: `'linear'`, `'n2linear'`, `'pchip'`, `'spline'`, or Bellhop's
+`'quad'`; `None` picks `'quad'` for a range-dependent profile and `'linear'`
+otherwise, and any other value is refused when the run writes its deck). Pass
+`ssp=` in any of these forms — the constructor coerces them to a
+`SoundSpeedProfile`:
 
 ```python
 from uacpy import Environment, SoundSpeedProfile
@@ -511,7 +573,10 @@ ssp = SoundSpeedProfile.from_casts(
 ```
 
 If a profile is shallower than the seafloor, the constructor extends its deepest
-sample down to `env.depth` automatically.
+sample down to `env.depth` automatically, holding that speed constant. A hold
+long enough for pressure alone to add more than 5 m/s (about 307 m) gives a
+`FallbackWarning`; `uacpy.data.extend_ssp_below_data` continues the profile
+along its deep gradient instead.
 
 ### Bottom
 
@@ -528,7 +593,7 @@ Environment(bathymetry=100, bottom=BoundaryProperties(
 ```
 
 The default (no `bottom=`) is a generic fluid half-space (1600 m/s, 1.5 g/cm³,
-0.5 dB/λ; `BoundaryProperties._ACOUSTIC_DEFAULTS`). It is none of the presets
+0.5 dB/λ). It is none of the presets
 — `sand` is 1650 m/s, 1.95 g/cm³, 0.8 dB/λ — so pass `bottom=` with a preset or
 measured values when the seabed matters. For range-dependent or layered seabeds, build a `Bottom` explicitly.
 
@@ -623,6 +688,10 @@ pass `elastic=True` to keep the preset's shear speed/attenuation (needed only
 for elastic-capable solvers). `SedimentLayer.from_preset(name, thickness=...)`
 does the same for a layer.
 
+The acoustic properties are keyword-only on both carriers: only
+`BoundaryProperties`' `acoustic_type` and `SedimentLayer`'s `thickness` may be
+given positionally, so a sound speed and a density cannot trade places.
+
 ### Volume absorption
 
 `env.absorption` carries the water-column volume-attenuation model. Pick one;
@@ -640,9 +709,12 @@ Environment(bathymetry=100, absorption=FrancoisGarrison(    # a GLODAP / BGC pH
 Environment(bathymetry=100, absorption=ConstantAbsorption(0.1))   # flat dB/λ
 Environment(bathymetry=100, absorption=Biological(          # fish-bladder layers
     [(0, 50, 1000, 5, 0.5)]))   # (z_top, z_bottom, f0, Q, a0)
-Environment(bathymetry=100, absorption=FrancoisGarrison(    # a T/S profile
-    temperature=[20, 12], salinity=[35, 34.8], pH=8,
-    depths=[0, 100]))
+Environment(bathymetry=100, absorption=FrancoisGarrison(    # a T/S profile,
+    temperature=[(0, 20), (100, 12)],                       # (depth, value)
+    salinity=[(0, 35), (100, 34.8)], pH=8))                 # pairs
+Environment(bathymetry=100,                                 # the same, from
+    absorption=FrancoisGarrison.from_temperature_salinity(  # arrays on depths
+        [0, 100], [20, 12], [35, 34.8]))
 FrancoisGarrison().table([1e3, 1e4])          # the law's α, to look at
 ```
 
@@ -660,33 +732,11 @@ is a measured α(f, z) with no law behind it,
 used as tabulated — linear in depth and in log f, refusing a frequency
 outside it ([environment guide](docs/guide/environment.md#absorption-from-real-water-a-profile-or-a-table)).
 
-**Hard break (2026-10-04):** the table functions `absorption_thorp`,
-`absorption_francois_garrison`, `absorption_biological` and
-`absorption_constant`, which returned a law's table, are gone
-(`Law(...).table(f)` replaces them); the first three names now belong to the
-plain-array formulas, renamed from `thorp_dB_per_km`,
-`francois_garrison_dB_per_km` and `biological_dB_per_km` (same arguments,
-same dB/km). `Absorption.alpha(...)` is `Absorption.table(...)`, and
-`FrancoisGarrison`'s fields are `temperature`, `salinity`, `pH`,
-`ph_scale` and `depths` (was `temperature_c`, `salinity_psu`, `z_bar_m`; the
-`depth` field that briefly replaced `z_bar_m` is gone too: the law has no
-depth of its own, every evaluation takes the depth evaluated, and the
-Acoustics-Toolbox decks carry it in each water row's `alphaI`, or, on a
-broadband Kraken/Scooter deck, as the `'F'` row at mid-water column).
-`uacpy.data.build_francois_garrison(reference_depth=)` is
-`FrancoisGarrison.from_temperature_salinity(collapse_to_depth=)`. Each water
-property is stored on its own depth axis, as `(depth, value)` pairs, and
-`depths=` is consumed at construction (`profile_depths` is the union). A
-saved environment or result written with the old field names no longer
-loads.
-The other temperature/salinity entry points take the same names:
-`SoundSpeedProfile.from_temperature_salinity(depths, temperature, salinity)`
-and `ph_to_nbs(pH, scale, temperature=, salinity=)` (were `temperature_c`,
-`salinity_psu`), and the `TSProfile` and `ArgoProfile` records' fields and
-`to_dataframe()` columns are `temperature` and `salinity`. These names reach
-saved files: `to_netcdf` writes them as the variable names, so a file written
-before carries `temperature_c` / `salinity_psu`, and a record pickled before
-no longer unpickles (`AttributeError`).
+Each water property (`temperature`, `salinity`, `pH`) is a single value, an
+array of exactly the shape of the depth evaluated, or `(depth, value)` pairs
+as an `(M, 2)` array ([utilities guide](docs/guide/utilities.md#sound-speed));
+the renames and refusals that brought the absorption laws and the water
+properties to this form are listed in [CHANGELOG.md](CHANGELOG.md).
 
 `fetch_environment(..., with_absorption=True)` builds a `FrancoisGarrison`
 profile from the site's fetched temperature/salinity column. Its pH is pH-source
@@ -714,15 +764,19 @@ rather than attach one, call its `table`: `Thorp().table(frequencies)`,
 protocol (`to_dict`, `to_xarray`). The formulas the laws are written
 on take and return plain arrays in dB/km, named `absorption_<model>` like
 `sound_speed_mackenzie`:
-`uacpy.acoustics.absorption_thorp(f, depth=None)`,
-`uacpy.acoustics.absorption_francois_garrison(f, temperature, salinity, pH,
-depth)` and `uacpy.acoustics.absorption_biological(f, f0_hz, Q, a0)` (one
+`uacpy.acoustics.absorption_thorp(frequency, depth=None)`,
+`uacpy.acoustics.absorption_francois_garrison(frequency, temperature, salinity,
+pH, depth)` and `uacpy.acoustics.absorption_biological(frequency, f0_hz, Q, a0)` (one
 layer's resonance), beside `uacpy.acoustics.ph_to_nbs`. The unit converter for
 a bare number or array is exported beside them too (dB/km ↔ dB/m ↔
-dB/wavelength ↔ Np/m ↔ Q ↔ L):
+dB/wavelength ↔ Np/m ↔ Q ↔ L); its `alpha`, `frequency` and `sound_speed`
+broadcast together, so a spectrum α(f) converts in one call:
 
 ```python
 uacpy.acoustics.convert_attenuation_units(0.5, 1000.0, 'dB/km', 'dB/wavelength')
+f = np.array([100.0, 1000.0, 10_000.0])                 # Hz
+alpha = uacpy.acoustics.absorption_thorp(f)              # dB/km, one per f
+uacpy.acoustics.convert_attenuation_units(alpha, f, 'dB/km', 'dB/wavelength')
 ```
 
 ### Real-world environments
@@ -737,8 +791,10 @@ import uacpy.data as data
 env = data.fetch_environment((43.2, 7.5), date='2026-06-14', bottom='sand')
 ```
 
-Each axis can be a **literal** (`ssp=`, `bathymetry=`, `bottom=`, exactly as
-`Environment` takes them) and/or fetched from one or more `*_sources` tried in
+Each axis can be a **literal** (`ssp=`, `bathymetry=`, `bottom=`, as
+`Environment` takes them, with one difference: a `bottom=` number is a mean
+grain size ϕ, not a sound speed, and a number with |ϕ| > 20 is refused as a
+likely sound speed) and/or fetched from one or more `*_sources` tried in
 order. `transect_to=(lat, lon)` samples bathymetry (and optionally SSP/bottom)
 along a great-circle path for a range-dependent environment;
 `with_absorption=True` attaches a site-specific Francois–Garrison model;
@@ -766,12 +822,12 @@ great-circle path instead, for a range-dependent environment.
 | Sound speed (climatology) | `fetch_ssp`, `fetch_ssp_transect`, `fetch_ts_profile`, `assemble_range_dependent` (stack your own 1-D columns into a range-dependent profile) |
 | Sound speed (operational) | `fetch_ssp_operational`, `fetch_ssp_transect_operational`, `fetch_ts_profile_operational` |
 | Sound speed (in-situ) | `fetch_argo_profile`, `fetch_ssp_argo` |
-| Sound speed (deep extension) | `extend_ssp_below_data` (one profile, along its own deep gradient), `extend_column_to_seafloor` (the transect form) |
+| Sound speed (deep extension) | `extend_ssp_below_data` (one profile, along its own deep gradient), `extend_column_to_seafloor` (the transect form), `deepen_with_climatology` (a cast of your own continued by the WOA23 column at its point and month, blended over its deepest 500 m) |
 | Seabed — any source | `fetch_bottom`, `fetch_bottom_transect` (`source=` one of `'emodnet'`, `'grainsize'`, `'diesing'`, `'mars'`, `'graw'`, `'crust1'`, `'pelagic'`, or the chains `'auto'` / `'local'` that `fetch_environment(bottom_sources=)` takes; a chain on a transect is resolved at each waypoint) |
-| Seabed — grain size | `bottom_from_grain_size`, `bottom_from_class` (the ϕ conversion itself is `uacpy.core.sediment.grain_size_to_geoacoustics`, inverse `grain_size_from_density`) |
+| Seabed — grain size | `bottom_from_grain_size`, `bottom_from_class`, and the ϕ conversion they wrap, `grain_size_to_geoacoustics` (one ϕ or an array; inverse `grain_size_from_density`); `bottom_from_samples` (your own samples' ϕ → a range-dependent bottom along a transect, each waypoint taking its nearest sample) |
 | Seabed — source records | `fetch_emodnet_substrate` (EMODnet live), `fetch_emodnet_substrate_local` (EMODnet cached), `fetch_sediment_sample` (NCEI / DECK41 samples), `fetch_seafloor_lithology` (Diesing), `fetch_mars_sediment`, `fetch_seabed_density`, `fetch_seabed_density_transect` (Graw), `pelagic_lithology`, `pelagic_grain_size` |
-| Seabed — thickness / crust | `fetch_sediment_thickness`, `fetch_sediment_thickness_transect`, `fetch_crust1_profile` |
-| Sea surface | `fetch_sea_surface` (an `Altimetry` carrying its provenance), `fetch_wind`, `fetch_wind_transect`, `fetch_waves`, `fetch_waves_operational`, `hs_to_pm_wind` (significant wave height → Pierson-Moskowitz wind) |
+| Seabed — thickness / crust | `fetch_sediment_thickness`, `fetch_sediment_thickness_transect`, `fetch_crust1_profile` (→ `Crust1Profile`) |
+| Sea surface | `fetch_sea_surface` (an `Altimetry` carrying its provenance), `fetch_wind`, `fetch_wind_transect`, `fetch_waves`, `fetch_waves_operational`, `hs_to_pm_wind` (significant wave height → Pierson-Moskowitz wind, knots at 19.5 m) |
 | Sea ice | `fetch_sea_ice_concentration`, `fetch_sea_ice_concentration_transect`, `sea_ice_grid`, `sea_ice_pixel`, `sea_ice_surface`, `fetch_sea_ice_surface`, `sea_ice_surface_transect`, `SEA_ICE_TYPICAL_ROUGHNESS_M` (a starting under-ice RMS roughness in m for `sea_ice_surface(..., roughness=)`) |
 | Absorption inputs | `fetch_ph`, `fetch_ph_profile`, `fetch_ph_operational` (the law: `FrancoisGarrison.from_temperature_salinity`) |
 | Provenance | `SOURCES`, `DataSource`, `DataProvenance`, `citations` |
@@ -799,30 +855,32 @@ attribution, citation) with the **actual** `data_date` and `data_point=(lat,
 lon)` returned (which may differ from what was requested — a climatology snaps to
 a grid cell, an Argo float is the nearest cast). `Environment` aggregates the
 union into `env.data_sources`. Render the required attribution text with
-`data.citations(env)` (or pass a carrier, a source id, or a `DataProvenance`);
+`data.citations(env)` (or pass a carrier, a record a fetcher returned, a source
+id, or a `DataProvenance`);
 non-commercial sources also emit a `ProvenanceWarning` when fetched.
 
 ## 6. Source and Receiver
 
 `Source` and `Receiver` carry only **geometry and spectrum** — solver knobs
-(launch angles, beam counts, …) were purged from them and now live on the model.
+(launch angles, beam counts, …) live on the model.
 
 `Source(depths, frequencies)` places one or more sources. Depths are positive
 down; multiple depths must be strictly increasing (outputs are indexed by source
 depth). Frequencies may be a scalar or array. `weights=` gives each source a
 complex amplitude (one per depth, a scalar broadcasts, default all ones): the
-engines never read it — every slab of a multi-depth run is the field of one
-unit-amplitude source — and `ResultStack.superpose()` adds the slabs with
-those weights (§8, ResultStack). A **single-depth** source with a non-unit
+engines never read it — a multi-depth run returns one `Field` whose leading
+`source_depth` axis holds the field of each unit-amplitude source — and
+`field.superpose()` adds them with those weights (§8, *The field of several
+sources*). A **single-depth** source with a non-unit
 weight is the n = 1 case of the same sum: `run()` returns its `Field` already
 scaled by the weight and records it in `metadata['superposed_sources']`. The
 same rule bounds both: a field that has lost its phase (a dB-only result such
 as Kraken's `INCOHERENT_TL` or OAST's TL) refuses a weight, and a real
 time-domain trace refuses a complex one; outside the field modes (rays,
 arrivals, modes, reflection tables) the weights are not applied and `run()`
-warns. A multi-depth stack read through `.dB` / `.tl` / `.plot()` without
-`superpose()` shows its unit-amplitude slabs and warns that the weights were
-not applied.
+warns. A multi-depth field read through `.dB` / `.tl` / `.p` / `.plot()`
+without `superpose()` shows its unit-amplitude sources and, when the `Source`
+carried other weights, warns that they were not applied.
 
 ```python
 from uacpy import Source
@@ -880,12 +938,12 @@ angle axis for that reason. Example 40 works through all of it.
 The level is its own `kind`, so it is captioned "Level (dB re 1 µPa)" rather
 than "TL (dB)" and a 1-D cut through it reads upward — more of a level is
 louder, where more of a loss is quieter. A multi-source total works the same
-way: `stack.superpose(coherent=False).at_source_level()`.
+way: `field.superpose(coherent=False).at_source_level()`.
 
 `Receiver(depths, ranges)` places the field-evaluation points. Depths are
 positive down, ranges are outward from the source (metres); like `Source`'s
 depths, both axes must be **strictly increasing** (minimum steps
-`DECK_DEPTH_RESOLUTION_M` and `DECK_RANGE_RESOLUTION_M`):
+`uacpy.core.deck_limits.DECK_DEPTH_RESOLUTION_M` and `DECK_RANGE_RESOLUTION_M`):
 
 ```python
 import numpy as np
@@ -894,7 +952,7 @@ from uacpy import Receiver
 Receiver(depths=50, ranges=1000)                              # single point
 Receiver(depths=np.linspace(10, 90, 9), ranges=5000)          # vertical array
 Receiver(depths=np.linspace(0, 100, 51),
-         ranges=np.linspace(0, 10_000, 201))                  # full grid
+         ranges=np.linspace(50, 10_000, 200))                 # full grid, past r = 0
 ```
 
 A receiver is a **grid**: the field is evaluated on the full depth × range
@@ -931,10 +989,10 @@ shares one contract:
   Identical across every model. No `**kwargs` — an unexpected keyword
   raises `TypeError`.
 - **`compute_*` convenience family.** Thin wrappers over `run()`, one per run
-  mode: `compute_tl`, `compute_rays`, `compute_eigenrays`, `compute_arrivals`,
+  mode: `compute_field`, `compute_rays`, `compute_eigenrays`, `compute_arrivals`,
   `compute_modes`, `compute_reflection`, `compute_time_series`,
-  `compute_transfer_function`, `compute_covariance`, `compute_replicas`. Each
-  capability-checks first, then forwards its mode's kwargs.
+  `compute_transfer_function`, `compute_covariance`, `compute_replicas`,
+  `compute_reverberation`. Each capability-checks first, then forwards its mode's kwargs.
 - **Units:** metres, Hz, m/s, g/cm³, dB-per-wavelength. Depth is positive down.
 
 The sections below are usage-oriented. For the **complete per-parameter tables**
@@ -964,7 +1022,7 @@ from constructor arguments (see the Bellhop row).
 | Model | Run modes | Range-dep. | Elastic | Altimetry | Broadband |
 |---|---|---|---|---|---|
 | **Bellhop** | TL (coh/incoh/semicoh), RAYS, EIGENRAYS, ARRIVALS, BROADBAND, TIME_SERIES | bathy + SSP (`interp_ssp` `None`/`'quad'`) + bottom | yes | yes | yes |
-| **Kraken** | MODES, COHERENT_TL, INCOHERENT_TL, BROADBAND, TIME_SERIES | bathy + SSP + bottom + layers (field path; MODES samples r = 0) | yes (`krakenc`) | no | yes |
+| **Kraken** | MODES, COHERENT_TL, INCOHERENT_TL, BROADBAND, TIME_SERIES | bathy + SSP + bottom + layers (field path; MODES takes r = 0 unless `collapse=` sets the quantity) | yes (`krakenc`) | no | yes |
 | **Scooter** | COHERENT_TL, BROADBAND, TIME_SERIES | no (collapsed) | yes | no | yes |
 | **RAM** | COHERENT_TL, BROADBAND, TIME_SERIES | bathy + SSP + bottom + layers | yes (`rams`) | yes (`ramsurf`) | yes |
 | **SPARC** | TIME_SERIES | no (collapsed) | no | no | (native pulse) |
@@ -997,7 +1055,7 @@ The names are `altimetry`, `range_dependent_bathymetry`,
 `range_dependent_ssp`, `range_dependent_bottom`, `layered_bottom`,
 `elastic_media`, `multi_source_depth`, `source_beam_pattern`,
 `rough_surface`, `rough_bottom` and `volume_attenuation`; anything else raises
-`ValueError`, so a typo cannot come back as a quiet `False`.
+`ConfigurationError`, so a typo cannot come back as a quiet `False`.
 `volume_attenuation` is declarative only: it answers whether the engine
 honours `env.absorption` along a propagation path (OASR does not — its water
 is a lossless half-space; Bounce writes it into its deck, where AT adds it to the sediment media it
@@ -1006,18 +1064,22 @@ lossless-water notice to describe), drives no collapse, and `env.absorption`
 passes through untouched either way.
 
 `multi_source_depth` says whether the engine writes every source depth into
-one deck (Bellhop in every mode it stacks, Kraken in its two TL modes,
-Scooter in `COHERENT_TL` — see each model's `spec.traits.native_multi_depth_modes`). It does not gate what a caller may pass: in the field
+one deck (Bellhop in its three TL modes, `RAYS` and `ARRIVALS`; Kraken in its
+two TL modes and `MODES`; Scooter in `COHERENT_TL` — see each model's
+`spec.traits.native_multi_depth_modes`). It does not gate what a caller may pass: in the field
 modes (`COHERENT_TL` / `INCOHERENT_TL` / `SEMICOHERENT_TL` / `BROADBAND` /
-`TIME_SERIES`) **every model accepts a multi-depth `Source` and returns a
-`ResultStack` over `source_depth`** — `PropagationModel.run` runs the engine
-once per depth with the same environment, receiver and keywords and stacks
-the slabs. Outside the field modes only Bellhop stacks (`RAYS` / `ARRIVALS` /
-`EIGENRAYS`); the other engines raise `ConfigurationError`. Whether the stack
-then **superposes** depends on what the slabs hold: complex pressure (the
-coherent engines, and OASP / OASSP among the OASES family) adds, while a
-dB-only engine such as OAST stacks but cannot add its slabs coherently —
-`stack.superpose()` refuses and says so.
+`TIME_SERIES`) **every model accepts a multi-depth `Source` and returns one
+`Field` with a leading `source_depth` axis** — `PropagationModel.run` runs the
+engine once per depth with the same environment, receiver and keywords (or
+the engine carries every depth in one deck) and joins the fields on that
+axis. Outside the field modes only Bellhop takes several depths (`RAYS` /
+`ARRIVALS` / `EIGENRAYS`, one `ResultStack` slab per depth) and Kraken's
+`MODES` (one mode set tabulated at every depth); the other engines raise
+`ConfigurationError`. Whether the field then **superposes** coherently
+depends on what it holds: complex pressure (the coherent engines, and OASP /
+OASSP among the OASES family) adds, while a dB-only engine such as OAST cannot
+add its sources coherently — `field.superpose()` refuses and says so, and
+`superpose(coherent=False)` adds them in intensity.
 
 When you hand a model an environment richer than it supports, the collapse
 step **collapses** the unsupported feature to something the model can run,
@@ -1040,8 +1102,9 @@ Keys and values: `bathymetry` (`max`/`median`/`mean`/`min`/`initial`), `ssp`
 thickness-weighted *arithmetic* mean of c, ρ and dB/λ over the layers and the
 half-space, a bookkeeping number with no acoustic basis: 1 m of 1500 m/s mud
 over 5250 m/s basalt collapses to 3375 m/s; prefer `top_layer`), `surface`
-(`r0`/`rmax`/`mean`/`median`), `altimetry` (`drop`), `elastic`
-(`fluid`/`vacuum`).
+(`r0`/`rmax`/`mean`/`median`), `altimetry` (`drop`, on the engines that cannot
+read a sea-surface shape — Kraken, Scooter, SPARC, Bounce, OASES; Bellhop and
+RAM's `ramsurf` read altimetry natively), `elastic` (`fluid`/`vacuum`).
 
 Warn versus raise: an unknown key or an invalid method raises
 `ConfigurationError` at construction, not deep inside a writer at `run()`
@@ -1079,7 +1142,7 @@ receiver = uacpy.Receiver(depths=np.linspace(1, 199, 60),
                           ranges=np.linspace(100, 10_000, 200))
 
 bellhop = Bellhop(backend='cxx', n_beams=500, launch_angles=(-80, 80))
-tl   = bellhop.compute_tl(env, source, receiver)            # Field
+field = bellhop.compute_field(env, source, receiver)           # Field
 rays = bellhop.compute_rays(env, source, receiver)          # Rays
 arr  = bellhop.compute_arrivals(env, source, receiver)      # Arrivals
 
@@ -1123,26 +1186,35 @@ it: a slow layer anywhere in the column does.
 
 Normal-mode solver. `backend='kraken'` (real) or `'krakenc'` (complex: elastic
 media, attenuation, leaky modes); `backend=None` auto-picks `krakenc` when the
-env carries shear or `leaky_modes=True`. `field.exe` runs **only** for field
+env carries shear or `leaky_modes=True`, and `kraken.exe` otherwise. Above a
+fluid seabed's speed `kraken.exe` solves the modes as if the seabed were rigid
+(`Kraken/BCImpedanceMod.f90:83-88`), and `backend='krakenc'` computes them as
+leaky modes (`kraken.htm`). The default window reaches above that speed and a
+default run says nothing of it; `backend='kraken'`, or a `c_high` above the
+seabed speed, gives one `ValidityWarning`, and `run_settings(...).engine.backend`
+records the program that ran. The choice is yours (see
+[Kraken §3](docs/models/kraken.md#real-or-complex-arithmetic-kraken-vs-krakenc)). `field.exe` runs **only** for field
 modes — `compute_modes` stops at the modes binary:
 
 ```python
 from uacpy import Environment, Kraken
 
-kraken = Kraken()
-modes = kraken.compute_modes(env, source, n_modes=30)   # Modes (k, phi); no receiver
+kraken = Kraken(n_modes=30)                             # the mode cap is a model setting
+modes = kraken.compute_modes(env, source)               # Modes (k, phi); no receiver
 print(modes.k.shape, modes.phi.shape)
 
-tl = kraken.compute_tl(env, source, receiver)           # modes -> field.exe -> Field
+field = kraken.compute_field(env, source, receiver)        # modes -> field.exe -> Field
 
 # Range-dependent field via coupled modes:
 env_rd = Environment(bathymetry=[(0, 100), (5_000, 160)],   # a wedge
                      ssp=env.ssp, bottom=env.bottom)
-tl_rd = Kraken(mode_coupling='coupled', n_segments=20).compute_tl(env_rd, source, receiver)
+field_rd = Kraken(mode_coupling='coupled', n_segments=20).compute_field(env_rd, source, receiver)
 ```
 
-`run()` defaults to a field mode (`COHERENT_TL`, or `BROADBAND` when a
-multi-element `frequencies=` is supplied) — call `compute_modes` for the modes
+`run()` defaults to a field mode (`COHERENT_TL`, or `BROADBAND` when the
+call itself passes `run(..., frequencies=[...])` with more than one element; a
+`Source` listing several frequencies does not switch it, and is refused in the
+narrowband default) — call `compute_modes` for the modes
 themselves. `RunMode.INCOHERENT_TL` sums the modes in power instead of
 amplitude; it cannot be combined with `mode_coupling='coupled'` on a
 range-dependent env (the solver rejects that pairing, so `run()` raises
@@ -1155,7 +1227,7 @@ new segment's modes, so it does not conserve energy and moves with
 run in the upper 100 m past 15 km, where `'adiabatic'` sits 0.13 dB below.
 Check either against RAM on a slope. Kraken segments range-dependent bathymetry, SSP and
 bottom natively (each profile carries the seabed column at its own range,
-layers included; `compute_modes` samples r = 0);
+layers included; `compute_modes` takes r = 0 unless `collapse=` sets the quantity);
 altimetry is not supported (Bellhop and RAM's `ramsurf` backend support it).
 
 ### Scooter
@@ -1168,14 +1240,15 @@ Hankel-transforms the Green's function to range.
 from uacpy import Scooter
 
 scooter = Scooter()
-tl = scooter.compute_tl(env, source, receiver)              # Field
+field = scooter.compute_field(env, source, receiver)           # Field
 hf = scooter.compute_transfer_function(env, source, receiver,
                                        frequencies=np.linspace(180, 220, 64))
 ```
 
-`c_low`/`c_high` default to `0.95 × min(SSP)` / `1.05 × max(SSP, bottom)`. The
-spectral `RMax` is set from `receiver.range_max × rmax_factor` (2.0
-narrowband, 3.0 broadband). `RMax` sets the wavenumber sampling
+`c_low` defaults to `0.90 × min(SSP)` and `c_high` to the unbounded `1e9`
+(`k_min = 0`, Jensen et al. ch. 4 App. 1) over every bottom. The
+spectral `RMax` is set from `receiver.range_max × rmax_factor` (2.0 in
+every run mode, the toolbox's Scooter decks). `RMax` sets the wavenumber sampling
 `Δk ≈ π/(2·RMax)`; the k→r step is a direct trapezoidal DFT, periodic in range
 with period `2π/Δk ≈ 4·RMax`, so the multiplier keeps that wrap-around replica
 beyond the receivers.
@@ -1191,7 +1264,7 @@ shape. Inspect the choice with `select_backend(env)`; force one with
 ```python
 from uacpy import RAM
 
-ram = RAM(n_pade=6, accuracy=1e-1)
+ram = RAM(n_pade=6)
 print(ram.select_backend(env))                              # e.g. 'mpirams'
 tl = ram.run(env, source, receiver)                         # COHERENT_TL -> Field
 ```
@@ -1248,9 +1321,9 @@ place is a different waveguide (7–10 dB louder over 1–9 km on the default
 seabed, up to 34 dB on clay, measured with Scooter). Use Scooter for a
 half-space.
 
-`'R'` marches one subprocess per receiver depth, so the depth axis is capped by
-`max_launches` (default 20) and a denser receiver raises `UnsupportedFeatureError`
-rather than queueing hours of solves — use a coarser depth axis here than the
+`'R'` marches one subprocess per receiver depth, so a dense depth axis queues
+one solve per depth; `SPARC(max_launches=N)` caps it (a denser receiver then
+raises `UnsupportedFeatureError`) — use a coarser depth axis here than the
 grids the other models take.
 
 SPARC marches the `source_waveform` a run is handed (the `'FN+B'` STSFIL route)
@@ -1278,7 +1351,7 @@ with tempfile.TemporaryDirectory() as work_dir:
     env2 = env.copy()
     env2.bottom = uacpy.Bottom.from_halfspace(
         uacpy.BoundaryProperties(acoustic_type='file', reflection_file=brc_path))
-    tl = Scooter().compute_tl(env2, source, receiver)
+    tl = Scooter().compute_field(env2, source, receiver)
 ```
 
 Bellhop does this transparently for *layered* bottoms via `auto_bounce`; use
@@ -1374,22 +1447,34 @@ if __name__ == '__main__':
     jobs = [
         Job(Bellhop(), env, source, receiver, run_mode=RunMode.COHERENT_TL, label='bellhop'),
         Job(Kraken(),  env, source, receiver, run_mode=RunMode.COHERENT_TL, label='kraken'),
-        Job(RAM(accuracy=1e-1), env, source, receiver, run_mode=RunMode.COHERENT_TL, label='ram'),
+        Job(RAM(), env, source, receiver, run_mode=RunMode.COHERENT_TL, label='ram'),
     ]
     batch = run_parallel(jobs, n_workers=3)                 # ParallelResult
     for label, result in zip(['bellhop', 'kraken', 'ram'], batch):
         print(label, result.dB.min())
 
-    # Single-model sweep -> stack into one ResultStack:
-    sweep = [Job(RAM(accuracy=1e-1).copy(n_pade=p), env, source, receiver, label=p)
+    # Single-model sweep -> one Field with a leading 'n_pade' axis:
+    sweep = [Job(RAM().copy(n_pade=p), env, source, receiver, label=p)
              for p in (4, 6, 8)]
-    stack = run_parallel(sweep).stack(coordinate_name='n_pade')
+    swept = run_parallel(sweep).stack(coordinate_name='n_pade')
 ```
 
 `ParallelResult` is indexable/iterable (`.results`, `.errors`, `.ok`);
-`.stack()` bundles successful same-model results into a `ResultStack`. Workers
+`.stack()` bundles successful same-model results along one new leading axis:
+`Field` results into one `Field` (they must share a grid), other results
+(rays, arrivals, modes) into a `ResultStack`. A joined `Field` whose jobs'
+run records differ (a knob sweep) has `run_settings=None`, each job's record
+staying on `results[i].run_settings`; a sweep that leaves the records equal
+keeps the one record its jobs share (attenuation on Kraken, Scooter, Bellhop
+or OAST; RAM's record holds the grid it resolves from the environment, so a
+sweep that changes that grid — attenuation, which sets its absorbing layer's
+depth — drops it, and a bottom-density sweep keeps it). Jobs on
+different waveguide sound speeds do not join (`stack()` refuses them):
+iterate `results`.
+Workers
 that own their scratch dir (`cleanup=True`, the default) drop on-disk artifacts —
-pin a unique `work_dir` per job with `cleanup=False` to keep them.
+pin a unique `work_dir` per job with `cleanup=False` to keep them. Example 50
+runs a frequency sweep this way.
 
 ## 8. Results
 
@@ -1449,7 +1534,7 @@ boolean `.is_complex`.
 | complex | `{depth, range}` | `pressure` | `Pa` | narrowband p(d, r) |
 | complex | `{depth, range, frequency}` | `pressure` | `Pa` | broadband H(d, r, f) |
 | real | `{time}` or `{…, time}` | `pressure` | `Pa` | p(t) |
-| complex | `{source_depth, depth, range}` | `pressure` | `Pa` | multi-source pressure |
+| any of the above | `{source_depth, …}` | `pressure` | as above | a multi-depth run: one plane per source depth, summed by `.superpose()` |
 
 Transmission loss is not a separate kind: `-20·log10|p|` is the same pressure
 field written in dB, which is what `.unit` records. That is why a RAM TL field
@@ -1494,15 +1579,24 @@ da = field.to_xarray()                     # labelled xarray.DataArray (extra: u
 Field.from_xarray(da)                      # and back: coords, pinned, kind/unit, identity
 field.to_netcdf('field.nc')                # NetCDF; complex data as real/imag parts
 field.view('level')                        # any plotted view by name, read-only
-stack.to_xarray()                          # a ResultStack: one DataArray, stacking dim first
+stack.to_netcdf('rays.nc')                 # a ResultStack: one NetCDF group per slab
 Arrivals.from_dict(arr.to_dict())          # arrivals as plain per-arrival columns
 arr.to_dataframe()                         # one row per arrival (also Rays, Modes,
                                            # ReflectionCoefficient)
 ```
 
+`np.savez(path, **x.to_dict())` saves any of them, and
+`from_dict(dict(np.load(path, allow_pickle=True)))` reads it back — for files
+you wrote only: `allow_pickle=True` unpickles, which runs whatever code the
+file carries. Exchange files through `to_netcdf` / `from_netcdf`, whose class
+paths are checked before anything is imported. A reader handed a file of
+another class (`Result.from_netcdf` on an Environment's file,
+`Environment.from_netcdf` on a result's) refuses, naming what the file holds
+and the call that reads it.
+
 Two more need a `time` axis — they read a `TIME_SERIES` field back into the
-frequency domain: `field.to_transfer_function()` is `H(f)` on the record's
-bins, and `field.extract_tone(frequency=200)` pulls the steady-state
+frequency domain: `field.to_transfer_function()` is `H(f)` on the grid the
+trace was synthesised from (on the record's bins for any other trace), and `field.extract_tone(frequency=200)` pulls the steady-state
 complex pressure at one frequency back out, dropping only the time axis (a
 `{depth, range, time}` field gives a `{depth, range}` map, a single trace one
 phasor).
@@ -1522,7 +1616,7 @@ narrow.coords                       # {'depth': ..., 'range': ...}
 narrow.pinned                       # {'frequency': 199.6}  (nearest sample)
 narrow.kind                         # 'pressure'
 
-line = narrow.at(depth=50)          # now coords = {'range': ...}, a 1-D cut
+line = narrow.at(depth=50)          # coords = {'range': ...}, a 1-D cut
 peak = H.max()                      # loudest point (argmax |p|; min finite dB for TL) → scalar Field
 peak.pinned                         # {'depth': 50.0, 'range': 3000.0, 'frequency': 59.6}
 ```
@@ -1530,8 +1624,8 @@ peak.pinned                         # {'depth': 50.0, 'range': 3000.0, 'frequenc
 `.at(**labels)` picks the nearest grid value (never fabricates); `.isel(**indices)`
 takes a positional index; `.eval(**labels, method='linear')` *interpolates*
 (`'linear'` / `'nearest'` / `'cubic'`) when you want a value between samples;
-`.max()` collapses every axis at the global `argmax(|data|)`. Slicing replaces
-the old per-shape result subclasses: you slice a `Field` down to 1-D/2-D, then
+`.max()` collapses every axis at the global `argmax(|data|)`. Slicing takes the
+place of per-shape result types: you slice a `Field` down to 1-D/2-D, then
 hand it to one plotter.
 
 Two methods narrow an axis instead of collapsing it: `.window(time=(lo, hi))`
@@ -1546,8 +1640,9 @@ the axis survives). There is no default — a `Field` carries `r` but not `c`. T
 magnitude is untouched.
 
 `at` / `isel` is the **grid-library convention** shared across the whole API
-(`at` = nearest, `isel` = positional): `Field`, `ResultStack`,
-`ReflectionCoefficient`, and the input carriers `SoundSpeedProfile`,
+(`at` = nearest, `isel` = positional): `Field` (a multi-depth run's field
+along its `source_depth` axis too), `ResultStack`, `ReflectionCoefficient`,
+and the input carriers `SoundSpeedProfile`,
 `Bathymetry`, `Altimetry`, `Bottom` and `Surface` all provide the pair. `eval`
 (= interpolate) exists only where interpolating between samples is meaningful —
 `Field`, `ReflectionCoefficient`, `SoundSpeedProfile`, `Bathymetry`,
@@ -1585,7 +1680,7 @@ Which keys appear depends on the model: only the Acoustics-Toolbox binaries
 (Bellhop, Kraken, Scooter, SPARC, Bounce) write a diagnostic `.prt` log, so
 `prt_file` exists on their results and not on RAM's or OASES'. Rather than
 assume, read the keys back — `result.list_metadata()` describes every key
-currently attached (runtime type, documented type, one-line meaning) so you do
+attached (runtime type, documented type, one-line meaning) so you do
 not have to grep the source.
 
 ### Phase reference — why IFFT needs it
@@ -1623,8 +1718,15 @@ p = ts.at(depth=50, range=5000).data        # the received pulse
 t = ts.times                                # seconds
 ```
 
-A `NumericsWarning` fires if `1/Δf` (the DFT period) is shorter than the waveform
-duration — refine the frequency grid so the late response does not wrap.
+The record is `1/Δf` long and sampled at exactly `sample_rate`: `fs/Δf`
+samples when that is whole, the next whole number above it otherwise, every
+sample the band's sum at its own instant (an inverse FFT on the lattice, a
+chirp-z off it). A waveform whose support is longer than `1/Δf` is refused
+(`ConfigurationError`): the synthesis would return it folded onto itself.
+`H.impulse_response(fs)` and `.apply(source_waveform=..., sample_rate=fs)`
+convolve instead, linearly, so the record has to hold only the channel; on a
+range grid `t_start='reduced'` gives each range its own record on the reduced
+time `t − r/c` (JKPS eq. 8.15), `.reduction_speed` recording `c`.
 
 **The level a signal with bandwidth or duration reaches** is a different
 question from either, and has two named answers:
@@ -1638,8 +1740,10 @@ loss = H.broadband_loss(source_waveform=my_chirp, sample_rate=fs)
 loss = H.window(frequency=(f0 - B / 2, f0 + B / 2)).broadband_loss()
 
 # sound exposure level — the time integral of p(t)² (Abraham sect. 3.2.1.5,
-# ISO 18405). No source-level argument: the level rides on the amplitude.
-sel = H.sound_exposure_level(unit_rms * 1e-6 * 10 ** (SL / 20), fs)
+# ISO 18405). No source-level argument: the level rides on the amplitude, so
+# the map carries no source_level_dB; it records ref**2 as sel.reference.
+sel = H.sound_exposure_level(source_waveform=unit_rms * 1e-6 * 10 ** (SL / 20),
+                             sample_rate=fs)
 ```
 
 `broadband_loss` is **not** `RunMode.INCOHERENT_TL`, which is Ainslie's
@@ -1655,21 +1759,34 @@ single-receiver field needs no `.at()`. They wrap the slice-and-plot / IFFT chai
 above; use `synthesize_time_series` for the response to a specific source pulse.
 
 **(b) Manual `2·Re[ifft(H)]`** for `travelling_wave` `H(f)`, when you want full
-control. Place each model frequency at bin `round(f/Δf)`; the window length
-`1/Δf` must exceed the arrival time `r/c0`, so the grid must be fine enough:
+control. A DFT of spacing `Δf` holds only multiples of `Δf`, so place the first
+model frequency at bin `round(f[0]/Δf)` and each next one a bin later: the band
+then sits on the lattice offset by one common `offset = f[0] − b0·Δf`, which a
+rotation by `exp(2πi·offset·t)` takes back out. Every default BROADBAND grid
+(`linspace(0.75 fc, 1.25 fc, 128)`) starts half a bin off the lattice, and
+rounding each frequency to its own bin without the rotation synthesises the
+right envelope on a carrier shifted by `Δf/2`. The window length `1/Δf` must
+exceed the arrival time `r/c0`, so the grid must be fine enough:
 
 ```python
 import numpy as np
 f = H.coords['frequency']
 spec1d = H.at(depth=50, range=5000).data       # complex H(f) at the cell
 df = f[1] - f[0]                                # need 1/df > r/c0
-nfft = 1 << int(np.ceil(np.log2(2 * round(f[-1] / df) + 2)))
+b0 = int(np.round(f[0] / df))                   # the first sample's bin
+offset = f[0] - b0 * df                         # the band's common offset
+nfft = 1 << int(np.ceil(np.log2(2 * (b0 + f.size) + 2)))
 buf = np.zeros(nfft, complex)
-buf[np.round(f / df).astype(int)] = spec1d
-pt = 2.0 * np.real(np.fft.ifft(buf)) * (nfft * df)   # Riemann sum of ∫H df
+buf[b0 + np.arange(f.size)] = spec1d
 t = np.arange(nfft) / (nfft * df)
+pt = 2.0 * np.real(np.fft.ifft(buf) * np.exp(2j * np.pi * offset * t)) \
+    * (nfft * df)                               # Riemann sum of ∫H df
 #  → peak of pt sits at t ≈ r/c0
 ```
+
+This is `H.to_time_trace(window=None, t_start=0.0, nfft=nfft)` written out
+(equal to within 3e-16 of the peak); `acoustic_signal.synthesize_time_series` is the
+same synthesis of a waveform through an `H` held as a plain array.
 
 For a unit-amplitude phase-only `H = exp(-i 2π f r/c0)` with `r = 3000 m`,
 `c0 = 1500 m/s`, this lands the impulse exactly at `t = 2.0 s`.
@@ -1679,30 +1796,34 @@ For a unit-amplitude phase-only `H = exp(-i 2π f r/c0)` with `r = 3000 m`,
 The non-grid results return new copies — no solver re-run:
 
 ```python
+cell = (receiver.depths[30], receiver.ranges[99])   # one receiver of the grid
+one = arr.at_receiver(receiver=cell)         # Arrivals of that one cell
 arr.filter_by_bounces(kind='surface')        # Arrivals: by multipath class
 arr.window(delay=(2.0, None)).top_n_by_amplitude(5)
 arr.sorted_by_amplitude()                    # loudest first
 arr.delays, arr.amplitudes, arr.phases       # the ray-arrival triple
 arr.received_amplitudes                      # what ARRIVES: absorption + phase
-arr.rms_delay_spread(receiver=None)         # pulse smearing, energy-weighted; one cell (receiver=(z, r) on a grid)
-arr.synthesis_band(bandwidth=8e3)            # grid that holds this multipath
-arr.channel_taps(2000.0, fc=12e3, sps=1, pulse=None, rolloff=0.25, span=8, receiver=None, normalize=False)  # ChannelTaps: baseband modem channel at a symbol rate; pulse None = 'rc' (raised cosine, the channel at the decision instants) at sps=1, 'rrc' above, or 'nearest'
-arr.coherence_bandwidth(convention='inverse_spread', factor=None)  # 1/(k·τ_rms), k=1 by default ('rappaport_0.5' k=5, 'rappaport_0.9' k=50, or factor=k)
-arr.channel_regime(2000.0, convention='inverse_spread', factor=None, rolloff=0.0)  # ChannelRegime: whether that symbol rate sees the channel flat
+arr.rms_delay_spread(receiver=cell)          # pulse smearing, energy-weighted; one cell (receiver= on a grid, nothing on one cell)
+one.synthesis_band(bandwidth=100.0, energy_fraction=1.0)  # grid whose record holds every arrival
+arr.channel_taps(50.0, fc=200.0, sps=1, pulse=None, rolloff=0.25, span=8, receiver=cell, normalize=False)  # ChannelTaps: baseband modem channel at a symbol rate; pulse None = 'rc' (raised cosine, the channel at the decision instants) at sps=1, 'rrc' above, or 'nearest'
+arr.coherence_bandwidth(convention='inverse_spread', factor=None, receiver=cell)  # 1/(k·τ_rms), k=1 by default ('rappaport_0.5' k=5, 'rappaport_0.9' k=50, or factor=k)
+arr.channel_regime(50.0, convention='inverse_spread', factor=None, rolloff=0.0, receiver=cell)  # ChannelRegime: whether that symbol rate sees the channel flat
 rays.window(launch_angle_deg=(-10, 10))         # Rays: pure data subsets
-rays.top_n_by_miss(20, target_range_m=5000, target_depth_m=50)
-rays.filter_by_miss_distance(50.0, target_range_m=5000, target_depth_m=50)
-rays.sorted_by_miss(target_range_m=5000, target_depth_m=50)
+rays.top_n_by_miss(20, target_depth_m=50, target_range_m=5000)
+rays.filter_by_miss_distance(50.0, target_depth_m=50, target_range_m=5000)
+rays.sorted_by_miss(target_depth_m=50, target_range_m=5000)
 rays.first_n(10)                       # first N traced rays
-rays.truncate_at_receiver(target_range_m=5000, target_depth_m=50)
+rays.truncate_at_receiver(target_depth_m=50, target_range_m=5000)
 modes.first_n(10).phase_speeds     # Modes: trim + derive v_p
+modes2 = kraken.compute_modes(env, uacpy.Source(depths=50, frequencies=205))
 modes.group_velocity_between(modes2)         # dω/dk — needs a 2nd frequency's Modes
 modes.with_attenuation(alpha_dB_per_m=0.01,  # perturbational modal attenuation
                        bottom=env.bottom)    # bottom= runs the normalisation
                                             # into the half-space; without it
-                                            # the result is an upper bound
-modes.modal_pressure_field(source_depth=50, receiver_depths=rcv.depths,
-                             ranges=rcv.ranges)        # → complex pressure; .dB is TL
+                                            # the .mod's recorded fluid
+                                            # half-space is used
+modes.modal_pressure_field(source_depth=50, receiver_depths=receiver.depths,
+                             ranges=receiver.ranges)   # → complex pressure; .dB is TL
 modes.excitation(source, sound_speed=1500.0) # what a source ARRAY drives:
                                             # Σₙ wₙ·φₘ(zₙ), one amplitude per
                                             # mode — the mode filter. Exact in
@@ -1715,73 +1836,113 @@ rc.at(angle=30)                              # ReflectionCoefficient: nearest sa
 rc.is_broadband                              # is there a frequency axis to select on?
 ```
 
+The two sparse Bellhop results name a place differently because they ask
+different questions. An `Arrivals` method's `receiver=(depth, range)` picks an
+existing cell of the result's receiver grid (and may be omitted when the run
+had one receiver). A `Rays` method's `target_depth_m=` / `target_range_m=` is a
+free point the miss distance is measured to, on or off the grid; `None` is the
+receiver the result was built for.
+
 `rc.at(angle=30, frequency=200)` needs a **broadband** reflection coefficient —
 the 2-D `(angle, frequency)` table `OASR` produces. Anything `Bounce` returns is
 single-frequency by construction, so `frequency=` raises `ConfigurationError`
 there; `rc.is_broadband` is the guard.
 
-### ResultStack
+### The field of several sources
 
-A `ResultStack` is a sequence of same-typed slabs that share every axis except a
-stacking coordinate. You get one two ways:
-
-* a **single run with a multi-depth `Source`** — in a field mode (the TL
-  modes, `BROADBAND`, `TIME_SERIES`) every model returns a `ResultStack`
-  stacked over `source_depth`, one slab per source, each the field of one
-  unit-amplitude source; Bellhop also stacks `RAYS` / `ARRIVALS` / `EIGENRAYS`,
-  and the other engines raise `ConfigurationError` outside the field modes;
-* `run_parallel(...).stack(coordinate_name=...)` over a parameter sweep.
+A run with a **multi-depth `Source`** in a field mode (the TL modes,
+`BROADBAND`, `TIME_SERIES`) returns **one `Field`** on every model, its
+leading `source_depth` axis holding the field of each unit-amplitude source:
+`(source_depth, depth, range)` for TL, `(source_depth, depth, range,
+frequency)` for `H(f)`, `(source_depth, depth, range, time)` for traces (every
+depth on one time axis: an engine that opens each depth's record at its own
+earliest arrival runs every depth again at the earliest of those starts, and
+`run_settings.notes` says so — pass `t_start=` to choose it yourself).
+`source_depths` lists the depths and `source_weights` the `Source` weights.
+Both follow a selection: `window(source_depth=…)` keeps the weight of each
+depth it keeps, so its `superpose()` sums those planes, and one plane (`at`,
+`isel`, `eval` on `source_depth`) is one source's field, with no weights.
 
 ```python
-for src_depth, slab in stack: ...     # iterate (coordinate, slab) pairs
-stack.at(source_depth=20)             # nearest-label slab → a Field
-stack.dB                              # stacked TL, shape (n_slabs, *slab.dB.shape)
-stack.n_slabs, stack.slab_type        # how many slabs, and of what result type
-stack.plot()                          # panel grid (Field slabs)
-stack.superpose()                     # Σ wᵢ·pᵢ with the Source's weights → one Field
-stack.superpose([1, 1j])              # the same with weights given here
-stack.superpose(coherent=False)       # √Σ|wᵢ·pᵢ|² → one real-dB Field
+field = model.run(env, Source(depths=[40, 60], frequencies=200,
+                              weights=[1, -1]), receiver)
+field.coords['source_depth']          # [40., 60.]
+field.at(source_depth=40)             # one source's field (nearest label)
+field.isel(source_depth=1)            # by position
+field.data[0]                         # one source's raw plane
+field.plot()                          # one panel per source depth
+field.superpose()                     # Σ wᵢ·pᵢ with the Source's weights → one Field
+field.superpose([1, 1j])              # the same with weights given here
+field.superpose(coherent=False)       # √Σ|wᵢ·pᵢ|² → one real-dB Field
+uacpy.stack_fields([f40, f60], [40, 60])  # one-source Fields run apart → the same Field
 ```
 
-Index a single slab with `stack[i]` or `stack.at(source_depth=…)` (each is a
-`Field`). `superpose` records what it added in
-`metadata['superposed_sources']`, and `coherent=` says **how the sources
-combine** — a statement about the sources, not about the arithmetic:
+`.dB`, `.tl`, `.p` and `.plot()` read the unit-amplitude planes and warn
+when the `Source` carried other weights. A metadata entry the depths
+disagree on — each depth's own `*_file` scratch paths when the run keeps
+its work directory — holds one value per depth. `superpose` records what it
+added in `metadata['superposed_sources']`, and `coherent=` says **how the
+sources combine** — a statement about the sources, not about the arithmetic:
 
 * `coherent=True` (default) adds complex pressure, `Σ wᵢ·pᵢ`: the sources are
   driven together with a fixed relative phase, as the elements of one array
-  are. The sum keeps the slabs' `phase_reference` (a time-domain stack adds
-  its real traces with real weights). A stack whose slabs are real dB values
-  has lost its phase and refuses here — superpose the complex field the run
-  returned, or add the intensities instead.
+  are. The sum keeps the field's `phase_reference` (time-domain traces add
+  with real weights). A field of real dB values has lost its phase and
+  refuses here — superpose the complex field the run returned, or add the
+  intensities instead.
 * `coherent=False` adds intensity, `√Σ|wᵢ·pᵢ|²`: the sources are mutually
   incoherent (separate platforms, unrelated tones, random relative phase), so
   their phases carry no information and only `|w|` is read. N identical
   sources give `10·log10(N)` where a coherent sum gives `20·log10(N)`. The
   result has no phase, so it comes back the way every engine returns its own
   incoherent mode — real dB, `phase_reference` cleared — and a **dB-only
-  stack combines this way**, since magnitudes are all it needs. Time-domain
-  traces refuse: intensity does not add sample by sample. A stack of
-  *levels* adds as levels, not as losses, so two incoherent 120 dB sources
-  give 123.01 dB.
+  field combines this way**, since magnitudes are all it needs (the power sum
+  is `uacpy.acoustics.sum_levels_dB`'s). Time-domain traces refuse: intensity
+  does not add sample by sample. A field of *levels* adds as levels, not as
+  losses, so two incoherent 120 dB sources give 123.01 dB.
+
+### ResultStack
+
+The sparse results cannot be one array — each source's rays or arrivals
+number differently — so a multi-depth Bellhop `RAYS` / `ARRIVALS` /
+`EIGENRAYS` run returns a `ResultStack`: one slab per source depth, every
+slab the same result type. `run_parallel(...).stack()` bundles non-Field
+results the same way. A `Field` is never a slab.
+
+```python
+for src_depth, rays in stack: ...     # iterate (coordinate, slab) pairs
+stack.at(source_depth=20)             # nearest-label slab
+stack[0], stack.isel(source_depth=1)  # positional slab
+stack.n_slabs, stack.slab_type        # how many slabs, and of what result type
+stack.to_dataframe()                  # every slab's rows, the coordinate a column
+stack.to_netcdf('rays.nc')            # one NetCDF group per slab; Result.from_netcdf reads it
+```
+
+A `ResultStack` is a `Result`: its identity is its first slab's, and it
+saves and loads as every result does (`to_dict` / `from_dict`, npz,
+`to_netcdf` / `from_netcdf`). Its slabs share no grid, so it is no single
+xarray object — `to_xarray()` refuses and names `stack[i].to_xarray()`.
 
 A weight therefore refuses at one place and waits at another, and the
 difference is *when* it is applied rather than whether it could be. A
 **single-depth** `Source(weights=…)` is applied by `run()` itself, which
 refuses a field whose phase is gone at that moment. A **multi-depth** one is
 applied by `superpose`, which has not been called yet and may be called
-either way — so a dB-only stack is built, and only a complex weight (nothing
-could rotate a phase that is not there) is refused up front.
+either way — so a dB-only multi-depth field is returned, and only a complex
+weight (nothing could rotate a phase that is not there) is refused up front.
 
 Note what the level means. TL is referenced to a unit source at 1 m, and a
 superposed field keeps that reference, so the array's gain is *inside* the
 number: three in-phase sources read several dB "less TL" than one. That is
-the total level re one unit source at 1 m, which is normally what an array
-calls for — it is not the TL of a single source. Scale the weights (e.g.
+the total propagation loss re one unit source at 1 m (plots caption it so),
+which is normally what an array
+calls for — it is not the TL of a single source. Because the array gain is
+inside it, it can fall below a single source's TL, and it goes negative where
+the gain exceeds the loss; subtract it from a source level, never add it. Scale the weights (e.g.
 `Σ|wᵢ|² = 1`) to normalise the array as a source, or give the `Source` a
 `source_level_dB` and read `superpose(...).at_source_level()`, which is an
 absolute level and so carries no such ambiguity. This is also why
-`stack.superpose(coherent=False)` and an engine's own `INCOHERENT_TL` are
+`field.superpose(coherent=False)` and an engine's own `INCOHERENT_TL` are
 different quantities: the engine sums *mode* magnitudes within one source,
 this sums *sources*.
 
@@ -1795,8 +1956,8 @@ the outputs a pinned `work_dir` left behind. `import uacpy` exposes them as
 One rule governs the whole subpackage: **every public reader and writer speaks
 metres and Hz at the Python boundary, degrees for angles (`source_angle`,
 `theta`) and radians for phase everywhere.** The km and on-disk angle axes the
-file formats want are converted inside, in `core/units.py`. So
-`write_ssp(filepath, ranges_m, sound_speed)` takes metres even though the `.ssp` format stores
+file formats want are converted inside, by the public `uacpy.units` helpers. So
+`write_ssp(filepath, ranges, sound_speed)` takes metres even though the `.ssp` format stores
 km, and `read_ssp_2d` hands its `ranges` back in metres.
 
 | Family | Readers | Writers |
@@ -1805,11 +1966,11 @@ km, and `read_ssp_2d` hands its `ranges` back in metres.
 | AT modes | `read_modes` (`.mod` or `.moa` → `Modes`) | `write_fieldflp` |
 | AT env (`.env`) | `read_env` (→ Environment, Source, Receiver, options), `read_prt`, `read_flp` | `write_bellhop_env_file`, `write_kraken_env_file`, `write_scooter_env_file`, `write_sparc_env_file`, `write_bounce_input_file`, `write_multi_profile_env` |
 | AT env building blocks (`uacpy.io.oalib_writer`; staging in `uacpy.io.refl_io`) | — | `write_header`, `write_ssp_section`, `write_layer_sections`, `write_bottom_section`, `writable_layers`, `write_source_depths`, `write_receiver_depths`, `write_receiver_ranges`, `write_phase_speed_and_rmax`, `write_absorption_block`, `write_fg_params`, `write_bio_layers`, `write_broadband_freqs`, `resolve_ssp_interp`, `resolve_ssp_topopt` |
-| Boundaries (`.bty`/`.ati`/`.ssp`/`.brc`/`.trc`/`.irc`/`.sbp`) | `read_bathymetry`, `read_altimetry`, `read_ssp_2d`, `read_reflection_coefficient` (returns a `ReflectionCoefficient`), `read_source_beam_pattern` | `write_bty_file`, `write_bty_long_format`, `write_ati_file`, `write_ssp`, `write_reflection_coefficient`, `write_source_beam_pattern`; staging in `uacpy.io.refl_io`: `stage_reflection_file`, `stage_source_beam_pattern`, `dedupe_reflection_file` |
+| Boundaries (`.bty`/`.ati`/`.ssp`/`.brc`/`.trc`/`.irc`/`.sbp`) | `read_bathymetry`, `read_altimetry`, `read_ssp_2d`, `read_reflection_coefficient` (returns a `ReflectionCoefficient`), `read_source_beam_pattern` (→ `BeamPatternTable`: `angles`, `levels_dB`); the BELLHOP3D grid `read_boundary_3d` (→ `Boundary3dFile`: `x`, `y`, `depths`) | `write_bty_file`, `write_bty_long_format`, `write_ati_file`, `write_ssp`, `write_reflection_coefficient`, `write_source_beam_pattern`; staging in `uacpy.io.refl_io`: `stage_reflection_file`, `stage_source_beam_pattern`, `dedupe_reflection_file` |
 | Scooter / SPARC (`.grn`, `.rts`, `STSFIL`) | `read_grn_file` (→ `GreensFunction`: `to_field`, `to_transfer_function`, `snapshot_to_field`, `snapshot_to_time_field`, `wavenumbers`), `read_rts_file` (one frequency's pressure from it: `uacpy.models.sparc.rts_to_pressure`), `read_ts` | `write_sparc_source_time_series` |
-| OASES (`.dat`, `.trf`, `.rhs`) | `read_oast_tl` (→ a `ResultStack` over frequency), `read_oasp_trf` (→ a pressure `Field`), `read_oasr_reflection_coefficients` (→ `ReflectionCoefficient`), `read_oasn_covariance` (→ `Covariance`), `read_oasn_replicas` (→ `Replicas`), `read_oases_rhs_header` | `write_oast_input`, `write_oasp_input`, `write_oasr_input`, `write_oasn_input`, `write_oass_input`, `write_oassp_input` |
+| OASES (`.dat`, `.trf`, `.rhs`) | `read_oast_tl` (→ a list of TL `Field`s, one per frequency), `read_oasp_trf` (→ a pressure `Field`), `read_oasr_reflection_coefficients` (→ `ReflectionCoefficient`), `read_oasn_covariance` (→ `Covariance`), `read_oasn_replicas` (→ `Replicas`), `read_oases_rhs_header` | `write_oast_input`, `write_oasp_input`, `write_oasr_input`, `write_oasn_input`, `write_oass_input`, `write_oassp_input` |
 | RAM (`in.pe`/`ram.in`, `psif.dat`, `tl.line`, `tl.grid`, `pcomplex.bin`) | `read_psif`, `read_tl_line`, `read_tl_grid`, `read_pcomplex_grid` | `write_inpe`, `write_ramin`, `write_ssp_file`, `write_bth_file`, `write_ranges_file`, `write_sediment_file`, `write_water_attenuation_file` |
-| Audio (`.wav`) | `read_wav`, `read_wav_metadata` | `write_wav` |
+| Audio (`.wav`) | `read_wav` (`start=` / `frames=` read one span), `read_wav_info` (→ `WavInfo`: encoding, `bits`, channels, rate, `n_frames`), `read_wav_metadata` | `write_wav` |
 
 Anything malformed raises `FileFormatError` (§4), never a bare `ValueError`.
 
@@ -1817,7 +1978,7 @@ Anything malformed raises `FileFormatError` (§4), never a bare `ValueError`.
 import uacpy
 
 bellhop = uacpy.Bellhop(work_dir='/tmp/run1', cleanup=False)
-r = bellhop.compute_tl(env, source, receiver)
+r = bellhop.compute_field(env, source, receiver)
 shd = uacpy.io.read_shd_file(r.metadata['shd_file'])   # the raw .shd behind the Field
 ```
 
@@ -1859,17 +2020,18 @@ helpers, geographic maps, animation, and the raw-array DSP/comms plotters.
 | `env.plot()` / `plot_environment(env)` | SSP + seafloor cross-section, optional `source=`/`receiver=` markers |
 | `ssp.plot()` / `env.ssp.plot()` / `plot_ssp(ssp)` / `plot_ssp(c, depths=z)` | sound-speed profile `c(z)` as a depth-down line (one per range if range-dependent); bare speeds take `depths=` (and `ranges=` for a 2-D array). `label=` / `color=` overlay several profiles on one `ax=`: an explicit colour draws the whole profile in it and drops the range colourbar, and the label names the profile rather than each column. `show_legend=` forces the legend on or off |
 | `bathymetry.plot()` / `altimetry.plot()` / `plot_range_profile(profile)` | seafloor depth / sea-surface height vs range — the shape carriers |
-| `Thorp().table(f).plot()` / `plot_absorption(coefficient)` / `plot_absorption(alpha, frequencies=f)` | volume absorption `α(f)` (dB/km, log-log), or an α(f, z) heatmap when the carrier has a depth axis. The plotter draws a carrier or a bare dB/km array (`frequencies=`, and `depths=` for a 2-D one) and computes nothing: a law is refused, so build a carrier with the law's `.table(...)` |
+| `Thorp().table(f).plot()` / `plot_absorption(coefficient)` / `plot_absorption(alpha, frequencies=f)` | volume absorption `α(f)` (dB/km, log-log), or an α(f, z) heatmap when the carrier has a depth axis. The plotter draws a carrier or a bare dB/km array (`frequencies=`, and `depths=` for a 2-D one) and computes nothing: a law is refused, so build a carrier with the law's `.table(...)`. The plotters that do take a description — `plot_weighting(group)`, `plot_roc(deflection)`, `plot_bottom_loss(material)`, `plot_ber_curve(..., scheme=)` — are conveniences over a named public function (`auditory_weighting`, `sonar.roc_curve`, `bottom_loss_curve`, `comms.ber_theory`) on a grid that needs no choosing; an absorption law needs a frequency grid and, for Francois-Garrison, an ocean, which are the caller's |
 | `plot_bottom_properties(env)` | seabed `c` / `ρ` / `α` vs depth, per layer stack |
 | `plot_bottom_loss(materials, water_sound_speed=…)` | plane-wave bottom loss vs grazing angle, one curve per seabed. Takes a preset name, a property dict (`sound_speed` / `density` / `attenuation`), a sequence of either, or a `{label: material}` mapping, so a fetched seabed and the canonical presets share one axes and one `water_sound_speed` — the critical angle is the ratio of the two speeds, so curves drawn against different water are not comparable. `mark_critical=True` rules each critical angle, skipping any seabed slower than the water, which has an angle of intromission instead |
 | `plot_mode_excitation(modes, source)` | what a source array drives, both descriptions on one angle axis: a stem per mode at its grazing angle, height `|Σₙ wₙ·φₘ(zₙ)|` — the modal excitation, which is what sets the field in a waveguide — over the same array's free-field pattern: `Source.array_beam_pattern` gives `P(θ)=f(θ)·A(θ)`, the product theorem's element pattern times `Source.array_factor`'s point-source factor (Butler & Sherman §7.1.1). The two agree while the pattern is symmetric in ±θ and diverge once steering breaks that, so both are drawn |
-| `source.plot_beam_pattern()` / `plot_beam_pattern(pattern)` | source directivity from a `.sbp` table or an `(N, 2)` array; polar by default, oriented like the field (0° = increasing range, +angle downward) and spanning the propagating half-plane. `polar=False` gives level-vs-angle, `mirror=True` reflects a half-defined table |
+| `source.plot_beam_pattern()` / `plot_beam_pattern(pattern)` | source directivity from a `BeamPatternTable` (`read_source_beam_pattern`) or an `(N, 2)` `(angle, level)` array; polar by default, oriented like the field (0° = increasing range, +angle downward) and spanning the propagating half-plane. `polar=False` gives level-vs-angle, `mirror=True` reflects a half-defined table |
 | `beams.plot()` / `plot_beam_power(beams)` | a scanned beam's power against **look** angle, from the `BeamformedField` `beamform_field` returns. The receive dual of `plot_beam_pattern`, which is a *launch* fan and labels its axis so; `at=` selects the grid point or frequency bin, `normalize=False` keeps the absolute level |
 | `plot_mode_wavenumbers(modes)` / `plot_modes_heatmap(modes)` | Re and Im of the modal wavenumbers against mode index (twin axes) · mode shapes as a heatmap |
 | `plot_mode_speeds(modes, c_bottom=…)` / `plot_dispersion(modes_by_frequency)` | phase speed per mode index, with the group speed where the backend filled it and the seabed speed marking the trapped count · the same two speeds against frequency, over a **sequence** of `Modes` (one per frequency), which it sorts by each result's own `f0` |
 | `plot_greens_function(grn, modes=…)` / `plot_wavenumber_sampling(f, c_low, c_high, delta_k, rmax_m=…)` | `|G(k_r, z)|` from a Scooter `.grn`, with Kraken's eigenvalues marked on it · the wavenumber axis that transform is sampled on — the phase-speed window against the water and seabed `ω/c`, and whether the receivers fit inside the alias period `2π/Δk` |
 | `plot_signal_excess(field)` / `plot_detection_probability(field)` / `plot_roc(deflection)` | `uacpy.sonar` field maps and the ROC curve |
-| `plot_bathymetry_map(lats, lons, depth)` / `plot_sea_ice_map(grid)` | geographic maps (also the pluggable `map_fn=` of `plot_overview`) |
+| `plot_track_exposure(plan, ax=None, *, positions=None, depth=None, contours=None)` | the plan view of a moving source's cumulative SEL (`Field.track_exposure(..., along=)`), with its line, its events and labelled contours (an exposure criterion, say); `plan.plot()` draws it |
+| `plot_bathymetry_map(grid)` or `plot_bathymetry_map(lats, lons, depth)` / `plot_sea_ice_map(grid)` | geographic maps (also the pluggable `map_fn=` of `plot_overview`); the `BathyGrid` `fetch_bathy_grid` returns is taken whole and credits its source |
 | `land_polygons(resolution='50m')` / `download_coastline(cache_dir=None)` | the Natural Earth land rings those maps draw behind the data, and the call that caches them offline — both take `url=` for a mirror |
 | `plot_overview(env, map_data, tl=…, title=…)` | three-panel map + TL + environment composite; `map_title`/`tl_title`/`env_title` name the panels, `title=` the figure |
 | `animate_field(field)` / `save_animation(field, path)` / `plot_time_snapshots(fields, times_s)` | time-domain animation and its still-frame grid |
@@ -1926,14 +2088,14 @@ auto-selects the shape. Plotting a field with 3+ surviving axes raises and tells
 you to slice first.
 
 **Fixed TL colour scale.** Every TL heatmap defaults to `vmin=20`, `vmax=120` dB
-(`_TL_LIMITS`) so figures are directly comparable across runs and models. Pass
+so figures are directly comparable across runs and models. Pass
 explicit `vmin=`/`vmax=` to override.
 
 ### (a) Single TL field with seafloor + contours
 
 ```python
 import uacpy
-tl = bellhop.compute_tl(env, src, rcv)     # Field, coords = {depth, range}; .dB → dB
+tl = bellhop.compute_field(env, src, rcv)     # Field, coords = {depth, range}; .dB → dB
 fig, ax = uacpy.plot.plot_field(
     tl, env=env,            # env= overlays the seafloor on the (depth, range) heatmap
     contours=[60, 80, 100], # dB contour lines
@@ -1953,9 +2115,9 @@ uacpy.plot.plot_field(tl.at(range=5000))        # TL vs depth, depth down
 
 ```python
 fields = {
-    'Bellhop': bellhop.compute_tl(env, src, rcv),
-    'Kraken':  kraken.compute_tl(env, src, rcv),
-    'RAM':     ram.compute_tl(env, src, rcv),
+    'Bellhop': bellhop.compute_field(env, src, rcv),
+    'Kraken':  kraken.compute_field(env, src, rcv),
+    'RAM':     ram.compute_field(env, src, rcv),
 }
 fig, axes = uacpy.plot.compare_models(fields, env=env, contours=[80, 100])
 ```
@@ -1981,24 +2143,25 @@ functions, not a result. All plotting lives in `uacpy.visualization` (`plot_psd`
 | Waveforms | `lfm_chirp`, `hfm_chirp`, `tone_burst`, `gaussian_pulse`, `ricker_wavelet`, `sparc_pulse`, `nwave` |
 | Coded probes | `m_sequence` (also `uacpy.comms.m_sequence`, the same function), `make_mseq_probe`, `bpsk_modulate` |
 | Noise synthesis | `make_bandlimited_noise` (unit-RMS, or in Pa at an absolute in-band density `psd_level_dB`), `synthesize_noise_from_psd` (any spectrum, at its absolute level); noise relative to a signal's power is `uacpy.comms.awgn` |
-| Spectral / levels | One estimator per statistic: `welch` and `constant_q` (both `scaling='density'` or `'spectrum'`), `sound_exposure` (the ISO 18405 band energy), and a histogram twin of each — `probabilistic_welch`, `probabilistic_constant_q`, `probabilistic_sound_exposure` (→ `SpectralEstimate` / `ProbabilisticSpectralEstimate`, whose Welch and exposure forms keep `.segment_levels_dB`, `.segment_times` and `.percentiles(q)`), and on plain arrays `level_histogram` (the dB-level histogram every histogram twin builds) and `level_percentiles`. Each takes only the parameters its own statistic can honour: `sound_exposure` has no window, overlap, detrending or averaging, because a band sum is the band's energy only when every bin is counted once and whole, and asking a bin estimator for `scaling='exposure'` raises and names it. `freq_min`, `freq_max` and `integration_time` mean the same thing in all six. `BAND_TYPES` names the ladders (`'decidecade'` by default, also `'octave'` — both IEC 61260-1 base-10 — and `'linear'`). Two result types cover the family: a name that fixes one scaling would say "density" over band power |
-| Band ladders | `decidecade_bands` (ISO 18405) and `octave_bands` (every third decidecade; `base=2` for exact octaves), both IEC 61260-1 base-10, `standard_bands` (the bands `sound_exposure` reports a range on, per `band_type`); `band_levels` integrates a PSD onto either ladder, `decidecade_band_levels` onto the decidecade one, each returning a `BandLevels` (`centres`, `levels`, with the band edges, `band_type` and `ref`; `.plot()` draws it) |
-| Arrays | `steering_vectors`, `beamform`, `snapshots` (→ `Snapshots`), `sample_covariance`, `bartlett` and `mvdr` (the Bartlett / MVDR power of any rows of element weights — steering vectors or matched-field replicas — with `normalize=`), `music_spectrum`, `shading_taper` (→ `BeamformResult`) |
+| Spectral / levels | One estimator per statistic: `welch` and `constant_q` (both `scaling='density'` or `'spectrum'`), `sound_exposure` (the ISO 18405 band energy), and a histogram twin of each — `probabilistic_welch`, `probabilistic_constant_q`, `probabilistic_sound_exposure` (→ `SpectralEstimate` / `ProbabilisticSpectralEstimate`, whose Welch and exposure forms keep `.segment_levels_dB`, `.segment_times` and `.percentiles(q)`), and on plain arrays `level_histogram` (the dB-level histogram every histogram twin builds) and `level_percentiles`. Each takes only the parameters its own statistic can honour: `sound_exposure` has no window, overlap, detrending or averaging, because a band sum is the band's energy only when every bin is counted once and whole, and asking a bin estimator for `scaling='exposure'` raises and names it. `freq_min`, `freq_max`, `integration_time` and `axis` mean the same thing in all six: `axis` is the time axis of a multichannel record, along which `welch`, `constant_q` and `sound_exposure` return one spectrum (one band row) per channel, frequency last, and the histogram twins pool the channels. `.level_dB(ref)` on a `SpectralEstimate` (and on a `'psd'` `SpectrogramResult` or a `CQSpectrogramResult`) is its power as a level in dB re `ref` (1 µPa by default), `power_to_dB` of it. `BAND_TYPES` names the ladders (`'decidecade'` by default, also `'octave'` — both IEC 61260-1 base-10 — and `'linear'`). Two result types cover the family: a name that fixes one scaling would say "density" over band power |
+| Band ladders | `decidecade_bands` (ISO 18405) and `octave_bands` (every third decidecade; `base=2` for exact octaves), both IEC 61260-1 base-10, `standard_bands` (the bands `sound_exposure` reports a range on, per `band_type`); `band_levels` integrates a PSD onto either ladder, `decidecade_band_levels` onto the decidecade one, each returning a `BandLevels` (`centers`, `levels`, with the band edges, `band_type` and `ref`; `.plot()` draws it) |
+| Arrays | `steering_vectors`, `beamform`, `snapshots` (→ `Snapshots`), `sample_covariance`, `bartlett` and `mvdr` (the Bartlett / MVDR power of any rows of element weights — steering vectors or matched-field replicas — with `normalize=`), `music_spectrum` (the same `weights` rows and `normalize='max'`), `shading_taper`; `beamform` returns a `BeamformResult` |
 | Arrays over a field | `beamform_field` (→ `BeamformedField`: beam power over a whole `(n_elements, *grid)` field, with `.best`, `.best_angle`, `.array_gain()` and the named `grid_coords` it was given), `realised_array_gain` (what `.array_gain()` returns, on plain arrays), `plane_wave_array_gain` (`|Σw|²/‖w‖²`), `matched_replica_gain` (the `10log10(N)` ceiling), `independent_beams` (orthogonal looks in a scanned sector — pair with `per_look_false_alarm`) |
 | Active / pulse compression | `matched_filter`, `pulse_compression`, `processing_gain_dB`, `ambiguity_function` (→ `AmbiguityResult`) |
 | Time-frequency | `spectrogram`, `analytic_signal`, `envelope`, `instantaneous_frequency`, `wigner_ville`, `cwt`, `inverse_cwt`, `cepstrum`, `complex_cepstrum`, `inverse_complex_cepstrum` (→ `SpectrogramResult`/`WignerVilleResult`/`CWTResult` with its `times`/`Cepstrum` with its `quefrencies`/`ComplexCepstrum`) |
 | Constant-Q (Brown 1991) | `constant_q_transform`, `constant_q_spectrogram`, and `constant_q` / `probabilistic_constant_q` (→ `CQTResult`/`SpectralEstimate`/`CQSpectrogramResult`/`ProbabilisticSpectralEstimate`) |
 | Gather transforms | `fk_transform`, `taup_transform`, `radon_transform`, `inverse_fk`, `inverse_taup`, `inverse_radon` (→ `FKResult`/`TauPResult`/`RadonResult`). `FKResult.scaling` says whether `power` is a calibrated density per Hz·rad/m (`scaling='density'`) or the raw unnormalised `\|FK\|²`, and `plot_fk` labels the panel from it |
-| System ID / channel | `frf_welch`, `etfe`, `periodic_etfe`, `lsfir` (→ `FRFResult`), `FRF` (one of them configured), `impulse_response`, `channel_response`, `impulse_response_from_transfer_function`, `transfer_function_from_impulse_response`, `synthesize_time_series` (a waveform through `H(f)`, density convention), `simulate_reception`, `fractional_delay_taps` |
-| Channel statistics (arrays) | `arrival_transfer_function`, `received_amplitudes`, `remove_delay`, `spectral_centroid`, `synthesis_band`, `broadband_propagation_loss`, `gate_transfer_function`, `rms_delay_spread`, `energy_support`, `coherence_bandwidth`, `coherence_factor`, `COHERENCE_BANDWIDTH_FACTORS`, `channel_regime`, `ChannelRegime`, `uniform_frequency_step`, `tone_phasor`, `waveform_spectrum_at`, `simulate_arrival_reception`, `simulate_arrival_grid`, `arrival_grid_transfer_function`, `delayandsum` |
-| Modal acoustics (arrays) | `core.acoustics.modal_attenuation`, `core.acoustics.mode_shapes_at`, `core.acoustics.modal_field`, `core.acoustics.modal_phase_speeds`, `core.acoustics.modal_grazing_angles`, `core.acoustics.modal_excitation`, `core.bottom.medium_density_at` |
-| Ray geometry (arrays) | `core.acoustics.polyline_miss_distance` |
+| System ID / channel | `frf_welch`, `etfe`, `periodic_etfe`, `lsfir` (→ `FRFResult`), `FRF` (one of them configured), `impulse_response`, `channel_response`, `impulse_response_from_transfer_function`, `transfer_function_from_impulse_response`, `synthesize_time_series` (a waveform through `H(f)` on its `1/Δf` record at exactly `sample_rate`, density convention; `t_start` required), `simulate_reception`, `apply_impulse_response` (a waveform through sampled taps, linear FFT overlap-add), `apply_impulse_response_blocks` (the same over a signal in blocks, `O(block + M)` memory), `fractional_delay_taps` |
+| Channel statistics (arrays) | `arrival_transfer_function`, `received_amplitudes`, `remove_delay`, `spectral_centroid`, `synthesis_band`, `broadband_propagation_loss`, `gate_transfer_function`, `rms_delay_spread`, `energy_support`, `coherence_bandwidth`, `coherence_factor`, `COHERENCE_BANDWIDTH_FACTORS`, `channel_regime`, `ChannelRegime`, `uniform_frequency_step`, `tone_phasor`, `waveform_spectrum_at`, `simulate_arrival_reception`, `simulate_arrival_grid`, `arrival_grid_transfer_function`, `arrival_impulse_response`, `arrival_grid_impulse_response`, `delayandsum` |
+| Modal acoustics (arrays) | `acoustics.modal_attenuation`, `acoustics.mode_shapes_at`, `acoustics.modal_field`, `acoustics.modal_phase_speeds`, `acoustics.modal_grazing_angles`, `acoustics.modal_excitation`, `core.bottom.medium_density_at` |
+| Ray geometry (arrays) | `acoustics.polyline_miss_distance` |
 | Seafloor mask (arrays) | `core.bathymetry.mask_below_seafloor` (`Field.mask_below_seafloor` wraps it) |
-| Wavenumber domain (arrays) | `core.acoustics.hankel_transform`, `core.acoustics.wavenumber_taper`, `alias_period`, `ranges_fit_alias_period`, `wavenumbers_from_phase_speeds`, `snapshot_frequency_component` (the methods of `GreensFunction` call these) |
-| Boundary / waveguide scalars (arrays) | `core.acoustics.reflection_coeff`, `critical_angle`, `bottom_loss_curve`, `pekeris_root` |
-| Seawater & bubbles (arrays) | `core.acoustics.sound_speed_mackenzie` / `_delgrosso` / `_teos10` / `_unesco`, `density`, `doppler`, `bubble_sound_speed`, `bubble_resonance`, `bubble_surface_loss` |
+| Wavenumber domain (arrays) | `acoustics.hankel_transform`, `acoustics.wavenumber_taper`, `alias_period`, `ranges_fit_alias_period`, `wavenumbers_from_phase_speeds`, `snapshot_frequency_component` (the methods of `GreensFunction` call these) |
+| Boundary / waveguide scalars (arrays) | `acoustics.reflection_coeff`, `critical_angle`, `bottom_loss_curve`, `pekeris_root` |
+| Seawater & bubbles (arrays) | `acoustics.sound_speed_mackenzie` / `_delgrosso` / `_teos10` / `_unesco`, `density`, `doppler`, `bubble_sound_speed`, `bubble_resonance`, `bubble_surface_loss` |
 | Model agreement | `metrics.tl_rmse` (same grid), `metrics.tl_rmse_on_shared_ranges` (resampling) |
-| Levels (arrays) | `core.acoustics.spl`, `peak_level`, `sound_exposure_level`, `power_to_dB`, `transmission_loss_dB`, `received_level_dB`, `sum_levels_dB`, `integrate_psd`, `band_level`, `no_energy_mask` |
+| Levels (arrays) | `acoustics.spl`, `peak_level`, `sound_exposure_level`, `cumulative_sound_exposure_level`, `track_exposure`, `power_to_dB`, `transmission_loss_dB`, `received_level_dB`, `sum_levels_dB`, `integrate_psd`, `band_level`, `no_energy_mask` |
+| Frequency weighting (arrays) | `acoustics.weighted_pressure`, `frequency_weighting`, `auditory_weighting`; every SEL entry point takes `weighting=` (a hearing group, a `W(f)` function or a `(f, W_dB)` table) |
 | PE grid quality (arrays; module `models.pe_grid`) | `models.optimize_grid`, `grid_error`, `optimal_c0`, `numerov_error`, `combined_error`, `rams_stable_dr`, `rams_stable_theta`, `rams_growth_margin`, `rams_dz_shear_cap`, `rotated_pade_coefficients`, `rotated_cn_growth`, `rotated_growth_floor`, `seabed_leak_rate` (`GridInfeasibleError` when no grid meets `eps`) |
 | Modal / dispersion | `warp_signal`, `unwarp_signal`, `modal_group_velocity` |
 
@@ -2010,7 +2173,8 @@ tuple, with the rest on attributes: `frf_welch` (H1/H2, with `.coherence`),
 pins the FIR order; one of the criterion strings `'AIC'`, `'BIC'`, `'FPE'` or
 `'CP'` searches instead, up to `max_order`. `FRF(method=…, estimator=…, order=…)`
 is the configuration of one of them, run by `.compute(x, y, sample_rate, …)`
-on a record pair or averaged over a 2-D block of measurements:
+on a record pair or averaged over a 2-D block of measurements;
+`method='p_etfe'` also takes `period=`, the excitation period in samples:
 
 ```python
 from uacpy.acoustic_signal import lsfir
@@ -2027,9 +2191,9 @@ cycle count) and a `sample_rate` build their own time axis and return
 (and `synthesize_noise_from_psd`, which returns `(time, signal,
 sample_rate)`). Those that take a time axis you built evaluate the pulse on it
 and return the signal alone: `ricker_wavelet(time, …)`, `gaussian_pulse(time,
-…)`, `nwave(time, …)`, and `sparc_pulse(t, omega, pulse_type)`, which returns
-`(signal, name)` and takes its frequency as `omega` in rad/s, as the SPARC
-pulse library it ports does. Build that axis as `np.arange(n) / sample_rate`,
+…)`, `nwave(time, …)`, and `sparc_pulse(times, frequency, pulse_type)`, which
+returns `(signal, name)`, takes its characteristic frequency in Hz and forms
+ω = 2πf itself. Build that axis as `np.arange(n) / sample_rate`,
 the step the first family uses. `make_mseq_probe(freq_min, freq_max, *, sample_rate,
 duration)` returns the signal alone. Build a chirp, push it through a delay, and
 pulse-compress:
@@ -2061,7 +2225,7 @@ TS, RL. The `*_field` helpers map the equation over a model TL
 | Detection theory | `albersheim_snr`, `probability_of_detection`, `roc_curve`, `detection_index`, `deflection_coefficient`, `detection_threshold_energy`, `per_look_false_alarm`, `scan_false_alarm` (a scan of N independent beams false-alarms at the scan's rate, not one beam's) |
 | Target strength | `ts_sphere`, `ts_cylinder`, `ts_plate`, `ts_ellipsoid`, `ts_convex` |
 | Scattering / reverb | `lambert_bottom`, `LAMBERT_MU_DB`, `chapman_harris_surface`, `column_scattering_strength`, `boundary_reverberation`, `volume_reverberation`, `total_reverberation` |
-| High-frequency boundary scattering (APL-UW TR 9407, 10–100 kHz) | `apl_uw_bottom_backscatter`, `apl_uw_bottom_loss`, `apl_uw_surface_backscatter`, `BottomParameters` (`.from_sediment` / `.from_grain_size` / `.from_geoacoustics` / `.from_bottom` / `.from_environment`), `APL_UW_SEDIMENTS` |
+| High-frequency boundary scattering (APL-UW TR 9407, 10–100 kHz) | `apl_uw_bottom_backscatter`, `apl_uw_bottom_loss`, `apl_uw_surface_backscatter`, `BottomParameters` (`.from_sediment` / `.from_grain_size` / `.from_geoacoustics` / `.from_bottom` / `.from_environment`), `APL_UW_SEDIMENTS`, `TABLE_WATER_SOUND_SPEED` |
 | Interface roughness (coherent reflection) | `rayleigh_parameter`, `coherent_reflection_factor`, `perturbative_grazing_limit` |
 | Matched-field localization | `synthesize_replica`, `replica_bank`, `replica_bank_from_field` (→ `Replicas`), `csdm`, `bartlett`, `mvdr` (→ an ambiguity `Field` in dB re max, whose `reference` is the peak power); `uacpy.core.results.ambiguity_field` builds that Field from an array-level surface |
 
@@ -2088,6 +2252,9 @@ or from a uacpy seabed — `from_environment(env)` reads a fetched
 `Environment`'s bottom (grain size first, geoacoustics against the water at
 the seafloor otherwise), `from_bottom` a bare `Bottom` / `SeabedColumn` /
 `BoundaryProperties` — and `APL_UW_SEDIMENTS` is the handbook's Table 2.
+`TABLE_WATER_SOUND_SPEED` (1528.0 m/s) is the water speed the report's
+Table 3 and Figure 2 were computed with; pass it as the water sound speed to
+reproduce them.
 
 `LAMBERT_MU_DB` (float, −27.0) is `lambert_bottom`'s default backscattering
 constant 10·log10(μ) in dB — Mackenzie's (1961) deep-water value; pass
@@ -2113,10 +2280,10 @@ numpy); it does not require OASES/OASN.
 
 `replica_bank_from_field(field, array_depths=...)` is the model-agnostic
 counterpart of `replica_bank`: it assembles the same `Replicas` bank from a
-coherent pressure `Field` (or a `ResultStack` over `source_depth`) produced by
-*any* forward model — run with the receivers at the array element depths and
-the source swept over the candidate grid — so PE or ray replicas drop into the
-same `bartlett` / `mvdr` processors.
+coherent pressure `Field` produced by *any* forward model — run with the
+receivers at the array element depths and a multi-depth `Source` over the
+candidate depths, whose field carries them on its `source_depth` axis — so PE
+or ray replicas drop into the same `bartlett` / `mvdr` processors.
 
 ```python
 import numpy as np
@@ -2152,7 +2319,7 @@ verified bit-exact against CMRE janus-c).
 | Modulation | `SCHEMES` (scheme name → `(family, order)`), `Modulator`, `constellation`, `dpsk_modulate`, `dpsk_demodulate`, `fsk_modulate`, `fsk_demodulate` |
 | Channel | `awgn`, `ebn0_to_snr_dB`, `snr_to_ebn0_dB`, `multipath_channel`, `pulse_shaped_taps`, `apply_channel`, `apply_fading_channel`, `fading_taps` |
 | Equalization | `DFE`, `lms_equalizer`, `rls_equalizer`, `mmse_equalizer`, `slicer`, `complex_gain` (the least-squares one-tap gain against a known sequence) |
-| Doppler / sync | `estimate_doppler_scale`, `compensate_doppler`, `doppler_from_speed`, `detect_preamble`, `detect_frames`, `matched_filter_metric` |
+| Doppler / sync | `estimate_doppler_scale` (→ a `DopplerEstimate` record; `.plot()` draws its ambiguity curve), `compensate_doppler`, `doppler_from_speed`, `detect_preamble`, `detect_frames`, `matched_filter_metric` |
 | Passband PHY | `rrc_filter`, `rrc_pulse`, `rc_pulse`, `pulse_shape`, `rrc_matched_filter`, `upconvert`, `downconvert`, `symbol_sync` |
 | Framing | `pack_frame`, `unpack_frame`, `bytes_to_bits`, `bits_to_bytes` |
 | Transceivers | `Transmitter`, `CommsReceiver`, `ReceiverDiagnostics` (what `receive(..., return_diagnostics=True)` returns on both receivers; the OFDM pair is in its own row) |
@@ -2191,8 +2358,8 @@ auditory weighting (Southall 2019). Spectra are in dB re 1 µPa²/Hz.
 | Area | Public names |
 |------|--------------|
 | Wenz spectrum | `WenzNoise` (band levels: `.band_level(freq_min, freq_max)`, `.decidecade_levels(...)`), `NoiseComponents` (its per-mechanism levels), `wind_noise_level`; the submodel registries `WIND_MODELS`, `SHIPPING_MODELS`, `RAIN_MODELS`, `THERMAL_MODELS`, `TURBULENCE_MODELS` (read-only; `register_noise_model(kind, name, fn)` adds one); `KNUDSEN_BAND_HZ` and `KNUDSEN_UNCERTAINTY_DB` (the Knudsen wind curves' band and spread) |
-| Ship radiated noise (ISO 17208) | `radiated_noise_level`, `monopole_source_level`, `nominal_source_depth`, `lloyd_mirror_correction`, `RNL_UNCERTAINTY_DB` |
-| Mammal weighting (Southall 2019) | `auditory_weighting`, `apply_weighting`, `weighted_level`, `HEARING_GROUPS`, `WEIGHTING_PARAMS` |
+| Ship radiated noise (ISO 17208) | `radiated_noise_level`, `monopole_source_level`, `nominal_source_depth`, `lloyd_mirror_correction`, `RNL_UNCERTAINTY_DB`; without a measurement, `ship_source_level_wales_heitmeyer` (the Wales & Heitmeyer 2002 mean merchant-ship monopole spectrum, Ainslie Eq. 8.195: measured 30–1200 Hz, continued to 15 kHz with Ainslie's −23 dB/decade gradient (sect. 8.3.1.4), refused outside 30 Hz–15 kHz; an ensemble mean with no speed term) |
+| Mammal weighting (Southall 2019) | `auditory_weighting`, `apply_weighting`, `weighted_level`, `HEARING_GROUPS`, `WEIGHTING_PARAMS`, `EXPOSURE_THRESHOLDS` (Southall Tables 6-7 TTS/PTS onset; weighted SEL of a record or a map: `weighting=` on `sound_exposure_level`, see §8) |
 
 The matching plotters `plot_source_level` and `plot_weighting` live on
 `uacpy.plot` (§9), not on `uacpy.noise`.
@@ -2226,7 +2393,9 @@ single module — each is sourced to its standard:
   (`band_type='octave'`, `octave_bands`). `standard_bands` and `band_levels`
   give the same ladders by `band_type` name.
 - **`uacpy.noise.monopole_source_level`** / `radiated_noise_level` — ship
-  monopole source level, ISO 17208.
+  monopole source level, ISO 17208, from a measurement;
+  `ship_source_level_wales_heitmeyer` — the mean merchant-ship monopole
+  spectrum (Wales & Heitmeyer 2002), without one.
 - **`uacpy.noise.auditory_weighting`** — marine-mammal frequency weighting,
   Southall et al. 2019.
 
@@ -2234,10 +2403,11 @@ single module — each is sourced to its standard:
 (`tl_rmse`, `tl_max_error`, `tl_bias`), each taking `(field, reference)` as
 two `Field`s on one depth/range grid (2-D or a 1-D cut) or two plain dB
 arrays, and `tl_rmse_on_shared_ranges(field, reference, depth=…)` for two
-grids that share only some ranges.
+grids that share only some ranges (or two `(ranges, tl_dB)` curves, no depth).
 `uacpy.analytic` supplies the exact fields to score an engine against:
 `free_field`, `lloyd_mirror`, `ideal_waveguide(env, source, receiver)` and
-`pekeris(env, source, receiver)` (see the utilities guide, §2).
+`pekeris(env, source, receiver)` (see the utilities guide, §2); example 49
+scores Bellhop, Kraken and Scooter against them.
 
 ```python
 from uacpy.acoustics import (
@@ -2261,8 +2431,23 @@ argument that names its unit: wind speed is **knots** everywhere
 `sonar.apl_uw_surface_backscatter(wind_speed_kn=)`, and what
 `data.fetch_wind` returns), the unit the Wenz and Chapman-Harris fits are
 stated in; the fits stated in m/s convert inside, and a reading in m/s converts
-with `core.units.ms_to_knots`. Arguments named `*_deg` are degrees,
-`core.acoustics.reflection_coeff(grazing_deg, …)` included.
+with `uacpy.units.ms_to_knots`. Arguments named `*_deg` are degrees,
+`acoustics.reflection_coeff(grazing_deg, …)` included.
+
+A name may carry its unit as a suffix, and then the suffix is the unit:
+`_m` metres, `_km` kilometres, `_s` seconds, `_deg` degrees, `_rad` radians,
+`_kn` knots, `_dbar` decibars, `_dB` decibels (`ranges_m`, `delays_s`,
+`grazing_deg`, `wind_speed_kn`). A suffix states the unit where the name
+alone could be read in another one; an unsuffixed length is metres.
+
+One idea has one spelling: `fc` for a centre or carrier frequency
+(`OASP(fc=)`, `Arrivals.channel_taps(fc=)`, `synthesis_band(fc=)`, the `fc`
+metadata key), `centers` for band centres (`BandLevels.centers`),
+`n_frequencies` for a count of frequencies (`Bellhop(n_frequencies=)`,
+`cwt(n_frequencies=)`) and `rng` for a random generator (`awgn(rng=)`,
+`schmidl_cox_preamble(rng=)`). `test_one_spelling_per_idea` in
+`tests/test_harmonisation_gates.py` holds every public parameter, result field,
+settings-record field and documented metadata key to them.
 
 ### Objects wrap functions
 
@@ -2281,12 +2466,11 @@ spread = rms_delay_spread(tau_measured, power_measured)   # from anywhere else
 
 This is a correctness rule, not a tidiness one. Two implementations of one
 computation drift, and the drift is invisible to the tests you would naturally
-write: `Field.to_transfer_function` and
-`transfer_function_from_impulse_response` were written with different
-normalisations and disagreed by a factor of `fs` **with the phase exact to
-1e-16**, so every phase assertion passed. `Arrivals.transfer_function` and
-Bellhop's broadband synthesis disagreed by up to 10.7 dB per bin on a negative
-amplitude, because one took `abs` and the other did not.
+write: two inverses of `h → H` with different normalisations differ by a factor
+of `fs` **with the phase exact to 1e-16**, so every phase assertion passes, and
+two arrival sums that differ only in taking `abs` of a negative amplitude
+differ by up to 10.7 dB per bin. Each computation therefore has one
+implementation, and every route to it calls that one.
 
 Three things make delegation possible, and their absence is what forces a
 method to re-implement:
@@ -2307,27 +2491,30 @@ array-level pair `impulse_response_from_transfer_function` /
 **density** convention (`ifft·fs`, `rfft·dt`) because a model's `H` is a
 density. Each pair round-trips to floating point; mixing halves is off by
 `fs`. `acoustic_signal.synthesize_time_series` is the density route on plain
-arrays — the core `Field.synthesize_time_series` runs.
+arrays — the core `Field.synthesize_time_series` runs. `Field.impulse_response`
+stores the taps of `impulse_response_from_transfer_function` in the density
+convention (`taps·fs`, 1/s, the unit of `to_time_trace`'s impulse response),
+and `Field.apply` takes them back to taps (`h·dt`) before
+`apply_impulse_response` convolves.
 
-One caveat worth stating plainly: every carrier is exported and constructible
-from plain arrays, so a method-only computation was never strictly
-unreachable. What it cost was learning the canonical coord order, the
-`kind`/`unit` tags and which metadata keys the method reads — a real coupling
-to pay for arithmetic that needs none of it.
+Every carrier is also exported and constructible from plain arrays, so a
+method could in principle be reached by building the carrier; the function
+form spares a caller the canonical coord order, the `kind`/`unit` tags and the
+metadata keys the method reads, a coupling that arithmetic needs none of.
 
 ### Units
 
 | Quantity | Unit | Note |
 |----------|------|------|
-| Length / depth / range | metres | suffix `_km` only when kilometres (`m_to_km` at IO boundaries) |
+| Length / depth / range | metres | a `_m` suffix states it where useful; `_km` when kilometres (`m_to_km` at IO boundaries) |
 | Frequency | Hz | |
 | Time | seconds | |
 | Angle | degrees | launch angles, grazing/incidence angles, wedge angles (radians only inside formulas) |
 | Sound speed | m/s | |
-| Density | g/cm³ | **acoustic inputs** (bottom/sediment). The `core.acoustics` formula-level helpers are the exception — SI `kg/m³` (and radians) — see *Density* below |
+| Density | g/cm³ | **acoustic inputs** (bottom/sediment). The `uacpy.acoustics` formula-level helpers are the exception — SI `kg/m³` (and radians) — see *Density* below |
 | Attenuation (geoacoustic) | dB per wavelength | models emit the matching `AT` TopOpt letter |
 | Attenuation (volume) | dB/km | `FrancoisGarrison(...).table(f)`, `Thorp().table(f)` |
-| Pressure | Pa (µPa for levels) | a recording enters through `uacpy.acoustics.pressure`, which turns volts (or ADC counts) into Pa given the hydrophone sensitivity in dB re 1 V/µPa; `uacpy.acoustics.spl` takes the waveform from there to dB re 1 µPa |
+| Pressure | Pa (µPa for levels) | a recording enters through `uacpy.acoustics.pressure_from_recording`, which turns volts (or ADC counts) into Pa given the hydrophone sensitivity in dB re 1 V/µPa; `uacpy.acoustics.spl` takes the waveform from there to dB re 1 µPa |
 | Pressure level / SPL | dB re 1 µPa | air would be dB re 20 µPa |
 | Noise spectral level | dB re 1 µPa²/Hz | |
 
@@ -2362,7 +2549,7 @@ to pay for arithmetic that needs none of it.
   `Δk·√(2k/(π·r))`. `'R'` is that weight without the `1/√π` (~4.97 dB hot) and
   is divided back in the SPARC model; `'S'` is scaled by `−2` inside
   `GreensFunction.snapshot_to_time_field` (SPARC
-  `'D'`/`'S'` remain experimental — see the SPARC parameter table in §18).
+  `'D'`/`'S'` are experimental — see the SPARC parameter table in §18).
 - A 2-D (line-source) analytic solution differs by the spreading factor
   `|G₃D/G₂D| = √(k/2πr)` — relevant only when comparing against closed-form 2-D
   references (see the ideal-wedge benchmark in `tests/test_benchmarks_analytic.py`).
@@ -2370,8 +2557,8 @@ to pay for arithmetic that needs none of it.
   their plots (`plot_sel`, `plot_psd`, `plot_ppsd`, `plot_spectrogram`, and the
   gather/transform/comms plotters) live in `uacpy.visualization`, not in the
   computation modules. Levels are formed through
-  `core.acoustics.power_to_dB` (`10·log₁₀(power/ref²)`), which floors `power` at
-  `PRESSURE_FLOOR` before the log so a silent sample yields a finite, very
+  `acoustics.power_to_dB` (`10·log₁₀(power/ref²)`), which floors `power` at
+  `PRESSURE_FLOOR` (1e-30, `uacpy.core.constants`) before the log so a silent sample yields a finite, very
   negative level rather than `−inf`.
 
 ### Phase / time convention
@@ -2383,7 +2570,7 @@ to pay for arithmetic that needs none of it.
   where the `phase_reference` carried on a `Result` fixes the reference (see §8,
   *Phase reference — why IFFT needs it*).
 - Broadband bands are defined per model: RAM uses half-bandwidth `fc/q_factor` (the sweep spans `fc ± fc/q_factor`), `Δf = 1/record_duration`;
-  Bellhop synthesizes `n_freqs` bins over `bandwidth_factor·fc` (§18) — a full width, so the same band is
+  Bellhop synthesizes `n_frequencies` bins over `bandwidth_factor·fc` (§18) — a full width, so the same band is
   `Q = 2/bandwidth_factor`. Passing the band as a `frequencies=` array — or as a multi-element
   `Source.frequencies` — means the same band on every engine. OASP computes it on its own
   `1/(DT·NX)` bin ladder spanning that band, so its bins need not be the ones listed (it warns
@@ -2514,18 +2701,19 @@ have their own measurements —
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| `binary not found` / model won't run | native binaries aren't built — run `./install.sh -y` (lands in `uacpy/bin/`, gitignored); pick a backend with `--bellhop fortran\|cxx\|cuda`. |
+| `binary not found` / model won't run | native binaries aren't built — run `./install.sh -y` (lands in `uacpy/bin/`, gitignored); pick a backend with `--bellhop fortran\|cxx\|cuda`. `python -m uacpy` lists which engine binaries were found and where. |
 | `UnsupportedFeatureError` | the model can't honour that `RunMode` or env axis. Check `model.supports_mode(...)`; unsupported env *shapes* are reduced by the collapse step (one `FallbackWarning` per dropped feature) — override the policy with `Model(collapse={...})`. |
-| TL is `NaN` in places | `NaN` marks no-data cells. Every engine NaNs the `r ≤ 0` columns of a point-source field (the `1/√r` spreading is singular there); Bellhop also NaNs cells no ray reached (shadow zones). Below the seafloor it is per-engine: Bellhop and RAM NaN receivers below the local seafloor; Scooter and SPARC compute through the sediment layers and NaN only below the deepest modelled interface; Kraken and the OASES models return the physical transmitted / evanescent field (Kraken NaNs only receivers in an *elastic* sub-bottom, which `field.exe` cannot evaluate). A solver that **failed** there also NaNs: RAM marks a diverged Padé march (and every receiver cell that interpolates one), `Modes.with_attenuation` marks modes whose perturbation has no answer, and a trace synthesised from a spectrum with unsolved bins is NaN rather than carrying a notch — uacpy never writes a level over a sample the model did not produce, and a cell that genuinely carries no energy reports the 600 dB `PRESSURE_FLOOR` instead. The solver cases are announced by a warning naming the cause: a `NumericsWarning` for a diverged march or unsolved bins, a `ValidityWarning` for a mode whose attenuation has no answer. Reductions and `uacpy.metrics` exclude NaNs via `np.isfinite`; plots leave them blank. |
+| TL is `NaN` in places | `NaN` marks no-data cells. Every engine NaNs the `r ≤ 0` columns of a point-source field (the `1/√r` spreading is singular there; Bellhop never evaluates `r = 0` for a line source either, except with `beam_type='S'`). A Bellhop cell no beam reached is not `NaN`: the engine's empty beam sum is an exact zero, reported at the 600 dB no-energy marker. Below the seafloor it is per-engine: Bellhop and RAM NaN receivers below the local seafloor; Scooter and SPARC compute through the sediment layers and NaN only below the deepest modelled interface; Kraken and the OASES models return the physical transmitted / evanescent field (Kraken NaNs only receivers in an *elastic* sub-bottom, which `field.exe` cannot evaluate). A solver that **wrote no number** there also NaNs: RAM marks the samples its march wrote as NaN/inf (and every receiver cell that interpolates one; a finite sample is the march's own value, however far below 0 dB), `Modes.with_attenuation` marks modes whose perturbation has no answer, and a trace synthesised from a spectrum with unsolved bins is NaN rather than carrying a notch (the bins where a normal-mode model found no mode, Kraken's `no_mode_bins`, are the exception: the modal sum there is empty, and every synthesis takes them as zero) — uacpy never writes a level over a sample the model did not produce, and a cell that genuinely carries no energy reports the 600 dB `PRESSURE_FLOOR` instead. The solver cases are announced by a warning naming the cause: a `NumericsWarning` for non-finite PE samples or unsolved bins, a `ValidityWarning` for a mode whose attenuation has no answer. Reductions and `uacpy.metrics` exclude NaNs via `np.isfinite`; plots leave them blank. |
 | OASES tests skipped / `requires_oases` | OASES is academic-licensed and not bundled; fetch it via `install.sh --oases yes`. Run only the rest with `pytest -m "not requires_oases and not requires_network"`. |
 | `Bellhop()` warns that `bellhopcuda` found no CUDA device | the auto-pick found the CUDA build but no usable GPU (none installed, `CUDA_VISIBLE_DEVICES=""`, a container without `--gpus`), so the run moved to the next installed binary for the rest of the process. Pass `Bellhop(backend='cxx')` to choose it directly; `result.backend` names the engine that ran. An explicit `backend='cuda'` raises instead. |
 | A solver keeps running after its Python process was killed | binaries run in their own session so a timeout can reap them; on Linux with util-linux `setpriv` (2.33+) they are also ended when the launching Python process dies. Without it — macOS, busybox-based images, older util-linux — killing Python outright (a scheduler's walltime, a notebook kernel restart, an outer `timeout`) leaves the binary running. Pass the model's `timeout=` so uacpy reaps it itself, and stop a leftover by its PID (`ps -eo pid,etime,args \| grep <binary>`, then `kill <pid>`). |
 | Wrong Python / missing deps | activate the project venv (`source uacpy_venv/bin/activate`), not system Python; `pip install -e ".[dev]"`. |
+| `numpy.ndarray size changed, may indicate binary incompatibility` on a NetCDF load | a compiled dependency the NetCDF route imports (`netCDF4`, `cftime`) was built against an older numpy than the one installed; the message is that module's, the load completes and the arrays come back bit-identical. Reinstall those wheels against the installed numpy to silence it: `pip install --force-reinstall --no-cache-dir netCDF4 cftime`. |
 | Two runs give slightly different numbers | expected in three places only, all bounded: the default `Bellhop()` backend (~1 ULP), the BLAS thread count (1e-16 to 1e-13 relative), and a `.prt` CPU-time stamp that no numeric output reads. Everything else is byte-identical — see [§15 Reproducibility](#reproducibility) for what to pin. |
 
 ## 17. Examples Index
 
-All 46 runnable scripts live in `uacpy/examples/`. Run them **by script
+All 50 runnable scripts live in `uacpy/examples/`. Run them **by script
 path** from the repo root — `python uacpy/examples/example_01_basic_shallow_water.py`
 — the form `run_all_examples.py` and the test suite use. The module form
 (`python -m uacpy.examples.example_01_…`) also works, from a source checkout;
@@ -2539,11 +2727,11 @@ uacpy calls it demonstrates are named in its own docstring.
 | 01 | Basic shallow-water propagation — Pekeris waveguide |
 | 02 | Sound-speed profiles — Munk, Pekeris, thermocline |
 | 03 | Five models on one thermocline environment at a single reference frequency (needs OASES, `./install.sh --oases yes`; runs the other models without it) |
-| 04 | Bellhop advanced — all-features showcase, multi-depth `ResultStack` summed as a phased array with `superpose(weights=)` |
+| 04 | Bellhop advanced — all-features showcase, a multi-depth `Field` over `source_depth` summed as a phased array with `superpose(weights=)` |
 | 05 | RAM (mpiramS) — range-dependent bottom and bathymetry |
-| 06 | Kraken — adiabatic modes over a continental shelf; an antiphase source pair (`Source(weights=[1, -1])` → `ResultStack.superpose()`) |
+| 06 | Kraken — adiabatic modes over a continental shelf; an antiphase source pair (`Source(weights=[1, -1])` → `Field.superpose()`) |
 | 07 | All models — comprehensive comparison (needs OASES, `./install.sh --oases yes`; runs the other models without it) |
-| 08 | Deep-water SOFAR channel — long-range propagation, convergence zones (needs OASES, `./install.sh --oases yes`; runs the other models without it) |
+| 08 | Deep-water SOFAR channel — long-range propagation in the Munk channel (needs OASES, `./install.sh --oases yes`; runs the other models without it) |
 | 09 | Ambient noise (Wenz) + PSD→time-series synthesis + PPSD check |
 | 10 | Signal-processing tour |
 | 11 | Bellhop run modes — comprehensive |
@@ -2582,6 +2770,10 @@ uacpy calls it demonstrates are named in its own docstring.
 | 44 | Two propagation models through one detection chain — a symmetric comparison protocol with its own measured noise floor, maps that agree where headline ranges do not, and the beam's broadband reception |
 | 45 | The level a signal with bandwidth or duration reaches, as a map — broadband propagation loss against the continuous-wave answer and against the incoherent stand-in, and the sound exposure level of one burst at a stated source level |
 | 46 | The same acoustics on data that never came from a model — a measured power delay profile, a recorded waveform and a hand-written mode set, through the array-level functions the carriers wrap |
+| 47 | The exposure a moving source delivers — single-shot SEL maps unweighted and weighted for two hearing groups, the cumulative SEL of a survey line against distance with the distance to TTS onset, the plan view, and one receiver's record accumulating to the same number |
+| 48 | Model files in, labelled data out — Bellhop's `.shd` and `.arr` read back with `uacpy.io.read_shd_file` / `read_arr_file`, and the results exported with `to_netcdf` / `from_netcdf`, `to_xarray` and `to_dataframe` (the export calls need `pip install "uacpy[xarray]"`) |
+| 49 | Three engines against closed-form fields — Bellhop against `analytic.lloyd_mirror` (hat and Gaussian beams), Kraken and Scooter against `analytic.ideal_waveguide`, the agreement measured with `uacpy.metrics` |
+| 50 | A frequency sweep in parallel, with the PE grid each frequency needs — `models.optimize_grid` before the runs, `run_parallel` with one `Job` per frequency, and `grid_error` on the grid RAM marched |
 
 ## 18. Parameter Reference
 
@@ -2604,7 +2796,7 @@ the per-model tables below.
 | `verbose` | — | `False` | Status-logging gate: `False`/`'silent'` → warnings+errors only; `True`/`'info'`; `'debug'`. |
 | `work_dir` | path | `None` | Fixed scratch directory; `None` → a fresh temp dir per run. |
 | `cleanup` | — | `None` | Delete scratch after the run; `None` → `True` unless `work_dir` is pinned. |
-| `timeout` | s | `600.0` | Per-subprocess wall-clock limit (every model, SPARC included). |
+| `timeout` | s | `600.0` | Per-subprocess wall-clock limit (every model, SPARC included); uacpy guidance: a guard on the host, no engine reads a time limit. |
 | `collapse` | dict | `None` | Per-feature range/layer collapse-policy overrides (see §7, "Environment feature support and collapse"). |
 
 ### `run()` call arguments (every model)
@@ -2614,9 +2806,9 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | Argument | Unit | Default | Meaning |
 |---|---|---|---|
 | `run_mode` | `RunMode` | `None` | Which product to compute; `None` → the model's default mode. |
-| `frequencies` | Hz | `None` | Explicit frequency vector for `BROADBAND` / `TIME_SERIES`, overriding `source.frequencies` for the call; on single-frequency run modes it is ignored with a warning. Kraken defaults `run_mode=None` to `BROADBAND` when the vector is multi-element; RAM never switches run modes on it. |
+| `frequencies` | Hz | `None` | Explicit frequency vector for `BROADBAND` / `TIME_SERIES`, overriding `source.frequencies` for the call, and refused like a `Source`'s own frequencies (positive, finite, each value once). On a single-frequency run mode it raises `ConfigurationError`, since the frequency comes from the `Source`; OASP is the exception, its solver always runs a frequency sweep and the keyword pins it. Kraken defaults `run_mode=None` to `BROADBAND` when the vector is multi-element; RAM never switches run modes on it. |
 | `source_waveform` | array | `None` | Source pressure pulse for `TIME_SERIES` synthesis. |
-| `sample_rate` | Hz | `None` | Sample rate of `source_waveform`. The output's rate is the returned field's `sample_rate`: Bellhop (arrival synthesis) returns this rate; Kraken, Scooter and RAM (inverse FFT of a transfer function) return `nfft·Δf` of their synthesis grid, which differs from it (e.g. 2560 Hz for a 2000 Hz input). Read `result.sample_rate` back before adding noise, writing a WAV or stacking traces from two models. |
+| `sample_rate` | Hz | `None` | Sample rate of `source_waveform`, and of the returned trace on every engine: Bellhop places each arrival on its samples, and Kraken, Scooter, RAM and OASP sum their band at `t_start + n/sample_rate` exactly (`sample_rate/Δf` samples a record, the next whole number above it when that is not whole). |
 | `output_duration` | s | `None` | Time-series record length, overriding the auto/constructor value. |
 | `t_start` | s | `None` | Time of the record's first sample, after emission, on every engine that can place its record (Bellhop, Kraken, Scooter, RAM, OASP, OASSP; SPARC's always starts at emission and warns). `None` opens it just before the estimated earliest arrival (a tenth of the record or `4/bandwidth`, whichever is longer, on the IFFT engines; a tenth of the pulse on Bellhop); a value replaces that placement. |
 
@@ -2627,7 +2819,7 @@ Passed at call time, not construction — the fixed no-`**kwargs` signature (§4
 | `Source.depths` | m | *required* | Source depth(s), positive down. |
 | `Source.frequencies` | Hz | *required* | Source frequency or frequencies. |
 | `Source.source_type` | — | `'point'` | `'point'` (cylindrical spreading), `'line'` (Cartesian), `'scaled'` (point with cylindrical spreading removed). Support: Bellhop `point/line`; Kraken, Scooter, Bounce and `SPARC(output_mode='S')` all three; RAM and OASES `point` only, except OASR (reflection only, any source type — nothing in its deck reads the source). |
-| `Source.beam_pattern` | deg / dB | `None` | Source directivity: `(N, 2)` `[angle_deg, level_dB]` array with strictly increasing angles, or a `.sbp` path. `None` = omnidirectional. Read by Bellhop and Kraken. |
+| `Source.beam_pattern` | deg / dB | `None` | Source directivity: `(N, 2)` `[angle_deg, level_dB]` array with strictly increasing angles, the `BeamPatternTable` `read_source_beam_pattern` returns, or a `.sbp` path. `None` = omnidirectional. Read by Bellhop and Kraken. |
 | `Receiver.depths` | m | *required* | Receiver depth(s), positive down. |
 | `Receiver.ranges` | m | `None` | Receiver range(s); `None` → a single point at 0 m. |
 
@@ -2645,116 +2837,116 @@ with a warning naming the value it dropped.
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
-| `backend` | — | `None` | Binary variant: `'fortran'`/`'cxx'`/`'cuda'`; `None` auto-selects CUDA > C++ > Fortran. |
+| `backend` | — | `None` | Binary variant: `'fortran'`/`'cxx'`/`'cuda'`; `None` auto-selects CUDA > C++ > Fortran (uacpy guidance: fastest first). |
 | `dimensionality` | — | `'2D'` | Only `'2D'` is supported; `'3D'` raises. |
-| `beam_type` | — | `'G'` | `G` geometric hat (Cartesian; BELLHOP's own default), `B` geometric Gaussian (Cartesian), `g` geometric hat (ray-centred), `S` simple Gaussian, `C`/`R` Červený in Cartesian / ray-centred coordinates. `'b'` raises: `bellhop.f90:403` `ERROUT`s on it and the C++/CUDA ports silently substitute the Cartesian beam. |
-| `n_beams` | count | `0` | Number of beams; `0` defers to Bellhop's auto-selection. |
-| `launch_angles` | deg | `(-80, 80)` | Launch-angle limits `(min, max)`. |
-| `ray_step` | m | `0.0` | Ray step size; `0` = automatic. |
-| `z_box` | m | `None` | Max depth of the ray box; `None` = 1.2 × max depth. |
-| `r_box` | m | `None` | Max range of the ray box; `None` = 1.2 × max range. |
-| `grid_type` | — | `'R'` | Receiver grid: `'R'` rectilinear, `'I'` irregular (sorted depth *i* pairs with sorted range *i*: a monotone diagonal, never arbitrary points — see `docs/models/bellhop.md`). |
-| `interp_ssp` | — | `None` | SSP scheme; `None` auto (`'quad'` if RD-SSP else `'linear'`). Accepted: `'linear'` (AT `C`, piecewise linear), `'n2linear'`, `'pchip'`, `'spline'`, `'quad'` (2-D `.ssp`). `'analytic'` (AT `A`) is refused. |
-| `interp_bathymetry` | — | `'linear'` | `.bty` interpolation: `'linear'` or `'curvilinear'`. |
+| `beam_type` | — | `'G'` | `G` geometric hat (Cartesian; BELLHOP's own default, `ReadEnvironmentBell.f90:393-395`), `B` geometric Gaussian (Cartesian), `g` geometric hat (ray-centred), `S` simple Gaussian, `C`/`R` Červený in Cartesian / ray-centred coordinates. `'b'` raises: `bellhop.f90:403` `ERROUT`s on it and the C++/CUDA ports silently substitute the Cartesian beam. |
+| `n_beams` | count | `0` | Number of beams; `0` defers to Bellhop's auto-selection, as `doc/bellhop.htm` advises (`angleMod.f90:38-51`). |
+| `launch_angles` | deg | `(-80, 80)` | Launch-angle limits `(min, max)`; uacpy guidance (the manual names no fan). |
+| `ray_step` | m | `None` | Ray step size, written as given; `None` = `env.depth / 50` (uacpy guidance); `0` asks BELLHOP for its own `depth/10` (`bellhop.f90:170-174`). |
+| `z_box` | m | `None` | Max depth of the ray box; `None` = 1.2 × max depth (uacpy guidance, measured; the manual's "say 1%" is the documented alternative). BELLHOP drops a ray leaving the box (`bellhop.f90:571-572`); a pinned box short of the seafloor runs with a `ValidityWarning` (not on `RAYS`). |
+| `r_box` | m | `None` | Max range of the ray box; `None` = 1.2 × max range (room for paths that turn back from beyond the farthest receiver). A pinned box short of the farthest receiver runs with a `ValidityWarning` (not on `RAYS`). |
+| `grid_type` | — | `'R'` | Receiver grid: `'R'` rectilinear (BELLHOP's default, `doc/bellhop.htm`), `'I'` irregular (sorted depth *i* pairs with sorted range *i*: a monotone diagonal, never arbitrary points — see `docs/models/bellhop.md`). |
+| `interp_ssp` | — | `None` | SSP scheme; `None` auto (`'quad'` if RD-SSP else `'linear'`). Accepted: `'linear'` (AT `C`, piecewise linear), `'n2linear'`, `'pchip'`, `'spline'`, `'quad'` (2-D `.ssp`; on a range-independent profile it runs as `'Q'` with the one profile written). `'analytic'` (AT `A`) is refused. |
+| `interp_bathymetry` | — | `'linear'` | `.bty` interpolation: `'linear'` (as `doc/ATI_BTY_File.htm` advises) or `'curvilinear'`. |
 | `interp_altimetry` | — | `'linear'` | `.ati` interpolation: `'linear'` or `'curvilinear'`. |
-| `beam_width_type` | — | `'F'` | Cerveny width (`ReadEnvironmentBell.f90:178-181`): `'F'` space-filling, `'M'` minimum width, `'W'` WKB (used for `beam_type` ∈ C/R). |
-| `beam_curvature` | — | `'D'` | `'D'` double, `'S'` single, `'Z'` zero. |
-| `eps_multiplier` | factor | `1.0` | Beam-width epsilon multiplier. |
-| `r_loop` | m | `1000.0` | Range at which the beam width is chosen. |
-| `n_image` | count | `1` | Number of images. |
-| `ib_win` | — | `4` | Beam-windowing parameter. |
-| `component` | — | `'P'` | **Reserved: only `'P'` (pressure) returns a field.** The Cerveny ray-centred field component: `'P'` pressure, `'V'` vertical, `'H'` horizontal particle velocity (`influence.f90:120-130`); any other letter raises (`io/bellhop_writer.py:70`). Only `beam_type='R'` reads it — `InfluenceCervenyRayCen` is the sole `Beam%Component` site — and there `'V'`/`'H'` raise `UnsupportedFeatureError`, since a particle-velocity `.shd` has no `Field` kind; every other beam type ignores the letter with a warning. |
-| `beam_shift` | — | `False` | Enable beam-shift on boundary reflections. |
-| `n_freqs` | count | `128` | Frequency bins for BROADBAND/TIME_SERIES synthesis from a single centre frequency. |
-| `bandwidth_factor` | factor | `0.5` | Fractional bandwidth of the synthesised band around the centre frequency. |
-| `auto_bounce` | — | `True` | Auto-route *layered* bottoms through BOUNCE (elastic half-spaces run natively); `False` collapses the stack to a half-space (one warning). |
+| `beam_width_type` | — | `None` | Cerveny width (`ReadEnvironmentBell.f90:178-181`): `'F'` space-filling, `'M'` minimum width, `'W'` WKB (used for `beam_type` ∈ C/R). `None` is `'F'`, uacpy guidance (measured; BELLHOP has no built-in width). |
+| `beam_curvature` | — | `None` | `'D'` doubling, `'S'` standard, `'Z'` zeroing (`ReadEnvironmentBell.f90:202-210`). `None` is `'S'`, BELLHOP's built-in value (`bellhopMod.f90:25`). |
+| `eps_multiplier` | factor | `None` | Beam-width epsilon multiplier; `None` is `1.0`, BELLHOP's built-in value (`bellhopMod.f90:23`). |
+| `r_loop` | m | `None` | Range at which the beam width is chosen, read only by the `'M'` width (`bellhop.f90:378-380`); `None` is 1000 m, uacpy guidance (BELLHOP has no built-in value; the toolbox's calib decks write 1 km, its 100 km decks 25-100 km). |
+| `n_image` | count | `None` | Number of images; a whole number ≥ 0 (read as an INTEGER, `ReadEnvironmentBell.f90:217`). `None` is `1`, BELLHOP's built-in (`bellhopMod.f90:22`). |
+| `ib_win` | — | `None` | Beam-windowing parameter; a whole number ≥ 0 (read as an INTEGER, `ReadEnvironmentBell.f90:217`). `None` is `5`, BELLHOP's built-in (`bellhopMod.f90:22`). The six Cerveny knobs set on another beam type are not used, with a notice. |
+| `component` | — | `'P'` | **Reserved: only `'P'` (pressure) returns a field.** The Cerveny ray-centred field component: `'P'` pressure, `'V'` vertical, `'H'` horizontal particle velocity (`influence.f90:120-130`); any other letter raises `ConfigurationError` (`validate_beam_shape` in `io/bellhop_writer.py`). Only `beam_type='R'` reads it — `InfluenceCervenyRayCen` is the sole `Beam%Component` site — and there `'V'`/`'H'` raise `UnsupportedFeatureError`, since a particle-velocity `.shd` has no `Field` kind; every other beam type ignores the letter with a warning. `'P'` is BELLHOP's built-in value (`bellhopMod.f90:24`). |
+| `beam_shift` | — | `False` | Enable beam-shift on boundary reflections; off is BELLHOP's own default (`ReadEnvironmentBell.f90:159-165`). |
+| `n_frequencies` | count | `None` | Frequency bins of the BROADBAND band expanded from a single centre frequency; `None` is 128, uacpy guidance (no value in the manuals). Set on a run that expands no band, it gets a notice. |
+| `bandwidth_factor` | factor | `None` | Fractional bandwidth (`None` is 0.5, likewise noticed when unused) of the synthesised band `fc·(1 ± bw/2)`, built as given; must lie in (0, 2) (from 2 up the lower edge reaches 0 Hz). uacpy guidance (the Bellhop User Guide names no width). |
+| `auto_bounce` | — | `True` | Auto-route *layered* bottoms through BOUNCE (elastic half-spaces run natively); `False` collapses the stack to a half-space (one warning). BOUNCE is the manual's route for elastic boundaries (`doc/bellhop.htm`). |
 
 ### Kraken parameters
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
-| `backend` | — | `None` | Modes binary: `'kraken'`/`'krakenc'`; `None` auto-picks `krakenc` for elastic/leaky media. |
-| `mode_coupling` | — | `'adiabatic'` | RD mode transitions: `'adiabatic'` or `'coupled'`. |
-| `n_segments` | count | `None` | Range segments for RD; `None` auto-picks from change-points (gaps > 2 km split). |
-| `mode_points_per_meter` | pts/m | `None` (derived) | Mode-depth grid density. |
+| `backend` | — | `None` | Modes binary: `'kraken'`/`'krakenc'`; `None` auto-picks `krakenc` for elastic/leaky media and a reflection table, `kraken` otherwise. Over a fluid seabed `kraken`'s real arithmetic solves the seabed above its speed as rigid (`BCImpedanceMod.f90:83-88`), where `krakenc` computes leaky modes (`doc/kraken.htm`); a default run says nothing of it, and `'kraken'` or a `c_high` above the seabed speed gives one `ValidityWarning`. `run_settings(...).engine.backend` records the program that ran. |
+| `mode_coupling` | — | `None` | RD mode transitions: `'adiabatic'` or `'coupled'`; `None` = `'adiabatic'`, `field.exe`'s own default (`doc/field.htm`). A set value a range-independent or `MODES` run does not use gives a `FallbackWarning`. |
+| `n_segments` | count | `None` | Range segments for RD. `None` puts edges at the bathymetry / SSP / bottom change points and splits so no segment exceeds 2 km, a seafloor depth change of a quarter of the shortest water wavelength, or (range-dependent SSP) a sound-speed change of `0.5·c/f`, at the run's highest frequency; the automatic count is capped at 200 profiles, thinned evenly with a `NumericsWarning`. An int (≥ 2) forces a uniform split. uacpy guidance (the manuals name no segment spacing). |
+| `mode_points_per_meter` | pts/m | `None` (derived) | Mode-depth grid density; `None` → 10 points per wavelength, the manual's coupled-mode sampling (`doc/kraken.htm`), floor 1.5 pts/m (uacpy guidance). |
 | `field_executable` | path | `None` | `field.exe` path; auto-detected if `None`. |
-| `c_low` | m/s | `None` | Lower phase-speed limit of the modal solver. |
-| `c_high` | m/s | `None` | Upper phase-speed limit. |
-| `n_mesh` | count | `0` | Mesh points per medium; `0` = auto. |
-| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme; `'quad'` is Bellhop-only and raises. |
-| `n_modes` | count | `None` | Cap on the modes `field.exe` propagates (FLP `MLimit`), and the truncation applied to a `Modes` result; `None` uses every mode found. |
-| `leaky_modes` | — | `False` | Include leaky modes (forces `krakenc`). |
+| `c_low` | m/s | `None` | Lower phase-speed limit of the modal solver; `None` → `0` for a fluid environment, KRAKEN's automatic floor (`doc/kraken.htm`), or the slowest compressional speed when the bottom or the surface carries shear (uacpy guidance). |
+| `c_high` | m/s | `None` | Upper phase-speed limit; `None` = 1.05 × max(SSP, bottom) over a fluid or elastic half-space; 10 × the fastest water speed over a `'file'`/`'precalc'` reflection-table seabed (and on `krakenc` over a rigid or vacuum floor); unbounded (`1e9`) over a rigid or vacuum floor on `kraken`; with `leaky_modes=True`, 10 × the fastest speed in the profile, water or seabed. `1e9` is the toolbox's "no upper limit" (`doc/bounce.htm`); the `1.05 ×` and `10 ×` factors are uacpy guidance (`doc/kraken.htm` leaves CHIGH to experience). |
+| `n_mesh` | count | `None` | Mesh points per medium (one count, or one per medium on a range-independent run), at the deck's frequency line; `0` = KRAKEN's automatic mesh (`doc/EnvironmentalFile.htm`), 20 points per wavelength, the shear wavelength where a shear speed is set (`ReadEnvironmentMod.f90:101-104`). `None` = `0`, except that a band deck writes, on a medium that would otherwise fall under AT's 10 points at the band's lowest frequency, the least count that keeps them. |
+| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme; unset → `'linear'` (AT `'C'`, the manual's choice when unsure, `doc/EnvironmentalFile.htm`); `'quad'` is Bellhop-only and raises. |
+| `n_modes` | count | `None` | Cap on the modes `field.exe` propagates (FLP `MLimit`), and the truncation applied to a `Modes` result; `None` uses every mode found, as `doc/field.htm` does with a large count. |
+| `leaky_modes` | — | `False` | Include leaky modes: `c_high` → 10 × the fastest speed in each profile (uacpy guidance, measured), and forces `krakenc`. |
 | `top_reflection_file` | path | `None` | Top-boundary reflection-coefficient file. |
-| `rmax_m` | m | `None` | Mesh-convergence tolerance of KRAKEN's Richardson extrapolation (`kraken.f90:80`, `Error*1000*RMax < 1`) — a **larger** value is a **tighter** tolerance. `field.exe` never reads it. `None` derives it from the receiver ranges. |
+| `rmax_m` | m | `None` | The Acoustics Toolbox's `RMax`: set it to the farthest range you will compute the field at. KRAKEN doubles its mesh until the eigenvalues are accurate at that range (`kraken.f90:80`, `Error*1000*RMax < 1`), so a **larger** value is a **tighter** mesh tolerance; `field.exe` never reads it. `None` = the farthest receiver range, the manual's value (`doc/kraken.htm`); 100 km without a positive receiver range (`compute_modes`), uacpy guidance, measured against the manual's `0`. A set `0` runs (no mesh doubling, with a `NumericsWarning`); a negative value is refused. |
 | `mode_depths` | array | `None` | Explicit mode-depth output grid. |
 
 ### Scooter parameters
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
-| `c_low` | m/s | `None` | Lower phase-speed limit; `None` = 0.95 × min SSP. |
-| `c_high` | m/s | `None` | Upper phase-speed limit; `None` = 1.05 × max(SSP, bottom); 10 × the fastest water speed over a `'file'`/`'precalc'` reflection-table seabed (`_TABLE_BOTTOM_C_HIGH_FACTOR`); unbounded (`1e9`) with `leaky_modes=True`. |
-| `n_mesh` | count | `0` | Total FE mesh points **per medium** (AT `NG`); `0` = auto. Not points-per-wavelength. |
-| `rmax_factor` | factor | `None` | Wavenumber-resolution range multiplier; `None` → 2.0 narrowband / 3.0 broadband. |
-| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. `'quad'` is Bellhop's external `.ssp` scheme, which the shared AT `EvaluateSSP` cannot read, so it raises. |
-| `wavenumber_spectrum` | — | `'positive'` | FLP Opt(2): `'positive'`/`'negative'`/`'both'` wavenumber spectrum. |
-| `taper` | fraction | `0.0` | Hanning roll-off over this fraction of the wavenumber span at **each** edge of the window before the Hankel transform (`fieldsco.m:taper`); `0` = rectangular window, the AT reference; `0 <= taper < 0.5`. |
-| `stabilizing_attenuation_off` | — | `False` | Disable Scooter's stabilising attenuation (TopOpt pos 7 = `'0'`). |
+| `c_low` | m/s | `None` | Lower phase-speed limit; `None` = 0.90 × min SSP, the factor `scooter.f90:258` computes (and does not apply). |
+| `c_high` | m/s | `None` | Upper phase-speed limit; `None` = the toolbox's unbounded `1e9` (`doc/bounce.htm`) over every bottom, so the integral starts at `k_min ≈ 0` — Jensen et al. (*Computational Ocean Acoustics*, ch. 4 App. 1): "it is recommended to initially include these components by choosing k min = 0". A set value is written as given; one that drops a direct or surface-reflected path the receivers see warns. |
+| `n_mesh` | count | `0` | Total FE mesh points **per medium** (AT `NG`); `0` = the manual's automatic mesh, scaled with frequency and floored at 100 points (`scooter.f90:106-110`). Not points-per-wavelength. |
+| `rmax_factor` | factor | `None` | Wavenumber-resolution range multiplier; `None` → 2.0 in every run mode, the ratio of the toolbox's own Scooter decks, narrowband and broadband (`tests/Munk/MunkS.env`, `tests/BroadBand/MunkS.env`: RMax 200 km for receivers to 100 km); `doc/scooter.htm` asks only that RMax reach the farthest receiver. |
+| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. `'quad'` is Bellhop's external `.ssp` scheme, which the shared AT `EvaluateSSP` cannot read, so it raises. Unset → `'linear'` (AT `'C'`, the manual's choice when unsure, `doc/EnvironmentalFile.htm`). |
+| `wavenumber_spectrum` | — | `'positive'` | FLP Opt(2): `'positive'`/`'negative'`/`'both'` wavenumber spectrum; `'positive'` is the manual's recommendation (`doc/fields.htm`). |
+| `taper` | fraction | `0.0` | Hanning roll-off over this fraction of the wavenumber span at **each** edge of the window before the Hankel transform (`fieldsco.m:taper`); `0` = rectangular window, the AT reference; `0 <= taper < 0.5`, and a positive taper is refused on a Green's function of fewer than four phase speeds. |
+| `stabilizing_attenuation_off` | — | `False` | Disable Scooter's stabilising attenuation (TopOpt pos 7 = `'0'`); `False` keeps SCOOTER's own default (`scooter.f90:129-130`). |
 
 ### SPARC parameters
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
-| `c_low` | m/s | `None` | Lower phase-speed limit; `None` = auto. |
-| `c_high` | m/s | `None` | Upper phase-speed limit; `None` = auto. |
-| `n_mesh` | count | `0` | Total mesh points **per medium** (AT `NG`); `0` = auto, sized at 20 points per wavelength at the band top `freq_max`. Not points-per-wavelength. |
-| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. `'quad'` is Bellhop's external `.ssp` scheme, which the shared AT `EvaluateSSP` cannot read, so it raises. |
-| `output_mode` | — | `'R'` | Which SPARC output geometry to march: `'R'` horizontal array (one run per receiver depth), `'D'` vertical array (one run per receiver range), `'S'` snapshot. All three return a `TIME_SERIES` `Field` on a shared time grid. **`'D'` and `'S'` are experimental — prefer `'R'`.** See *Fields, pressure normalization & transmission loss* (§15) and `SPARC.run`. |
+| `c_low` | m/s | `None` | Lower phase-speed limit; `None` = 0.90 × min(SSP), Scooter's window. |
+| `c_high` | m/s | `None` | Upper phase-speed limit; `None` = `1e7`, the "no upper limit" every toolbox SPARC deck writes (`tests/iso.env:9`), so `k_min = 0` (Jensen et al., ch. 4 App. 1). Not `1e9`: the per-wavenumber band-pass index (`sparc.f90:398`, `tslib/bandpassc.f90:16`) overflows there on a long source series and silences the source; a deck whose index would overflow is refused. |
+| `n_mesh` | count | `None` | Total mesh points **per medium** (AT `NG`); `None` = 20 points per wavelength at the band top `freq_max`; a set `0` is the toolbox's automatic mesh at the deck frequency (`ReadEnvironmentMod.f90:101-106`). Not points-per-wavelength. |
+| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. `'quad'` is Bellhop's external `.ssp` scheme, which the shared AT `EvaluateSSP` cannot read, so it raises. Unset → `'linear'` (AT `'C'`, the manual's choice when unsure, `doc/EnvironmentalFile.htm`). |
+| `output_mode` | — | `'R'` | Which SPARC output geometry to march: `'R'` horizontal array (one run per receiver depth), `'D'` vertical array (one run per receiver range), `'S'` snapshot. All three return a `TIME_SERIES` `Field` on a shared time grid. **`'D'` and `'S'` are experimental — prefer `'R'`.** `'R'` is uacpy guidance: `doc/sparc.htm` names no default. See *Fields, pressure normalization & transmission loss* (§15) and `SPARC.run`. |
 | `pulse_type` | — | `None` | AT 4-character pulse-type code; `None` marches the run's `source_waveform` (`'FN+B'`) and falls back to `'PN+B'` without one. The `'B'` band-pass is not modelled by the CW source-spectrum deconvolution, so it adds a few dB to the `'R'` absolute level; `'PN+N'` (no band-pass) calibrates tighter (~±1.5 dB vs Kraken). |
-| `n_time_samples` | count | `512` | Number of output time samples. Used verbatim; `run()` warns (naming the value that fixes it) when the resulting Nyquist sits below the source band, because the p(t) would alias silently. |
-| `time_max` | s | `None` | Max time; `None` = auto (2.5 × the travel time to the farthest receiver). |
-| `march_start` | s | `-0.1` | Time the march starts (not the output window, which is `[0, time_max]`). |
-| `courant_factor` | factor | `0.999` | Integration time multiplier. |
-| `max_launches` | count | `20` | Hard cap on the looped axis — receiver depths for `output_mode='R'`, receiver ranges for `'D'` (`'S'` runs once and is uncapped). SPARC marches one subprocess per element, so exceeding the cap raises `UnsupportedFeatureError` rather than running for hours; raise it explicitly (`SPARC(max_launches=...)`) if you mean it. |
-| `rmax_factor` | factor | `None` | RMax multiplier on the receiver max range; `None` → 4.0. SPARC synthesises range inline as a direct `deltak` sum (`sparc.f90:595,622`), and a uniform-`dk` sum is periodic with period `2π/dk ≈ RMax` (`sparc.f90:116`) — pushing RMax well past the receivers keeps the alias off the plot. |
-| `freq_min` | Hz | `None` | Pulse-band lower edge; `None` → one octave around source freq. |
-| `freq_max` | Hz | `None` | Pulse-band upper edge; `None` → one octave around source freq. |
-| `window_sound_speed` | m/s | `None` | Reference speed for the travel-time window when `time_max` is auto; `None` → default. |
+| `n_time_samples` | count | `None` | Number of output time samples over `[0, time_max]`; `None` → the least count with more than eight samples per period at `freq_max`, `floor(8·freq_max·time_max) + 2` (Jensen et al., *Computational Ocean Acoustics*, Sect. 8.2.1.3: "Δt = T/N < 1/(8 f max)"; the manual gives no count). A set value is used verbatim; `run()` warns (naming that count) when its Nyquist sits below the source band, because the p(t) would alias silently. |
+| `time_max` | s | `None` | Output window end; `None` → the run's `output_duration=` when given, else 2.5 × the travel time to the farthest receiver at `window_sound_speed`. |
+| `march_start` | s | `-0.1` | Time the march starts (not the output window, which is `[0, time_max]`); the TSTART of `doc/sparc.htm`'s sample deck. |
+| `courant_factor` | factor | `0.999` | Integration time multiplier (TMULT); `1.0` is the maximum stable step (`doc/sparc.htm`), `0.999` the TMULT of the toolbox's `tests/iso.env`. |
+| `max_launches` | count | `None` | Cap on the looped axis — receiver depths for `output_mode='R'`, receiver ranges for `'D'` (`'S'` runs once). `None` runs every element; a set cap refuses a grid past it with `UnsupportedFeatureError`, since SPARC marches one subprocess per element. |
+| `rmax_factor` | factor | `None` | RMax multiplier on the receiver max range; `None` → `RMax = r + 1.2 × c_fast × time_max`. SPARC synthesises range inline as a direct `deltak` sum (`sparc.f90:595,622`), periodic with period `2π/dk ≈ RMax` (`sparc.f90:116`) and folded mirrored, so receiver `r` sees the replica from `RMax − r`; the default keeps it out of the record — Jensen et al.'s criterion (Sect. 8.3.2) applied to that fold, `1.2` uacpy's measured margin (`4 × r` on the auto window). |
+| `freq_min` | Hz | `None` | Pulse-band lower edge; `None` → the span of `run(frequencies=)`, else the band of a marched waveform, else `0` for a canned pulse (its spectral support starts at 0 Hz, `tslib/cans.f90`). |
+| `freq_max` | Hz | `None` | Pulse-band upper edge; `None` → as `freq_min`, and for a canned pulse on `f = source.frequencies[0]` the top of the support `tslib/cans.f90` states for its shape: `3f` for the default `'P'` ("support [0, 3F]"), `2f` `'R'`, `2.5f` `'A'`, `3f` `'N'`, and `3f` for a shape stated unbounded (uacpy guidance, the toolbox's SPARC decks). |
+| `window_sound_speed` | m/s | `None` | Reference speed for the travel-time window when `time_max` is auto; `None` → the slowest speed in `env.ssp` (uacpy guidance), 1500 m/s only when the profile carries no usable speed. |
 
 ### RAM parameters
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
-| `backend` | — | `None` | RAM-family backend: `'mpirams'`/`'ramgeo'`/`'rams'`/`'ramsurf'`; `None` auto-dispatches by env shape. |
-| `dr` | m | `None` | Range step; `None` → Lytaev optimiser. |
-| `dz` | m | `None` | Depth step; `None` → Lytaev optimiser, floored at `λ/16`, with the shallowest seafloor placed `SEAFLOOR_CELL_OFFSET` (a quarter cell) below a node on the fluid backends. |
-| `zmax` | m | `None` | PE domain depth; `None` = seafloor + absorbing layer. |
-| `n_pade` | count | `6` | Number of Padé coefficients (2–10). |
-| `n_stability` | count | `1` | Number of stability terms. |
-| `stability_range_m` | m | `None` | Stability range; `None` = max output range. |
+| `backend` | — | `None` | RAM-family backend: `'mpirams'`/`'ramgeo'`/`'rams'`/`'ramsurf'`; `None` auto-dispatches by what each code can represent (uacpy guidance; `ramgeo1.5.f:3-4`, `ramsurf1.5.f:3-11`). |
+| `dr` | m | `None` | Range step; `None` → Lytaev optimiser (Lytaev 2023 §4.1; the RAM guide asks for convergence tests rather than a value, `ram.pdf` p.8). |
+| `dz` | m | `None` | Depth step; `None` → Lytaev optimiser, floored at `λ/15` (the Acoustics Toolbox RAM writers' step), refined for the trapped modes, with the shallowest seafloor placed `SEAFLOOR_CELL_OFFSET` (a quarter cell) below a node on the fluid backends. |
+| `zmax` | m | `None` | PE domain depth; `None` = seafloor + sediment stack + a pad of real seabed (the depth the bottom field reaches over the track) + absorbing layer. |
+| `n_pade` | count | `8` | Number of Padé coefficients (2–10); 8 is Collins' sample deck, Lytaev's `[7/8]` and the Acoustics Toolbox RAM writer's order. |
+| `n_stability` | count | `None` | Number of stability terms, written as given (`0` turns them off); `None` → 1 (ram.pdf p.3: "ns = 1 or 2 is effective for most problems"), Collins' sample deck's `ns`. rams0.5 takes `ns = 1` itself (`rams0.5.f:176`), so a value set there gives a notice. |
+| `stability_range_m` | m | `None` | Range past which the stability terms are switched off; `None` keeps them at every range (mpiramS writes the max output range, the Collins codes 0 → `2 × rmax`), the RAM guide's default (`ram.pdf` p.7). |
 | `q_factor` | — | `None` | `fc / half-bandwidth`: the sweep spans `fc ± fc/q_factor`. `None` is resolved from the source: a single frequency with `record_duration` also unset → the default band (128 bins over `fc·(1 ± 0.25)`, as every broadband engine), `1e6` (one bin) for an explicit `run(frequencies=[fc])`; a single frequency with `T` pinned → `4.0`, the default band's half-width; a multi-frequency source → the array's own half-width, `fc / ((n//2 + ½)·Δf)`. |
 | `record_duration` | s | `None` | Time-window width, `Δf = 1/record_duration`. `None` is resolved alongside `q_factor`: a single frequency with `Q` also unset → the default band's spacing (`1.0` for an explicit `run(frequencies=[fc])`); a single frequency with `Q` pinned → `127/(fc·0.5)`, the default band's spacing; a multi-frequency source → `1/Δf` from the array's spacing. |
-| `depth_decimation` | factor | `1` | Output depth-decimation factor. |
-| `earth_curvature` | — | `False` | Apply the flat-earth (Earth-curvature) transformation; off so RAM matches the other engines' flat Earth, on for long-range work (beyond ~56 km). |
-| `absorber_width_wavelengths` | λ | `20.0` | Absorbing-layer width below the seafloor (in wavelengths). |
-| `absorber_attenuation` | dB/λ | `10.0` | Attenuation at the absorbing-layer floor (ramped from sediment attn). |
-| `n_sediment_points` | count | `1000` | Sediment depth control points for the mpiramS profile. |
-| `c0` | m/s | `None` | PE reference (expansion) speed — algorithmic, not physical; `None` → Lytaev Eq. (15). |
-| `accuracy` | — | `None` | Lytaev optimiser accuracy budget (max \|τ·n_steps\|); `None` uses the 1e-3 default. A pinned value that the stability floor prevents reaching warns; the default reports it as status only. |
-| `angle_max` | deg | `30.0` | Max propagation angle bounding the PE spectrum (Lytaev). |
-| `rams_rotation_angle` | deg | `None` | `rams` backend rotated-Padé angle (Milinazzo-Zala-Brooke): `None` is 45° unless the stability rule needs less, then the widest stable angle per frequency (warned); a float pins it. |
-| `rams_rotation` | — | `True` | `rams` Padé branch-cut rotation. |
-| `rams_dr_factor` | factor | `5.0` | Tightening factor on the Lytaev `dr` for the `rams` backend (1.0 disables). The automatic `rams` step is also held under a stability rule — the rotated Crank-Nicolson step's growth on the steepest propagating components against the seabed's leak of them — which binds above a few kHz and in deep water; a pinned `dr` the rule predicts to diverge warns before the march. |
+| `depth_decimation` | factor | `1` | Output depth-decimation factor; `1` = none, as Collins' sample deck (`ram.pdf` p.12-13). |
+| `earth_curvature` | — | `False` | Apply the flat-earth (Earth-curvature) transformation; off so RAM matches the other engines' flat Earth, on for long-range work (beyond ~56 km, Etter §5.5.2); uacpy guidance. |
+| `absorber_width_wavelengths` | λ | `20.0` | Absorbing-layer width below the seafloor (in wavelengths); uacpy guidance, measured on lossless seabeds — far thicker than the RAM guide's "lower few wavelengths" (`ram.pdf` p.7). |
+| `absorber_attenuation` | dB/λ | `10.0` | Attenuation at the absorbing-layer floor (ramped from sediment attn); `10` is the floor of Collins' sample ramp (`ram.pdf` p.12). |
+| `n_sediment_points` | count | `None` | Sediment depth control points for the mpiramS profile, written as given (≥ 4); `None` → one per depth cell over the sediment span, at least 1000. |
+| `c0` | m/s | `None` | PE reference (expansion) speed — algorithmic, not physical; `None` → Lytaev Eq. (15) (Collins' sample uses 1600 m/s for 1500–1700 m/s phase speeds, `ram.pdf` p.8). |
+| `accuracy` | — | `None` | Lytaev optimiser accuracy budget (max \|τ·n_steps\|). `None` → the default chooser's 1e-3 target, relaxed, floored at `λ/15` and capped, each reported as status; a pinned value is met as given (no relaxation, floor or cap) or refused when no grid meets it. |
+| `angle_max` | deg | `None` | Max propagation angle bounding the PE spectrum. `None` → Lytaev (2023) §5.5's `max(30°, steepest bathymetry slope)`; a set value is used as given and never narrowed. |
+| `rams_rotation_angle` | deg | `None` | `rams` backend rotated-Padé angle (Milinazzo-Zala-Brooke): `None` is 45° unless the stability rule needs less, then the widest stable angle per frequency (warned); a float pins it, marched as given (warned when the rule finds it unstable). 45° is uacpy's measured tuning, in line with Milinazzo, Zala & Brooke (1997) Fig. 11. |
+| `rams_rotation` | — | `True` | `rams` Padé branch-cut rotation; uacpy guidance (the 45° tuning and the stability rule were measured with rotation on). |
+| `rams_dr_factor` | factor | `None` | Divisor of the Lytaev `dr` for the `rams` backend, used as given; `None` → 5.0 (uacpy guidance), and 1.0 leaves the λ/5 cap and the stability rule alone. It divides the automatic `dr` only: beside a pinned `dr`, or on another backend, it gives a notice that it is not used. The automatic `rams` step is also held under a stability rule — the rotated Crank-Nicolson step's growth on the steepest propagating components against the seabed's leak of them — which binds above a few kHz and in deep water; a pinned `dr` the rule predicts to diverge warns before the march. |
 
 ### Bounce parameters
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
 | `c_low` | m/s | `None` | Min phase velocity for tabulation (must be > 0). `None` → `min(1400, min(env.ssp))`, AT `bounce.htm`'s "lowest speed in the problem"; a fixed 1400 loses the grazing wedge in water slower than that. |
-| `c_high` | m/s | `None` | Max phase velocity; `None` is unbounded (`1e9`), tabulating the full 0–90° grazing span. A finite value truncates the table at `acos(c0 / c_high)` and must be > `c_low`. |
-| `rmax_m` | m | `None` | Max range for angular sampling; `None` auto-derives from `receiver.range_max` (10000 m fallback). Ignored when `n_angles` is set. |
-| `n_angles` | count | `None` | Explicit number of angular samples; `None` = bounce computes it from `rmax_m`. |
-| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. A BOUNCE deck has no water column, so `'quad'` raises. |
+| `c_high` | m/s | `None` | Max phase velocity; `None` is unbounded (`1e9`, the manual's value, `doc/bounce.htm`), tabulating the full 0–90° grazing span. A finite value truncates the table at `acos(c0 / c_high)` and must be > `c_low`. |
+| `rmax_m` | m | `None` | Max range for angular sampling; `None` auto-derives from `receiver.range_max` (10000 m fallback). Refused beside `n_angles`, which sets it. |
+| `n_angles` | count | `None` | Exact number of angular samples (a count the deck's RMax cannot give is refused, naming the one it gives); refused beside `rmax_m`. `None` = bounce computes it from `rmax_m`. |
+| `interp_ssp` | — | `None` | `TopOpt(1)` sample-connection scheme. A BOUNCE deck has no water column, so `'quad'` raises. Unset → `'linear'` (AT `'C'`, the manual's choice when unsure, `doc/EnvironmentalFile.htm`). |
 
 ### OASES — OAST (transmission loss)
 
@@ -2762,41 +2954,41 @@ with a warning naming the value it dropped.
 |---|---|---|---|
 | `compute_contour` | — | `None` | Add `'C'` option (range-depth contour plot); unset → `False`. |
 | `compute_depth_average` | — | `None` | Add `'A'` option (depth-averaged TL); unset → `False`. |
-| `complex_contour` | — | `None` | `'J'` option (complex integration contour); unset → `True`. |
+| `complex_contour` | — | `None` | `'J'` option (complex integration contour); unset → `True`, as the manual's worked OAST deck (`oast.tex:476`). |
 | `options` | — | `None` | Raw OASES options string, written verbatim; `None` derives it from the three flags above. The string replaces the whole option line, so passing it **together with** any of those flags raises `ConfigurationError` rather than discarding them — that is why the three default to `None` and not to their effective values. |
-| `integration_offset` | dB/λ | `0.0` | Wavenumber-integration contour offset. |
-| `n_wavenumbers` | count | `None` | Number of wavenumber samples; `None` = OASES auto. |
-| `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`, Block VII's phase-speed window (`unoast31.f:213`); `None` derives the pair from the water column alone, which an elastic seabed needs widening — its shear and interface branches sit below the slowest water speed and so fall outside the derived `k_max`. |
-| `range_min` | m | `None` | TL plot range-axis min; `None` → 0. |
-| `range_max` | m | `None` | TL plot range-axis max; `None` → `receiver.range_max`. |
-| `vrec` | m/s | `0.0` | Vertical receiver velocity for the `'d'` Doppler option (VREC). |
+| `integration_offset` | dB/λ | `0.0` | Wavenumber-integration contour offset; `0` asks OASES for its own, the manual's recommended default (`oast.tex:293-303`). |
+| `n_wavenumbers` | count | `None` | Number of wavenumber samples; `None` = OASES's automatic sampling (`NW = -1`, `oast.tex:543-550`). |
+| `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`, Block VII's phase-speed window (`unoast31.f:213`); `None` derives the pair from the water column alone, which an elastic seabed needs widening — its shear and interface branches sit below the slowest water speed and so fall outside the derived `k_max`. The derived pair is `0.90 × min(c_water)`, the factor every wavenumber-integration engine shares (`scooter.f90:258`; Jensen et al., ch. 4 App. 1), and `1e8`, the CMAX of the manual's worked decks (`oast.tex:487`). |
+| `range_min` | m | `None` | First range of OAST's native TL grid (`XLEFT`); `None` → 0, the manual's worked deck (`oast.tex:489`). |
+| `range_max` | m | `None` | Last range of OAST's native TL grid (`XRIGHT`); `None` → `receiver.range_max`, the range OAST's automatic sampling sizes its wavenumber step against (`unoast31.f:427-430`). |
+| `vrec` | m/s | `0.0` | Source/receiver velocity `V` of option `'d'` (Block III, `oast.tex:37`): source and receiver move at the same speed, `V` its projection on the line joining them, so there is no Doppler shift (`oast.tex:215-222`); read only under a raw `options` carrying `'d'`, refused non-zero otherwise. `0` is uacpy guidance (stationary). |
 | `dip_angle` | deg | `None` | Fault dip angle of the dip-slip moment source that option `'4'` selects (`unoast31.f:1117-1122`). `None` writes 0 when `'4'` is present, and raises when it is not. |
 
 ### OASES — OASP (broadband pulse / transfer function)
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
-| `n_time_samples` | count | `None` | Power-of-two FFT length (samples per receiver trace). `None`: 4096 for the default sweep; for a requested band (`frequencies=`, a TIME_SERIES pulse, COHERENT_TL's source frequency) the smallest power of two whose bins are as fine as the requested spacing. A value given is a floor. |
-| `freq_max` | Hz | `None` | Sweep upper edge; `None` → 2.5 × centre frequency. |
-| `freq_min` | Hz | `0.0` | Sweep lower edge. |
-| `center_frequency` | Hz | `None` | Pulse carrier frequency; `None` → the midpoint of the run's frequency band (a single `source.frequencies` entry is its own centre). |
+| `n_time_samples` | count | `None` | Power-of-two FFT length (samples per receiver trace). `None`: 4096 for the default sweep; for a requested band (`frequencies=`, a TIME_SERIES pulse, COHERENT_TL's source frequency) the smallest power of two whose bins are as fine as the requested spacing. A value set must be a power of two (`oasp.tex:129`) and is written as given; when its bins are coarser than the requested spacing a `NumericsWarning` names the count that reaches it. |
+| `freq_max` | Hz | `None` | Sweep upper edge; `None` → 2.5 × centre frequency, as the manual's worked OASP deck (`oasp.tex:572`, `:583`). |
+| `freq_min` | Hz | `None` | Sweep lower edge; `None` → `0`, as the manual's worked OASP deck (`oasp.tex:583`). A pinned edge that differs from a band the call names is refused; beside a derived band it gets a not-used notice. |
+| `fc` | Hz | `None` | Pulse carrier frequency; `None` → the midpoint of the run's frequency band (a single `source.frequencies` entry is its own centre). The manual's FRC (`oasp.tex:84`), which OASP only records (`oasp.tex:278-280`). |
 | `integrand_plot_step` | factor | `None` | Integrand-**plot** frequency decimation (INTF, `unoasp22.f:382,591`); `None` → 40. The `.trf` always carries every bin `LXP1..MX`. |
 | `options` | — | `None` | Raw OASES options string; `None` → `'N J'`. |
 | `integration_offset` | dB/λ | `0.0` | Wavenumber-contour offset. |
 | `n_wavenumbers` | count | `None` | Wavenumber sample count; `None` = auto. |
-| `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`, Block VII's phase-speed window; `None` derives the pair from the water column alone, leaving an elastic seabed's shear and interface branches outside `k_max`. Same knob and same reason as OAST. |
+| `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`, Block VII's phase-speed window; `None` derives the pair from the water column alone, leaving an elastic seabed's shear and interface branches outside `k_max`. Same knob and same reason as OAST, the derived `c_high` is `1e8`, as the manual's worked OASP decks write (`oasp.tex:581`). |
 | `dip_angle` | deg | `None` | Fault dip angle of the dip-slip moment source that option `'4'` selects, as OAST. |
 
 ### OASES — OASR (reflection coefficients)
 
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
-| `angles` | deg | `None` | **Uniformly spaced** angle grid; `None` → `linspace(0, 90, 181)`. OASR regenerates the axis from `(min, max, count)`, so a non-uniform array raises. |
-| `angle_type` | — | `'grazing'` | `'grazing'` (native) or `'incidence'` (grazing = 90 − incidence). |
-| `reflection_type` | — | `None` | `'P-P'` (unset → this) or `'transmission'`. `'P-SV'` and `'P-Slow'` raise `UnsupportedFeatureError`: the water column the wave arrives through carries no SV wave, and no uacpy carrier expresses the poro-elastic medium the Biot slow wave needs. |
+| `angles` | deg | `None` | **Uniformly spaced** angle grid; `None` → `linspace(0, 90, 181)`, the grid of the manual's worked OASR deck (`oasr.tex:373`). OASR regenerates the axis from `(min, max, count)`, so a non-uniform array raises. |
+| `angle_type` | — | `'grazing'` | `'grazing'` (native, OASR's default axis, `oasr.tex:151-152`) or `'incidence'` (grazing = 90 − incidence). |
+| `reflection_type` | — | `None` | `'P-P'` (unset → this, OASR's default, `oasr.tex:138-140`) or `'transmission'`. `'P-SV'` and `'P-Slow'` raise `UnsupportedFeatureError`: the water column the wave arrives through carries no SV wave, and no uacpy carrier expresses the poro-elastic medium the Biot slow wave needs. |
 | `options` | — | `None` | Raw OASES options string; `None` derives from `reflection_type`. |
-| `plot_angle_step` | factor | `None` | Angle-axis **plot** decimation (`unoasr21.f:167`); the `.rco`/`.trc` tables always carry every angle. |
-| `plot_frequency_step` | factor | `None` | Frequency-axis plot decimation, symmetric with `plot_angle_step`. |
+| `plot_angle_step` | factor | `None` | Angle-axis **plot** decimation (`unoasr21.f:167`); the `.rco`/`.trc` tables always carry every angle. A whole number ≥ 0; `0` leaves the plot out. |
+| `plot_frequency_step` | factor | `None` | Frequency-axis plot decimation, symmetric with `plot_angle_step` (a whole number ≥ 0). |
 | `interface_roughness` | m | `None` | Per-interface RMS roughness (top → bottom). |
 
 ### OASES — OASN (noise covariance / replicas)
@@ -2804,20 +2996,20 @@ with a warning naming the value it dropped.
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
 | `options` | — | `None` | OASES options string; `None` → `'N'` (covariance) / `'R'` (replica). |
-| `surface_noise_level` | dB re 1 µPa²/Hz | `0.0` | Surface-generated noise spectral level. Disabled when `abs(level) < 0.01` (`oasnun22.f:183`); a **negative** value is a spectrum-file unit number, not a quieter surface (`oasnun22.f:191-193`). Requires a vacuum or air `env.surface` — OASES stops on an upper half-space faster than 500 m/s. |
-| `white_noise_level` | dB re 1 µPa²/Hz | `None` | Uncorrelated per-hydrophone white-noise level, added to every covariance diagonal. OASES has no off switch for it (`oasnun22.f:228`), so an explicit `0.0` is a literal 0 dB re 1 µPa²/Hz (1e-12 Pa²/Hz on the covariance diagonal) per sensor; `None` writes −200 dB, numerically nil. |
-| `deep_noise_level` | dB re 1 µPa²/Hz | `0.0` | Deep broad-area source spectral level. Disabled when `level < 0.01`, including any negative value (`oasnun22.f:233`) — deliberately not the same rule as `surface_noise_level`. |
-| `deep_source_depth` | m | `None` | Depth of the deep noise sheet; `None` → half the water depth. |
+| `surface_noise_level` | dB re 1 µPa²/Hz | `0.0` | Surface-generated noise spectral level. Written exactly as given; disabled when `abs(level) < 0.01`, tested at single precision as OASN reads it (`oasnun22.f:183`); a **negative** level at or beyond −0.01 is a spectrum-file unit number to OASN, not a quieter surface (`oasnun22.f:191-193`), and is refused. Requires a vacuum or air `env.surface` — OASES stops on an upper half-space faster than 500 m/s. |
+| `white_noise_level` | dB re 1 µPa²/Hz | `None` | Uncorrelated per-hydrophone white-noise level, added to every covariance diagonal. OASES has no off switch for it (`oasnun22.f:228`), so an explicit `0.0` is a literal 0 dB re 1 µPa²/Hz (1e-12 Pa²/Hz on the covariance diagonal) per sensor; `None` writes −200 dB, numerically nil (uacpy guidance: the manual gives no level). |
+| `deep_noise_level` | dB re 1 µPa²/Hz | `0.0` | Deep broad-area source spectral level. Disabled when `level ≤ 0.01`, including any negative value (`oasnun22.f:233`) — deliberately not the same rule as `surface_noise_level`. OASES's deep loop keeps two defects uacpy does not correct (a plane-geometry division with `ICDR` unset, `oasnun22.f:705`, and a stale taper window, `:713-714`): a deep-only level reads `10·log10(c/f)` dB high and off in depth shape — see the OASES page. |
+| `deep_source_depth` | m | `None` | Depth of the deep noise sheet; `None` → half the water depth (uacpy guidance). |
 | `discrete_sources` | list | `None` | Point sources: dicts with `depth`/`x`/`y` (m) and `level` (dB). OASES carries no per-source phase; any other key raises. |
 | `replica_xmin` / `replica_xmax` | m | `None` | Replica grid x-bounds; `None` → 100 / 10000. |
-| `replica_nx` | count | `50` | Replica grid points in x. |
+| `replica_nx` | count | `50` | Replica grid points in x (a whole number ≥ 1, as `replica_ny` / `replica_nz`). |
 | `replica_ymin` / `replica_ymax` | m | `None` | Replica grid y-bounds; `None` → 0 / 0. |
 | `replica_ny` | count | `1` | Replica grid points in y. |
 | `replica_zmin` / `replica_zmax` | m | `None` | Replica grid depth-bounds; `None` → 10 / `env.depth − 10`. |
 | `replica_nz` | count | `20` | Replica grid points in depth. |
-| `c_low` / `c_high` | m/s | `None` | Phase-speed bounds for the wavenumber integrations; `None` → 0.95 × min(c_water) / 1e8. |
+| `c_low` / `c_high` | m/s | `None` | Phase-speed bounds for the wavenumber integrations; `None` → 0.90 × min(c_water), the shared factor (`scooter.f90:258`) / 1e8, which the manual asks for surface noise (`oasn.tex:283-285`). |
 | `integration_offset` | dB/λ | `0.0` | Wavenumber-integration contour offset. |
-| `n_wavenumbers` | count | `None` | Wavenumber sample count; `None` = auto. |
+| `n_wavenumbers` | count | `None` | Wavenumber sample count. `None`: OASES's automatic sampling for the replicas; the surface- and deep-noise blocks have none, so `None` writes 1600 / 63836 / 100 (continuous / discrete / evanescent) for surface noise (uacpy guidance, measured) and the manual's worked-deck 400 / 400 / 100 for deep noise (`oasn.tex:480`); a pinned `n` writes `n`, `max(n, 10)`, `max(1, n // 4)`. |
 
 ### OASES — OASS (reverberation / scattered field)
 
@@ -2829,12 +3021,12 @@ decks share one work dir, and the producer's `Result` comes back as
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
 | `correlation_length` | m | — | **Required.** `CL` of the roughness power spectrum. OASS does not adopt it from the mean-field run (`oass.tex:182-183`). |
-| `spectral_exponent` | — | `2.0` | `M` of the roughness spectrum; must exceed 1.5 or the spectrum is not integrable. |
-| `roughness_spectrum` | — | `'gaussian'` | `'gaussian'` or `'goff-jordan'` (option `'g'`). |
+| `spectral_exponent` | — | `None` | `M` of the roughness spectrum; must exceed 1.5 or the spectrum is not integrable. `None` is 2.5, OASES's own Goff-Jordan exponent (`oaseun31.f:103-104`), the "very smooth variation" end of the manual's range (`oassp.tex:356-358`); a pin under the Gaussian spectrum gets a not-used notice. |
+| `roughness_spectrum` | — | `'gaussian'` | `'gaussian'` (OASES's own default, `oass.tex:136-137`) or `'goff-jordan'` (option `'g'`). |
 | `rms_roughness` | m | `None` | `|RG|` at the scattering interface **in the OASS deck**; `None` → the environment's own. The mean-field deck always uses the environment's value, so the scattering interface must be rough **in `env`** (a smooth one raises `ConfigurationError` before any binary runs); this knob cannot supply the roughness. |
-| `interface` | count | `None` | `INTFC`, the deck-layer index of the scattering interface; `None` → the seafloor. Must be rough in the environment, or the mean field writes an empty `.rhs`. |
+| `interface` | count | `None` | `INTFC`, the deck-layer index of the scattering interface (a whole number ≥ 1); `None` → the seafloor. Must be rough in the environment, or the mean field writes an empty `.rhs`. |
 | `multiple_scattering` | — | `False` | Option `'p'`: perturbed boundary operator, a lower bound on the reverberation level. |
-| `mean_field` | — | `None` | The producer model; `None` → `OAST(options='N J T s')`. Only OAST qualifies, and the option line must carry `'s'`. An OASR producer is refused: it stamps every `.rhs` record with interface 2 and samples the wavenumber axis in `cos θ`, so OASS cannot recover a uniform `DLWVNO` from it. |
+| `mean_field` | — | `None` | The producer model; `None` → `OAST(options='N J T s')`. A supplied one keeps its own `verbose` and `timeout`; only `work_dir`, `cleanup` and `use_tmpfs` follow this run. Only OAST qualifies, and the option line must carry `'s'`. An OASR producer is refused: it stamps every `.rhs` record with interface 2 and samples the wavenumber axis in `cos θ`, so OASS cannot recover a uniform `DLWVNO` from it. |
 | `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`. `c_low` is physically significant, not a tuning knob: raising it above the mean field's truncates the scattering integral (measured 30 dB), lowering it is inert. `None` → the mean field's own bound; a different value warns. |
 | `receiver_gains` | dB | `None` | Per-element gain, Block VI column 5. |
 | `options` | — | `None` | Raw OASES options string; `None` → the run mode's product letter (`'r'` / `'a'`) plus the flags above. Mutually exclusive with them. |
@@ -2865,14 +3057,14 @@ in OASSP's integration path, so option `'p'` would be parsed and do nothing.
 | Parameter | Unit | Default | Meaning |
 |---|---|---|---|
 | `correlation_length` | m | — | **Required.** `CL` of the roughness power spectrum; OASSP reads it from this deck, not from the mean field. A **negative** value is OASES' switch to the 12-token volume-scattering record and raises `UnsupportedFeatureError` — see below. |
-| `spectral_exponent` | — | `2.0` | `M` of the roughness spectrum; must exceed 1.5 or the spectrum is not integrable. |
-| `roughness_spectrum` | — | `'gaussian'` | `'gaussian'` or `'goff-jordan'` (option `'g'`). |
+| `spectral_exponent` | — | `None` | `M` of the roughness spectrum; must exceed 1.5 or the spectrum is not integrable. `None` is 2.5, OASES's own Goff-Jordan exponent (`oaseun31.f:103-104`), the "very smooth variation" end of the manual's range (`oassp.tex:356-358`); a pin under the Gaussian spectrum gets a not-used notice. |
+| `roughness_spectrum` | — | `'gaussian'` | `'gaussian'` (OASES's own default, `oass.tex:136-137`) or `'goff-jordan'` (option `'g'`). |
 | `rms_roughness` | m | `None` | `\|RG\|` at the scattering interface **in the OASSP deck**; `None` → the environment's own. The scattering interface must be rough **in `env`** — the mean field reads only the environment, and a smooth one raises `ConfigurationError`. The scattered field is linear in it (`pow = \|ROUGH(INTFCE)\|`, `unoassp30.f:601, :613`). |
 | `interface` | count | `None` | Cross-check only. OASSP reads the scattering interface out of the `.rhs` (`unoassp30.f:548-549`); a value that disagrees with the file raises rather than attaching the spectrum to a layer the binary never looks at. |
-| `realization` | count | `0` | Realization index `k`; the OASES seed is `-123 - k` (`unoassp30.f:170`, `:535`), so a given `k` is reproducible and different `k` are different draws. Under cylindrical geometry it also shifts the full-Bessel tabulation window by `k/2` in `kr` (`:171`, `:639-640`), which OASP pins to 0 — so a large-`k` ensemble is not *purely* statistical. |
-| `scattered_only` | — | `True` | Option `'s'`: zero the source arrays so the `.trf` holds the scattered field alone (`unoassp30.f:628-635`). |
-| `mean_field` | — | `None` | The producer model; `None` → an `OASP` built from the FFT-grid knobs below. Mutually exclusive with them, since the mean field owns the grid. Option `'s'` is added if missing — without it OASP writes no `.rhs` at all. |
-| `n_time_samples`, `freq_min`, `freq_max`, `center_frequency` | — | `None` | Passed to the mean-field `OASP`. **Not** OASSP's own Block VIII — see below. |
+| `realization` | count | `0` | Realization index `k` (a whole number ≥ 0); the OASES seed is `-123 - k` (`unoassp30.f:170`, `:535`), so a given `k` is reproducible and different `k` are different draws. Under cylindrical geometry it also shifts the full-Bessel tabulation window by `k/2` in `kr` (`:171`, `:639-640`), which OASP pins to 0 — so a large-`k` ensemble is not *purely* statistical. |
+| `scattered_only` | — | `True` | Option `'s'`: zero the source arrays so the `.trf` holds the scattered field alone (`unoassp30.f:628-635`), as both of the manual's worked OASSP decks (`oassp.tex:592`, `:653`); the program's own default is the total field (`oassp.tex:231-233`). |
+| `mean_field` | — | `None` | The producer model; `None` → an `OASP` built from the FFT-grid knobs below; a supplied one keeps its own `verbose` and `timeout`. Mutually exclusive with them, since the mean field owns the grid. Option `'s'` is added if missing — without it OASP writes no `.rhs` at all. |
+| `n_time_samples`, `freq_min`, `freq_max`, `fc` | — | `None` | Passed to the mean-field `OASP`. **Not** OASSP's own Block VIII — see below. |
 | `c_low` / `c_high` | m/s | `None` | `CMIN`/`CMAX`. `c_high` needs plane geometry, i.e. `Source(source_type='line')`: a point Source runs cylindrical, where OASSP forces `CMAX = 1e12` and a full Hankel transform (`unoassp30.f:205-217`). |
 | `n_wavenumbers`, `integration_offset` | — | — | As for `OASP`. |
 | `options` | — | `None` | Raw OASES options string; `None` → `'N J s'` plus the flags above. Mutually exclusive with them. Validated by the wrapper, because OASSP's `GETOPT` closes with an empty `ELSE` (`unoassp30.f:1050`) and discards an unknown letter with no diagnostic. |

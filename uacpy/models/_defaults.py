@@ -5,14 +5,22 @@ Read by the engines only; the carriers and io never consult them.
 """
 
 
-DEFAULT_C_MIN = 1400.0   # below slowest expected water-column speed
+# m/s — the cap on BOUNCE's derived c_low, min(DEFAULT_C_MIN, min(env.ssp)):
+# doc/bounce.htm sets CMin to "the lowest speed in the problem (say
+# 1400.0)", and its example deck writes 1400.0.
+DEFAULT_C_MIN = 1400.0
 
 # Broadband-mode auto-generated frequency grid: when the user runs a
 # broadband-capable wrapper (Bellhop, Scooter, Kraken, RAM, OASP)
 # without an explicit ``frequencies=`` override, the wrapper picks
 # ``N`` bins linearly spaced over ``[fc·(1 - BW/2), fc·(1 + BW/2)]``
-# (clipped to [1, ∞)) where ``fc = source.frequencies[0]``.
-# Default BW=0.5 — Bellhop User Guide §9 recommends sub-banding for
-# wide bandwidths because arrivals are computed at a single fc.
-DEFAULT_BROADBAND_N_FREQS = 128
+# where ``fc = source.frequencies[0]`` (``bandwidth_factor`` below 2, so
+# the band stays above 0 Hz).
+# Default BW=0.5, uacpy guidance: the Bellhop User Guide §9 recommends
+# dividing a wide band into sub-bands "so that the appropriate attenuation
+# is used in each sub-band" and names no width.
+# N=128, uacpy guidance (no value in the manuals): the bins are 1/T apart,
+# T the alias-free time window (Jensen et al., *Computational Ocean
+# Acoustics*, Sect. 8.2.1.2), so 128 bins over 0.5·fc give T = 254/fc.
+DEFAULT_BROADBAND_N_FREQUENCIES = 128
 DEFAULT_BROADBAND_BANDWIDTH_FACTOR = 0.5

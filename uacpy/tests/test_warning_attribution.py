@@ -92,9 +92,9 @@ def test_an_assignment_warns_on_the_assigning_line():
     layer = uacpy.SedimentLayer(thickness=5.0, sound_speed=1600.0, density=1.8)
     receiver = Receiver(depths=[10.0], ranges=[100.0])
     with recorded_warnings() as record:
-        layer.density = 1800.0
+        layer.shear_speed = 1700.0
     warning = _only_warning(record)
-    assert 'kg/m³' in str(warning.message)
+    assert 'exceeds sound_speed' in str(warning.message)
     assert Path(warning.filename).resolve() == _THIS_FILE
     with recorded_warnings() as record:
         receiver.ranges = None
@@ -384,13 +384,13 @@ CONVERTED_SITES = [
     # and from ``FrancoisGarrison.from_temperature_salinity`` alike; the frequency notice is
     # the base class's, raised once per ``alpha`` / ``alpha_dB_per_m`` call.
     ('core/absorption.py', 'FrancoisGarrison.__post_init__', 1),
-    ('core/absorption.py', 'Absorption._warn_outside_frequency_range', 1),
+    ('core/absorption.py', 'Absorption._check_frequency_range', 1),
     # One helper for both seabed carriers (``SedimentLayer`` and
     # ``BoundaryProperties``, both built by ``@carrier``), reached from the
     # user's constructor, from an assignment's rebuild and from the
     # in-package factories (``SeabedColumn.collapse_layers``, the CRUST1/GRAW
     # readers) alike.
-    ('core/boundary.py', '_warn_implausible_geoacoustics', 2),
+    ('core/boundary.py', '_check_geoacoustic_plausibility', 1),
     # Reached from a ``Receiver(depths=…)`` and from ``receiver.ranges =
     # None``: the walk serves both, where the ``stacklevel=3`` it replaced
     # named ``_carrier.py`` on the second.
@@ -408,9 +408,10 @@ CONVERTED_SITES = [
     # BeamformedField.to_time_trace and from
     # acoustic_signal.synthesize_time_series at different depths.
     ('acoustic_signal/_synthesis.py', 'record_start', 3),
-    ('acoustic_signal/_synthesis.py', 'warn_unsolved_bins', 2),
+    ('acoustic_signal/_synthesis.py', 'warn_unsolved_bins', 1),
     ('core/results/_field_synthesis.py', '_synthesize_time_series', 1),
-    ('acoustic_signal/_synthesis.py', 'waveform_synthesis_setup', 1),
+    ('acoustic_signal/_synthesis.py', 'reduced_record_starts', 3),
+    ('acoustic_signal/_synthesis.py', 'synthesize_traces', 1),
     # One window builder for the tone extractor and the Fourier synthesis,
     # reached from both at different depths.
     ('acoustic_signal/windows.py', '_taper', 1),
@@ -430,14 +431,16 @@ CONVERTED_SITES = [
     ('data/_netcdf.py', 'NetcdfGrid._bounded', 1),
     ('data/bathymetry.py', '_fetch_bathy_grid_backend', 1),
     ('data/bathymetry.py', '_fetch_bathy_transect_backend', 2),
-    ('data/crust1_local.py', '_warn_non_commercial', 1),
-    ('data/environment.py', '_record_provenance', 1),
     ('data/gebco_local.py', '_grid_path', 2),
     ('data/mars.py', '_query_bbox', 1),
     ('data/pelagic.py', 'pelagic_lithology', 1),
     ('data/seaice_local.py', 'sea_ice_surface_transect', 1),
-    ('data/sediment.py', '_warn_filled_gaps', 1),
-    ('data/sound_speed.py', 'extend_ssp_below_data', 1),
+    # Every data-layer source note goes through the two notice helpers,
+    # which a fetch decorated with one_provenance_notice collects into one
+    # summary warning of its own.
+    ('data/_provenance_notice.py', 'provenance_notice', 1),
+    ('data/_provenance_notice.py', 'provenance_fallback', 1),
+    ('data/_provenance_notice.py', 'one_provenance_notice.decorate.fetch_with_one_provenance_notice', 1),
     ('io/_fortran_helpers.py', '_warn_non_little_endian', 1),
     ('io/bathy_io.py', 'write_bty_long_format', 1),
     ('io/bellhop_writer.py', '_write_quad_ssp_beside', 1),

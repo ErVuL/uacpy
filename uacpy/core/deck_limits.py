@@ -64,5 +64,7 @@ DECK_DEPTH_FMT = f'.{DECK_AXIS_DECIMALS}f'
 SBP_ANGLE_RESOLUTION_DEG = 1.0e-6
 
 # m — the range a deck takes when no receiver range is positive:
-# Bellhop's ray-box range and BOUNCE's RMax.
+# Bellhop's ray-box range and BOUNCE's RMax. uacpy guidance: no manual gives
+# a range for a run with no positive receiver range; 10 km is the RMax of
+# the BOUNCE example deck in doc/bounce.htm.
 NO_RECEIVER_RANGE_FALLBACK_M = 10_000.0

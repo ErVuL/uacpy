@@ -270,9 +270,9 @@ def test_bottom_from_mars(monkeypatch):
 def test_a_sample_coarser_than_the_relations_says_so(monkeypatch, folk, model):
     """MARS reaches seabed coarser than either grain-size relation is fitted
     over, and the conversion answers those with its fit at the nearer end —
-    under the default 'hamilton' that is the 0.92 ϕ coarse-sand row, which
-    nothing downstream can tell from a real coarse sand. The sample's own ϕ
-    still travels on the bottom; only the geoacoustics are the fit's."""
+    the -1 ϕ value under both models, which nothing downstream can tell from
+    a real -1 ϕ sediment. The sample's own ϕ still travels on the bottom; only
+    the geoacoustics are the fit's."""
     _install(monkeypatch, _collection(_feature(-34.0, 151.31, folk=folk)))
     with pytest.warns(UserWarning, match='fitted over'):
         bp = mars.fetch_bottom_mars(_P, model=model)
@@ -280,6 +280,22 @@ def test_a_sample_coarser_than_the_relations_says_so(monkeypatch, folk, model):
     edge = data.bottom_from_grain_size(
         mars.GRAIN_SIZE_MODEL_RANGES[model][0], model=model)
     assert bp.sound_speed == pytest.approx(edge.sound_speed)
+
+
+@pytest.mark.parametrize('model, attenuation_range', [
+    ('hamilton', 'attenuation [0, 9.5]'), ('apl-uw', 'attenuation [-1, 9]')])
+def test_the_coarse_sample_notice_states_each_quantitys_own_range(
+        monkeypatch, model, attenuation_range):
+    """Both models' sound speed and density stop at -1 ϕ, so the notice
+    states the per-quantity ranges and sends a coarser seabed to a material
+    class, not to the other model."""
+    _install(monkeypatch, _collection(_feature(-34.0, 151.31, folk='G')))
+    with recorded_warnings() as caught:
+        mars.fetch_bottom_mars(_P, model=model)
+    [notice] = [str(w.message) for w in caught
+                if 'fitted over' in str(w.message)]
+    assert 'sound speed [-1, 9]' in notice and attenuation_range in notice
+    assert 'uacpy.core.materials' in notice and "'apl-uw' relations" not in notice
 
 
 @pytest.mark.parametrize('folk, model', [('msG', 'apl-uw'),    # -0.63 ϕ

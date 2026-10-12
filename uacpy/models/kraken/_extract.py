@@ -6,8 +6,11 @@ import dataclasses
 import numpy as np
 from pathlib import Path
 from uacpy.models._conventions import _line_source_unit_at_1m
-from uacpy.models._extract import _restore_requested_axis
-from uacpy.models._stacking import _slabs_of
+from uacpy.models._extract import (
+    _restore_requested_axis, result_kwargs, stamp_result,
+)
+from uacpy.core.results._superposition import (restack_source_depths,
+                                               split_source_depths)
 from uacpy.core.run_settings import RunMode
 from uacpy.core.source import Source
 from uacpy.core.receiver import Receiver
@@ -23,6 +26,13 @@ from uacpy.models.kraken._settings import KrakenLaunch, _BAND_ROUTES
 #: REAL(KIND=8) (``misc/SourceReceiverPositions.f90:14, 65``) and writes back
 #: unrounded (``misc/RWSHDFile.f90:106``).
 _SHD_FREQUENCY_RTOL = 5e-12
+
+#: Relative precision of the receiver-depth axis a ``.shd`` gives back:
+#: field.exe holds ``Pos%Rz`` as REAL(KIND=4)
+#: (``misc/SourceReceiverPositions.f90:25``) and writes it so
+#: (``misc/RWSHDFile.f90:113``), each depth rounded to at most 2**-24 of
+#: itself, so of the axis's largest.
+_SHD_DEPTH_RTOL = 2.0 ** -23
 
 
 def read_shd(shd_file: Path, launch: KrakenLaunch, *,
@@ -80,15 +90,16 @@ def evaluated_receiver(inputs) -> Receiver:
 def assemble_field_from_shd(raw, source, receiver, is_rd,
                              n_profiles, run_mode,
                              line_c_source=None, source_rho=None, *,
-                             backend, mode_coupling, result_kwargs,
-                             stamp_result):
+                             backend, mode_coupling, model_name,
+                             provenance):
     """Build the result Field from field.exe's ``.shd`` as
     :meth:`_read_output` read it (``raw``): native-broadband
     ``(n_d, n_r, n_f)`` (``raw['frequencies']``), single-frequency
     complex pressure (``raw['pressure']``), or narrowband TL
     (``raw['shd']``). field.exe's modal sum differs
     from Scooter's Hankel path by an overall -1, negated here — times
-    ``exp(-i*pi/4)`` for a line source — so every coherent branch carries
+    ``exp(-i*pi/4)`` for a line source, and by ``i`` more for the line
+    source of the coupled evaluator — so every coherent branch carries
     the ``'travelling_wave'`` phase reference, upcast to complex128 (the
     ``.shd`` payload is complex64) so every uacpy engine returns one
     dtype. ``RunMode.INCOHERENT_TL`` instead yields real dB TL with no
@@ -103,7 +114,9 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
     sediment. Every branch divides it out here.
 
     ``backend`` is the modes binary whose ``.mod`` field.exe summed
-    (``'kraken'`` / ``'krakenc'``), the result's ``backend``."""
+    (``'kraken'`` / ``'krakenc'``), the result's ``backend``;
+    ``model_name`` and ``provenance`` identify the result
+    (:func:`~uacpy.models._extract.result_kwargs`)."""
     # EvaluateMod.f90:34 applies one prefactor i*SQRT(2*pi)*EXP(i*pi/4)
     # to every source geometry; its pi/4 is the stationary-phase term of
     # the POINT-source Hankel asymptote. The 2-D line-source field has no
@@ -115,11 +128,19 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
     phase_corr = np.complex128(-1.0)
     if source.source_type == 'line':
         phase_corr = -np.exp(-1j * np.pi / 4.0)
+        # field.exe runs the coupled evaluator for more than one profile
+        # under option 'C' (field.f90:214-219), and its line-source branch
+        # writes the prefactor SQRT(2*pi)*EXP(i*pi/4) without the leading i
+        # its point branch (EvaluateCMMod.f90:60-63), the single-profile
+        # (EvaluateMod.f90:34-37) and the adiabatic (EvaluateADMod.f90:54)
+        # evaluators carry: that field is the others' times 1/i.
+        if int(n_profiles) > 1 and mode_coupling == 'coupled':
+            phase_corr = phase_corr * 1j
 
     rho = np.atleast_1d(np.asarray(
         1.0 if source_rho is None else source_rho, dtype=float))
 
-    # c(z_s) per source depth: k0 = 2πf/c(z_s) is taken at each slab's
+    # c(z_s) per source depth: k0 = 2πf/c(z_s) is taken at each source's
     # own depth, as ``source_rho`` is.
     line_c = (None if line_c_source is None
               else np.atleast_1d(np.asarray(line_c_source, dtype=float)))
@@ -164,7 +185,7 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
             },
             phase_reference=PhaseReference.TRAVELLING_WAVE,
             **result_kwargs(
-                source,
+                model_name, provenance, source,
                 backend=backend,
                 frequencies=freqs_read,
                 mode_coupling=mode_coupling if is_rd else 'none',
@@ -182,7 +203,7 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
             data=p,
             coords={'depth': receiver.depths, 'range': receiver.ranges},
             **result_kwargs(
-                source,
+                model_name, provenance, source,
                 backend=backend,
                 frequencies=float(np.atleast_1d(source.frequencies)[0]),
                 mode_coupling=mode_coupling if is_rd else 'none',
@@ -194,15 +215,24 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
         field.phase_reference = PhaseReference.TRAVELLING_WAVE
     else:
         read = raw['shd']
-        # One slab per source depth of the deck — read_shd_file stacks an
-        # NSz > 1 .shd — each stamped with its own depth.
-        slabs = _slabs_of(read)
+        # One slab per source depth of the deck — read_shd_file puts an
+        # NSz > 1 .shd on a source_depth axis — each stamped with its own
+        # depth, then joined on that axis again.
+        slabs = split_source_depths(read)
         sources = ([source.at_depth(i) for i in range(len(slabs))]
                    if len(slabs) > 1 else [source])
         slab_rho = (rho if rho.size == len(slabs)
                     else np.full(len(slabs), rho[0]))
+        requested_depths = np.atleast_1d(
+            np.asarray(receiver.depths, dtype=float))
         for i_slab, (field, slab_source, rho_s) in enumerate(
                 zip(slabs, sources, slab_rho)):
+            # The depths the deck was written from, when the .shd's
+            # single-precision copy agrees with them (_SHD_DEPTH_RTOL), as
+            # every other engine and this one's band branches return.
+            field.coords['depth'] = _restore_requested_axis(
+                np.asarray(field.coords['depth'], dtype=float),
+                requested_depths, _SHD_DEPTH_RTOL)
             # The line-source level (×√k0, see ``line_level``) is applied
             # ONCE here, before the INCOHERENT/COHERENT split, because both
             # branches below need it: COHERENT_TL keeps this payload as the
@@ -243,12 +273,12 @@ def assemble_field_from_shd(raw, source, receiver, is_rd,
                     field.data, dtype=np.complex128)
                 phase_reference = 'travelling_wave'
             stamp_result(
-                field, slab_source, backend=backend,
+                model_name, provenance, field, slab_source, backend=backend,
                 frequencies=float(np.atleast_1d(source.frequencies)[0]),
                 phase_reference=phase_reference,
             )
             field.metadata['mode_coupling'] = (mode_coupling if is_rd
                                                else 'none')
             field.metadata['n_profiles'] = n_profiles
-        field = read
+        field = restack_source_depths(slabs, read, who='Kraken.run')
     return field

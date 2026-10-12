@@ -46,7 +46,7 @@ def record_section():
     """
     env, source = rigid_floor_channel()
     array = uacpy.Receiver(depths=50.0, ranges=np.linspace(200.0, 1200.0, 24))
-    p = SPARC(time_max=1.0, n_time_samples=1024).run(env, source, array)
+    p = SPARC(time_max=1.0, n_time_samples=2048).run(env, source, array)
 
     section = p.at(depth=50.0).to_dict()
     section['data'] = (section['data']
@@ -75,7 +75,9 @@ def single_trace():
     H = trace.to_transfer_function(band=(0.0, 700.0))
     freqs, spectrum = H.coords['frequency'], H.data.ravel()
     axes[1].semilogy(freqs, np.abs(spectrum) + 1e-30, linewidth=1.0)
-    for edge, label in ((100.0, 'freq_min = fc/2'), (400.0, 'freq_max = 2·fc')):
+    band = p.run_settings.engine
+    for edge, label in ((band.freq_min, f'freq_min = {band.freq_min:g} Hz'),
+                        (band.freq_max, f'freq_max = {band.freq_max:g} Hz')):
         axes[1].axvline(edge, color='crimson', linestyle='--', linewidth=1.0)
         axes[1].annotate(label, (edge, 1.0), xycoords=('data', 'axes fraction'),
                          xytext=(4, -12), textcoords='offset points',
@@ -101,7 +103,7 @@ def vertical_array():
     env, source = rigid_floor_channel()
     vla = uacpy.Receiver(depths=np.linspace(2.0, 98.0, 33),
                          ranges=np.array([800.0]))
-    p = SPARC(output_mode='D', time_max=0.9, n_time_samples=1024).run(env, source, vla)
+    p = SPARC(output_mode='D', time_max=0.9, n_time_samples=2048).run(env, source, vla)
     fig, ax = p.at(range=800.0).plot(
         stacked=True, figsize=TALL,
         title='SPARC — vertical array at 800 m (output_mode=\'D\')')
@@ -114,7 +116,7 @@ def snapshots():
     env, source = rigid_floor_channel()
     grid = uacpy.Receiver(depths=np.linspace(1.0, 99.0, 40),
                           ranges=np.linspace(10.0, 500.0, 80))
-    p = SPARC(output_mode='S', time_max=0.36, n_time_samples=384).run(env, source, grid)
+    p = SPARC(output_mode='S', time_max=0.36, n_time_samples=512).run(env, source, grid)
 
     times = (0.06, 0.14, 0.22, 0.30)
     late = np.asarray(p.data)[..., -1]

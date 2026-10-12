@@ -47,7 +47,7 @@ print(f"  H{H.data.shape} over "
 fs = 4000.0
 _, pulse = tone_burst(f_center, 5, sample_rate=fs)
 
-waveform = H.synthesize_time_series(pulse, sample_rate=fs)
+waveform = H.synthesize_time_series(source_waveform=pulse, sample_rate=fs)
 print(f"  p(t){waveform.data.shape}, dt={waveform.dt * 1e3:.3f} ms, "
       f"{waveform.n_times} samples")
 

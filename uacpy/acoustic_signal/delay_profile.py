@@ -247,8 +247,8 @@ def _fold_notice(delays_s, powers, record: float, *, who: str, remediation: str,
             f"{level} relative to the whole. {remediation}")
 
 
-def synthesis_band(delays_s, powers, *, bandwidth: float, centre: float,
-                   record: Optional[float] = None,
+def synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
+                   output_duration: Optional[float] = None,
                    energy_fraction: Optional[float] = None,
                    margin: float = 1.2) -> np.ndarray:
     """Frequency grid wide enough to synthesise a power delay profile
@@ -258,7 +258,8 @@ def synthesis_band(delays_s, powers, *, bandwidth: float, centre: float,
     spacing — not the bandwidth — decides how much multipath the trace can
     hold. The window is the primitive and the spacing follows from it
     (Jensen, Kuperman, Porter and Schmidt, *Computational Ocean Acoustics*,
-    sect. 8.2). Pass ``record`` to state that window; leave it out and it is
+    sect. 8.2). Pass ``output_duration`` to state that window; leave it out
+    and it is
     the span holding ``energy_fraction`` of the profile's energy
     (:func:`energy_support`), times ``margin``, and never shorter than
     ``1/bandwidth``.
@@ -269,10 +270,10 @@ def synthesis_band(delays_s, powers, *, bandwidth: float, centre: float,
         The profile, as for :func:`energy_support`, pooled over every cell
         the synthesis shares one record across.
     bandwidth : float, keyword-only
-        Width of the band (Hz), centred on ``centre``.
-    centre : float, keyword-only
-        Band centre (Hz). The band must start above 0 Hz.
-    record : float, optional
+        Width of the band (Hz), centred on ``fc``.
+    fc : float, keyword-only
+        Band centre frequency (Hz). The band must start above 0 Hz.
+    output_duration : float, optional
         Length of the record (s), stated rather than derived. Refused with
         ``energy_fraction``: they are two answers to one question.
     energy_fraction : float, optional
@@ -280,13 +281,14 @@ def synthesis_band(delays_s, powers, *, bandwidth: float, centre: float,
     margin : float, optional
         Headroom on the derived span (default 1.2, at least 1). It is also
         the number of frequency samples per interference fringe of two
-        paths the span apart. Not used when ``record`` is given.
+        paths the span apart. Not used when ``output_duration`` is given.
 
     Returns
     -------
     ndarray
-        Ascending frequencies, ``max(ceil(bandwidth * record) + 1, 2)`` of
-        them over ``centre ± bandwidth / 2``.
+        Ascending frequencies, ``max(ceil(bandwidth * output_duration) + 1,
+        2)`` of
+        them over ``fc ± bandwidth / 2``.
 
     Warns
     -----
@@ -299,43 +301,43 @@ def synthesis_band(delays_s, powers, *, bandwidth: float, centre: float,
         delays_s,
         powers,
         bandwidth=bandwidth,
-        centre=centre,
-        record=record,
+        fc=fc,
+        output_duration=output_duration,
         energy_fraction=energy_fraction,
         margin=margin)
 
 
-def _synthesis_band(delays_s, powers, *, bandwidth: float, centre: float,
-                   record: Optional[float] = None,
+def _synthesis_band(delays_s, powers, *, bandwidth: float, fc: float,
+                   output_duration: Optional[float] = None,
                    energy_fraction: Optional[float] = None,
                    margin: float = 1.2,
                    who: str = "synthesis_band") -> np.ndarray:
     """:func:`synthesis_band` reporting its refusals as ``who``."""
     bandwidth = float(bandwidth)
     require_positive(bandwidth, f"{who} bandwidth", hint="Hz")
-    centre = float(centre)
-    require_positive(centre, f"{who} centre", hint="Hz")
+    fc = float(fc)
+    require_positive(fc, f"{who} fc", hint="Hz")
     # A positive centre and a positive width still describe a band that
     # runs through 0 Hz into negative frequency when the width exceeds
     # twice the centre, and a model run on it returns an H that is not
     # conjugate-symmetric, which an IFFT turns into a complex trace.
-    if centre - bandwidth / 2.0 <= 0.0:
+    if fc - bandwidth / 2.0 <= 0.0:
         raise ConfigurationError(
             f"{who}: a {bandwidth:g} Hz band centred on "
-            f"{centre:g} Hz starts at "
-            f"{centre - bandwidth / 2.0:g} Hz, at or below 0 Hz — there "
+            f"{fc:g} Hz starts at "
+            f"{fc - bandwidth / 2.0:g} Hz, at or below 0 Hz — there "
             f"is no field to synthesise there. Narrow bandwidth= below "
-            f"{2.0 * centre:g} Hz, or pass centre= high enough to carry "
+            f"{2.0 * fc:g} Hz, or pass fc= high enough to carry "
             f"the band.")
-    if record is not None and energy_fraction is not None:
+    if output_duration is not None and energy_fraction is not None:
         raise ConfigurationError(
-            f"{who}: record= and energy_fraction= are "
+            f"{who}: output_duration= and energy_fraction= are "
             "two answers to one question — how long the record has to "
-            "be. Pass record= (s) to state the window, or "
+            "be. Pass output_duration= (s) to state the window, or "
             "energy_fraction= to derive it from these arrivals.")
-    if record is not None:
-        record = float(record)
-        require_positive(record, f"{who} record", hint="s")
+    if output_duration is not None:
+        record = float(output_duration)
+        require_positive(record, f"{who} output_duration", hint="s")
     else:
         margin = float(margin)
         if margin < 1.0:
@@ -353,7 +355,7 @@ def _synthesis_band(delays_s, powers, *, bandwidth: float, centre: float,
                 f"{who}: these arrivals carry a "
                 "non-finite delay or amplitude, so the span they occupy "
                 "is undefined and no window can be derived from them. "
-                "Pass record= (s) to state one.")
+                "Pass output_duration= (s) to state one.")
         # A single arrival spans no time, and a grid still needs two
         # points to define a spacing: fall back to the shortest record
         # that holds it.
@@ -363,22 +365,22 @@ def _synthesis_band(delays_s, powers, *, bandwidth: float, centre: float,
         span = float(delays.max() - delays.min())
         notice = _fold_notice(
             delays, powers, record, who=who,
-            remediation=(f"Pass energy_fraction=1.0 (or record={span:g}) to hold "
+            remediation=(f"Pass energy_fraction=1.0 (or output_duration="
+                         f"{span:g}) to hold "
                     f"every arrival, or drop the tail arrivals before "
                     f"sizing the band rather than folding them."))
         if notice is not None:
             warnings.warn(notice, NumericsWarning,
                           skip_file_prefixes=USER_FRAME_SKIP)
     n_freq = max(int(np.ceil(bandwidth * record)) + 1, 2)
-    return np.linspace(centre - bandwidth / 2.0,
-                       centre + bandwidth / 2.0, n_freq)
+    return np.linspace(fc - bandwidth / 2.0,
+                       fc + bandwidth / 2.0, n_freq)
 
 
 def coherence_factor(convention: str = 'inverse_spread', factor=None) -> float:
     """The ``k`` of ``1 / (k tau_rms)``: ``factor`` when given (any finite
     ``k > 0``), else the named convention's — see
-    :data:`COHERENCE_BANDWIDTH_FACTORS`. ``who`` (keyword-only) is the name
-    the refusals carry, for a method that delegates here.
+    :data:`COHERENCE_BANDWIDTH_FACTORS`.
 
     Parameters
     ----------
@@ -427,8 +429,7 @@ def coherence_bandwidth(delays_s, powers, *,
     source outside the corpus, so they are options and not the default.
 
     Returns ``inf`` for a single arrival (no spread, a flat channel), and
-    ``nan`` when the spread is. ``who`` (keyword-only) is the name the
-    refusals carry, for a method that delegates here.
+    ``nan`` when the spread is.
 
     Parameters
     ----------

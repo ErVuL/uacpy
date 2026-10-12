@@ -13,8 +13,8 @@ OAST needs OASES (./install.sh --oases yes); without it the example runs
 the other models and says so.
 
 Uses: SoundSpeedProfile.from_2d · Bottom.from_halfspaces · uacpy.Thorp ·
-Kraken(mode_coupling=, n_segments=) · env.plot · compare_models(ncols=,
-contours=)
+Kraken(mode_coupling=, n_segments=) · Field.mask_below_seafloor · env.plot ·
+compare_models(ncols=, contours=)
 """
 
 import os
@@ -93,8 +93,14 @@ for warning in caught:
     else:
         warnings.showwarning(warning.message, warning.category,
                              warning.filename, warning.lineno)
+# The receivers reach below the sloping seafloor. RAM and Bellhop return NaN
+# there; Kraken's deck carries the sediment down to the deepest receiver, and
+# Scooter and OAST run on the guide flattened to 170 m, so each returns values
+# below it. Every field is cut at env's seafloor, so the numbers below compare
+# water with water.
+fields = {name: field.mask_below_seafloor(env)
+          for name, field in fields.items()}
 for name, field in fields.items():
-    # NaN-aware: RAM masks sub-seafloor cells, so a plain mean would be nan.
     print(f"  {name:8s} TL [{np.nanmin(field.dB):5.1f}, "
           f"{np.nanmax(field.dB):5.1f}] dB, mean {np.nanmean(field.dB):5.1f}")
 

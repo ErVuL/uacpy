@@ -23,14 +23,14 @@ import struct
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 
 from uacpy.core._export import ExportRecord
 from uacpy.core.exceptions import (ConfigurationError, FileFormatError,
                                    IOWarning, UnsupportedFeatureError)
-from uacpy.core.results import Field, ResultStack
+from uacpy.core.results import Field
 from uacpy.core._warn_frames import USER_FRAME_SKIP
 from uacpy.io._fortran_helpers import (
     _bound_counts,
@@ -69,7 +69,7 @@ def read_oast_tl(
     receiver_depths: Optional[np.ndarray] = None,
     *,
     frequencies: Optional[np.ndarray] = None,
-) -> ResultStack:
+) -> List[Field]:
     """
     Read OAST transmission loss output on its native grids.
 
@@ -90,24 +90,26 @@ def read_oast_tl(
     frequencies : array_like, optional
         The frequencies (Hz) of the plotted blocks, one each, in the order
         the run wrote them (the OAST deck's frequencies). Required for a
-        ``.plp`` without ``Freq:`` labels; on a labelled ``.plp`` the labels
-        are used and a ``frequencies`` more than 0.05 Hz (half the
-        ``F7.1`` label step) from them is refused.
+        ``.plp`` without ``Freq:`` labels. On a labelled ``.plp`` it is
+        checked against the labels: within 0.05 Hz (half the ``F7.1``
+        label step) it is kept at its own precision, as receiver depths are
+        matched back to ``receiver_depths``; further away it is refused.
+        Omitted, the labels are the frequencies.
 
     Returns
     -------
-    tl : ResultStack
-        **Always** a :class:`~uacpy.core.results.ResultStack` over
-        ``'frequency'`` — of length 1 for a single-frequency run — of real
-        TL :class:`~uacpy.core.results.Field` slabs ``(n_depths,
-        n_ranges)``, so a caller never branches on the type. Each slab
-        carries its **own** native range axis: OAST rebuilds its range grid
-        inside the frequency loop (``DX`` scales as ``1/f``,
-        ``unoast31.f:481``), so the frequencies share no axis, and summing
-        the slabs (:meth:`ResultStack.superpose`) is refused for that
-        reason. The coordinate is the ``Freq:`` labels (``F7.1``,
-        ``oasfun22.f:368``), or ``frequencies`` for a ``.plp`` that carries
-        none.
+    tl : list of Field
+        **Always** a list — of length 1 for a single-frequency run — of real
+        TL :class:`~uacpy.core.results.Field` ``(n_depths, n_ranges)``, one
+        per plotted frequency in the run's order, so a caller never
+        branches on the type. Each carries its **own** native range axis:
+        OAST rebuilds its range grid inside the frequency loop (``DX``
+        scales as ``1/f``, ``unoast31.f:481``), so the frequencies share no
+        axis and are not one Field. Each Field's ``frequencies`` is its
+        frequency: ``frequencies`` when given (checked against the ``Freq:``
+        labels to their 0.05 Hz print quantum and kept at its own precision,
+        as the receiver depths are), else the label (``F7.1``,
+        ``oasfun22.f:368``).
 
     Raises
     ------
@@ -150,12 +152,15 @@ def read_oast_tl(
                 f"of {filepath}.",
                 remediation="Omit frequencies= to use the labels, or pass "
                             "the deck the file came from.")
-        frequencies = labels
-    slabs = [Field(data=tl[i], coords={'depth': parsed['depths'],
-                                       'range': ranges[i]},
-                   model='', backend='', frequencies=float(frequencies[i]))
-             for i in range(n_freq)]
-    return ResultStack(slabs, frequencies, coordinate_name='frequency')
+        # The labels are F7.1 print roundings: frequencies= that agrees
+        # with them is kept at its own precision, as receiver depths are
+        # matched back to the caller's axis (_match_label_depths).
+        if frequencies is None:
+            frequencies = labels
+    return [Field(data=tl[i], coords={'depth': parsed['depths'],
+                                      'range': ranges[i]},
+                  model='', backend='', frequencies=float(frequencies[i]))
+            for i in range(n_freq)]
 
 
 def _unique_in_order(values: list) -> list:
@@ -923,7 +928,7 @@ def read_oasp_trf(
         frequencies=raw['freq'],
         source_depths=np.array([raw['source_depth']]),
         metadata={'title': raw['title'],
-                  'center_frequency': raw['center_frequency']})
+                  'fc': raw['fc']})
 
 
 def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
@@ -1168,7 +1173,7 @@ def _read_oasp_trf_binary(filepath: Path, receiver_depths: np.ndarray) -> Dict:
         'depths': receiver_depths,
         'transfer_function': transfer_function,
         'source_depth': float(sd),
-        'center_frequency': float(freqs),
+        'fc': float(freqs),
         'omegim': float(omegim),
     }
 
@@ -1560,6 +1565,8 @@ def _header_metadata(data: Dict, arrays) -> Dict:
 def read_oasn_covariance(
     filepath: Union[str, Path],
     receiver_depths: Optional[np.ndarray] = None,
+    *,
+    unit: str = '',
 ):
     """Read an OASN/OASS ``.xsm`` as a :class:`~uacpy.core.results.Covariance`.
 
@@ -1580,12 +1587,19 @@ def read_oasn_covariance(
         Depths (m) of the array's elements. The file carries no positions;
         given, and one per receiver, they fill ``receiver_positions`` as a
         vertical array at ``x = y = 0``.
+    unit : str, optional
+        The unit of the matrix as its producer states it, stamped on
+        ``Covariance.unit``. The file carries none, and the two programs
+        that write this layout differ: OASN writes µPa²/Hz (noise levels re
+        1 µPa²/Hz), OASS the variance of a CW field in Pa² for a 1 Pa
+        source (``oass.tex:216-218``). Default ``''``: not stated.
 
     Returns
     -------
     Covariance
-        ``covariance`` ``(n_freq, n_rcv, n_rcv)``; ``frequencies`` the
-        header's uniform FREQ1…FREQ2 axis; ``model`` empty. ``metadata``
+        ``covariance`` ``(n_freq, n_rcv, n_rcv)`` in the file's own scale;
+        ``unit`` as given; ``frequencies`` the header's uniform FREQ1…FREQ2
+        axis; ``model`` empty. ``metadata``
         holds every header field: ``title``, ``n_receivers``,
         ``n_frequencies``, ``freq_min``, ``freq_max``, ``freq_delta``,
         ``surface_noise_level``, ``white_noise_level`` (dB).
@@ -1599,6 +1613,7 @@ def read_oasn_covariance(
         backend='oasn',
         frequencies=_oasn_frequency_axis(data),
         metadata=_header_metadata(data, ('covariance',)),
+        unit=unit,
     )
 
 

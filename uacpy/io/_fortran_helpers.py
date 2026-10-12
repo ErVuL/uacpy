@@ -18,7 +18,7 @@ import struct
 import unicodedata
 import warnings
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -128,8 +128,8 @@ def fortran_float(token) -> float:
       so any value below ~1e-99 comes back in this form. It is a *foreign*
       file that carries one: uacpy's own OALIB build writes ``.rts`` from
       default-``REAL`` arrays (``Scooter/sparc.f90:40``, written
-      ``'( 12G15.6 )'`` at ``:294``) and ``install.sh:999`` passes no
-      ``-fdefault-real-8``, so single precision caps the exponent at the two
+      ``'( 12G15.6 )'`` at ``:294``) and ``install.sh``'s ``OALIB_FFLAGS``
+      carry no ``-fdefault-real-8``, so single precision caps the exponent at the two
       digits of its ±38 range. The three-digit form therefore comes from a
       double-precision SPARC built elsewhere — or from a local build whose
       ``UACPY_FORTRAN_ARCH_FLAGS`` override widened the default real.
@@ -483,19 +483,11 @@ def _warn_non_little_endian(detected: str, source: str) -> None:
         _ENDIAN_WARN_EMITTED = True
 
 
-def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
-    """Detect Fortran-record byte order from the first 4 bytes of a file.
-
-    The Fortran framing puts a 4-byte record-length prefix at the head of
-    every record. On a well-formed file that integer is much smaller than
-    ``2**31`` in the correct endianness and absurdly large in the wrong
-    one: reading a marker byte-reversed multiplies a short length by
-    ``2**24``, so the smaller of the two candidates is the right one. The
-    ``2**28`` cap (256 MiB) sits far above any record these formats write,
-    and a one-shot notice is logged when the choice isn't little-endian.
-
-    Returns ``'<'`` (little-endian) or ``'>'`` (big-endian).
-    """
+def _plausible_byte_orders(first4: bytes) -> List[str]:
+    """The byte orders (``'<'``, ``'>'``) under which ``first4`` reads as a
+    plausible record length, in ``(0, 2**28)``, the smaller reading first and
+    little-endian first on a tie. Raises ``FileFormatError`` when neither
+    does."""
     if len(first4) < 4:
         raise FileFormatError("detect_endian: need 4 bytes to probe.")
     little = struct.unpack('<i', first4)[0]
@@ -503,17 +495,39 @@ def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
     cap = 1 << 28
     little_ok = 0 < little < cap
     big_ok = 0 < big < cap
-    if little_ok and not big_ok:
-        chosen = '<'
-    elif big_ok and not little_ok:
-        chosen = '>'
-    elif little_ok and big_ok:
-        chosen = '<' if little <= big else '>'
-    else:
-        raise FileFormatError(
-            f"detect_endian: cannot resolve byte order from first record "
-            f"marker (little={little}, big={big}); file is probably corrupt."
-        )
+    if little_ok and big_ok:
+        return ['<', '>'] if little <= big else ['>', '<']
+    if little_ok:
+        return ['<']
+    if big_ok:
+        return ['>']
+    raise FileFormatError(
+        f"detect_endian: cannot resolve byte order from first record "
+        f"marker (little={little}, big={big}); file is probably corrupt."
+    )
+
+
+def detect_endian(first4: bytes, source: str = '_fortran_helpers') -> str:
+    """Detect Fortran-record byte order from the first 4 bytes of a file.
+
+    The Fortran framing puts a 4-byte record-length prefix at the head of
+    every record. On a well-formed file that integer is much smaller than
+    ``2**31`` in the correct endianness and usually absurdly large in the
+    wrong one: reading a marker byte-reversed multiplies a short length by
+    ``2**24``, so the smaller of the two candidates is taken. The ``2**28``
+    cap (256 MiB) sits far above any record these formats write, and a
+    one-shot notice is logged when the choice isn't little-endian.
+
+    Four bytes do not always settle it: a little-endian 65536 (bytes
+    ``00 00 01 00``) reads 256 big-endian, the smaller. The sequential
+    records these formats open with are a few dozen bytes long, so this rule
+    serves them; a direct-access header word, which grows with the run's
+    grid, is confirmed against the file's structure by
+    :class:`DirectAccessFile` instead.
+
+    Returns ``'<'`` (little-endian) or ``'>'`` (big-endian).
+    """
+    chosen = _plausible_byte_orders(first4)[0]
     _warn_non_little_endian('big' if chosen == '>' else 'little', source)
     return chosen
 
@@ -598,23 +612,56 @@ class DirectAccessFile:
     The ``.shd``/``.grn`` (``misc/RWSHDFile.f90:100-102``) and ``.mod``
     (``Kraken/kraken.f90:587``) formats open with ``RECL = 4 * LRecl``, the
     record length counted in 4-byte words, and store that word count first.
-    The byte order is detected from those first 4 bytes
-    (:func:`detect_endian`, whose notices name ``source``);
-    :attr:`record_words` is the stored count.
+    The byte order is read from those first 4 bytes by the rule of
+    :func:`detect_endian` (whose notices name ``source``); :attr:`record_words`
+    is the stored count.
+
+    The word count grows with the run's grid, so it can read plausibly both
+    ways: ``LRecl = 2*NRr = 65536`` little-endian reads 256 big-endian.
+    ``header_counts`` settles that case: called on this file under each
+    plausible order, smaller reading first, it returns the header's counts,
+    and the first order under which every count lies in ``1..file_size``
+    is kept (the first plausible order when none does).
     """
 
-    def __init__(self, fid, source: str):
+    def __init__(self, fid, source: str, *,
+                 header_counts: Optional[Callable[['DirectAccessFile'],
+                                                  Sequence[int]]] = None):
         self.fid = fid
         head = fid.read(4)
-        fid.seek(0)
-        self.endian = detect_endian(head, source=source)
-        self.i4 = np.dtype(self.endian + 'i4')
-        self.f4 = np.dtype(self.endian + 'f4')
-        self.f8 = np.dtype(self.endian + 'f8')
         fid.seek(0, 2)
         self.file_size = fid.tell()
         fid.seek(0)
-        self.record_words = int(np.fromfile(fid, dtype=self.i4, count=1)[0])
+        orders = _plausible_byte_orders(head)
+        chosen = orders[0]
+        if header_counts is not None and len(orders) > 1:
+            for order in orders:
+                self._take_byte_order(order)
+                if self._counts_fit(header_counts):
+                    chosen = order
+                    break
+        self._take_byte_order(chosen)
+        _warn_non_little_endian('big' if chosen == '>' else 'little', source)
+
+    def _take_byte_order(self, order: str) -> None:
+        """Read the file as byte order ``order``: its dtypes and its stored
+        record length, leaving the file just past that word."""
+        self.endian = order
+        self.i4 = np.dtype(order + 'i4')
+        self.f4 = np.dtype(order + 'f4')
+        self.f8 = np.dtype(order + 'f8')
+        self.fid.seek(0)
+        self.record_words = int(np.fromfile(self.fid, dtype=self.i4,
+                                            count=1)[0])
+
+    def _counts_fit(self, header_counts) -> bool:
+        """Whether every count ``header_counts`` reads lies in
+        ``1..file_size``; a read past the end of the file is a no."""
+        try:
+            counts = [int(c) for c in header_counts(self)]
+        except (IndexError, ValueError, OverflowError):
+            return False
+        return bool(counts) and all(0 < c <= self.file_size for c in counts)
 
     @property
     def record_bytes(self) -> int:

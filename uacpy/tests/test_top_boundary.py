@@ -166,10 +166,10 @@ def test_bellhop_top_bc_changes_tl():
         ranges=np.linspace(2000.0, 8000.0, 25),
     )
     bellhop = uacpy.models.Bellhop(verbose=False)
-    tl_vac = bellhop.compute_tl(
+    tl_vac = bellhop.compute_field(
         _basic_env(BoundaryProperties(acoustic_type='vacuum')), src, rcv,
     )
-    tl_ice = bellhop.compute_tl(_basic_env(_ice()), src, rcv)
+    tl_ice = bellhop.compute_field(_basic_env(_ice()), src, rcv)
     diff = np.abs(tl_vac.dB - tl_ice.dB)
     finite = np.isfinite(diff)
     assert finite.any() and diff[finite].max() >= 1.0, (

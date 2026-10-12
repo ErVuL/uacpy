@@ -1576,6 +1576,23 @@ class TestOassMeanFieldOptionLine:
                                   producer.compute_depth_average))
         assert {'s', 'T'} <= chars
 
+    def test_a_supplied_mean_field_keeps_its_verbose_and_timeout(self):
+        """The user's producer runs with its own verbose and timeout; its
+        cleanup is OASS's, whose directory holds the .rhs oass2 reads."""
+        model = _oass(verbose=False, timeout=456.0, cleanup=False,
+                      mean_field=OAST(options='N J T s', verbose=True,
+                                      timeout=123.0, cleanup=True))
+        producer = model._build_mean_field()
+        assert (producer.verbose, producer.timeout) == (True, 123.0)
+        assert producer.cleanup is False
+
+    def test_the_default_mean_field_takes_the_hosts_verbose_and_timeout(
+            self):
+        producer = _oass(verbose=True, timeout=456.0,
+                         cleanup=False)._build_mean_field()
+        assert (producer.verbose, producer.timeout) == (True, 456.0)
+        assert producer.cleanup is False
+
 
 @pytest.mark.requires_oases
 class TestTheMeanFieldsFilesFollowTheScatterersCleanup:
@@ -1601,3 +1618,32 @@ class TestTheMeanFieldsFilesFollowTheScatterersCleanup:
         result, mean = self._mean(work_dir=tmp_path / 'wd', cleanup=False)
         paths = [v for k, v in mean.metadata.items() if k.endswith('_file')]
         assert paths and all(pathlib.Path(p).exists() for p in paths)
+
+
+@pytest.mark.requires_oases
+class TestTheSpectralExponentResolvesFromNone:
+    """As OASSP: ``None`` is OASES' own Goff-Jordan exponent 2.5, and a pin
+    under the Gaussian spectrum is said to be unused."""
+
+    @staticmethod
+    def _engine(**kw):
+        with recorded_warnings() as caught:
+            engine = _oass(**kw).run_settings(_env(), _CLASS_SRC,
+                                              _CLASS_RCV).engine
+        return engine, [str(w.message) for w in caught
+                        if 'spectral_exponent' in str(w.message)]
+
+    def test_unset_is_oases_own_exponent(self):
+        assert OASS.__init__.__kwdefaults__['spectral_exponent'] is None
+        engine, said = self._engine()
+        assert engine.spectral_exponent == 2.5 and said == []
+
+    @pytest.mark.parametrize('spectrum, said', [('gaussian', True),
+                                                ('goff-jordan', False)])
+    def test_a_pin_is_said_unused_only_under_the_gaussian_spectrum(
+            self, spectrum, said):
+        engine, messages = self._engine(spectral_exponent=2.0,
+                                        roughness_spectrum=spectrum)
+        assert engine.spectral_exponent == 2.0
+        assert bool(messages) is said, messages
+

@@ -3,7 +3,9 @@
 The physically-modeled version of example 35. Instead of spherical spreading,
 a ship's ISO 17208 monopole source level is propagated to a marine mammal
 through a Bellhop transfer function over a UNESCO sound-speed profile, band by
-band, and then auditory-weighted (Southall 2019).
+band, and then auditory-weighted (Southall 2019) and summed over the bands; held
+for an exposure time, that level gives the weighted SEL the criteria are stated
+on.
 
 The loss in each decidecade band is averaged OVER the band: a band level is
 the energy of every frequency in it, and one tone at the band centre samples a
@@ -13,7 +15,8 @@ range; ``Field.window(...).broadband_loss()`` averages it per band.
 
 Uses: sound_speed_unesco → Environment SSP · decidecade_bands ·
 radiated_noise_level / monopole_source_level (ISO 17208) · Bellhop BROADBAND ·
-Field.window · Field.broadband_loss · apply_weighting · env.ssp.plot
+Field.window · Field.broadband_loss · apply_weighting · sum_levels_dB ·
+env.ssp.plot
 """
 
 import os
@@ -24,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parents[2]))   # uacpy from a checkout
 import numpy as np
 import matplotlib.pyplot as plt
 import uacpy
-from uacpy.acoustics import sound_speed_unesco
+from uacpy.acoustics import sound_speed_unesco, sum_levels_dB
 from uacpy.acoustic_signal import decidecade_bands
 from uacpy.noise import (apply_weighting, monopole_source_level,
                          nominal_source_depth, radiated_noise_level)
@@ -72,9 +75,14 @@ groups = {"LF": "baleen whale", "VHF": "harbour porpoise"}
 weighted = {group: apply_weighting(received, frequency=bands, group=group) for group in groups}
 print(f"  received level at {animal_range / 1000:.0f} km, "
       f"{animal_depth:.0f} m: peak {received.max():.1f} dB re 1 µPa")
+# Southall et al. (2019) state non-impulsive criteria as weighted SEL; a
+# level held for T seconds has SEL = level + 10·log10(T / 1 s) (ISO 18405).
+exposure_s = 3600.0
 for group, animal in groups.items():
-    print(f"  {group} ({animal}) weighted peak: "
-          f"{np.nanmax(weighted[group]):.1f} dB")
+    level = sum_levels_dB(weighted[group], axis=-1)
+    print(f"  {group} ({animal}) weighted received level: {level:.1f} dB re "
+          f"1 µPa; held {exposure_s / 3600:.0f} h, weighted SEL "
+          f"{level + 10 * np.log10(exposure_s):.1f} dB re 1 µPa²·s")
 
 fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
 env.ssp.plot(ax=axes[0, 0], color='C0')

@@ -80,9 +80,11 @@ def ambiguity_field(surface, candidates, *, reference_unit: str,
     :func:`~uacpy.acoustic_signal.mvdr` over a replica bank — indexed by the
     ``candidates`` mapping in order: one named coordinate per surface axis,
     in the Field's vocabulary (``'frequency'``, ``'depth'``, ``'range'``,
-    ``'x'``, ``'y'``). The Field carries ``kind='ambiguity'``, so it plots
-    with ``.plot()`` on the ambiguity colormap and ``.max()`` returns the
-    estimate as a slice with its coordinates.
+    ``'x'``, ``'y'``). The Field carries ``kind='ambiguity'``, so a
+    ``(depth, range)`` or ``(depth, x)`` surface plots with ``.plot()``
+    through :func:`~uacpy.plot.plot_matched_field` (any other through
+    :func:`~uacpy.plot.plot_field`, on the ambiguity colormap), and
+    ``.max()`` returns the estimate as a slice with its coordinates.
 
     The linear power the dB values are relative to is kept on the Field as
     :attr:`~uacpy.core.results.Field.reference` in ``reference_unit`` (the
@@ -93,7 +95,7 @@ def ambiguity_field(surface, candidates, *, reference_unit: str,
     A candidate with zero power is ``-inf`` dB and one :func:`mvdr` could not
     evaluate stays NaN; neither is floored, since a floor is a display choice
     (``plot_matched_field``'s ``dynamic_range_dB``, or ``vmin=`` on
-    ``.plot()``).
+    :func:`~uacpy.plot.plot_field`).
 
     Parameters
     ----------
@@ -163,6 +165,9 @@ class Covariance(Result):
     ``np.linalg.eigh(cov.covariance[ifreq])`` directly.
     """
 
+    #: The plotter that draws this result (``.plot()``).
+    _plotter = '_plot_covariance'
+
     def __init__(
         self,
         *,
@@ -205,7 +210,9 @@ class Covariance(Result):
         ``(n_f, n_rcv, n_rcv)``, ``receiver_positions`` (``None`` when not
         recorded) and the identity, as :meth:`Field.to_dict` writes it.
         ``np.savez(f, **d)`` stores it; read it back with
-        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`."""
+        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`. That load
+        unpickles, so use it only on files you wrote; :meth:`to_netcdf` /
+        :meth:`from_netcdf` is the route for a file from elsewhere."""
         return {
             'covariance': self.covariance.copy(),
             'receiver_positions': _copy_or_none(self.receiver_positions),
@@ -236,14 +243,16 @@ class Covariance(Result):
     def from_dict(cls, d: dict) -> "Covariance":
         """Reconstruct a :class:`Covariance` from :meth:`to_dict` output, or
         from the mapping ``np.load(f, allow_pickle=True)`` returns for a file
-        written with ``np.savez(f, **cov.to_dict())``.
+        written with ``np.savez(f, **cov.to_dict())``. Load such a file only
+        if you wrote it: ``allow_pickle=True`` unpickles.
 
         Parameters
         ----------
         d : mapping
             :meth:`to_dict` output, or the mapping ``np.load`` returns for it.
         """
-        d = cls._unwrap_saved(d, payload=('covariance',))
+        d = cls._unwrap_saved(d, payload=('covariance',),
+                              required=('receiver_positions', 'unit'))
         return cls(covariance=d['covariance'],
                    receiver_positions=d.get('receiver_positions'),
                    unit=str(d.get('unit', '')),
@@ -378,6 +387,9 @@ class Replicas(Result):
     across the element axis.
     """
 
+    #: The plotter that draws this result (``.plot()``).
+    _plotter = '_plot_replicas'
+
     def __init__(
         self,
         *,
@@ -440,7 +452,9 @@ class Replicas(Result):
         coordinate arrays, metres), ``receiver_positions`` (``None`` when
         not recorded) and the identity, as :meth:`Field.to_dict` writes it.
         ``np.savez(f, **d)`` stores it; read it back with
-        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`."""
+        ``np.load(f, allow_pickle=True)`` into :meth:`from_dict`. That load
+        unpickles, so use it only on files you wrote; :meth:`to_netcdf` /
+        :meth:`from_netcdf` is the route for a file from elsewhere."""
         return {
             'replicas': self.replicas.copy(),
             'candidates': {name: values.copy()
@@ -485,14 +499,16 @@ class Replicas(Result):
     def from_dict(cls, d: dict) -> "Replicas":
         """Reconstruct :class:`Replicas` from :meth:`to_dict` output, or from
         the mapping ``np.load(f, allow_pickle=True)`` returns for a file
-        written with ``np.savez(f, **replicas.to_dict())``.
+        written with ``np.savez(f, **replicas.to_dict())``. Load such a file
+        only if you wrote it: ``allow_pickle=True`` unpickles.
 
         Parameters
         ----------
         d : mapping
             :meth:`to_dict` output, or the mapping ``np.load`` returns for it.
         """
-        d = cls._unwrap_saved(d, payload=('replicas',))
+        d = cls._unwrap_saved(d, payload=('replicas',),
+                              required=('candidates', 'receiver_positions'))
         return cls(replicas=d['replicas'], candidates=d['candidates'],
                    receiver_positions=d.get('receiver_positions'),
                    **cls._identity_from_dict(d))

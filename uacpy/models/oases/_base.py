@@ -7,13 +7,14 @@ from pathlib import Path
 
 from uacpy.models.base import PropagationModel
 from uacpy.core._warn_frames import USER_FRAME_SKIP
-from uacpy.models._launch import _tail
+from uacpy.models._launch import _tail, prt_launch, run_launch
 from uacpy.core.run_settings import RunMode
 from uacpy.core.exceptions import (
     ConfigurationError, IOWarning, ModelExecutionError,
     UnsupportedFeatureError,
 )
 from uacpy.models.oases._common import _oases_subprocess_env
+from uacpy.models._extract import stamp_result
 
 
 class OASES(PropagationModel):
@@ -112,8 +113,8 @@ class OASES(PropagationModel):
         result.metadata.update(extra)
         if components:
             result._components = {**result.components, **components}
-        return self._stamp_result(
-            result, source, backend=backend,
+        return stamp_result(
+            self.model_name, self.provenance, result, source, backend=backend,
             frequencies=(result.frequencies
                          if isinstance(frequencies, str) else frequencies))
 
@@ -135,10 +136,10 @@ class OASES(PropagationModel):
         env = _oases_subprocess_env(base_name, **self._FOR_FILES)
         if extra_env:
             env.update(extra_env)
-        launch = self._prt_launch([str(self._exe)], work_dir, base_name,
-                                  env=env,
-                                  stale_outputs=self._OUTPUT_SUFFIXES)
-        return self._launch_binary(dataclasses.replace(
+        context = self._launch_context()
+        launch = prt_launch(context, [str(self._exe)], work_dir, base_name,
+                            env=env, stale_outputs=self._OUTPUT_SUFFIXES)
+        return run_launch(context, dataclasses.replace(
             launch,
             stale_outputs=(tuple(self._OUTPUT_FORT_FILES)
                            + launch.stale_outputs),
@@ -201,8 +202,8 @@ class OASES(PropagationModel):
         only a ``>``-prefixed line that also says *warning* is forwarded.
         These are the solver's words, passed through verbatim rather than
         reinterpreted — the same contract as the ``.prt`` pass. Fatals are
-        already raised by ``_raise_on_fortran_fatal`` and quoted by
-        ``_require_output``.
+        already raised by ``raise_on_fortran_fatal`` and quoted by
+        ``require_output``.
         """
         text = getattr(result, 'stdout', None)
         if not text:

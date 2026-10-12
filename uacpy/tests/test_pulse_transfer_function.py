@@ -427,16 +427,13 @@ class TestTheSumOverPathsIsTheModelsOwnBroadbandRun:
             broadband.coords['range'][0])
 
 
-class TestAGridThatCannotBePlacedOnADftIsRefused:
-    """A knife edge in the synthesis plan, found by audit.
-
-    The band is placed at ``floor(f/df + 0.5)`` and de-rotated by ONE common
-    offset taken from the first sample. When ``freqs[0]/df`` lands on the .5
-    boundary the first sample rounds one way and the rest the other, so part
-    of the band sits a whole bin out. It is silent: on 25 Hz-4 kHz with
-    ``df`` = 2/3 a two-path SEL read 52.34 dB against a true 54.01, on a
-    1500 ms record where nothing folds. Nudging ``df`` by 0.005 Hz is exact,
-    so no caller would think to check.
+class TestABandStartingOnTheRoundingBoundaryIsPlacedWhole:
+    """The band is placed on the DFT lattice from its first sample, bin
+    ``round(f[0]/df) + k`` for sample ``k``, and de-rotated by ONE common
+    offset. A band whose ``freqs[0]/df`` sits on the .5 rounding boundary is
+    therefore placed whole like any other; rounding each sample on its own
+    would put part of it a whole bin out (a two-path SEL of 52.34 dB against
+    a true 54.01 on 25 Hz-4 kHz at ``df`` = 2/3).
     """
 
     @staticmethod
@@ -451,21 +448,53 @@ class TestAGridThatCannotBePlacedOnADftIsRefused:
     def level(self, df):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            return float(self.two_paths(df).sound_exposure_level(
-                tone_burst(500.0, 5, sample_rate=RATE)[1], RATE).dB[0, 0])
+            return float(self.two_paths(df).sound_exposure_level(source_waveform=tone_burst(500.0, 5, sample_rate=RATE)[1],
+                                                                 sample_rate=RATE).dB[0, 0])
 
-    def test_a_grid_on_the_rounding_boundary_is_refused(self):
+    def test_a_grid_on_the_rounding_boundary_gives_its_neighbours_level(self):
         for df in (2.0 / 3.0, 25.0 / 40.5):       # freqs[0]/df = 37.5, 40.5
             assert (25.0 / df) % 1 == pytest.approx(0.5), df
-            with pytest.raises(ConfigurationError, match="rounding boundary"):
-                self.level(df)
+            assert self.level(df) == pytest.approx(54.0108, abs=1e-3), df
 
     def test_grids_either_side_of_it_agree_exactly(self):
-        # The refusal is a knife edge, not a broad rejection: a few parts in
-        # 1e3 of df either way is exact, which is why it had to be checked
-        # rather than left to a caller to notice.
         for df in (0.665, 0.670, 1.0, 5.0, 25.0):
             assert self.level(df) == pytest.approx(54.0108, abs=1e-3), df
+
+    def test_a_synthesis_band_grid_on_the_boundary_is_the_direct_sum(self):
+        # synthesis_band's grid for centre = bandwidth = 100 Hz and a 0.12 s
+        # record is linspace(50, 150, 14): f[0]/df = 6.4999999999999.
+        from uacpy.acoustic_signal import synthesis_band
+        f = synthesis_band(np.array([0.0]), np.array([1.0]), bandwidth=100.0,
+                           fc=100.0, output_duration=0.1202, margin=1.0)
+        df = f[1] - f[0]
+        assert f.size == 14 and (f[0] / df) % 1 == pytest.approx(0.5)
+        h = np.exp(-2j * np.pi * f * 0.03)
+        trace = Field(data=h.reshape(1, 1, -1),
+                      coords={'depth': [10.0], 'range': [100.0],
+                              'frequency': f}, frequencies=f).to_time_trace(
+            window=None, t_start=0.0)
+        t = trace.coords['time']
+        direct = 2.0 * np.real(
+            (h[None, :] * np.exp(2j * np.pi * f[None, :] * t[:, None])).sum(1)
+            * df)
+        np.testing.assert_allclose(trace.data.ravel(), direct,
+                                   atol=1e-12 * np.abs(direct).max())
+
+    @pytest.mark.parametrize('freqs', [
+        [100.0, 110.0, 130.0, 140.0],       # a gap: 130 Hz is not bin 12
+        [140.0, 130.0, 120.0, 110.0],       # uniform but descending
+    ])
+    def test_an_axis_the_lattice_cannot_hold_is_refused(self, freqs):
+        # Placing sample k on bin round(f[0]/df) + k holds only on a uniform
+        # ascending axis; with no source waveform the synthesis grid's own
+        # check is the one that refuses any other.
+        f = np.asarray(freqs)
+        field = Field(data=np.ones((1, 1, f.size), dtype=complex),
+                      coords={'depth': [10.0], 'range': [100.0],
+                              'frequency': f})
+        with pytest.raises(ConfigurationError,
+                           match='uniformly spaced and ascending'):
+            field.to_time_trace(window=None, t_start=0.0)
 
 
 class TestOneSignalAtOneReceiver:
@@ -655,7 +684,7 @@ class TestChannelStatisticsAreOneReceivers:
         """``synthesis_band`` sizes ONE record shared by the whole grid, so
         it has to span the cells: pooled on purpose."""
         arr = _two_cell_arrivals()
-        f = arr.synthesis_band(bandwidth=200.0, centre=1000.0)
+        f = arr.synthesis_band(bandwidth=200.0, fc=1000.0)
         assert 1.0 / (f[1] - f[0]) > 3.0
 
 

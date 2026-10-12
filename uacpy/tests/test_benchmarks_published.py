@@ -113,7 +113,7 @@ def _wedge_agreement(model, slope=True):
     """Run ``model`` on the wedge (or its null control) at the reference
     table's receivers and return ``(rms_per_receiver, nulls_at_30m, tl)``."""
     ranges, ref = _load_tl_table(WEDGE_TABLE)
-    tl = model.compute_tl(_wedge_env(slope),
+    tl = model.compute_field(_wedge_env(slope),
                           Source(depths=WEDGE_ZS, frequencies=WEDGE_FREQ),
                           Receiver(depths=list(WEDGE_ZR), ranges=ranges)).dB
     tl = np.asarray(tl, dtype=float).reshape(ref.shape)
@@ -281,7 +281,7 @@ def _pe3b_tl(model, attenuation=0.5, depth=PE3B_Z):
     """``model``'s TL over the reference table's ranges, source and receiver
     both at ``depth``."""
     ranges, _ = _load_tl_table(PE3B_TABLE)
-    tl = model.compute_tl(_pe3b_env(attenuation),
+    tl = model.compute_field(_pe3b_env(attenuation),
                           Source(depths=depth, frequencies=PE3B_FREQ),
                           Receiver(depths=[depth], ranges=ranges)).dB
     return np.asarray(tl, dtype=float).ravel()
@@ -310,25 +310,31 @@ def test_the_pe_workshop_3b_reference_table_places_its_nulls():
 
 
 @pytest.mark.requires_binary
-@pytest.mark.parametrize('engine, measured, bounds', [
-    ('ram', (0.211, 1.09), (0.4, 1.6)),
-    ('kraken', (0.273, 1.07), (0.45, 1.6)),
-    ('scooter', (0.459, 2.54), (0.7, 3.3)),
+@pytest.mark.parametrize('engine, measured, bounds, null_bound', [
+    ('ram', (0.211, 1.09), (0.4, 1.6), 30.0),
+    ('kraken', (0.273, 1.07), (0.45, 1.6), 30.0),
+    ('scooter', (0.432, 2.06), (0.7, 3.3), 60.0),
 ])
-def test_wave_engines_match_the_pe_workshop_3b_reference(engine, measured, bounds):
+def test_wave_engines_match_the_pe_workshop_3b_reference(engine, measured,
+                                                          bounds, null_bound):
     """RAM, Kraken and Scooter at their defaults reproduce COUPLE07's
     Test Case 3b, source and receiver half a metre above a lossy bottom.
 
     Measured median / p90 |dTL| over 4.9-10.1 km: RAM 0.211 / 1.09 dB,
-    Kraken 0.273 / 1.07 dB, Scooter 0.459 / 2.54 dB; every null deeper
+    Kraken 0.273 / 1.07 dB, Scooter 0.432 / 2.06 dB; every null deeper
     than 10 dB lands 0-20 m short of the reference's, the same 10 m in all
-    three, so the shift is the reference's rather than any engine's. The
-    bounds sit 1.5-1.9x above the medians and 0.5-0.8 dB above the p90s; a
-    null may move 30 m. RAM pinned to dr 5 m, dz 0.1 m, Pade 8 lands at
+    three, so the shift is the reference's rather than any engine's — but
+    Scooter's 6.95 km null, which lands 50 m short. The bounds sit
+    1.5-1.9x above the medians and 0.5-1.2 dB above the p90s; a null may
+    move 30 m, Scooter's 60. RAM pinned to dr 5 m, dz 0.1 m, Pade 8 lands at
     0.084 / 0.58 dB and Kraken at ``n_mesh=2000`` at 0.266 / 1.08 dB, so the
     defaults are what is measured, not a loose setting of them. Scooter's
     p90 is the widest because its interference fringes are the least
-    stable: it adds three shallow nulls near 6.9 km that the others lack.
+    stable: it adds three shallow nulls near 6.9 km that the others lack,
+    and the 6.95 km null moves with the edges of its wavenumber window —
+    10 m short with c_low 0.95 × min SSP and c_high 1.05 × the seabed
+    speed, 30 m at c_low 0.9, 40 m at an unbounded c_high, 50 m with both
+    (the defaults), 10 m again with ``taper=0.05``.
 
     NULL CONTROL, asserted below: the same engine over a lossless bottom
     sits 11 dB median from the reference.
@@ -338,7 +344,8 @@ def test_wave_engines_match_the_pe_workshop_3b_reference(engine, measured, bound
     median, p90, offsets = _pe3b_agreement(model)
     assert median < bounds[0], f"median |dTL| {median:.3f} dB; measured {measured[0]}"
     assert p90 < bounds[1], f"p90 |dTL| {p90:.3f} dB; measured {measured[1]}"
-    assert max(abs(o) for o in offsets) <= 30.0, f"null offsets {offsets} m"
+    assert max(abs(o) for o in offsets) <= null_bound, (
+        f"null offsets {offsets} m")
 
     null_median, _, _ = _pe3b_agreement(model, attenuation=0.0)
     assert null_median > 3.0 * bounds[0], (
@@ -416,7 +423,7 @@ def _corrugation_far_offset(model, corrugated=True, density=2.5):
     over ``CORRUGATION_FAR``."""
     ranges, ref = _load_tl_table(
         {2.5: CORRUGATION_TABLE, 1.5: CORRUGATION_RHO15_TABLE}[density])
-    tl = model.compute_tl(_corrugated_env(corrugated, density=density),
+    tl = model.compute_field(_corrugated_env(corrugated, density=density),
                           Source(depths=18.0, frequencies=25.0),
                           Receiver(depths=[50.0], ranges=ranges)).dB
     tl = np.asarray(tl, dtype=float).ravel()
@@ -438,14 +445,14 @@ def test_the_corrugated_seafloor_reference_table_is_the_published_run():
 @pytest.mark.requires_binary
 @pytest.mark.parametrize('engine, measured, bounds', [
     ('mpirams', 4.35, (3.0, 5.7)),
-    ('ramgeo', 5.47, (4.0, 7.0)),
+    ('ramgeo', 5.42, (4.0, 7.0)),
     ('kraken_coupled', 1.20, (0.3, 2.5)),
 ])
 def test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference(
         engine, measured, bounds):
     """Beyond the corrugation every forward-marching engine in uacpy puts
     the field below COUPLE07's two-way solution: the mean TL offset over
-    10-18.09 km is +4.35 dB for RAM's mpirams, +5.47 dB for ramgeo and
+    10-18.09 km is +4.35 dB for RAM's mpirams, +5.42 dB for ramgeo and
     +1.20 dB for Kraken's coupled modes. The offsets are pinned on both
     sides rather than bounded from above: a change in either direction is
     news.
@@ -484,7 +491,11 @@ def test_one_way_engines_lose_more_to_the_corrugation_than_the_two_way_reference
     """
     model = {
         'mpirams': lambda: RAM(backend='mpirams', dr=5.0, dz=0.25, n_pade=6, timeout=900),
-        'ramgeo': lambda: RAM(backend='ramgeo', dr=5.0, dz=0.25, n_pade=6, timeout=900),
+        # ramgeo takes one bathymetry node per step and the manual bounds dr by
+        # the smallest region (ram.pdf p.8): the 1 m faces need dr <= 1 m.
+        # Measured over dr: 0.25 m +5.11, 0.5 m +5.42, 0.9999 m +5.47 dB, and
+        # +4.38 at exactly 1 m, where every step lands on a face's ends.
+        'ramgeo': lambda: RAM(backend='ramgeo', dr=0.5, dz=0.25, n_pade=6, timeout=900),
         'kraken_coupled': lambda: Kraken(mode_coupling='coupled', timeout=900),
     }[engine]()
 
@@ -568,7 +579,7 @@ def _bucker_agreement(model, bottom_density=2.1):
     """``(median, p90)`` of |dTL| between ``model`` and the reference over
     ``BUCKER_WINDOW``."""
     ranges, ref = _load_tl_table(BUCKER_TABLE)
-    tl = model.compute_tl(_bucker_env(bottom_density),
+    tl = model.compute_field(_bucker_env(bottom_density),
                           Source(depths=30.0, frequencies=100.0),
                           Receiver(depths=[90.0], ranges=ranges)).dB
     diff = np.abs(np.asarray(tl, dtype=float).ravel() - ref[0])
@@ -768,7 +779,7 @@ def _pe4c_agreement(model, slope=True):
     the slope and shelf figures are at the 150 m receiver over 5 km
     intensity averages."""
     ranges, ref = _load_tl_table(PE4C_TABLE)
-    tl = model.compute_tl(_pe4c_env(slope), Source(depths=600.0, frequencies=25.0),
+    tl = model.compute_field(_pe4c_env(slope), Source(depths=600.0, frequencies=25.0),
                           Receiver(depths=[150.0, 700.0], ranges=ranges)).dB
     tl = np.asarray(tl, dtype=float).reshape(ref.shape)
     flat = (ranges >= PE4C_FLAT[0]) & (ranges < PE4C_FLAT[1])
@@ -839,8 +850,7 @@ def test_engines_follow_pe_workshop_4c_up_the_slope_and_onto_the_shelf(engine, b
     "4c shelf 21.7 dB too loud (5 km averages); uniform n_segments=60-400 "
     "put the shelf mean at 98-106 dB against the reference's 99. The automatic decomposition here is the thinned one "
     "(326 asked, 200 kept, unevenly spaced). field.exe's coupled projection is not "
-    "unitary on modes at and above the half-space speed (docs/models/kraken.md 6.6); "
-    "the run now warns (coupled 27.5 dB above the adiabatic sum of the same modes). "
+    "unitary on modes at and above the half-space speed (docs/models/kraken.md 6.6). "
     "Remove this marker when fixed."))
 def test_kraken_coupled_modes_keep_the_pe_workshop_4c_shelf_level():
     """Kraken's coupled modes at their defaults should keep the shelf level
@@ -923,7 +933,7 @@ def _ideal_wedge_agreement(bottom, slope=0.05):
     seafloor."""
     analytic = {'vacuum': ideal_wedge_tl, 'rigid': _rigid_wedge_tl}[bottom]
     r = IDEAL_WEDGE_RANGES
-    tl = Bellhop(n_beams=4000, timeout=900).compute_tl(
+    tl = Bellhop(n_beams=4000, timeout=900).compute_field(
         _ideal_wedge_env(bottom, slope), Source(depths=100.0, frequencies=25.0),
         Receiver(depths=[30.0, 150.0], ranges=r)).dB
     tl = np.asarray(tl, dtype=float).reshape(2, -1)

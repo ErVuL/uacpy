@@ -22,7 +22,7 @@ Two models are provided, and they are not independent:
   polynomials + α₂/f). These are the same formulas the AT ``'G'`` bottom uses
   internally.
 
-**The attenuation is one function.** TR 9407 p. IV-8 says so — "Hamilton's
+**The attenuation is one function.** TR 9407 p. IV-9 says so — "Hamilton's
 parameterization of α₂/f is reproduced below" — citing the same Hamilton (1972)
 paper ``hamilton_attenuation`` implements — so both models call that one function and
 there is no second copy to drift from it. **Below 1 ϕ the ρ and ν are one function too**: TR 9407 p. IV-8,
@@ -81,7 +81,7 @@ frequency-independent (``α[dB/λ] = (α/f)·c/1000``).
 
 import warnings
 from functools import partial
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import numpy as np
 
@@ -89,12 +89,12 @@ from uacpy.core.constants import (DEFAULT_SOUND_SPEED,
                                   DEFAULT_WATER_DENSITY_G_CM3)
 from uacpy.core.exceptions import ConfigurationError, ValidityWarning
 from uacpy.core._warn_frames import USER_FRAME_SKIP
+from uacpy.core._validate import canonical_choice
 
 __all__ = ['DEFAULT_GRAIN_SIZE_ENVIRONMENT', 'DEFAULT_GRAIN_SIZE_MODEL',
            'GRAIN_SIZE_ENVIRONMENTS',
            'GRAIN_SIZE_MODELS', 'GRAIN_SIZE_MODEL_RANGES',
            'GRAIN_SIZE_SOURCE_RANGES', 'canonical_grain_size_selection',
-           'check_grain_size_selection',
            'grain_size_from_density', 'grain_size_to_geoacoustics',
            'apl_uw_density_ratio', 'apl_uw_sound_speed_ratio',
            'hamilton_attenuation']
@@ -117,7 +117,9 @@ __all__ = ['DEFAULT_GRAIN_SIZE_ENVIRONMENT', 'DEFAULT_GRAIN_SIZE_MODEL',
 # the regressions below. The table stays as the data it is: the class means the
 # regressions were fitted to, the per-class sample counts, the clayey-silt
 # median, and the check that the fit reproduces its own class means
-# (``test_sediment.py``). ``uacpy.data.graw_local`` inverts it for ρ → ϕ.
+# (``test_sediment.py``), which is its one reader. ``uacpy.data.graw_local``
+# goes ρ → ϕ by inverting the (T) density regression
+# (:func:`grain_size_from_density`), not this table.
 _HB_TABLE = (
     # (Mz_phi, density_gcm3, velocity_ratio)   coarse → fine
     (0.92, 2.034, 1.201),   # coarse sand
@@ -168,7 +170,7 @@ _HB_T_DENSITY = (2.374, -0.175, 0.008)       # ρ, g/cm³
 # the ratios Table II implies span 1524.85 to 1532.32 m/s. TR 9407 does publish
 # one, for this exact conversion, and its own coarse branch is these two
 # polynomials rescaled: p. IV-8, "The density and sound speed ratios agree with
-# those of Hamilton and Bachman for -1 <= M_z < 1", and "c₁ = 1.528 m/ms is used
+# those of Hamilton and Bachman for -1 <= M_z < 1", and p. IV-9, "c₁ = 1.528 m/ms is used
 # in determining δ from Hamilton's expressions". Coefficient by coefficient
 # against ``apl_uw_sound_speed_ratio`` and ``apl_uw_density_ratio``'s first branches:
 #   1952.5/1.2778 = 1528.017   -86.26/-0.056452 = 1528.024   4.14/0.002709 = 1528.239
@@ -337,7 +339,7 @@ def hamilton_attenuation(phi: float) -> float:
     those limits outside them.
 
     **Both models return this one function**, which is why it is written once:
-    TR 9407 p. IV-8 says "Hamilton's parameterization of α₂/f is reproduced
+    TR 9407 p. IV-9 says "Hamilton's parameterization of α₂/f is reproduced
     below" and cites this paper, and ``α₂/f`` is this ``k_p`` under the other
     report's name, in the same dB m⁻¹ kHz⁻¹. TR 9407's printed version
     differs from this one only in presentation:
@@ -345,16 +347,17 @@ def hamilton_attenuation(phi: float) -> float:
     * its coarse constant, ``Mz < 0 → 0.4556``, which is ``k_p(0)`` exactly;
     * its tail, ``Mz >= 9.5 → 0.0601``, which is ``k_p(9.5) = 0.060075``
       printed to four decimals, on a branch neither model can reach (each
-      clamps ϕ below 9.5 first);
-    * the **tie at a branch join**, which decides the value at exactly 2.6,
-      4.5 or 6.0 ϕ — 0.5193 on one side and 0.5215 on the other at 2.6 ϕ.
+      clamps ϕ below 9.5 first).
 
-    Hamilton's caption gives the ranges as "0 to 2.6ϕ", "2.6 to 4.5ϕ" and so
-    on, sharing each endpoint between two branches and settling nothing. The
-    Acoustics-Toolbox does settle it, and this follows it:
-    ``ReadEnvironmentBell.f90:509-518`` reads
-    ``ELSE IF( Mz >= 2.6 .AND. Mz < 4.5 )``, so a join belongs to the branch
-    **above** it. ``model='apl-uw'`` has to match that binary, and
+    The **tie at a branch join** decides the value at exactly 2.6, 4.5 or
+    6.0 ϕ — 0.5193 on one side and 0.5215 on the other at 2.6 ϕ. Hamilton's
+    caption gives the ranges as "0 to 2.6ϕ", "2.6 to 4.5ϕ" and so on,
+    sharing each endpoint between two branches. TR 9407 Eq. 5 (p. IV-9)
+    settles it with half-open intervals (``2.6 <= Mz < 4.5``), so a join
+    belongs to the branch **above** it; the Acoustics-Toolbox reads the
+    same (``ReadEnvironmentBell.f90:509-518``,
+    ``ELSE IF( Mz >= 2.6 .AND. Mz < 4.5 )``), and this function follows
+    both. ``model='apl-uw'`` has to match that binary, and
     ``'hamilton'`` agrees with it because both models call this one
     function.
 
@@ -393,7 +396,6 @@ def hamilton_attenuation(phi: float) -> float:
 def _canonical_pair(model, hamilton_fit, who, model_argument,
                     environment_argument):
     """``(model, hamilton_fit)`` in their canonical spellings."""
-    from uacpy.core._validate import canonical_choice
     return (canonical_choice(model, GRAIN_SIZE_MODELS, who, model_argument),
             canonical_choice(hamilton_fit, tuple(GRAIN_SIZE_ENVIRONMENTS),
                              who, environment_argument))
@@ -402,11 +404,11 @@ def _canonical_pair(model, hamilton_fit, who, model_argument,
 def canonical_grain_size_selection(model, hamilton_fit, *, who: str,
                                    model_argument: str = 'model',
                                    environment_argument: str = 'hamilton_fit'):
-    """``(model, hamilton_fit)`` checked by :func:`check_grain_size_selection`
+    """``(model, hamilton_fit)`` checked by :func:`_check_grain_size_selection`
     and in their canonical spellings (``'Hamilton'`` → ``'hamilton'``), for an
     entry point to use from then on. ``hamilton_fit=None`` stays ``None``
     (each caller's own default) and is checked as the default fit."""
-    check_grain_size_selection(
+    _check_grain_size_selection(
         model, hamilton_fit or DEFAULT_GRAIN_SIZE_ENVIRONMENT, who=who,
         model_argument=model_argument,
         environment_argument=environment_argument)
@@ -416,7 +418,7 @@ def canonical_grain_size_selection(model, hamilton_fit, *, who: str,
     return canonical_model, (None if hamilton_fit is None else canonical_fit)
 
 
-def check_grain_size_selection(model: str, hamilton_fit: str, *,
+def _check_grain_size_selection(model: str, hamilton_fit: str, *,
                                who: str = 'grain_size',
                                model_argument: str = 'model',
                                environment_argument: str = 'hamilton_fit'
@@ -437,10 +439,10 @@ def check_grain_size_selection(model: str, hamilton_fit: str, *,
     if model != 'hamilton' and hamilton_fit != DEFAULT_GRAIN_SIZE_ENVIRONMENT:
         raise ConfigurationError(
             f"{who}: {model_argument}={model!r} has no {hamilton_fit!r} form — "
-            f"TR 9407 "
-            f"publishes one set of relations, not one per hamilton_fit.",
-            remediation="Use model=DEFAULT_GRAIN_SIZE_MODEL for the abyssal fits, or drop "
-                        "the hamilton_fit.",
+            f"TR 9407 publishes one set of relations, not one per Hamilton "
+            f"fit.",
+            remediation=f"Use {model_argument}=DEFAULT_GRAIN_SIZE_MODEL for "
+                        f"the abyssal fits, or drop {environment_argument}=.",
         )
 
 
@@ -490,8 +492,26 @@ def grain_size_from_density(
     the middle of the range. Treat what comes back as an index, not as a
     measurement; if Bachman (1985) is ever ingested, this is the first thing to
     replace.
+
+    Parameters
+    ----------
+    density : float
+        Measured bulk density of the sediment (g/cm³).
+    water_density : float, optional
+        In-situ seawater density (g/cm³) the density ratio is formed
+        against. ``None`` (default) uses the reference the forward call
+        uses, ``DEFAULT_WATER_DENSITY_G_CM3``.
+    hamilton_fit : str, optional
+        Which Hamilton & Bachman fit to invert: ``'continental-terrace'``
+        (default), ``'abyssal-hill'`` or ``'abyssal-plain'``, as
+        :func:`grain_size_to_geoacoustics` names them.
+
+    Returns
+    -------
+    float
+        Mean grain size (ϕ); the fit's nearer end, with a ``ValidityWarning``,
+        for a density it cannot represent.
     """
-    from uacpy.core._validate import canonical_choice
     hamilton_fit = canonical_choice(hamilton_fit, tuple(GRAIN_SIZE_ENVIRONMENTS),
                                     'grain_size_from_density', 'hamilton_fit')
     if hamilton_fit not in GRAIN_SIZE_ENVIRONMENTS:
@@ -684,16 +704,86 @@ def _endpoint_quantities(model: str, hamilton_fit: str, phi: float):
     return [(names, span) for span, names in groups.items()]
 
 
+def _one_grain_size(grain_size_phi: float, evaluate, model: str,
+                    hamilton_fit: str, clamp: tuple, water_sound_speed,
+                    water_density):
+    """``((cp, density, attenuation), notes, unclamped)`` at one ϕ: the
+    quantities at ϕ clamped to ``clamp``, one note per group of quantities
+    whose own source does not cover ϕ, and the unclamped fit at ϕ where the
+    clamp moved the answer (``None`` elsewhere; :func:`_clamp_note` words
+    it)."""
+    lo, hi = clamp
+    phi = float(np.clip(grain_size_phi, lo, hi))
+    values = evaluate(phi, water_sound_speed, water_density)
+    # Report per quantity, against the source each one comes from. Comparing
+    # the clamped fit with the fit at the raw phi cannot do it: on 'hamilton'
+    # both hold their own limits flat, so the two are equal by construction at
+    # every phi and the comparison is blind to the substitution it exists to
+    # catch. "Did this quantity's own source cover this phi?" is answerable at
+    # every phi, and it is the question whose answer differs between quantities
+    # -- at phi = 0.5 the attenuation is interpolated while the velocity and
+    # density are an end row. NaN is excluded because it propagates to NaN
+    # outputs, so there is nothing substituted to report; +-inf is included,
+    # being the largest substitution there is.
+    if np.isnan(grain_size_phi):
+        return values, [], None
+    notes = [
+        f"{_names_and([_SOURCE_QUANTITY.get(n, n) for n in names])} "
+        f"{'come' if len(names) > 1 else 'comes'} from data covering "
+        f"{src_lo:g} to {src_hi:g} ϕ, so "
+        f"{'they are' if len(names) > 1 else 'it is'} its "
+        f"ϕ={min(max(grain_size_phi, src_lo), src_hi):g} "
+        f"{'values' if len(names) > 1 else 'value'}"
+        for names, (src_lo, src_hi) in _endpoint_quantities(
+            model, hamilton_fit, grain_size_phi)
+    ]
+    unclamped = None
+    if notes and phi != grain_size_phi:
+        raw = evaluate(float(grain_size_phi), water_sound_speed,
+                       water_density)
+        if raw != values:
+            unclamped = raw
+    return values, notes, unclamped
+
+
+def _clamp_note(clamp: tuple, unclamped) -> str:
+    """The clause naming the clamp and what the unclamped fit gives: its
+    values at one ϕ, or the span of each quantity over several, so one
+    warning about many ϕ values stays one clause long."""
+    raw = np.asarray(unclamped, dtype=float).reshape(-1, 3)
+
+    def span(k, unit):
+        lo, hi = raw[:, k].min(), raw[:, k].max()
+        return (f"{lo:.4f} {unit}" if lo == hi
+                else f"{lo:.4f} to {hi:.4f} {unit}")
+    return (f"ϕ was clamped to [{clamp[0]:g}, {clamp[1]:g}], and the "
+            f"unclamped fit there gives sound_speed={span(0, 'm/s')}, "
+            f"density={span(1, 'g/cm³')}, attenuation={span(2, 'dB/λ')}")
+
+
+#: The most distinct ϕ values one aggregated warning lists by value.
+_LISTED_PHI = 8
+
+
+def _phi_list(phis) -> str:
+    """``'9.5 and 12'`` / ``'9.5, 10, 11 and 3 more'`` for sorted values."""
+    shown = [f"{p:g}" for p in phis[:_LISTED_PHI]]
+    if len(phis) > _LISTED_PHI:
+        shown.append(f"{len(phis) - _LISTED_PHI} more")
+    return _names_and(shown)
+
+
 def grain_size_to_geoacoustics(
-    grain_size_phi: float, *, model: str = DEFAULT_GRAIN_SIZE_MODEL,
+    grain_size_phi, *, model: str = DEFAULT_GRAIN_SIZE_MODEL,
     hamilton_fit: str = DEFAULT_GRAIN_SIZE_ENVIRONMENT,
     water_sound_speed: Optional[float] = None,
     water_density: Optional[float] = None,
-) -> Dict[str, float]:
+) -> Dict[str, Union[float, np.ndarray]]:
     """Map a mean grain size (Wentworth ϕ) to bulk geoacoustic properties.
 
     Returns ``{'sound_speed', 'density', 'attenuation'}`` (m/s, g/cm³,
-    dB/wavelength). Sediment sound speed and density are computed as **ratios to
+    dB/wavelength): floats for one ϕ, arrays of ``grain_size_phi``'s shape
+    for an array of them. Sediment sound speed and density are computed as **ratios to
     the overlying seawater**, scaled by the in-situ ``water_sound_speed`` /
     ``water_density`` (so fine muds correctly come out *slower* than seawater,
     ratio < 1). Attenuation is returned in dB/wavelength, which is
@@ -702,8 +792,12 @@ def grain_size_to_geoacoustics(
 
     Parameters
     ----------
-    grain_size_phi : float
-        Mean grain size on the Wentworth ϕ scale.
+    grain_size_phi : float or array_like
+        Mean grain size on the Wentworth ϕ scale: one value, or an array of
+        any shape (a grain-size map, the samples of a survey), each element
+        converted as one value is. An array's substitutions are reported in
+        one ``ValidityWarning`` that names the ϕ values affected, grouped by
+        what was substituted.
     model : {'hamilton', 'apl-uw'}, optional
         ``'hamilton'`` (default) — Hamilton & Bachman (1982) / Hamilton (1972).
         ``'apl-uw'`` — APL-UW TR 9407 (1994). What the choice does, and where
@@ -728,7 +822,7 @@ def grain_size_to_geoacoustics(
         uacpy's in-situ defaults, not the conditions the relations were
         measured at: Hamilton & Bachman's values are laboratory measurements
         at 23 °C / 1 atm, and uacpy forms its Hamilton ratio against
-        1528 m/s (APL-UW TR 9407, p. IV-8). Pass ``1500.0, 1.0`` to
+        1528 m/s (APL-UW TR 9407, p. IV-9). Pass ``1500.0, 1.0`` to
         reproduce the Acoustics-Toolbox ``'G'`` bottom's absolute numbers.
 
     **Each returned quantity is reported against its own source.** A
@@ -746,7 +840,9 @@ def grain_size_to_geoacoustics(
     ranges, :data:`GRAIN_SIZE_MODEL_RANGES`) is additionally clamped to it, and
     where the clamp moves the answer the warning also reports what the
     unclamped fit would have given — ``'apl-uw'`` only, whose polynomials keep
-    extrapolating (ϕ = 9.5 differs by 1.8 m/s, ϕ = -1.5 by 47 m/s). For
+    extrapolating (ϕ = 9.5 differs by 1.8 m/s, ϕ = -1.5 by 47 m/s); for an
+    array, once per group, as the span of each quantity over the group's
+    values, so the warning stays a few lines long for a map of any size. For
     ``'hamilton'`` the clamp moves nothing, each of its sources already holding
     ϕ at its own edge, so there the report is the per-quantity one alone. ±inf is
     reported like any other ϕ past the end; a NaN ϕ propagates to NaN outputs
@@ -764,7 +860,7 @@ def grain_size_to_geoacoustics(
     ratios from these sites were **discarded** because of the large scatter and
     vertical variations in porosity ... Rather, the acoustic models were fit to
     data in order to determine the relationship between grain size and
-    density" (p. IV-9). So at 4 ϕ its ρ = 1.224 is not a claim about silty
+    density" (p. IV-10). So at 4 ϕ its ρ = 1.224 is not a claim about silty
     sand's density — Hamilton & Bachman's silty-sand class (4.24 ϕ, 40
     samples) averages 1.783, and their (T) regression over all 340 terrace
     samples gives 1.80 at 4 ϕ — it is the density that made APL-UW's reflection-loss and backscatter model
@@ -809,47 +905,50 @@ def grain_size_to_geoacoustics(
     if water_density is None:
         water_density = ref_rhow
     spans = _source_ranges(model, hamilton_fit).values()
-    lo = min(span[0] for span in spans)
-    hi = max(span[1] for span in spans)
+    clamp = (min(span[0] for span in spans), max(span[1] for span in spans))
     evaluate = _GEOACOUSTIC_MODELS[model]
     if model == 'hamilton':
         evaluate = partial(evaluate, hamilton_fit=hamilton_fit)
-    phi = float(np.clip(grain_size_phi, lo, hi))
-    cp, density, attenuation = evaluate(phi, water_sound_speed, water_density)
-    # Report per quantity, against the source each one comes from. Comparing
-    # the clamped fit with the fit at the raw phi cannot do it: on 'hamilton'
-    # both hold their own limits flat, so the two are equal by construction at
-    # every phi and the comparison is blind to the substitution it exists to
-    # catch. "Did this quantity's own source cover this phi?" is answerable at
-    # every phi, and it is the question whose answer differs between quantities
-    # -- at phi = 0.5 the attenuation is interpolated while the velocity and
-    # density are an end row. NaN is excluded because it propagates to NaN
-    # outputs, so there is nothing substituted to report; +-inf is included,
-    # being the largest substitution there is.
-    if not np.isnan(grain_size_phi):
-        notes = [
-            f"{_names_and([_SOURCE_QUANTITY.get(n, n) for n in names])} "
-            f"{'come' if len(names) > 1 else 'comes'} from data covering "
-            f"{src_lo:g} to {src_hi:g} ϕ, so "
-            f"{'they are' if len(names) > 1 else 'it is'} its "
-            f"ϕ={min(max(grain_size_phi, src_lo), src_hi):g} "
-            f"{'values' if len(names) > 1 else 'value'}"
-            for names, (src_lo, src_hi) in _endpoint_quantities(
-                model, hamilton_fit, grain_size_phi)
-        ]
-        if notes and phi != grain_size_phi:
-            raw = evaluate(float(grain_size_phi), water_sound_speed,
-                           water_density)
-            if raw != (cp, density, attenuation):
-                notes.append(
-                    f"ϕ was clamped to [{lo:g}, {hi:g}], and "
-                    f"the unclamped fit there gives sound_speed={raw[0]:.4f} "
-                    f"m/s, density={raw[1]:.4f} g/cm³, "
-                    f"attenuation={raw[2]:.4f} dB/λ")
-        if notes:
-            warnings.warn(
-                f"grain_size_to_geoacoustics: at ϕ={grain_size_phi:g}, "
-                + "; ".join(notes) + ".",
-                ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP,
-            )
-    return {'sound_speed': cp, 'density': density, 'attenuation': attenuation}
+    convert = partial(_one_grain_size, evaluate=evaluate, model=model,
+                      hamilton_fit=hamilton_fit, clamp=clamp,
+                      water_sound_speed=water_sound_speed,
+                      water_density=water_density)
+    names = ('sound_speed', 'density', 'attenuation')
+    phis = np.asarray(grain_size_phi, dtype=float)
+    if phis.ndim == 0:
+        phi = float(phis)
+        values, notes, unclamped = convert(phi)
+        if unclamped is not None:
+            notes = notes + [_clamp_note(clamp, [unclamped])]
+        result = dict(zip(names, values))
+        report = f"at ϕ={phi:g}, " + "; ".join(notes) if notes else ""
+    else:
+        # Each distinct value is converted once, as one ϕ is, and scattered
+        # back; the notes of the values that share them are reported once,
+        # with the clamp clause spanning the group's unclamped fits rather
+        # than one clause per ϕ.
+        distinct, inverse = np.unique(phis.ravel(), return_inverse=True)
+        counts = dict(zip(distinct.tolist(), np.bincount(
+            inverse, minlength=distinct.size).tolist()))
+        rows, groups = [], {}
+        for phi in distinct.tolist():
+            values, notes, unclamped = convert(phi)
+            rows.append(values)
+            if notes:
+                key = ("; ".join(notes), unclamped is not None)
+                listed, raws = groups.setdefault(key, ([], []))
+                listed.append(phi)
+                if unclamped is not None:
+                    raws.append(unclamped)
+        columns = np.array(rows, dtype=float).reshape(-1, 3)[inverse]
+        result = {name: columns[:, k].reshape(phis.shape)
+                  for k, name in enumerate(names)}
+        report = "; ".join(
+            f"at ϕ={_phi_list(listed)} "
+            f"({sum(counts[p] for p in listed)} of {phis.size} values), "
+            f"{text}" + (f"; {_clamp_note(clamp, raws)}" if raws else "")
+            for (text, _clamped), (listed, raws) in groups.items())
+    if report:
+        warnings.warn(f"grain_size_to_geoacoustics: {report}.",
+                      ValidityWarning, skip_file_prefixes=USER_FRAME_SKIP)
+    return result
